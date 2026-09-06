@@ -1,0 +1,6 @@
+id=vtouch-merge
+name=VTouch Userspace Merge
+version=0.1.6
+versionCode=10
+author=Hermes Agent
+description=Userspace physical+virtual touchscreen merger with watchdog recovery. Requires root and a compatible Type-B touchscreen.
