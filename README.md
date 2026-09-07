@@ -16,7 +16,6 @@
 | `vtouchws` | WebSocket 桥接 |
 | `vtouchsupervise` | Worker 监控 / 崩溃自动重启 |
 | `vtouch_onefile_example.js` | AutoJs6 单文件 SDK |
-| KernelSU 模块 | 开机自启动服务 |
 
 ## 快速安装（共享存储）
 
@@ -53,9 +52,8 @@ Android NDK r27d 交叉编译，详见 [docs/README.md](docs/README.md) 与 [src
 ```
 src/                  C 源码（vtouchmerge、vtouchws、vtouchsupervise）
 clients/              AutoJs6 SDK
-scripts/              安装 / 启动脚本
-ksu-module/           KernelSU 模块
-sdcard/vtouch-merge/  手机运行目录
+scripts/              安装 / 启动 / 打包脚本
+sdcard/vtouch-merge/  手机运行目录（随安装包分发）
 build/                编译产物
 tests/                Python 冒烟测试
 docs/                 文档
