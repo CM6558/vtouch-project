@@ -2,21 +2,32 @@
 
 把 vtouch SDK 打包成 AutoJs6 **应用插件**：安装 APK 后，任意脚本 `plugins.load('org.vtouch.plugin')` 即可拿到 `VTouch` 构造函数，不依赖"项目"目录结构。
 
-## 机制（源码确认，AutoJs6 6.x）
+## 机制（源码确认，AutoJs6 6.7.0）
 
 `plugins.load('含点号且非 .js 结尾的名称')` 按 **应用插件** 处理，完整链路：
 
-1. `createPackageContext(pkg, INCLUDE_CODE | IGNORE_SECURITY)` —— **APK 必须已安装**。
-2. 读插件 APK 的 meta-data `org.autojs.plugin.sdk.registry` → 注册类全名。
-3. 反射调用注册类的静态方法 `loadDefault(Context, Context, Object, Object)`（参数类型必须精确匹配 `android.content.Context`）。
-4. 返回对象上反射调用 `getAssetsScriptDir()` / `getVersion()` —— **鸭子类型即可，无需继承任何 Plugin SDK 基类**（Auto.js 4.x 时代的 `Auto.js-Plugin-SDK` 仓库已下线，本工程零依赖实现）。
-5. 把 APK `assets/<scriptDir>/` 复制到 AutoJs6 缓存，`require` 其中的 **`index.js`**。
-6. `index.js` 导出 `function (plugin) {...}`；AutoJs6 以插件 Java 实例为参数调用它，**返回值就是 `plugins.load()` 的结果**。
+1. **插件中心授权检查**（6.7.0+）：`PluginTrustManager.isAuthorized()` 要求签名指纹在官方/信任白名单，或用户在 AutoJs6 **插件中心**（主界面 → 左滑抽屉 → 插件中心 → VTouch Plugin → 授权）手动授权过。未授权抛 `PluginLoadException: 未在插件中心获得授权`。**更换签名后必须重新授权。**
+2. `createPackageContext(pkg, INCLUDE_CODE | IGNORE_SECURITY)` —— **APK 必须已安装**。
+3. 读插件 APK 的 meta-data `org.autojs.plugin.sdk.registry` → 注册类全名。
+4. 反射调用注册类的静态方法 `loadDefault(Context, Context, Object, Object)`，返回实例**必须是 `android.content.ServiceConnection`**（硬性类型检查，否则抛 "Plugin instance must be type of android.content.ServiceConnection"）。
+5. 反射调 `getAssetsScriptDir()` / `getVersion()`；**`getVersion() < 2` 时跳过 Service 绑定**（`bindService` 仅 version>=2 触发），纯脚本插件返回 1 即可，无需实现 Service/AIDL。
+6. 把 APK `assets/<scriptDir>/` 复制到 AutoJs6 缓存，`require` 其中的 **`index.js`**。
+7. `index.js` 导出 `function (plugin) {...}`；AutoJs6 以插件 Java 实例为参数调用它，**返回值就是 `plugins.load()` 的结果**。
 
 对应源码：
-- `com/stardust/autojs/core/plugin/Plugin.java`（反射加载）
-- `com/stardust/autojs/runtime/api/Plugins.java`（assets 复制 + index.js 路径）
+- `org/autojs/autojs/core/plugin/Plugin.kt`（反射加载 + ServiceConnection 强转）
+- `org/autojs/autojs/core/plugin/center/PluginTrustManager.kt` + `PluginAuthorizationStore.kt`（授权）
+- `org/autojs/autojs/runtime/api/Plugins.kt`（启用/授权检查 + assets 复制 + bindService）
 - `org/autojs/autojs/runtime/api/augment/plugins/Plugins.kt`（包名判定 + 调用胶水层）
+
+## 生命周期（真机验证教训）
+
+AutoJs6 脚本主体结束后事件循环仍保持（WebSocket/timers 存活）。**vtouchws 是单客户端 WebSocket 服务端**——脚本结束后若不关闭连接，旧连接占用端口导致下次 `connect` 失败（表现为"有时能连上、有时报错"）。业务完成后必须显式：
+
+```js
+client.close();      // 关闭 WebSocket（释放单连接）
+vt.stopService();    // 杀掉 vtouchmerge/vtouchws，释放 EVIOCGRAB
+```
 
 ## 工程结构
 

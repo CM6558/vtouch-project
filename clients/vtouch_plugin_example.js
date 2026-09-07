@@ -113,8 +113,10 @@ var vt = new VTouch().connect(function (client) {
     //     ]
     // ], 600);
 
-    /* 样例 8：异常清理（SIGKILL 强杀会跳过 exit handler，业务里显式调用） */
-    // client.reset();
+    /* 样例 8：标准收尾（重要）
+     * 服务生命周期与脚本绑定：业务完成后显式关闭连接并停止服务。
+     * vtouchws 是单连接模型，旧连接不释放会导致下次脚本连不上；
+     * events.on("exit") 只在脚本被停止时兜底，SIGKILL 强杀会跳过。 */
     // client.close();
     // vt.stopService();
 });

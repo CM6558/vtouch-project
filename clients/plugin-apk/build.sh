@@ -49,8 +49,8 @@ echo "add assets + classes.dex: OK"
 "$BT/zipalign" -f 4 build/unsigned.apk build/aligned.apk
 echo "zipalign: OK"
 
-# 6) 签名（首次自动生成 keystore）
-KEYSTORE=build/vtouch.keystore
+# 6) 签名（keystore 固定在 HOME 下，不随 build/ 清理而变，保证签名/授权指纹稳定）
+KEYSTORE=${VT_KEYSTORE:-"$HOME/.vtouch-plugin.keystore"}
 STORE_PASS=${VT_PLUGIN_STORE_PASS:-vtouch123}
 if [ ! -f "$KEYSTORE" ]; then
     "$JAVA_HOME/bin/keytool" -genkeypair -v \

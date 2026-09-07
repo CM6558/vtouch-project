@@ -2,6 +2,9 @@
 clients/plugin-apk/build/
 clients/plugin-apk/out/
 
+# 真机插件中心授权用的中间文件（在设备上生成，不入库）
+clients/plugin_center_authorization.xml
+
 # 常见本地文件
 *.log
 .DS_Store
