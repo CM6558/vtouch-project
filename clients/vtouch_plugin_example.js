@@ -16,9 +16,10 @@
  * 使用：
  *   var vt = new VTouch(options).connect(onReady);
  *   options: url(默认 ws://127.0.0.1:27183), width/height(默认 device.width/height),
- *            timeout(默认 15000ms)
- *   connect 会自动检查并启动 vtouch 服务（root），失败自动重试；
- *   脚本退出时 events.on("exit") 自动 close + stopService 释放物理触摸独占。
+ *            connectTimeout(默认 15000ms), onError(错误回调，如 vt.onError = log)
+ *   connect 会自动检查并启动 vtouch 服务（root），失败自动重试，
+ *   服务进程异常退出后也会周期性重新拉起；脚本退出时 events.on("exit")
+ *   自动 close + stopService 释放物理触摸独占。
  *
  * Finger API（f 为 client.finger() 返回的 Finger 对象）：
  *   client.finger()       自动分配空闲 slot 0~9
@@ -28,21 +29,24 @@
  *   f.move(x, y)          移动（未按下时跳过并告警）
  *   f.up()                抬起并释放 slot
  *   f.tap(x, y, ms)       点击，ms 默认 60
- *   f.swipe(x1,y1,x2,y2,durationMs)   滑动，durationMs 默认 300ms
+ *   f.swipe(x1,y1,x2,y2,durationMs)   滑动，durationMs 默认 300ms，内部线程按帧插值
+ *   f.hold(ms, fn)        按住 ms 后执行回调（回调运行在定时器中，需自行继续 move/up）
+ *   f.press(x, y, ms, fn) down 后定时 up，适合自动释放按压
  *   f.frame(state,x,y)    当前手指的 down/move/up 帧操作
  *   f.state()             返回 down 或 up
- *   f.cancel()            清理本地状态，不会抬起触点
+ *   f.cancel()            取消本地定时器，不会抬起触点
  *
  * VTouch API：
- *   client.frame(points)  多指同帧操作 [{slot,state,x,y}, ...]
- *   client.gesture(frames)连续提交多帧
- *   client.pinch(cx,cy,startGap,endGap)   双指缩放
+ *   client.frame(points)  多指同帧原子提交（单次 SYN_REPORT）
+ *   client.gesture(frames[, durationMs])  连续提交多帧；第二参可选总时长，
+ *                         0 或缺省 = 立即逐帧提交（无内置时序）
+ *   client.pinch(cx,cy,startGap,endGap,durationMs)  双指缩放
  *   client.reset()        释放全部模拟触点
  *   client.close()        关闭连接
  *
  * 坐标使用 device.width/device.height 的逻辑屏幕坐标，服务端负责转换。
- * sleep(ms) 只阻塞当前脚本线程；如需阻塞等待，放进 threads.start 中执行，
- * 避免饿死 WebSocket 回调。
+ * sleep(ms) 只阻塞当前 Auto.js 脚本线程；swipe/pinch 已内部线程化，
+ * 业务代码如需 sleep 请放进 threads.start。
  */
 "use strict";
 
@@ -52,59 +56,65 @@ var VTouch = plugins.load('vtouch');
 // var VTouch = require('/sdcard/vtouch-merge/plugins/vtouch.js');
 
 var vt = new VTouch().connect(function (client) {
-    threads.start(function () {
-        var f = client.finger();
-        // var f2 = client.finger();
-        f.swipe(200, 200, 1500, 2000, 1000);
-        // f2.swipe(200, 2000, 1500, 2000, 1000);
+    var f = client.finger();
+    // var f2 = client.finger();
+    f.swipe(200, 200, 1500, 2000, 1000);
+    // f2.swipe(200, 2000, 1500, 2000, 1000);
 
-        /* 样例 1：点击 */
-        // f.tap(client.width / 2, client.height / 2, 60);
+    /* 样例 1：点击 */
+    // f.tap(client.width / 2, client.height / 2, 60);
 
-        /* 样例 2：按下、等待、移动、抬起 */
-        // f.down(client.width / 2, client.height / 2);
-        // sleep(1000);
-        // f.move(client.width / 2 + 50, client.height / 2);
-        // f.up();
+    /* 样例 2：按下、等待、移动、抬起（sleep 放在子线程中执行） */
+    // threads.start(function () {
+    //     f.down(client.width / 2, client.height / 2);
+    //     sleep(1000);
+    //     f.move(client.width / 2 + 50, client.height / 2);
+    //     f.up();
+    // });
 
-        /* 样例 3：单指滑动 */
-        // f.swipe(200, 2000, 900, 2000, 1000);
+    /* 样例 3：单指滑动（内部已线程化，不阻塞主线程） */
+    // f.swipe(200, 2000, 900, 2000, 1000);
 
-        /* 样例 4：显式 slot */
-        // var f2 = client.finger(2);
-        // f2.down(720, 1584).move(760, 1584).up();
+    /* 样例 4：显式 slot */
+    // var f2 = client.finger(2);
+    // f2.down(720, 1584).move(760, 1584).up();
 
-        /* 样例 5：两个 Finger 同帧移动 */
-        // var f0 = client.finger(0), f1 = client.finger(1);
-        // f0.down(500, 1200); f1.down(900, 1200);
-        // client.frame([
-        //     {slot: f0.slot, state: "move", x: 450, y: 1200},
-        //     {slot: f1.slot, state: "move", x: 950, y: 1200}
-        // ]);
-        // f0.up(); f1.up();
+    /* 样例 5：两个 Finger 同帧移动（原子提交，单次 SYN_REPORT） */
+    // var f0 = client.finger(0), f1 = client.finger(1);
+    // client.frame([
+    //     {slot: f0.slot, state: "down", x: 500, y: 1200},
+    //     {slot: f1.slot, state: "down", x: 900, y: 1200}
+    // ]);
+    // client.frame([
+    //     {slot: f0.slot, state: "move", x: 450, y: 1200},
+    //     {slot: f1.slot, state: "move", x: 950, y: 1200}
+    // ]);
+    // client.frame([
+    //     {slot: f0.slot, state: "up", x: 450, y: 1200},
+    //     {slot: f1.slot, state: "up", x: 950, y: 1200}
+    // ]);
 
-        /* 样例 6：双指缩放 */
-        // client.pinch(client.width / 2, client.height / 2, 200, 1000);
+    /* 样例 6：双指缩放（durationMs 生效，内部线程插值） */
+    // client.pinch(client.width / 2, client.height / 2, 200, 1000, 800);
 
-        /* 样例 7：手势帧序列 */
-        // client.gesture([
-        //     [
-        //         {slot: 0, state: "down", x: 500, y: 1200},
-        //         {slot: 1, state: "down", x: 900, y: 1200}
-        //     ],
-        //     [
-        //         {slot: 0, state: "move", x: 450, y: 1200},
-        //         {slot: 1, state: "move", x: 950, y: 1200}
-        //     ],
-        //     [
-        //         {slot: 0, state: "up", x: 450, y: 1200},
-        //         {slot: 1, state: "up", x: 950, y: 1200}
-        //     ]
-        // ]);
+    /* 样例 7：手势帧序列（可指定总时长，0/缺省 = 立即逐帧提交） */
+    // client.gesture([
+    //     [
+    //         {slot: 0, state: "down", x: 500, y: 1200},
+    //         {slot: 1, state: "down", x: 900, y: 1200}
+    //     ],
+    //     [
+    //         {slot: 0, state: "move", x: 450, y: 1200},
+    //         {slot: 1, state: "move", x: 950, y: 1200}
+    //     ],
+    //     [
+    //         {slot: 0, state: "up", x: 450, y: 1200},
+    //         {slot: 1, state: "up", x: 950, y: 1200}
+    //     ]
+    // ], 600);
 
-        /* 样例 8：异常清理（SIGKILL 强杀会跳过 exit handler，业务里显式调用） */
-        // client.reset();
-        // client.close();
-        // vt.stopService();
-    });
+    /* 样例 8：异常清理（SIGKILL 强杀会跳过 exit handler，业务里显式调用） */
+    // client.reset();
+    // client.close();
+    // vt.stopService();
 });
