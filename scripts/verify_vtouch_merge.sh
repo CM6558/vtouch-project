@@ -1,11 +1,9 @@
 #!/system/bin/sh
-# Verify VTouch Merge KernelSU module after installation/reboot.
+# Verify vtouch deployment after installation.
 # Read-only checks: does not start/stop processes and does not grab touch.
 set +e
 
-MOD_ID="vtouch-merge"
-MOD_BASE="/data/adb/modules/$MOD_ID"
-RUN_BASE="/data/adb/vtouch-merge"
+RUN_BASE="/data/local/tmp/vtouch-runtime"
 OUT="${1:-/sdcard/vtouch-merge-verify.txt}"
 PASS=0
 WARN=0
@@ -20,7 +18,7 @@ check_exec() { [ -x "$1" ] && ok "executable: $1" || bad "not executable: $1"; }
 
 TMP_OUT="$OUT.tmp"
 {
-    say "VTouch Merge verification"
+    say "vtouch verification"
     say "time=$(date 2>/dev/null)"
     say "uid=$(id -u) context=$(id -Z 2>/dev/null)"
     say "kernel=$(uname -a)"
@@ -28,37 +26,30 @@ TMP_OUT="$OUT.tmp"
     say ""
 
     if [ "$(id -u)" = "0" ]; then ok "root available"; else bad "not running as root"; fi
-    if [ -d "$MOD_BASE" ]; then ok "KernelSU module directory exists: $MOD_BASE"; else bad "module directory missing: $MOD_BASE"; fi
-    if [ -f "$MOD_BASE/disable" ]; then bad "module is disabled"; else ok "module is enabled"; fi
 
-    check_file "$MOD_BASE/module.prop"
-    check_file "$MOD_BASE/service.sh"
-    check_exec "$MOD_BASE/system/bin/vtouchmerge"
-    check_exec "$MOD_BASE/system/bin/vtouchsupervise"
+    check_exec /data/local/tmp/vtouchmerge
+    check_exec /data/local/tmp/vtouchws
 
     if [ -c /dev/uinput ]; then ok "/dev/uinput exists"; else bad "/dev/uinput missing"; fi
     if [ -r /proc/bus/input/devices ]; then ok "input device inventory readable"; else warn "input inventory is not readable"; fi
 
     say ""
     say "Processes:"
-    ps -A 2>/dev/null | grep -E '(^|[[:space:]])vtouch(supervise|merge)([[:space:]]|$)' || true
-    SUP=$(ps -A 2>/dev/null | grep -E '[ /]vtouchsupervise([[:space:]]|$)' | grep -v grep | wc -l)
-    WRK=$(ps -A 2>/dev/null | grep -E '[ /]vtouchmerge([[:space:]]|$)' | grep -v grep | wc -l)
-    [ "$SUP" -eq 1 ] && ok "one supervisor running" || warn "supervisor count=$SUP (expected 1)"
-    [ "$WRK" -eq 1 ] && ok "one merge worker running" || warn "worker count=$WRK (expected 1)"
+    ps -A 2>/dev/null | grep -E '(^|[[:space:]])vtouch(merge|ws)([[:space:]]|$)' || true
+    MRG=$(ps -A 2>/dev/null | grep -E '[ /]vtouchmerge([[:space:]]|$)' | grep -v grep | wc -l)
+    WS=$(ps -A 2>/dev/null | grep -E '[ /]vtouchws([[:space:]]|$)' | grep -v grep | wc -l)
+    [ "$MRG" -eq 1 ] && ok "one vtouchmerge running" || warn "vtouchmerge count=$MRG (expected 1)"
+    [ "$WS" -eq 1 ] && ok "one vtouchws running" || warn "vtouchws count=$WS (expected 1)"
 
     say ""
     say "Runtime directory:"
     if [ -d "$RUN_BASE" ]; then ok "runtime directory exists"; else warn "runtime directory missing; service may not have run"; fi
     if [ -S "$RUN_BASE/merge.sock" ]; then ok "merge socket exists"; else warn "merge socket missing"; fi
-    if [ -f "$RUN_BASE/supervisor.log" ]; then
-        ok "supervisor log exists"
-        say "--- last log lines ---"
-        tail -30 "$RUN_BASE/supervisor.log" 2>/dev/null || true
-        say "--- end log ---"
-    else
-        warn "supervisor log missing"
-    fi
+
+    say ""
+    say "WebSocket port:"
+    SS=$(ss -ltn 2>/dev/null | grep 27183)
+    if [ -n "$SS" ]; then ok "listening on 127.0.0.1:27183"; say "$SS"; else warn "port 27183 not listening"; fi
 
     say ""
     say "Input classification:"
@@ -68,7 +59,7 @@ TMP_OUT="$OUT.tmp"
 
     say ""
     say "Result: pass=$PASS warn=$WARN fail=$FAIL"
-    if [ "$FAIL" -eq 0 ] && [ "$SUP" -eq 1 ] && [ "$WRK" -eq 1 ] && [ -S "$RUN_BASE/merge.sock" ]; then
+    if [ "$FAIL" -eq 0 ] && [ "$MRG" -eq 1 ] && [ "$WS" -eq 1 ] && [ -S "$RUN_BASE/merge.sock" ]; then
         say "RESULT=READY_FOR_STAGED_TOUCH_TEST"
         exit 0
     fi
