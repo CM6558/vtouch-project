@@ -1,114 +1,99 @@
-    name: Build vtouch (Android NDK)
+name: Build vtouch (Android NDK)
 
-    on:
-      push:
-        branches: [master, main]
-      pull_request:
-        branches: [master, main]
-      workflow_dispatch:
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
 
-    permissions:
-      contents: write
+permissions:
+  contents: write
 
-    env:
-      NDK_VERSION: r27d
-      NDK_TOOLCHAIN_BIN: linux-x86_64
+env:
+  NDK_VERSION: r27d
+  NDK_TOOLCHAIN_BIN: linux-x86_64
 
-    jobs:
-      build:
-        name: Compile arm64 binaries
-        runs-on: ubuntu-latest
-        steps:
-          - name: Checkout
-            uses: actions/checkout@v4
+jobs:
+  build:
+    name: Compile arm64 binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-          - name: Cache NDK ${{ env.NDK_VERSION }}
-            id: cache-ndk
-            uses: actions/cache@v4
-            with:
-              path: ${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}
-              key: android-ndk-${{ env.NDK_VERSION }}-linux
+      - name: Cache NDK ${{ env.NDK_VERSION }}
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}
+          key: android-ndk-${{ env.NDK_VERSION }}-linux
 
-          - name: Install NDK ${{ env.NDK_VERSION }}
-            if: steps.cache-ndk.outputs.cache-hit != 'true'
-            run: |
-              curl -fsSLo /tmp/ndk.zip \
-                "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
-              unzip -q /tmp/ndk.zip -d /tmp/ndk-extract
-              mv /tmp/ndk-extract/android-ndk-${{ env.NDK_VERSION }} \
-                 "${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}"
-              rm -f /tmp/ndk.zip
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLo /tmp/ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip"
+          unzip -q /tmp/ndk.zip -d /tmp/ndk-extract
+          mv /tmp/ndk-extract/android-ndk-${{ env.NDK_VERSION }} \
+             "${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}"
+          rm -f /tmp/ndk.zip
 
-          - name: Set up toolchain PATH
-            run: |
-              NDK="${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}"
-              echo "NDK=$NDK" >> "$GITHUB_ENV"
-              echo "$NDK/toolchains/llvm/prebuilt/${{ env.NDK_TOOLCHAIN_BIN }}/bin" >> "$GITHUB_PATH"
+      - name: Set up toolchain PATH
+        run: |
+          NDK="${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}"
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "$NDK/toolchains/llvm/prebuilt/${{ env.NDK_TOOLCHAIN_BIN }}/bin" >> "$GITHUB_PATH"
 
-          - name: Compile vtouchmerge (core merger)
-            run: |
-              mkdir -p build
-              aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
-                src/vtouchmerge.c -o build/vtouchmerge
+      - name: Compile vtouchmerge (core merger)
+        run: |
+          mkdir -p build
+          aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
+            src/vtouchmerge.c -o build/vtouchmerge
 
-          - name: Compile vtouchsupervise (worker supervisor)
-            run: |
-              aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
-                -DVT_MERGE_LIBRARY src/vtouchsupervise.c src/vtouchmerge.c -o build/vtouchsupervise
+      - name: Compile vtouchsupervise (worker supervisor)
+        run: |
+          aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
+            -DVT_MERGE_LIBRARY src/vtouchsupervise.c src/vtouchmerge.c -o build/vtouchsupervise
 
-          - name: Compile vtouchws (WebSocket bridge)
-            run: |
-              aarch64-linux-android24-clang -O2 -Wall -Wextra -pthread \
-                src/vtouchws.c -o build/vtouchws
+      - name: Compile vtouchws (WebSocket bridge)
+        run: |
+          aarch64-linux-android24-clang -O2 -Wall -Wextra -pthread \
+            src/vtouchws.c -o build/vtouchws
 
-          - name: Compile vtouchd (legacy daemon)
-            run: |
-              aarch64-linux-android24-clang -O2 -Wall -Wextra -pthread \
-                src/vtouchd.c -o build/vtouchd
+      - name: Verify binaries
+        run: |
+          set -e
+          for f in build/vtouchmerge build/vtouchsupervise build/vtouchws; do
+            test -x "$f" || { echo "missing executable: $f"; exit 1; }
+            file "$f"
+          done
+          ls -lh build/
 
-          - name: Compile vtouchctl (legacy control client)
-            run: |
-              aarch64-linux-android24-clang -O2 -Wall -Wextra \
-                src/vtouchctl.c -o build/vtouchctl
+      - name: Package install archives (release only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # Refresh the shipped binaries with freshly compiled ones, then rebuild the install zips.
+          cp build/vtouchmerge build/vtouchws sdcard/vtouch-merge/
+          python3 scripts/make_install_archives.py
 
-          - name: Verify binaries
-            run: |
-              set -e
-              for f in build/vtouchmerge build/vtouchsupervise build/vtouchws build/vtouchd build/vtouchctl; do
-                test -x "$f" || { echo "missing executable: $f"; exit 1; }
-                file "$f"
-              done
-              ls -lh build/
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtouch-arm64-binaries
+          path: |
+            build/vtouchmerge
+            build/vtouchsupervise
+            build/vtouchws
+          if-no-files-found: error
 
-          - name: Package install archives (release only)
-            if: startsWith(github.ref, 'refs/tags/')
-            run: |
-              # Refresh the shipped binaries with freshly compiled ones, then rebuild the install zips.
-              cp build/vtouchmerge build/vtouchws sdcard/vtouch-merge/
-              python3 scripts/make_install_archives.py
-
-          - name: Upload build artifacts
-            uses: actions/upload-artifact@v4
-            with:
-              name: vtouch-arm64-binaries
-              path: |
-                build/vtouchmerge
-                build/vtouchsupervise
-                build/vtouchws
-                build/vtouchd
-                build/vtouchctl
-              if-no-files-found: error
-
-          - name: Create GitHub Release (release only)
-            if: startsWith(github.ref, 'refs/tags/')
-            uses: softprops/action-gh-release@v2
-            with:
-              files: |
-                build/vtouchmerge
-                build/vtouchsupervise
-                build/vtouchws
-                build/vtouchd
-                build/vtouchctl
-                vtouch-merge-sdcard-latest.zip
-                vtouch-merge-ksu-latest.zip
-                vtouch-merge-install-bundle.zip
+      - name: Create GitHub Release (release only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/vtouchmerge
+            build/vtouchsupervise
+            build/vtouchws
+            vtouch-merge-sdcard-latest.zip
+            vtouch-merge-install-bundle.zip
