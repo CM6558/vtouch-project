@@ -7,12 +7,22 @@ Android touch simulation/merging system for rooted devices. Merges physical touc
 ```
 src/                  C source (vtouchmerge, vtouchws, vtouchsupervise)
 clients/              AutoJs6 JavaScript SDK (vtouch_onefile_example.js)
+clients/plugins/      AutoJs6 项目插件版 SDK (vtouch.js, module.exports = VTouch)
+clients/vtouch_plugin_example.js  项目插件加载示例 (plugins.load('vtouch'))
+clients/plugin-apk/    AutoJs6 应用插件 APK 工程 (零依赖注册类 + 胶水层 + build.sh)
 scripts/              Install/start/stop scripts and packaging tool
 sdcard/vtouch-merge/  Files shipped in vtouch-merge-sdcard-latest.zip
 build/                Compiled arm64 binaries
 tests/                Python smoke tests
 docs/                 Protocol and design docs
 ```
+
+## APK 构建环境（本机已装并验证）
+
+- JDK 17：`C:\Program Files\Eclipse Adoptium\jdk-17.0.20.101-hotspot`
+- Android SDK：`C:\Users\21102\AppData\Local\Android\Sdk`（build-tools 34.0.0 + platforms android-24，腾讯镜像手动放置，无 cmdline-tools）
+- 环境变量 `ANDROID_HOME` / `JAVA_HOME` 已持久化（setx）
+- 构建：`bash clients/plugin-apk/build.sh`，产物 `out/vtouch-plugin.apk`（已本机验证：签名/包名/meta-data/assets 正斜杠条目/一致性）
 
 ## Build
 

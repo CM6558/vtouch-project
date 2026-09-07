@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.vtouch.plugin"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <application android:label="VTouch Plugin" android:hasCode="true">
+        <!-- AutoJs6 插件注册入口：value 为 VTouchPlugin 的全限定类名 -->
+        <meta-data
+            android:name="org.autojs.plugin.sdk.registry"
+            android:value="org.vtouch.plugin.VTouchPlugin" />
+    </application>
+</manifest>

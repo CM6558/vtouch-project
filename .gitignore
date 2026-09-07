@@ -1,0 +1,7 @@
+# APK 构建中间产物、签名密钥（密钥绝不提交）与安装包
+clients/plugin-apk/build/
+clients/plugin-apk/out/
+
+# 常见本地文件
+*.log
+.DS_Store
