@@ -5,11 +5,10 @@ Android touch simulation/merging system for rooted devices. Merges physical touc
 ## Project structure
 
 ```
-src/                  C source (vtouchmerge, vtouchws, vtouchsupervise, etc.)
+src/                  C source (vtouchmerge, vtouchws, vtouchsupervise)
 clients/              AutoJs6 JavaScript SDK (vtouch_onefile_example.js)
-scripts/              Shell scripts for installation/service management
-ksu-module/           KernelSU module files
-sdcard/vtouch-merge/  Files to push to device's /sdcard/vtouch-merge/
+scripts/              Install/start/stop scripts and packaging tool
+sdcard/vtouch-merge/  Files shipped in vtouch-merge-sdcard-latest.zip
 build/                Compiled arm64 binaries
 tests/                Python smoke tests
 docs/                 Protocol and design docs
