@@ -41,7 +41,6 @@ vtouchmerge
 | `vtouchws` | WebSocket 桥接，将 AutoJs6 调用转发到 vtouchmerge |
 | `vtouchsupervise` | Worker 监控器，崩溃时自动重启 |
 | `vtouch_onefile_example.js` | AutoJs6 单文件 SDK |
-| KernelSU 模块 | 开机自启动服务 |
 
 ## 构建
 
@@ -78,13 +77,12 @@ sh /sdcard/vtouch-merge/install_from_sdcard.sh
 
 输出 `[OK] VTOUCH_READY=1` 表示服务启动成功。
 
-### 2. KernelSU 模块（生产环境）
+### 2. 手动部署（可选）
 
 ```bash
-# 刷入模块
-adb push vtouch-merge-ksu-latest.zip /sdcard/
-# 在 KernelSU 管理器中安装该 zip
-# 重启设备
+adb push build/vtouchmerge /sdcard/
+adb push build/vtouchws /sdcard/
+adb shell 'su -c "cp /sdcard/vtouchmerge /data/local/tmp/vtouchmerge; cp /sdcard/vtouchws /data/local/tmp/vtouchws; chmod 755 /data/local/tmp/vtouchmerge /data/local/tmp/vtouchws"'
 ```
 
 ### 3. 运行 AutoJs6 SDK
@@ -123,9 +121,19 @@ var vt = new VTouch().connect(function (client) {
 - `f.move(x, y)` - 移动
 - `f.up()` - 抬起
 - `f.tap(x, y, ms)` - 点击（默认 60ms）
-- `f.swipe(x1, y1, x2, y2, durationMs)` - 滑动（默认 300ms）
+- `f.swipe(x1, y1, x2, y2, durationMs)` - 滑动（默认 300ms，内部线程插值）
+- `f.hold(ms, fn)` - 按住 ms 后执行回调
+- `f.press(x, y, ms, fn)` - down 后定时 up，自动释放按压
 - `f.state()` - 返回 "down" 或 "up"
-- `f.cancel()` - 清理本地状态
+- `f.cancel()` - 取消本地定时器，不抬指
+
+**VTouch 对象方法：**
+- `vt.frame(points)` - 多指同帧原子提交（单次 SYN_REPORT）
+- `vt.gesture(frames[, durationMs])` - 帧序列，可选总时长
+- `vt.pinch(cx, cy, startGap, endGap, durationMs)` - 双指缩放
+- `vt.reset()` - 释放全部虚拟触点
+- `vt.close()` - 关闭连接
+- `vt.onError` - 服务端错误回调
 
 ## 停止服务
 
@@ -159,9 +167,8 @@ su -c "sh /data/local/tmp/vtouch-stop.sh"
 vtouch-project/
 ├── src/                    # C 源码
 ├── clients/                # AutoJs6 SDK
-├── scripts/                # 安装/启动脚本
-├── ksu-module/             # KernelSU 模块
-├── sdcard/vtouch-merge/    # 手机运行目录
+├── scripts/                # 安装/启动脚本与打包工具
+├── sdcard/vtouch-merge/    # 手机运行目录（随安装包分发）
 ├── build/                  # 编译产物
 ├── tests/                  # 测试脚本
 └── docs/                   # 文档
