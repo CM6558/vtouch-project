@@ -5,27 +5,27 @@
 为 AutoJs6 提供比 `shell()` 更轻量的长连接接口：
 
 ```text
-AutoJs6 -> ws://127.0.0.1:27183 -> vtouchws -> Unix socket -> vtouchd -> uinput
+AutoJs6 -> ws://127.0.0.1:27183 -> vtouchws -> Unix socket -> vtouchmerge -> uinput
 ```
 
-WebSocket bridge 只绑定回环地址，不监听局域网。它不直接操作 uinput，而是复用现有 vtouchd 的触点 owner、reset 和错误处理。
+WebSocket bridge 只绑定回环地址，不监听局域网。它不直接操作 uinput，而是复用现有 vtouchmerge 的触点 owner、reset 和错误处理。
 
 ## 协议
 
-客户端发送 WebSocket 文本帧，payload 是一条 vtouchd 命令：
+客户端发送 WebSocket 文本帧，payload 是一条 vtouchmerge 命令：
 
 ```json
 {"cmd":"ping"}
 {"cmd":"tap","x":720,"y":1584,"duration":60}
 ```
 
-当前 bridge 的协议适配层应将 JSON 命令转换为 vtouchd 的文本协议，并把响应包装为 JSON。批量多指帧：
+当前 bridge 的协议适配层应将 JSON 命令转换为 vtouchmerge 的文本协议，并把响应包装为 JSON。批量多指帧：
 
 ```json
 {"cmd":"frame","points":[{"slot":0,"state":"down","x":500,"y":1200},{"slot":1,"state":"down","x":900,"y":1200}]}
 ```
 
-该功能只有在 vtouchd 支持真正 frame 提交后才可声称同帧；bridge 不能把多条旧命令伪装成同一帧。
+该功能只有在 vtouchmerge 支持真正 frame 提交后才可声称同帧；bridge 不能把多条旧命令伪装成同一帧。
 
 ## 端口
 
@@ -33,15 +33,15 @@ WebSocket bridge 只绑定回环地址，不监听局域网。它不直接操作
 127.0.0.1:27183
 ```
 
-只允许本机连接。WebSocket bridge 需要作为 root 或与 vtouchd 有权限通信的服务进程启动。
+只允许本机连接。WebSocket bridge 需要作为 root 或与 vtouchmerge 有权限通信的服务进程启动。
 
 ## 生命周期
 
-- WebSocket 建立时创建一个后端 vtouchd 连接；
+- WebSocket 建立时创建一个后端 vtouchmerge 连接；
 - 所有消息按连接串行处理；
 - ping/pong 用于 WebSocket 保活；
 - close、EOF、协议错误、超时都关闭后端连接；
-- vtouchd 负责释放该后端连接的触点；
+- vtouchmerge 负责释放该后端连接的触点；
 - 单个消息最大 4096 字节；
 - 不执行客户端提供的 shell 字符串。
 
