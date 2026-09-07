@@ -50,7 +50,7 @@ The bridge connects to:
 /data/local/tmp/vtouch-runtime/merge.sock
 ```
 
-No old `vtouchd`, old `vtouch.sock`, or KernelSU module is required.
+No KernelSU module or legacy `vtouchd`/`vtouchctl` is required.
 
 `vtouchmerge` requires logical display dimensions via `-w WIDTH -h HEIGHT`; start scripts read them dynamically from `wm size` and fail if unavailable. It dynamically selects the first `/dev/input/event*` device described by `/proc/bus/input/devices` whose ioctl capabilities include EV_ABS, ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_MT_POSITION_X/Y, and INPUT_PROP_DIRECT. It opens the source nonblocking, creates `vtouch-merged` on `/dev/uinput` using discovered raw ranges and `physical slots + virtual slots` (virtual slots default 10, bounded to 32), verifies UI_DEV_CREATE/UI_GET_SYSNAME, then grabs the physical source. Physical events remain raw; only virtual logical coordinates are converted with rounded, clamped integer mapping.
 
@@ -81,4 +81,4 @@ CC=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clan
 "$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DVT_MERGE_TEST -fsyntax-only src/vtouchmerge.c
 ```
 
-Or use `src/Android.mk` with `ndk-build` (the existing `vtouchd` is not changed). This backend is build-only here; it has not been deployed to a phone and EVIOCGRAB has not been called on a real device.
+Or use `src/Android.mk` with `ndk-build`.
