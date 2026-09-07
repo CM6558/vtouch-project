@@ -1,5 +1,0 @@
-# Permit only the runtime operations required by the userspace merger.
-allow ksu input_device:chr_file { getattr open read ioctl };
-allow ksu uhid_device:chr_file { getattr open read write ioctl };
-allow ksu tmpfs:dir { add_name create getattr open read remove_name search write };
-allow ksu tmpfs:file { create getattr open read write append setattr unlink };
