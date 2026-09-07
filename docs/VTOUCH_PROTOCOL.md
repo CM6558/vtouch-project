@@ -1,6 +1,6 @@
 # WebSocket 调用说明
 
-当前 bridge 不是 JSON RPC，而是把现有 vtouchd 文本协议封装在 WebSocket 文本帧中。
+当前 bridge 不是 JSON RPC，而是把 vtouchmerge 文本协议封装在 WebSocket 文本帧中。
 
 ```text
 AutoJs6 WebSocket -> "ping" -> "pong"
