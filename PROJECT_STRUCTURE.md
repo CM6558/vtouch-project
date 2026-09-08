@@ -8,7 +8,10 @@ vtouch-project/
 │   ├── vtouchsupervise.c         # worker 监控器（心跳检测 + 崩溃自动重启）
 │   └── Android.mk                # NDK integration
 ├── clients/
-│   └── vtouch_onefile_example.js # AutoJs6 单文件 SDK（Finger API + 原子多指帧）
+│   ├── plugin-apk/               # APK 应用插件（org.vtouch.plugin，SDK v2 唯一载体）
+│   ├── plugins/vtouch.js         # AutoJs6 项目插件（SDK v2 分发）
+│   ├── vtouch_plugin_example.js  # 插件用法示例
+│   └── vtouch_plugin_apk_test.js # 插件真机测试脚本
 ├── scripts/
 │   ├── install_from_sdcard.sh    # 手机端安装/启动（部署入口）
 │   ├── vtouch-start.sh           # 启动服务
@@ -19,7 +22,6 @@ vtouch-project/
 ├── docs/
 │   ├── README.md                 # 总文档
 │   ├── VTOUCH_MERGE.md           # 合并器架构文档
-│   ├── VTOUCH_ONEFILE.md         # AutoJs6 SDK 使用说明
 │   ├── VTOUCH_PROTOCOL.md        # WebSocket/文本协议
 │   └── WEBSOCKET_DESIGN.md       # WebSocket 设计
 ├── tests/
