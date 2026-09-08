@@ -33,13 +33,17 @@ vt.stopService();    // 杀掉 vtouchmerge/vtouchws，释放 EVIOCGRAB
 
 ```
 plugin-apk/
-├── AndroidManifest.xml          # meta-data 注册入口 org.vtouch.plugin.VTouchPlugin
+├── AndroidManifest.xml          # meta-data 注册入口 + VTouchService 托管服务
 ├── build.sh                     # 命令行构建（aapt2 + javac + d8 + zipalign + apksigner）
 ├── src/org/vtouch/plugin/
-│   └── VTouchPlugin.java        # 注册类：loadDefault + getAssetsScriptDir + getVersion
+│   ├── VTouchPlugin.java        # 注册类：loadDefault + Java API（start/stop/runCommand/isReady）
+│   └── VTouchService.java       # 后台托管服务（root 拉起 vtouchmerge/vtouchws）
 └── assets/vtouch/
-    └── index.js                 # 胶水层：module.exports = function(plugin){ ...SDK...; return VTouch; }
+    └── index.js                 # 胶水层（由 scripts/build_sdk.py 生成）：SDK + 插件 Java API 优先覆盖
 ```
+
+> SDK 单源化：`clients/vtouch_onefile_example.js`、`clients/plugins/vtouch.js`、本 assets/index.js
+> 均由 `scripts/vtouch-sdk.src.js`（可读主源）经 `scripts/build_sdk.py` 生成，改 SDK 只改主源。
 
 ## 构建
 
@@ -80,16 +84,26 @@ adb install out/vtouch-plugin.apk
 ```
 
 ```js
-// 任意脚本，无需项目结构
+// 任意脚本，无需项目结构（v2：自动连接 + 一行一个动作）
 var VTouch = plugins.load('org.vtouch.plugin');
-var vt = new VTouch().connect(function (client) {
-    threads.start(function () {
-        client.finger().swipe(200, 200, 1500, 2000, 1000);
-    });
-});
+var vt = new VTouch();                    // 自动连接，服务未启动自动拉起
+vt.tap(540, 1200);                        // 点击
+vt.swipe(200, 200, 1500, 2000, 1000);     // 滑动
+// 退出自动 close + stopService
 ```
 
 未安装插件时 `plugins.load` 抛 `PluginLoadException`（可 try/catch 回退到项目插件或 require）。
+
+## v2 架构（vtouchmerge 新架构）
+
+- SDK v2：`new VTouch()` 自动连接（先确保服务就绪再连 WebSocket，省去首次失败重试），
+  便捷 API `vt.tap/vt.swipe/vt.down/vt.move/vt.up` 一行一个动作，发送队列自动缓冲；
+  脚本退出自动 `close() + stopService()`。
+- 插件 Java API 优先：胶水层覆盖 `startService/stopService`，走 `VTouchPlugin` 的
+  Java 实现（root 进程内拉起/停止 vtouchmerge + vtouchws），失败自动回退 shell。
+- `VTouchService`：可选的后台托管组件，供显式 `startService` 场景
+  （`org.vtouch.plugin.action.STOP` 停止）。
+- 托管的是 vtouchmerge 新架构（合并器 + WebSocket 桥），非旧 vtouchd。
 
 ## 与项目插件对比
 
