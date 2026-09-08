@@ -32,6 +32,7 @@ import json
 import os
 import socket
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -128,15 +129,29 @@ def save_state(state):
         log(f"[sync_auto] ✗ 缓存写入失败: {e}", err=True)
 
 
+def _pid_alive(pid):
+    """Windows 上 os.kill(pid, 0) 不可用, 用 tasklist 检测."""
+    try:
+        if sys.platform == "win32":
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
+                               capture_output=True, text=True, timeout=10)
+            return str(pid) in r.stdout
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
 def acquire_lock():
     if os.path.exists(LOCK_FILE):
         try:
             pid = int(open(LOCK_FILE).read().strip())
-            os.kill(pid, 0)  # 仅检测存活 (Windows 上多数情况抛异常)
-            log(f"[sync_auto] 已有实例运行 (pid {pid}), 退出", err=True)
-            sys.exit(2)
+            if _pid_alive(pid):
+                log(f"[sync_auto] 已有实例运行 (pid {pid}), 退出", err=True)
+                sys.exit(2)
+            log(f"[sync_auto] 清理残留锁 (pid {pid} 已退出)")
         except (ValueError, OSError):
-            pass  # 锁文件残留 (进程已死), 覆盖
+            pass  # 锁文件损坏, 覆盖
     with open(LOCK_FILE, "w") as f:
         f.write(str(os.getpid()))
 
