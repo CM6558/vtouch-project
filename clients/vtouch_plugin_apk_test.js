@@ -40,6 +40,15 @@ note("AutoJs6: " + autojs.versionName);
 var r = shell("ls -l /data/local/tmp/vtouchmerge /data/local/tmp/vtouchws 2>&1; echo '---'; ls -la /data/local/tmp/vtouch-runtime/ 2>&1", true);
 note("预检 code=" + r.code + "\n" + (r.result || "") + (r.error || ""));
 
+/* ---------- 阶段 B2：插件 Java API 预检（v2） ---------- */
+try {
+    /* 胶水层 v2 在插件模式下会覆盖 startService 走插件 Java API（__origStart 标记） */
+    var checkViaProto = VTouch.prototype.startService.toString().indexOf("__origStart") >= 0;
+    note("startService 已由插件 Java API 覆盖: " + checkViaProto);
+} catch (e) {
+    note("Java API 预检异常: " + e);
+}
+
 /* ---------- 阶段 C：连接 + 触摸测试（默认关闭） ---------- */
 if (TOUCH_TEST) {
     note("开始连接 + 触摸测试（将启动 vtouchmerge，独占物理触摸）");
