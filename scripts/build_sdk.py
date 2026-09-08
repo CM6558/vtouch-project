@@ -95,7 +95,6 @@ def main() -> int:
 
     if args.check:
         ok = all(check_js(p) for p in [
-            ROOT / "clients" / "vtouch_onefile_example.js",
             ROOT / "clients" / "plugins" / "vtouch.js",
             ROOT / "clients" / "plugin-apk" / "assets" / "vtouch" / "index.js",
         ])
