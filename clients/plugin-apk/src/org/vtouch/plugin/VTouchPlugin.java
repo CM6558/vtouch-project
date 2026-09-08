@@ -10,6 +10,7 @@ import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -206,10 +207,52 @@ public class VTouchPlugin implements ServiceConnection {
         return pid > 0 && new File("/proc/" + pid).exists();
     }
 
-    /** 启动后端：wm size 取真实分辨率，root 拉起 vtouchmerge/vtouchws。 */
+    /** 确保 /data/local/tmp 下 vtouchmerge/vtouchws 存在（APK assets 自动释放）。
+     *  普通进程无权直接写 /data/local/tmp -> 先写 app 私有目录, 再 root cp + chmod。
+     *  幂等: 已存在且非空直接返回（二次脚本零开销）。 */
+    static boolean ensureBinaries() {
+        Context ctx = sContext;
+        if (ctx == null) return false;
+        try {
+            File m = new File(MERGE_BIN), w = new File(WS_BIN);
+            if (m.exists() && m.length() > 0 && w.exists() && w.length() > 0) return true;
+            File pm = new File(ctx.getFilesDir(), "vtouchmerge");
+            File pw = new File(ctx.getFilesDir(), "vtouchws");
+            if (!pm.exists() || pm.length() == 0) writeAsset(ctx, "vtouchmerge", pm);
+            if (!pw.exists() || pw.length() == 0) writeAsset(ctx, "vtouchws", pw);
+            String out = execRoot("cp -f '" + pm.getAbsolutePath() + "' " + MERGE_BIN
+                    + " && cp -f '" + pw.getAbsolutePath() + "' " + WS_BIN
+                    + " && chmod 755 " + MERGE_BIN + " " + WS_BIN);
+            if (out == null) {
+                Log.e(TAG, "ensureBinaries: root cp failed");
+                return false;
+            }
+            return m.exists() && m.length() > 0 && w.exists() && w.length() > 0;
+        } catch (Exception e) {
+            Log.e(TAG, "ensureBinaries failed", e);
+            return false;
+        }
+    }
+
+    /** 把 assets 资源写出到文件（普通进程可写目录，如 app 私有目录）。 */
+    private static void writeAsset(Context ctx, String asset, File dest) throws IOException {
+        try (InputStream is = ctx.getAssets().open(asset);
+             FileOutputStream fos = new FileOutputStream(dest)) {
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = is.read(buf)) > 0) fos.write(buf, 0, n);
+        }
+        Log.i(TAG, "extracted asset " + asset + " -> " + dest.getAbsolutePath());
+    }
+
+    /** 启动后端：确保二进制已释放，wm size 取真实分辨率，root 拉起 vtouchmerge/vtouchws。 */
     static boolean startBackend() {
         try {
             if (serviceReady()) return true;
+            if (!ensureBinaries()) {
+                Log.e(TAG, "startBackend: binaries missing and auto-extract failed");
+                return false;
+            }
             String cmd = "SIZE=$(wm size 2>/dev/null | sed -n 's/.*Physical size: //p' | head -n 1); "
                     + "W=${SIZE%x*}; H=${SIZE#*x}; "
                     + "case \"$W:$H\" in ''|*[!0-9:]*) echo 'no size'; exit 12;; esac; "
