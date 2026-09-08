@@ -57,4 +57,25 @@ sdcard/vtouch-merge/  手机运行目录（随安装包分发）
 build/                编译产物
 tests/                Python 冒烟测试
 docs/                 文档
+extension/sync-ext/   Chrome 扩展（一键网页同步通道）
 ```
+
+## 一键网页同步（本地 → GitHub，零 git push）
+
+本地改动无需 `git push`，由 Python + Chrome 扩展自动走 GitHub 网页提交：
+
+```sh
+# 1) 生成清单（列出本地 vs 远端差异，含内容）
+python scripts/sync_web.py --json D:\sync-manifest.json --no-open
+
+# 2) 一键提交（Python WS server → Chrome 扩展 → 网页编辑提交）
+python scripts/sync_auto.py --manifest D:\sync-manifest.json
+```
+
+前置（一次性）：
+1. `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → `extension/sync-ext`
+2. Chrome 需已登录 GitHub（登录态复用，无需额外登录）
+
+说明：扩展经代理隧道连本机局域网 IP（默认 `10.164.120.30`，见
+`extension/sync-ext/offscreen.js` 与 `manifest.json`，换机器需改）；代理要求放行
+内网地址，`127.0.0.1` 会被系统代理 CONNECT 拦截。
