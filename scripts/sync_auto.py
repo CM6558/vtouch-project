@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-sync_auto.py — 一键把本地改动同步到 GitHub（浏览器扩展 WS 通道, 零 git push / 零 MCP / 零 CDP 端口）
+sync_auto.py — 一步静默后台同步: 本地改动 -> GitHub 网页提交 (零 git, 零 MCP, 零额外登录)
 
 架构:
-  本脚本在 0.0.0.0:9336 开极简 WebSocket server。
-  Chrome 扩展 (extension/sync-ext) 的 offscreen 文档（常驻, 不受 SW 休眠影响）
-  通过 WS 连接本 server —— 扩展请求强制走代理隧道, 故用本机局域网 IP
-  (10.164.120.30, 代理放行内网) 而非 127.0.0.1 (代理 CONNECT 拦截)。
-  offscreen 收任务后经 chrome.runtime 转发 SW 执行 GitHub 编辑页提交,
-  登录态天然可用 (用户已登录的 Chrome)。
+  本脚本扫描仓库受管文本文件, 与本地缓存 (sync-state.json) 比对 sha256,
+  变化的文件经 Chrome 扩展通道逐个网页提交:
+    Python WS server (0.0.0.0:9336) -> 扩展 offscreen 文档常驻持 WS (SW 休眠免疫)
+    -> runtime.sendMessage 转发 SW -> executeScript(MAIN world) 编辑页注入
+    -> CM6 -> Commit -> 验证跳转。登录态天然可用 (用户已登录的 Chrome)。
 
-用法（每次同步）:
-  1. python scripts/sync_web.py --json D:\\sync-manifest.json --no-open   # 生成清单
-  2. python scripts/sync_auto.py --manifest D:\\sync-manifest.json        # 一键提交
+  * 完全不用 git: 无 fetch/diff/status/commit/push。
+  * 幂等: 内容 sha256 未变则跳过 (不覆盖远端, 远端被手动改过也安全)。
+  * 删除/二进制天然不处理 (远端残留无害; zip 等按扩展名排除)。
 
-前置（一次性）:
+用法 (一步):
+  python scripts/sync_auto.py                          # 前台, 打印进度
+  pythonw scripts/sync_auto.py --silent                # 静默后台, 日志写 D:\\MYP\\sync-auto.log
+  pythonw scripts/sync_auto.py --silent --watch 600    # 常驻, 每 10 分钟自动同步一次
+
+前置 (一次性):
   chrome://extensions -> 开发者模式 -> 加载已解压的扩展 -> 选 extension/sync-ext
-  （若本机局域网 IP 变化, 改 extension/sync-ext/{manifest.json,offscreen.js} 的 10.164.120.30）
+  (若本机局域网 IP 变化, 改 extension/sync-ext/{manifest.json,offscreen.js} 的 10.164.120.30)
 
 依赖: 仅 Python 3 标准库 + Chrome + 已加载扩展。
 """
@@ -32,7 +36,110 @@ import time
 
 WS_PORT = 9336
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_MANIFEST = os.path.join(os.path.dirname(REPO_DIR), "sync-manifest.json")
+REPO = "CM6558/vtouch-project"
+BRANCH = "master"
+OUT_DIR = os.path.dirname(REPO_DIR)          # D:\MYP
+STATE_FILE = os.path.join(OUT_DIR, "sync-state.json")
+LOCK_FILE = os.path.join(OUT_DIR, ".sync-auto.lock")
+LOG_FILE = os.path.join(OUT_DIR, "sync-auto.log")
+
+# 受管目录 (相对 REPO_DIR) 与排除项
+MANAGED_DIRS = ["scripts", "extension", "src", "docs", "clients"]
+MANAGED_FILES = ["README.md"]
+TEXT_EXTS = {".py", ".js", ".java", ".xml", ".md", ".c", ".h", ".mk", ".json",
+             ".html", ".txt", ".bat", ".yml", ".yaml", ".toml", ".cfg", ".sh",
+             ".gradle", ".properties", ".css", ".ts"}
+EXCLUDE_DIRS = {".git", "build", "__pycache__", ".github-sync-profile",
+                "node_modules", "dist", ".idea", ".vscode"}
+MAX_SIZE = 512 * 1024
+
+SILENT = False
+
+
+def log(msg, err=False):
+    """silent 时写日志文件, 否则打印."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    if SILENT:
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except Exception:
+            pass
+    else:
+        print(msg, file=sys.stderr if err else sys.stdout, flush=True)
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def scan_repo():
+    """扫描受管目录下文本文件, 返回 {relpath: sha256hex}."""
+    files = {}
+    roots = [os.path.join(REPO_DIR, d) for d in MANAGED_DIRS]
+    roots += [os.path.join(REPO_DIR, f) for f in MANAGED_FILES]
+    for root in roots:
+        if os.path.isfile(root):
+            rel = os.path.relpath(root, REPO_DIR).replace("\\", "/")
+            files[rel] = sha256_file(root)
+            continue
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            for fn in filenames:
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in TEXT_EXTS:
+                    continue
+                fp = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getsize(fp) > MAX_SIZE:
+                        continue
+                except OSError:
+                    continue
+                rel = os.path.relpath(fp, REPO_DIR).replace("\\", "/")
+                files[rel] = sha256_file(fp)
+    return files
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log(f"[sync_auto] ✗ 缓存写入失败: {e}", err=True)
+
+
+def acquire_lock():
+    if os.path.exists(LOCK_FILE):
+        try:
+            pid = int(open(LOCK_FILE).read().strip())
+            os.kill(pid, 0)  # 仅检测存活 (Windows 上多数情况抛异常)
+            log(f"[sync_auto] 已有实例运行 (pid {pid}), 退出", err=True)
+            sys.exit(2)
+        except (ValueError, OSError):
+            pass  # 锁文件残留 (进程已死), 覆盖
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def release_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
 
 
 # ---------------- 极简 WebSocket SERVER (纯标准库) ----------------
@@ -179,106 +286,138 @@ class WSServer:
         raise RuntimeError("扩展响应超时")
 
 
-# ---------------- main ----------------
-def main():
-    ap = argparse.ArgumentParser(description="一键网页同步: 本地改动 -> GitHub (扩展 WS 通道)")
-    ap.add_argument("--manifest", default=None, help="sync_web.py --json 清单路径")
-    ap.add_argument("--port", type=int, default=WS_PORT)
-    ap.add_argument("--only", default=None, help="只处理路径包含该子串的文件")
-    ap.add_argument("--login-check", action="store_true", help="只检查登录态后退出")
-    args = ap.parse_args()
-
-    manifest_path = args.manifest or DEFAULT_MANIFEST
-    if not os.path.exists(manifest_path):
-        print(f"[sync_auto] ✗ 清单不存在: {manifest_path}\n"
-              "  先运行: python scripts/sync_web.py --json <path> --no-open", file=sys.stderr)
-        return 2
-    m = json.load(open(manifest_path, encoding="utf-8"))
-    repo = m.get("repo", "CM6558/vtouch-project")
-    branch = m.get("branch", "master")
-    updates = m.get("updates", [])
-    deletes = m.get("deletes", [])
-    binaries = m.get("binaries", [])
-    print(f"[sync_auto] {repo} @ {branch}: 更新 {len(updates)} 删除 {len(deletes)} 二进制 {len(binaries)}")
-
-    print(f"[sync_auto] 开启本地 WS 通道 0.0.0.0:{args.port} (等扩展连接, 最多 90s)...")
-    srv = WSServer(args.port)
-    srv.listen()
-    try:
-        user = ""
-        while True:  # 断线自动重连 (扩展重载/代理隧道超时都会断)
-            try:
-                srv.accept(timeout=90)
-            except RuntimeError as e:
-                print(f"[sync_auto] ✗ {e}", file=sys.stderr)
-                return 2
-            print("[sync_auto] 扩展已连接 ✓")
-            # check_login 可能因代理抖动返回空 (页面加载失败), 重试 4 次
-            for attempt in range(4):
-                try:
-                    r = srv.rpc({"action": "check_login"}, timeout=90)
-                    user = r.get("user", "")
-                    if user:
-                        break
-                    print(f"[sync_auto] 登录检查为空 (第 {attempt + 1} 次), 重试...")
-                except RuntimeError as e:
-                    print(f"[sync_auto] 连接断开, 等待重连: {e}")
-                    try:
-                        srv.conn.close()
-                    except Exception:
-                        pass
-                    srv.conn = None
-                    srv.buf = b""
-                    break  # 外层 while 会重新 accept
-            if not user:
-                if srv.conn is None:
-                    continue  # 连接断了, 重新 accept
-                print("[sync_auto] ✗ 多次检查 GitHub 未登录 (请确认 Chrome 已登录 github.com)", file=sys.stderr)
-                return 2
-            break  # 登录确认后不再重连
-        print(f"[sync_auto] GitHub 登录: {user}")
-
-        if args.login_check:
-            return 0
-
-        ok, fail = [], []
-        for i, u in enumerate(updates, 1):
-            path = u["path"]
+# ---------------- 同步主流程 ----------------
+def sync_once(srv, args, repo=REPO, branch=BRANCH, accept_timeout=90):
+    """扫描 + 提交变化文件, 返回 (ok_list, fail_list).
+    accept_timeout: 等扩展连接秒数 (watch 模式用短值, Chrome 未开时快速跳过)."""
+    files = scan_repo()
+    state = load_state()
+    # 新文件 (无缓存记录) 或 hash 变化 -> 需要提交
+    to_submit = []
+    for path in sorted(files):
+        if state.get(path) != files[path]:
             if args.only and args.only not in path:
-                print(f"  [{i}/{len(updates)}] 跳过 {path} (--only 过滤)")
                 continue
-            print(f"  [{i}/{len(updates)}] {u['status']} {path} ...", end=" ", flush=True)
+            to_submit.append(path)
+    log(f"[sync_auto] {repo} @ {branch}: 扫描 {len(files)} 文件, 待提交 {len(to_submit)}")
+
+    if not to_submit:
+        log("[sync_auto] 无变化, 跳过")
+        return [], []
+
+    if srv.conn is None:
+        srv.accept(timeout=accept_timeout)
+        log("[sync_auto] 扩展已连接 ✓")
+    # else: 复用上一轮连接 (offscreen 常驻, watch 模式连续轮次不重连)
+    # check_login 可能因代理抖动返回空 (页面加载失败), 重试 4 次
+    user = ""
+    for attempt in range(4):
+        try:
+            r = srv.rpc({"action": "check_login"}, timeout=90)
+            user = r.get("user", "")
+            if user:
+                break
+            log(f"[sync_auto] 登录检查为空 (第 {attempt + 1} 次), 重试...")
+        except RuntimeError as e:
+            log(f"[sync_auto] 连接断开, 等待重连: {e}", err=True)
             try:
-                r = srv.rpc({
-                    "action": "commit",
-                    "path": path,
-                    "content": u["content"],
-                    "is_new": u["status"] == "A",
-                    "repo": repo,
-                    "branch": branch,
-                })
-                if r.get("ok"):
+                srv.conn.close()
+            except Exception:
+                pass
+            srv.conn = None
+            srv.buf = b""
+            srv.accept(timeout=90)
+            log("[sync_auto] 扩展重连 ✓")
+    if not user:
+        raise RuntimeError("多次检查 GitHub 未登录 (请确认 Chrome 已登录 github.com)")
+    log(f"[sync_auto] GitHub 登录: {user}")
+
+    ok, fail = [], []
+    for i, path in enumerate(to_submit, 1):
+        abs_path = os.path.join(REPO_DIR, path.replace("/", os.sep))
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            fail.append((path, f"读取失败: {e}"))
+            continue
+        log(f"  [{i}/{len(to_submit)}] {path} ...")
+        try:
+            r = srv.rpc({
+                "action": "commit",
+                "path": path,
+                "content": content,
+                "is_new": path not in state,   # 无缓存记录 -> 按新建处理 (远端可能已存在, 但提交页自动识别)
+                "repo": repo,
+                "branch": branch,
+            })
+            if r.get("ok"):
+                ok.append(path)
+                state[path] = files[path]      # 提交成功才更新缓存
+                save_state(state)
+                log(f"  ✓ {path}")
+            else:
+                err_msg = r.get("error", "?")
+                # "Commit 按钮未就绪" = 内容与远端相同, 视为无变化跳过 (幂等)
+                if "按钮未就绪" in err_msg:
                     ok.append(path)
-                    print("✓")
+                    state[path] = files[path]
+                    save_state(state)
+                    log(f"  ~ {path} (无变化, 跳过)")
                 else:
-                    fail.append((path, r.get("error", "?")))
-                    print(f"✗ {r.get('error', '?')}")
-            except Exception as e:
-                fail.append((path, str(e)))
-                print(f"✗ {e}")
+                    fail.append((path, err_msg))
+                    log(f"  ✗ {path}: {err_msg}", err=True)
+        except Exception as e:
+            fail.append((path, str(e)))
+            log(f"  ✗ {path}: {e}", err=True)
+    log(f"[sync_auto] 本轮完成: 成功 {len(ok)} 失败 {len(fail)}")
+    return ok, fail
 
-        for d in deletes:
-            print(f"  [del] {d['path']} — 需手动: https://github.com/{repo}/delete/{branch}/{d['path']}")
-        for b in binaries:
-            print(f"  [bin] {b['path']} — 跳过 (需手动网页上传)")
 
-        print()
-        print(f"=== 完成: 成功 {len(ok)} 失败 {len(fail)} ===")
-        for p, e in fail:
-            print(f"  ✗ {p}: {e}")
-        return 0 if not fail else 1
+def main():
+    global SILENT
+    ap = argparse.ArgumentParser(description="一步网页同步: 本地改动 -> GitHub (免 git, 扩展 WS 通道)")
+    ap.add_argument("--silent", action="store_true", help="静默后台 (日志写 sync-auto.log, 无输出)")
+    ap.add_argument("--port", type=int, default=WS_PORT)
+    ap.add_argument("--watch", type=int, default=0,
+                    help="常驻模式: 每 N 秒自动同步一次 (0=单次后退出)")
+    ap.add_argument("--only", default=None, help="只处理路径包含该子串的文件 (调试用)")
+    ap.add_argument("--repo", default=REPO)
+    ap.add_argument("--branch", default=BRANCH)
+    args = ap.parse_args()
+    SILENT = args.silent
+
+    acquire_lock()
+    try:
+        srv = WSServer(args.port)
+        srv.listen()
+        try:
+            if args.watch:
+                log(f"[sync_auto] 常驻模式: 每 {args.watch}s 同步一次 (Ctrl+C 退出)")
+                while True:
+                    try:
+                        # Chrome 未开时快速跳过 (20s 等待), 减少日志噪音
+                        sync_once(srv, args, args.repo, args.branch,
+                                  accept_timeout=20 if args.silent else 60)
+                    except RuntimeError as e:
+                        log(f"[sync_auto] ✗ {e}", err=True)
+                        try:
+                            srv.conn.close()
+                        except Exception:
+                            pass
+                        srv.conn = None
+                        srv.buf = b""
+                    time.sleep(args.watch)
+            else:
+                ok, fail = sync_once(srv, args, args.repo, args.branch)
+                return 0 if not fail else 1
+        finally:
+            srv.close()
+    except RuntimeError as e:
+        log(f"[sync_auto] ✗ {e}", err=True)
+        return 2
     finally:
-        srv.close()
+        release_lock()
 
 
 if __name__ == "__main__":
