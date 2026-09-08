@@ -65,13 +65,27 @@ async function checkLogin() {
 async function doCommit(msg) {
   const base = `https://github.com/${msg.repo || "CM6558/vtouch-project"}`;
   const branch = msg.branch || "master";
-  const url = msg.is_new
-    ? `${base}/new/${branch}?filename=${encodeURIComponent(msg.path)}`
-    : `${base}/edit/${branch}/${msg.path}`;
+  // 先试编辑页; 远端不存在时 GitHub 显示 404, 自动切新建页 (不依赖 is_new 猜测)
+  const url = `${base}/edit/${branch}/${msg.path}`;
   const tab = await chrome.tabs.create({ url, active: false });
+  let detectedNew = false;
   try {
-    if (!(await waitFor(tab.id, 40000, () => !!document.querySelector('.cm-content')))) {
-      return { ok: false, error: "编辑器加载超时" };
+    const mode = await waitFor(tab.id, 40000, () => {
+      if (document.querySelector('.cm-content')) return 'edit';
+      // GitHub 404 页的 h1 精确为 "Page not found" (避免 "Not Found" 泛匹配误判)
+      const h1 = document.querySelector('h1');
+      if (h1 && h1.textContent.trim() === 'Page not found') return '404';
+      return 'wait';
+    });
+    if (mode === '404') {
+      detectedNew = true;
+      const newUrl = `${base}/new/${branch}?filename=${encodeURIComponent(msg.path)}`;
+      await chrome.tabs.update(tab.id, { url: newUrl, active: false });
+      await waitFor(tab.id, 40000, () => !!document.querySelector('.cm-content'));
+    } else if (mode !== 'edit') {
+      if (!(await waitFor(tab.id, 40000, () => !!document.querySelector('.cm-content')))) {
+        return { ok: false, error: "编辑器加载超时" };
+      }
     }
     // 注入: CRLF 会让 CM6 按 2 行处理 (\r 和 \n 都是行分隔) -> 先转 LF
     const normContent = String(msg.content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
@@ -113,17 +127,17 @@ async function doCommit(msg) {
     console.log("[vtouch-sync] inj:", inj, "expect≈", String(msg.content || '').length);
     await sleep(1500);
 
-    // 大文件(15KB+) CM6 处理慢, 等 45s
-    const clicked = await poll(tab.id, 45000, () => {
+    // 注入后 CM6 处理 + 按钮启用: 大文件 15KB 约 2-5s, 内容未变则永不启用 (等 15s 即跳过)
+    const clicked = await poll(tab.id, 15000, () => {
       const b = Array.from(document.querySelectorAll('button'))
         .find(x => x.textContent.trim() === 'Commit changes...');
       if (b && !b.disabled) { b.click(); return 'clicked'; }
       return 'wait';
     });
-    if (clicked !== 'clicked') return { ok: false, error: "Commit 按钮未就绪" };
+    if (clicked !== 'clicked') return { ok: false, error: "Commit 按钮未就绪 (内容可能无变化)" };
     await sleep(600);
 
-    const commitMsg = (msg.is_new ? "feat: " : "sync: ") + msg.path;
+    const commitMsg = (detectedNew ? "feat: " : "sync: ") + msg.path;
     const done = await poll(tab.id, 25000, (cm) => {
       const d = document.querySelector('[role="dialog"]');
       const inp = d && d.querySelector('input[placeholder^="Update"], input[placeholder^="Create"]');
