@@ -180,6 +180,9 @@ def main() -> int:
         path = e["path"]
         fp = repo / path
         if e["status"] == "D":
+            # 本地文件仍存在(未跟踪但内容在) => 不是真删除(远端已跟踪导致 git 误报)
+            if (repo / path).exists():
+                continue
             deletes.append({"path": path})
             continue
         if not fp.exists():
