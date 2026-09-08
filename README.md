@@ -15,7 +15,8 @@
 | `vtouchmerge` | 核心触摸合并程序（EVIOCGRAB + uinput） |
 | `vtouchws` | WebSocket 桥接 |
 | `vtouchsupervise` | Worker 监控 / 崩溃自动重启 |
-| `vtouch_onefile_example.js` | AutoJs6 单文件 SDK |
+| `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
+| `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
 
 ## 快速安装（共享存储）
 
