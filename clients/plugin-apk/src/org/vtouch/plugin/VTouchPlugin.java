@@ -208,6 +208,7 @@ public class VTouchPlugin implements ServiceConnection {
     }
 
     /** 确保 /data/local/tmp 下 vtouchmerge/vtouchws 存在（APK assets 自动释放）。
+     *  按运行时 ABI 从 assets/native/<abi>/ 选择二进制（arm64-v8a 实机 / x86_64 模拟器）。
      *  普通进程无权直接写 /data/local/tmp -> 先写 app 私有目录, 再 root cp + chmod。
      *  幂等: 已存在且非空直接返回（二次脚本零开销）。 */
     static boolean ensureBinaries() {
@@ -216,10 +217,13 @@ public class VTouchPlugin implements ServiceConnection {
         try {
             File m = new File(MERGE_BIN), w = new File(WS_BIN);
             if (m.exists() && m.length() > 0 && w.exists() && w.length() > 0) return true;
+            String abi = (Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0)
+                    ? Build.SUPPORTED_ABIS[0] : "arm64-v8a";
+            String assetDir = "native/" + abi + "/";
             File pm = new File(ctx.getFilesDir(), "vtouchmerge");
             File pw = new File(ctx.getFilesDir(), "vtouchws");
-            if (!pm.exists() || pm.length() == 0) writeAsset(ctx, "vtouchmerge", pm);
-            if (!pw.exists() || pw.length() == 0) writeAsset(ctx, "vtouchws", pw);
+            if (!pm.exists() || pm.length() == 0) writeAsset(ctx, assetDir + "vtouchmerge", pm);
+            if (!pw.exists() || pw.length() == 0) writeAsset(ctx, assetDir + "vtouchws", pw);
             String out = execRoot("cp -f '" + pm.getAbsolutePath() + "' " + MERGE_BIN
                     + " && cp -f '" + pw.getAbsolutePath() + "' " + WS_BIN
                     + " && chmod 755 " + MERGE_BIN + " " + WS_BIN);
