@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "VTouch Sync Helper",
+  "version": "1.0.0",
+  "description": "纯 Python 驱动 GitHub 网页提交的本地助手 (offscreen WS 常驻通道)",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "alarms",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://github.com/*",
+    "ws://10.164.120.30:9336/*",
+    "http://10.164.120.30:9336/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "VTouch Sync (由 python sync_auto.py 驱动)"
+  }
+}
