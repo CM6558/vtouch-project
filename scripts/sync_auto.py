@@ -2,7 +2,7 @@
 
 # -*- coding: utf-8 -*-
 
-"""  
+"""
 
 sync_auto.py — 一键把本地改动同步到 GitHub（浏览器扩展 WS 通道, 零 git push / 零 MCP / 零 CDP 端口）
 
