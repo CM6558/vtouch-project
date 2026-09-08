@@ -41,9 +41,14 @@ echo "javac: OK"
 echo "d8: OK"
 
 # 4) assets + dex 打入 APK（jar 条目名必须是 "assets/..." 正斜杠前缀，AssetManager 依赖该前缀）
+#    native 二进制（vtouchmerge/vtouchws）一并打入 assets 根:
+#    运行时 VTouchPlugin.ensureBinaries() 检测缺失则自动释放到 /data/local/tmp（单 APK 即可运行）
+mkdir -p build/merge-assets/assets
+cp -f ../../sdcard/vtouch-merge/vtouchmerge ../../sdcard/vtouch-merge/vtouchws build/merge-assets/assets/
 "$JAVA_HOME/bin/jar" --update --file build/unsigned.apk -C . assets/vtouch/index.js
+"$JAVA_HOME/bin/jar" --update --file build/unsigned.apk -C build/merge-assets assets/vtouchmerge assets/vtouchws
 "$JAVA_HOME/bin/jar" --update --file build/unsigned.apk -C build/dex classes.dex
-echo "add assets + classes.dex: OK"
+echo "add assets + native + classes.dex: OK"
 
 # 5) zipalign
 "$BT/zipalign" -f 4 build/unsigned.apk build/aligned.apk
