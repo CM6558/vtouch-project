@@ -52,7 +52,8 @@ API = "https://api.github.com"
 
 # 受管目录 (相对 REPO_DIR) 与排除项
 MANAGED_DIRS = ["scripts", "extension", "src", "docs", "clients", "tests", "sdcard"]
-MANAGED_FILES = ["README.md", "PROJECT_STRUCTURE.md", "AGENTS.md"]
+MANAGED_FILES = ["README.md", "PROJECT_STRUCTURE.md", "AGENTS.md",
+                 ".github/workflows/build-vtouch-plugin-apk.yml", ".github/workflows/build.yml"]
 TEXT_EXTS = {".py", ".js", ".java", ".xml", ".md", ".c", ".h", ".mk", ".json",
              ".html", ".txt", ".bat", ".yml", ".yaml", ".toml", ".cfg", ".sh",
              ".gradle", ".properties", ".css", ".ts"}
