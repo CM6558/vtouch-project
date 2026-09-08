@@ -161,7 +161,17 @@ def main() -> int:
         if line.startswith("?? "):
             p = line[3:].strip()
             if p not in seen:
-                entries.append({"status": "A", "path": p, "untracked": True})
+                # 未跟踪目录 -> 递归展开其下文件
+                dp = repo / p
+                if dp.is_dir():
+                    for f in sorted(dp.rglob("*")):
+                        if f.is_file():
+                            rel = str(f.relative_to(repo)).replace("\\", "/")
+                            if rel not in seen:
+                                entries.append({"status": "A", "path": rel, "untracked": True})
+                                seen.add(rel)
+                else:
+                    entries.append({"status": "A", "path": p, "untracked": True})
 
     print(f"[3/4] 待同步条目: {len(entries)}")
 
