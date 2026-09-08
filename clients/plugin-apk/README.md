@@ -49,7 +49,12 @@ plugin-apk/
 
 ## 构建
 
-> **状态：本机已实构建验证**（Windows Git Bash，2026-09）。产物 `out/vtouch-plugin.apk` 已验证：签名有效、包名 `org.vtouch.plugin`、meta-data 正确、`assets/vtouch/index.js` 为正斜杠条目且与源文件字节一致、classes.dex 一致。**注意：native 自动释放（assets 内嵌 vtouchmerge/vtouchws）为本机无 Android SDK 环境下的代码级改动，构建/真机验证未执行**——请以 GitHub Actions 产物为准。GitHub Actions 工作流位于仓库根 `.github/workflows/build-vtouch-plugin-apk.yml`。
+> **状态：双 ABI（arm64-v8a 实机 + x86_64 模拟器）**。native 由 NDK r27d 交叉编译
+> `vtouchmerge.c`/`vtouchws.c`（纯 C，无 STL 依赖）打入 `assets/native/<abi>/`，
+> 运行时 `ensureBinaries()` 按 `Build.SUPPORTED_ABIS[0]` 选择释放。
+> 本机无 Android SDK（dl.google.com 经内网代理不可达），**本地构建未执行**；
+> 以 GitHub Actions 产物为准（工作流自动装 NDK r27d + SDK，push 即构建）。
+> 无 NDK 时 build.sh 回退：仅打包 `sdcard/vtouch-merge` 已有 arm64 产物（x86_64 模拟器需 NDK 重建）。
 
 **本机**（需 JDK 17+ 和 Android SDK build-tools / platforms）：
 
