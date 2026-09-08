@@ -31,8 +31,11 @@ import hashlib
 import json
 import os
 import socket
+import ssl
 import sys
 import time
+import urllib.error
+import urllib.request
 
 WS_PORT = 9336
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +45,9 @@ OUT_DIR = os.path.dirname(REPO_DIR)          # D:\MYP
 STATE_FILE = os.path.join(OUT_DIR, "sync-state.json")
 LOCK_FILE = os.path.join(OUT_DIR, ".sync-auto.lock")
 LOG_FILE = os.path.join(OUT_DIR, "sync-auto.log")
+CONFIG_FILE = os.path.join(OUT_DIR, "sync-config.json")
+PROXY = "http://proxyhk.huawei.com:8080"
+API = "https://api.github.com"
 
 # 受管目录 (相对 REPO_DIR) 与排除项
 MANAGED_DIRS = ["scripts", "extension", "src", "docs", "clients"]
@@ -140,6 +146,79 @@ def release_lock():
         os.remove(LOCK_FILE)
     except OSError:
         pass
+
+
+# ---------------- GitHub REST API (免浏览器, 首选通道) ----------------
+def get_token():
+    t = os.environ.get("VT_SYNC_TOKEN", "").strip()
+    if not t:
+        try:
+            t = json.load(open(CONFIG_FILE, encoding="utf-8")).get("token", "")
+        except Exception:
+            pass
+    return t
+
+
+def api_request(method, url, body=None, token=None, headers=None):
+    """经华为代理请求 GitHub API (urllib 标准库)."""
+    h = {"Accept": "application/vnd.github+json", "User-Agent": "vtouch-sync"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    if headers:
+        h.update(headers)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=h)
+    proxy = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+    opener = urllib.request.build_opener(proxy)
+    try:
+        with opener.open(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw) if raw else {}
+        except Exception:
+            return e.code, {"message": raw[:300]}
+    except Exception as e:
+        return 0, {"message": str(e)}
+
+
+def api_get_sha(path, token):
+    st, d = api_request("GET", f"{API}/repos/{REPO}/contents/{path}?ref={BRANCH}", token=token)
+    if st == 200 and isinstance(d, dict):
+        return d.get("sha", "")
+    return ""
+
+
+def api_put(path, content, token):
+    """创建或更新文件. 返回 (ok, err)."""
+    sha = api_get_sha(path, token)
+    body = {
+        "message": f"sync: {path}",
+        "content": base64.b64encode(content.encode("utf-8")).decode(),
+        "branch": BRANCH,
+    }
+    if sha:
+        body["sha"] = sha          # 修改需带 sha (远端已变则 409)
+    st, d = api_request("PUT", f"{API}/repos/{REPO}/contents/{path}", body=body, token=token)
+    if st in (200, 201):
+        return True, ""
+    if st == 409:
+        return False, "远端已被修改 (409), 跳过避免覆盖 (以远程为主)"
+    return False, f"HTTP {st}: {d.get('message', d)[:120]}"
+
+
+def api_delete(path, token):
+    sha = api_get_sha(path, token)
+    if not sha:
+        return True, ""           # 远端已无此文件
+    st, d = api_request("DELETE", f"{API}/repos/{REPO}/contents/{path}",
+                        body={"message": f"del: {path}", "sha": sha, "branch": BRANCH},
+                        token=token)
+    if st in (200, 204):
+        return True, ""
+    return False, f"HTTP {st}: {d.get('message', d)[:120]}"
 
 
 # ---------------- 极简 WebSocket SERVER (纯标准库) ----------------
@@ -287,9 +366,8 @@ class WSServer:
 
 
 # ---------------- 同步主流程 ----------------
-def sync_once(srv, args, repo=REPO, branch=BRANCH, accept_timeout=90):
-    """扫描 + 提交变化文件, 返回 (ok_list, fail_list).
-    accept_timeout: 等扩展连接秒数 (watch 模式用短值, Chrome 未开时快速跳过)."""
+def scan_changes(args, repo, branch):
+    """扫描 + 首次预填 + 计算差异. 返回 (to_submit, to_delete, files, state)."""
     files = scan_repo()
     state = load_state()
     # 首次运行 (缓存为空): 用 git 只读对比一次性预填 (视为已同步的文件记入缓存,
@@ -318,7 +396,67 @@ def sync_once(srv, args, repo=REPO, branch=BRANCH, accept_timeout=90):
             if args.only and args.only not in path:
                 continue
             to_submit.append(path)
-    log(f"[sync_auto] {repo} @ {branch}: 扫描 {len(files)} 文件, 待提交 {len(to_submit)}")
+    # 删除检测: 缓存有但本地已消失 (受管范围内)
+    to_delete = [p for p in state
+                 if p not in files and state[p] != "DELETED"
+                 and (not args.only or args.only in p)]
+    log(f"[sync_auto] {repo} @ {branch}: 扫描 {len(files)} 文件, "
+        f"待提交 {len(to_submit)}, 待删除 {len(to_delete)}")
+    return to_submit, to_delete, files, state
+
+
+def sync_via_api(args, repo=REPO, branch=BRANCH):
+    """GitHub REST API 通道: 免浏览器/扩展, 秒级, 天然支持删除. 返回 (ok, fail)."""
+    token = get_token()
+    if not token:
+        log("[sync_auto] 未配置 API token (环境变量 VT_SYNC_TOKEN 或 "
+            "D:\\MYP\\sync-config.json 的 \"token\" 字段)", err=True)
+        return [], [("__config__", "未配置 GitHub API token")]
+    to_submit, to_delete, files, state = scan_changes(args, repo, branch)
+    if not to_submit and not to_delete:
+        log("[sync_auto] 无变化, 跳过")
+        return [], []
+
+    ok, fail = [], []
+    for i, path in enumerate(to_submit, 1):
+        abs_path = os.path.join(REPO_DIR, path.replace("/", os.sep))
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            fail.append((path, f"读取失败: {e}"))
+            continue
+        log(f"  [{i}/{len(to_submit)}] {path} ...")
+        okk, err = api_put(path, content, token)
+        if okk:
+            ok.append(path)
+            state[path] = files[path]
+            save_state(state)
+            log(f"  ✓ {path}")
+        else:
+            fail.append((path, err))
+            log(f"  ✗ {path}: {err}", err=True)
+
+    for path in to_delete:
+        log(f"  [del] {path} ...")
+        okk, err = api_delete(path, token)
+        if okk:
+            ok.append(path)
+            state.pop(path, None)
+            save_state(state)
+            log(f"  ✓ 已删除 {path}")
+        else:
+            fail.append((path, err))
+            log(f"  ✗ 删除 {path}: {err}", err=True)
+
+    log(f"[sync_auto] 本轮完成: 成功 {len(ok)} 失败 {len(fail)}")
+    return ok, fail
+
+
+def sync_once(srv, args, repo=REPO, branch=BRANCH, accept_timeout=90):
+    """扩展 WS 通道 (无 API token 时的回退). 返回 (ok_list, fail_list).
+    accept_timeout: 等扩展连接秒数 (watch 模式用短值, Chrome 未开时快速跳过)."""
+    to_submit, to_delete, files, state = scan_changes(args, repo, branch)
 
     if not to_submit:
         log("[sync_auto] 无变化, 跳过")
@@ -401,6 +539,8 @@ def main():
     ap.add_argument("--watch", type=int, default=0,
                     help="常驻模式: 每 N 秒自动同步一次 (0=单次后退出)")
     ap.add_argument("--only", default=None, help="只处理路径包含该子串的文件 (调试用)")
+    ap.add_argument("--force-ext", action="store_true",
+                    help="强制走扩展 WS 通道 (即使已配置 API token)")
     ap.add_argument("--repo", default=REPO)
     ap.add_argument("--branch", default=BRANCH)
     args = ap.parse_args()
@@ -408,6 +548,19 @@ def main():
 
     acquire_lock()
     try:
+        if get_token() and not args.force_ext:
+            # API 通道: 免浏览器, 秒级, 支持删除
+            if args.watch:
+                log(f"[sync_auto] 常驻模式 (API): 每 {args.watch}s 同步一次 (Ctrl+C 退出)")
+                while True:
+                    ok, fail = sync_via_api(args, args.repo, args.branch)
+                    time.sleep(args.watch)
+            else:
+                ok, fail = sync_via_api(args, args.repo, args.branch)
+                return 0 if not fail else 1
+            return 0
+
+        # 扩展 WS 通道 (无 token 或 --force-ext)
         srv = WSServer(args.port)
         srv.listen()
         try:
