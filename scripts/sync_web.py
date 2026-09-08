@@ -102,6 +102,7 @@ def main() -> int:
     ap.add_argument("--proxy", default=None, help="代理地址, 如 http://proxyhk.huawei.com:8080 (默认: 自动探测系统代理)")
     ap.add_argument("--no-fetch", action="store_true", help="跳过 git fetch")
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    ap.add_argument("--json", default=None, help="输出机器可读清单 JSON 路径 (供自动提交驱动)")
     args = ap.parse_args()
 
     repo = Path(args.repo).resolve()
@@ -139,8 +140,8 @@ def main() -> int:
 
     print(f"[2/4] 本地 {local_head[:8]} -> 远端 {remote_head[:8]} (领先 {ahead}, 落后 {behind})")
 
-    # 未推送的已提交改动
-    r = git(repo, "diff", "--name-status", f"origin/{branch}", "HEAD")
+    # 未推送的已提交改动 + 工作区未提交改动（对比工作区 vs 远端）
+    r = git(repo, "diff", "--name-status", f"origin/{branch}")
     if r.returncode != 0:
         print(f"[x] git diff 失败: {r.stderr.strip()}", file=sys.stderr)
         return 1
@@ -193,6 +194,25 @@ def main() -> int:
     html = render(full_name, branch, local_head[:8], remote_head[:8], ahead, behind,
                   updates, deletes, binaries)
     out_path.write_text(html, encoding="utf-8")
+
+    if args.json:
+        manifest = {
+            "repo": full_name,
+            "branch": branch,
+            "local_head": local_head,
+            "remote_head": remote_head,
+            "ahead": int(ahead),
+            "behind": int(behind),
+            "generated_at": subprocess.run(
+                ["date", "+%Y-%m-%dT%H:%M:%S%z"], capture_output=True, text=True
+            ).stdout.strip(),
+            "updates": updates,
+            "deletes": deletes,
+            "binaries": binaries,
+        }
+        json_path = Path(args.json)
+        json_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"      清单 JSON: {json_path}")
 
     if not args.no_open:
         webbrowser.open(out_path.as_uri())
