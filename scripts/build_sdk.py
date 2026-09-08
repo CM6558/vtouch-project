@@ -4,7 +4,6 @@
 build_sdk.py — SDK 单源化构建：从 scripts/vtouch-sdk.src.js 生成三种分发形态。
 
   scripts/vtouch-sdk.src.js      <- 唯一可读主源 (改 SDK 只改这里)
-  ├─ clients/vtouch_onefile_example.js    (压缩 SDK + 示例)
   ├─ clients/plugins/vtouch.js            (项目插件: module.exports = VTouch)
   └─ clients/plugin-apk/assets/vtouch/index.js  (APK 胶水层: function(plugin) 导出)
 
