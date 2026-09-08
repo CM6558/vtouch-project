@@ -38,16 +38,18 @@ plugin-apk/
 ├── src/org/vtouch/plugin/
 │   ├── VTouchPlugin.java        # 注册类：loadDefault + Java API（start/stop/runCommand/isReady）
 │   └── VTouchService.java       # 后台托管服务（root 拉起 vtouchmerge/vtouchws）
-└── assets/vtouch/
-    └── index.js                 # 胶水层（由 scripts/build_sdk.py 生成）：SDK + 插件 Java API 优先覆盖
+└── assets/
+    ├── vtouch/index.js          # 胶水层（由 scripts/build_sdk.py 生成）：SDK + 插件 Java API 优先覆盖
+    ├── vtouchmerge              # native 合并器（构建时从 sdcard/vtouch-merge 打入, 运行时自动释放）
+    └── vtouchws                 # native WebSocket 桥（同上）
 ```
 
-> SDK 单源化：`clients/vtouch_onefile_example.js`、`clients/plugins/vtouch.js`、本 assets/index.js
+> SDK 单源化：`clients/plugins/vtouch.js`、本 assets/index.js
 > 均由 `scripts/vtouch-sdk.src.js`（可读主源）经 `scripts/build_sdk.py` 生成，改 SDK 只改主源。
 
 ## 构建
 
-> **状态：本机已实构建验证**（Windows Git Bash，2026-09）。产物 `out/vtouch-plugin.apk` 已验证：签名有效、包名 `org.vtouch.plugin`、meta-data 正确、`assets/vtouch/index.js` 为正斜杠条目且与源文件字节一致、classes.dex 一致。GitHub Actions 工作流位于仓库根 `.github/workflows/build-vtouch-plugin-apk.yml`。
+> **状态：本机已实构建验证**（Windows Git Bash，2026-09）。产物 `out/vtouch-plugin.apk` 已验证：签名有效、包名 `org.vtouch.plugin`、meta-data 正确、`assets/vtouch/index.js` 为正斜杠条目且与源文件字节一致、classes.dex 一致。**注意：native 自动释放（assets 内嵌 vtouchmerge/vtouchws）为本机无 Android SDK 环境下的代码级改动，构建/真机验证未执行**——请以 GitHub Actions 产物为准。GitHub Actions 工作流位于仓库根 `.github/workflows/build-vtouch-plugin-apk.yml`。
 
 **本机**（需 JDK 17+ 和 Android SDK build-tools / platforms）：
 
@@ -81,12 +83,14 @@ jobs:
 
 ```sh
 adb install out/vtouch-plugin.apk
+# 无需提前推送 vtouchmerge/vtouchws 二进制: 首次脚本运行时插件自动从 APK assets 释放到
+# /data/local/tmp（需 root; 释放后永久生效, 二次脚本零开销）
 ```
 
 ```js
 // 任意脚本，无需项目结构（v2：自动连接 + 一行一个动作）
 var VTouch = plugins.load('org.vtouch.plugin');
-var vt = new VTouch();                    // 自动连接，服务未启动自动拉起
+var vt = new VTouch();                    // 自动释放二进制(如需) + 拉起服务 + 自动连接
 vt.tap(540, 1200);                        // 点击
 vt.swipe(200, 200, 1500, 2000, 1000);     // 滑动
 // 退出自动 close + stopService
