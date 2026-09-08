@@ -4,6 +4,9 @@
         android:versionCode="2"
         android:versionName="2.0.0">
 
+        <!-- targetSdk 28：避免 Android 14+ 前台服务类型强制校验（本机仅 android-24 platform，无法声明 type/specialUse） -->
+        <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="28" />
+
         <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
         <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -14,11 +17,26 @@
                                     android:name="org.autojs.plugin.sdk.registry"
                                     android:value="org.vtouch.plugin.VTouchPlugin" />
 
-                    <!-- 后台托管服务：显式 startService 拉起 vtouchmerge/vtouchws -->
+                    <!-- 后台托管服务：插件主路径（脚本 load 启动 / 脚本退出停止）。
+                         exported=true 必须：AutoJs6 经 createPackageContext 跨包 startService。 -->
                     <service
                                     android:name=".VTouchService"
-                                    android:exported="false"
+                                    android:exported="true"
                                     android:stopWithTask="false" />
+
+                    <!-- 最小启动入口：ColorOS 启动管理要求应用被打开过一次才允许后台拉起。
+                         打开即提示并结束，不进最近任务。 -->
+                    <activity
+                                    android:name=".MainActivity"
+                                    android:exported="true"
+                                    android:excludeFromRecents="true"
+                                    android:finishOnTaskLaunch="true"
+                                    android:theme="@android:style/Theme.Translucent.NoTitleBar">
+                                    <intent-filter>
+                                                    <action android:name="android.intent.action.MAIN" />
+                                                    <category android:name="android.intent.category.LAUNCHER" />
+                                    </intent-filter>
+                    </activity>
 
         </application>
 </manifest>

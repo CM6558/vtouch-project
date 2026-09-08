@@ -4,6 +4,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 
@@ -28,13 +29,13 @@ import java.net.Socket;
  *   3. getVersion() < 2 时跳过 Service 绑定；v2 保持 1：纯脚本模式，
  *      插件 Java API（startVTouchService 等）为进程内直接调用，不依赖绑定。
  *
- * v2 架构（vtouchmerge 新架构）：本类以 root 拉起/守护
- *   vtouchmerge + vtouchws 两个进程，并暴露给 JS 胶水层：
- *     - isServiceReady()    服务是否健康（sock + pid 检查）
- *     - startVTouchService() root 启动 vtouchmerge/vtouchws
- *     - stopVTouchService()  停止并清理
+ * v2 架构（插件负责服务运行）：服务生命周期由 VTouchService 组件持有，
+ *   本类只做转发 + 健康检查，暴露给 JS 胶水层：
+ *     - isServiceReady()    服务是否健康（sock + pid + 进程存活）
+ *     - startVTouchService() startService(VTouchService) -> root 启动后端
+ *     - stopVTouchService()  startService(STOP) -> 停止并清理
  *     - runCommand(cmd)      经 WebSocket 桥向 vtouchmerge 发命令（触摸注入）
- *   VTouchService 组件提供相同的托管能力（供显式 startService 场景）。
+ *   生命周期与脚本绑定（脚本 load 启动、脚本退出停止），由 SDK 胶水层驱动。
  */
 public class VTouchPlugin implements ServiceConnection {
 
@@ -46,8 +47,12 @@ public class VTouchPlugin implements ServiceConnection {
     private static final String MERGE_PID = RUNTIME_DIR + "/merge.pid";
     private static final String WS_PID = RUNTIME_DIR + "/websocket.pid";
 
+    /** AutoJs6 传入的应用上下文（createPackageContext 得到的插件包 Context），供跨包 startService。 */
+    private static Context sContext;
+
     /** AutoJs6 反射入口：返回插件实例（必须实现 ServiceConnection）。 */
     public static Object loadDefault(Context context, Context selfContext, Object runtime, Object topLevelScope) {
+        sContext = context != null ? context : selfContext;
         return new VTouchPlugin();
     }
 
@@ -78,13 +83,94 @@ public class VTouchPlugin implements ServiceConnection {
         return serviceReady();
     }
 
-    /** root 启动 vtouchmerge + vtouchws（新架构）。 */
+    /** 插件负责服务运行：startForegroundService(VTouchService) 托管后端，失败回退进程内直启。
+     *  ColorOS 启动管理：重装后应用视为"未打开"，后台拉起服务会被 OplusAppStartupManager 拦截
+     *  （静默 prevent，不抛异常）。解决：先拉起一次 MainActivity（透明、即开即关）标记"已打开"，
+     *  再重试一次服务启动；仍失败才回退。 */
     public boolean startVTouchService() {
+        Context ctx = sContext;
+        if (ctx != null) {
+            if (startServiceViaIntent(ctx)) return true;
+            if (ensureOpened(ctx)) {
+                if (startServiceViaIntent(ctx)) return true;
+            }
+            Log.e(TAG, "VTouchService 未能启动，回退进程内直启");
+            return startBackend();
+        }
         return startBackend();
     }
 
-    /** 停止并清理 vtouch 服务。 */
+    /** startForegroundService(VTouchService) 并轮询就绪；就绪返回 true。 */
+    private static boolean startServiceViaIntent(Context ctx) {
+        try {
+            Intent i = new Intent();
+            i.setComponent(new ComponentName("org.vtouch.plugin", "org.vtouch.plugin.VTouchService"));
+            /* Android 12+/调用方 targetSdk 31+ 时普通 startService 会被判后台拒绝
+               （Background start not allowed, startFg=false）。
+               用 startForegroundService 走前台服务路径；VTouchService.onCreate
+               立即 startForeground 满足 5s 时限。API<26 退回 startService。
+               本机仅 android-24 platform，startForegroundService(API26+) 用反射调用。 */
+            if (Build.VERSION.SDK_INT >= 26) {
+                try {
+                    Context.class.getMethod("startForegroundService", Intent.class).invoke(ctx, i);
+                } catch (Exception e) {
+                    Log.e(TAG, "startForegroundService failed, plain startService: " + e);
+                    ctx.startService(i);
+                }
+            } else {
+                ctx.startService(i);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "startService intent failed: " + e);
+            return false;
+        }
+        /* 等待 VTouchService 内 startBackend() 把后端拉起（幂等：已就绪则快速返回）。 */
+        for (int i = 0; i < 15; i++) {
+            if (serviceReady()) return true;
+            try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+        }
+        return serviceReady();
+    }
+
+    /** 打开一次 MainActivity，让 ColorOS 启动管理放行该包的后台服务拉起。
+     *  必须用 root/shell 上下文（受信，ColorOS 记为"用户打开"）；从 AutoJs6 应用
+     *  上下文 startActivity 会被记为 ignored（checkBackgroundActivityPermission deny）。 */
+    private static boolean ensureOpened(Context ctx) {
+        try {
+            String out = execRoot("am start -n org.vtouch.plugin/.MainActivity");
+            Thread.sleep(600); // 等 Activity 启动/结束，ColorOS 记录"已打开"
+            return out != null;
+        } catch (Exception e) {
+            Log.e(TAG, "ensureOpened failed: " + e);
+            return false;
+        }
+    }
+
+    /** 停止并清理：通知 VTouchService 停止 + 兜底直接 killall。 */
     public boolean stopVTouchService() {
+        Context ctx = sContext;
+        if (ctx != null) {
+            try {
+                Intent i = new Intent();
+                i.setComponent(new ComponentName("org.vtouch.plugin", "org.vtouch.plugin.VTouchService"));
+                i.setAction(VTouchService.ACTION_STOP);
+                /* 与启动一致用前台服务路径（普通 startService 在调用方 targetSdk 31+ 会被判后台拒绝，
+                   导致 STOP action 无法送达 onStartCommand）。 */
+                if (Build.VERSION.SDK_INT >= 26) {
+                    try {
+                        Context.class.getMethod("startForegroundService", Intent.class).invoke(ctx, i);
+                    } catch (Exception e) {
+                        Log.e(TAG, "stop startForegroundService failed: " + e);
+                        ctx.startService(i);
+                    }
+                } else {
+                    ctx.startService(i);
+                }
+                ctx.stopService(i);
+            } catch (Exception e) {
+                Log.e(TAG, "stopService intent failed: " + e);
+            }
+        }
         return stopBackend();
     }
 
@@ -180,11 +266,26 @@ public class VTouchPlugin implements ServiceConnection {
         }
     }
 
-    /** 执行 root shell 命令（su -c），返回 stdout；失败返回 null。 */
+    /** 执行 root shell 命令（su -c），返回 stdout；失败返回 null。
+     *  用绝对路径候选：插件 app 进程的 PATH 可能不含 su 所在目录
+     *  （现象：Cannot run program "su": error=2, No such file or directory）。 */
     static String execRoot(String cmd) {
+        String[] suCandidates = {"/system/bin/su", "/system/xbin/su", "/sbin/su", "su"};
         Process p = null;
+        for (String su : suCandidates) {
+            try {
+                p = Runtime.getRuntime().exec(new String[]{su, "-c", cmd});
+                break;
+            } catch (Exception e) {
+                Log.e(TAG, "execRoot candidate " + su + " failed: " + e);
+                p = null;
+            }
+        }
+        if (p == null) {
+            Log.e(TAG, "execRoot failed: no su binary in candidates");
+            return null;
+        }
         try {
-            p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
             BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
             StringBuilder sb = new StringBuilder();
             String line;
