@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'clients/plugin-apk/**'
+      - '.github/workflows/build-vtouch-plugin-apk.yml'
   workflow_dispatch:
 
 jobs:
@@ -20,6 +21,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install NDK r27d (arm64 + x86_64 双 ABI 编译)
+        run: |
+          curl -fsSLo /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-r27d-linux.zip"
+          sudo mkdir -p /opt/ndk
+          sudo unzip -q /tmp/ndk.zip -d /opt/ndk
+          echo "ANDROID_NDK_HOME=/opt/ndk/android-ndk-r27d" >> "$GITHUB_ENV"
 
       - name: Build plugin APK
         run: |
