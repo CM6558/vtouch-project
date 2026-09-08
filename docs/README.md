@@ -40,7 +40,8 @@ vtouchmerge
 | `vtouchmerge` | 核心触摸合并程序，接管真实触摸并合并模拟触点 |
 | `vtouchws` | WebSocket 桥接，将 AutoJs6 调用转发到 vtouchmerge |
 | `vtouchsupervise` | Worker 监控器，崩溃时自动重启 |
-| `vtouch_onefile_example.js` | AutoJs6 单文件 SDK |
+| `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
+| `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
 
 ## 构建
 
@@ -87,12 +88,9 @@ adb shell 'su -c "cp /sdcard/vtouchmerge /data/local/tmp/vtouchmerge; cp /sdcard
 
 ### 3. 运行 AutoJs6 SDK
 
-```bash
-# 推送 SDK 到手机
-adb push clients/vtouch_onefile_example.js /sdcard/vtouch-merge/
-```
-
-在 AutoJs6 中运行 `/sdcard/vtouch-merge/vtouch_onefile_example.js`。
+SDK v2 以 APK 应用插件为载体（`clients/plugin-apk`，包名 `org.vtouch.plugin`）：
+在 AutoJs6 中 `plugins.load('org.vtouch.plugin')` 后按示例脚本使用
+（见 `clients/vtouch_plugin_example.js` 与 `clients/vtouch_plugin_apk_test.js`）。
 
 ## AutoJs6 SDK 使用
 
