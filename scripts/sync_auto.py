@@ -292,7 +292,26 @@ def sync_once(srv, args, repo=REPO, branch=BRANCH, accept_timeout=90):
     accept_timeout: 等扩展连接秒数 (watch 模式用短值, Chrome 未开时快速跳过)."""
     files = scan_repo()
     state = load_state()
-    # 新文件 (无缓存记录) 或 hash 变化 -> 需要提交
+    # 首次运行 (缓存为空): 用 git 只读对比一次性预填 (视为已同步的文件记入缓存,
+    # 与远端有差异的留待提交)。此后完全不用 git。
+    if not state:
+        import subprocess
+        changed = set()
+        try:
+            subprocess.run(["git", "fetch", "origin"], cwd=REPO_DIR,
+                           capture_output=True, timeout=120)
+            out = subprocess.run(["git", "diff", "origin/master", "--name-only"],
+                                 cwd=REPO_DIR, capture_output=True, text=True, timeout=60).stdout
+            changed = {l.strip().replace("\\", "/") for l in out.splitlines() if l.strip()}
+        except Exception as e:
+            log(f"[sync_auto] 首次预填跳过 (git 不可用): {e}", err=True)
+        for path in files:
+            if path not in changed:
+                state[path] = files[path]
+        if state:
+            save_state(state)
+            log(f"[sync_auto] 首次预填: {len(state)} 文件视为已同步, "
+                f"{len(changed)} 文件与远端有差异留待提交")
     to_submit = []
     for path in sorted(files):
         if state.get(path) != files[path]:
