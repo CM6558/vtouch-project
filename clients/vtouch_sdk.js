@@ -170,4 +170,3 @@ VTouch.prototype.stop = function () {
     return this;
 };
 VTouch.Finger = Finger;
-module.exports = VTouch;

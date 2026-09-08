@@ -1,11 +1,175 @@
-/*
- * VTouch 应用插件胶水层 (AutoJs6 plugins.load('org.vtouch.plugin') 入口)。
- * 机制: plugins.load(含点号且非 .js 结尾) -> 应用插件包名 -> meta-data
- * "org.autojs.plugin.sdk.registry" -> 静态 loadDefault(Context,Context,Object,Object)
- * -> assets/<getAssetsScriptDir()>/index.js，导出 function(plugin) 的返回值即 load 结果。
- */
 module.exports = function (plugin) {
-    /* plugin 为 APK 内的 Java 插件实例 (VTouchPlugin)，当前用不到。 */
-"use strict";var VTouch=function(options){options=options||{};this.url=options.url||"ws://127.0.0.1:27183";this.width=options.width||device.width;this.height=options.height||device.height;this.connectTimeout=options.connectTimeout||options.timeout||15000;this.onError=options.onError||null;this.ws=null;this.queue=[];this.current=null;this.opened=false;this.connecting=false;this.closed=false;this.keepAlive=null;this.fingers={};this.errStreak=0;this.serviceStarts=0;this.exitHooked=false;this.animThread=null;this.gestureTimers=null;};VTouch.prototype.startService=function(){if(this.serviceStarted)return this;var cmd="B=/data/local/tmp/vtouch-runtime; M=/data/local/tmp/vtouchmerge; W=/data/local/tmp/vtouchws; [ -x $M ] && [ -x $W ] || { echo 'vtouch binaries missing'; exit 11; }; mkdir -p $B; if [ -S $B/merge.sock ] && [ -f $B/merge.pid ] && [ -f $B/websocket.pid ] && kill -0 $(cat $B/merge.pid) 2>/dev/null && kill -0 $(cat $B/websocket.pid) 2>/dev/null; then exit 0; fi; killall vtouchmerge 2>/dev/null; killall vtouchws 2>/dev/null; rm -f $B/merge.sock $B/merge.pid $B/websocket.pid; nohup $M -s $B/merge.sock -v 10 -w "+this.width+" -h "+this.height+" >/dev/null 2>&1 </dev/null & echo $! > $B/merge.pid; nohup $W >/dev/null 2>&1 </dev/null & echo $! > $B/websocket.pid";var r=shell(cmd,true);if(r&&r.code!==0)throw new Error("vtouch 服务启动失败: "+(r.error||r.result||""));this.serviceStarted=true;return this;};VTouch.prototype.stopService=function(){try{shell("killall vtouchmerge 2>/dev/null;killall vtouchws 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/merge.sock /data/local/tmp/vtouch-runtime/merge.pid /data/local/tmp/vtouch-runtime/websocket.pid",true);}catch(error){log("[vtouch] service stop failed: "+error);}this.serviceStarted=false;return this;};VTouch.prototype.connect=function(onReady){var self=this,startedAt=Date.now();this.onReady=onReady||null;if(this.opened||this.connecting)return this;this.closed=false;this.opened=false;this.connecting=true;this.connectAttempts=0;this.startTried=false;if(this.keepAlive){clearInterval(this.keepAlive);this.keepAlive=null;}this.keepAlive=setInterval(function(){if(self.opened&&!self.closed){try{self._send("ping");}catch(e){}}},5000);function onFail(){if(self.closed||self.opened)return;if(!self.startTried||self.connectAttempts%10===0){self.startTried=true;self.serviceStarts++;try{self.startService();}catch(err){log("[vtouch] start service failed: "+err);}}if(self.connectAttempts>=60||Date.now()-startedAt>=self.connectTimeout)throw new Error("vtouch WebSocket 连接失败");self.retryTimer=setTimeout(attempt,120);}function attempt(){if(self.closed||self.opened)return;self.connectAttempts++;log("[vtouch] connecting: "+self.url+" attempt="+self.connectAttempts);self.watchdog=setTimeout(function(){if(!self.opened&&!self.closed){log("[vtouch] connect stalled, retry");try{self.ws&&self.ws.cancel();}catch(e){}onFail();}},600);try{self.ws=new WebSocket(self.url);}catch(err){clearTimeout(self.watchdog);log("[vtouch] create websocket failed: "+err);onFail();return;}self.ws.on(WebSocket.EVENT_OPEN,function(){clearTimeout(self.watchdog);self.connecting=false;self.opened=true;self.closed=false;self.errStreak=0;log("[vtouch] connected: "+(Date.now()-startedAt)+"ms");self._syncFingerState();self._next();if(typeof self.onReady==="function")self.onReady(self);}).on(WebSocket.EVENT_TEXT,function(text){var response=String(text);log("[vtouch] <- "+response);if(response.indexOf("err")===0){self.errStreak++;log("[vtouch] server error: "+response);if(typeof self.onError==="function")self.onError(response);if(self.errStreak>=5){self.errStreak=0;log("[vtouch] too many server errors, resetting virtual touches");try{self.reset();}catch(e){}}}else{self.errStreak=0;}}).on(WebSocket.EVENT_BYTES,function(bytes){log("[vtouch] bytes: "+bytes.utf8());}).on(WebSocket.EVENT_CLOSING,function(code,reason){log("[vtouch] closing: "+code+" "+reason);}).on(WebSocket.EVENT_CLOSED,function(code,reason){clearTimeout(self.watchdog);self.connecting=false;self.opened=false;log("[vtouch] closed: "+code+" "+reason);if(!self.closed)onFail();}).on(WebSocket.EVENT_FAILURE,function(error){clearTimeout(self.watchdog);log("[vtouch] failure: "+error);if(!self.closed)onFail();});}attempt();if(!this.exitHooked){this.exitHooked=true;events.on("exit",function(){try{self.close();}finally{try{self.stopService();}catch(error){log("[vtouch] stop service failed: "+error);}}});}return this;};VTouch.prototype._syncFingerState=function(){var k;for(k in this.fingers){this.fingers[k].cancel();this.fingers[k].downState=false;}};VTouch.prototype._next=function(){if(!this.opened||this.closed)return this;while(this.queue.length){this.current=this.queue.shift();log("[vtouch] -> "+this.current);try{if(!this.ws.send(this.current))throw new Error("WebSocket send returned false");}catch(error){log("[vtouch] send failed: "+error);this.close();break;}}return this;};VTouch.prototype._send=function(t){if(this.closed)throw new Error("vtouch 已关闭");this.queue.push(t);return this._next();};VTouch.prototype._point=function(t,e){t=Math.round(t);e=Math.round(e);if(t<0||t>=this.width||e<0||e>=this.height)return null;return{x:t,y:e};};VTouch.prototype._slot=function(t){t=Math.round(t);if(t<0||t>9)throw new Error("slot 必须是 0~9");return t;};VTouch.prototype._animate=function(durationMs,tick,done){var self=this;var dur=Math.max(1,Math.round(durationMs==null?300:durationMs));var n=Math.max(2,Math.round(dur/16.667));var interval=dur/n;if(this.animThread&&this.animThread.isAlive&&this.animThread.isAlive()){try{this.animThread.interrupt();}catch(e){}}this.animThread=threads.start(function(){try{for(var i=1;i<=n;i++){sleep(Math.max(1,interval));if(self.closed)return;if(tick)tick(i/n);}if(done)done();}catch(error){log("[vtouch] animation stopped: "+error);}});return this;};VTouch.prototype._clearGestureTimers=function(){var i;if(this.gestureTimers){for(i=0;i<this.gestureTimers.length;i++)clearTimeout(this.gestureTimers[i]);this.gestureTimers=null;}};VTouch.prototype.finger=function(t){var e;if(t===void 0||t===null){for(e=0;e<=9;e++){if(!this.fingers[e]||this.fingers[e].state()==="up")break;}if(e>9)throw new Error("没有可用的模拟手指 slot");t=e;}else{t=this._slot(t);}return this.fingers[t]||(this.fingers[t]=new Finger(this,t)),this.fingers[t];};VTouch.prototype.frame=function(points){var i,o,s,n,valid=[];if(!points||!points.length)throw new Error("frame 不能为空");for(i=0;i<points.length;i++){o=points[i];if(!o||["down","move","up"].indexOf(o.state)<0)throw new Error("state 必须是 down、move 或 up");s=this._slot(o.slot);n=this._point(o.x,o.y);if(!n){log("[vtouch] skip out-of-range frame point "+o.x+","+o.y);continue;}valid.push({slot:s,state:o.state,x:n.x,y:n.y});}if(!valid.length)return this;this._send("begin_frame");for(i=0;i<valid.length;i++){this._send("point "+valid[i].slot+" "+valid[i].state+" "+valid[i].x+" "+valid[i].y);if(this.fingers[valid[i].slot]){if(valid[i].state==="down")this.fingers[valid[i].slot].downState=true;else if(valid[i].state==="up"){this.fingers[valid[i].slot].cancel();this.fingers[valid[i].slot].downState=false;}}}this._send("end_frame");return this;};VTouch.prototype.gesture=function(frames,durationMs){var self=this,i;if(!frames||!frames.length)throw new Error("gesture 不能为空");var dur=Math.max(0,Math.round(durationMs==null?0:durationMs));var per=dur>0?dur/frames.length:0;if(per<=0){for(i=0;i<frames.length;i++)this.frame(frames[i]);return this;}this._clearGestureTimers();this.gestureTimers=[];for(i=0;i<frames.length;i++){(function(frame,delay){self.gestureTimers.push(setTimeout(function(){if(!self.closed)self.frame(frame);},Math.round(delay)));})(frames[i],i*per);}return this;};VTouch.prototype.pinch=function(cx,cy,startGap,endGap,durationMs){var self=this;var r=this._point(cx,cy);if(!r)throw new Error("pinch 中心点超出屏幕: "+cx+","+cy);var maxGap=2*Math.min(r.x,this.width-1-r.x);if(maxGap<2)throw new Error("pinch 中心点不能形成双指: "+r.x+","+r.y);var g0=Math.min(Math.max(1,Math.round(startGap==null?100:startGap)),maxGap);var g1=Math.min(Math.max(1,Math.round(endGap==null?100:endGap)),maxGap);var c=this.finger(0),l=this.finger(1);this.frame([{slot:c.slot,state:"down",x:r.x-g0/2,y:r.y},{slot:l.slot,state:"down",x:r.x+g0/2,y:r.y}]);this._animate(durationMs==null?300:durationMs,function(p){var g=g0+(g1-g0)*p;self.frame([{slot:c.slot,state:"move",x:r.x-g/2,y:r.y},{slot:l.slot,state:"move",x:r.x+g/2,y:r.y}]);},function(){self.frame([{slot:c.slot,state:"up",x:r.x-g1/2,y:r.y},{slot:l.slot,state:"up",x:r.x+g1/2,y:r.y}]);});return this;};VTouch.prototype.reset=function(){var k;for(k in this.fingers){this.fingers[k].cancel();this.fingers[k].downState=false;}this._clearGestureTimers();if(this.animThread&&this.animThread.isAlive&&this.animThread.isAlive()){try{this.animThread.interrupt();}catch(e){}this.animThread=null;}return this._send("reset");};VTouch.prototype.close=function(){var k;for(k in this.fingers){this.fingers[k].cancel();this.fingers[k].downState=false;}this._clearGestureTimers();if(this.animThread&&this.animThread.isAlive&&this.animThread.isAlive()){try{this.animThread.interrupt();}catch(e){}this.animThread=null;}this.closed=true;this.opened=false;this.connecting=false;this.current=null;this.queue=[];if(this.keepAlive){clearInterval(this.keepAlive);this.keepAlive=null;}try{this.ws&&this.ws.close(WebSocket.CODE_CLOSE_NORMAL,"script exit");}catch(e){try{this.ws&&this.ws.cancel();}catch(e2){}}};var Finger=function(touch,slot){this.touch=touch;this.slot=slot;this.downState=false;this.timer=null;};Finger.prototype.down=function(x,y){var o=this.touch._point(x,y);if(!o){log("[vtouch] skip out-of-range down "+x+","+y);return this;}this.touch._send("down "+this.slot+" "+o.x+" "+o.y);this.downState=true;return this;};Finger.prototype.move=function(x,y){var o;if(!this.downState){log("[vtouch] skip move: finger "+this.slot+" is not down");return this;}o=this.touch._point(x,y);if(!o){log("[vtouch] skip out-of-range move "+x+","+y);return this;}this.touch._send("move "+this.slot+" "+o.x+" "+o.y);return this;};Finger.prototype.up=function(){if(!this.downState)return this;this.cancel();this.touch._send("up "+this.slot);this.downState=false;return this;};Finger.prototype.tap=function(x,y,durationMs){var self=this;var ms=Math.max(0,Math.round(durationMs==null?60:durationMs));this.down(x,y);if(this.timer)clearTimeout(this.timer);this.timer=setTimeout(function(){self.timer=null;if(self.downState)self.up();},ms);return this;};Finger.prototype.hold=function(durationMs,continuation){var self=this;if(!this.downState){log("[vtouch] hold: finger "+this.slot+" is not down");return this;}if(this.timer)clearTimeout(this.timer);this.timer=setTimeout(function(){self.timer=null;if(self.downState&&continuation)continuation(self);},Math.max(0,Math.round(durationMs)));return this;};Finger.prototype.press=function(x,y,durationMs,continuation){var self=this;this.down(x,y);this.hold(durationMs==null?60:durationMs,function(f){f.up();if(continuation)continuation(f);});return this;};Finger.prototype.swipe=function(x1,y1,x2,y2,durationMs){var self=this;this.down(x1,y1);this.touch._animate(durationMs==null?300:durationMs,function(p){var mx=x1+(x2-x1)*p,my=y1+(y2-y1)*p;if(self.downState)self.move(mx,my);else self.down(mx,my);},function(){if(self.downState)self.up();});return this;};Finger.prototype.frame=function(state,x,y){return this.touch.frame([{slot:this.slot,state:state,x:x,y:y}]);};Finger.prototype.cancel=function(){if(this.timer){clearTimeout(this.timer);this.timer=null;}return this;};Finger.prototype.state=function(){return this.downState?"down":"up";};
+/* =============================================================
+ * vtouch AutoJs6 SDK — 同步式 API（精简版）
+ *
+ * 同步式写法（必须放进 vt.run() 子线程，主线程保持空闲处理 WebSocket 事件）：
+ *   var vt = new VTouch();
+ *   vt.run(function () {
+ *       vt.connect();                       // 阻塞直到连接就绪（自动启动服务/快速重试/超时）
+ *       var f = vt.finger();
+ *       f.swipe(200, 200, 1500, 2000, 1000); // 同步：内部按帧 sleep 插值
+ *       f.tap(720, 1584, 60);               // 同步：按下 - sleep - 抬起
+ *       vt.stop();                           // 关闭连接并停止服务（释放 EVIOCGRAB）
+ *   });
+ *
+ * 连接：服务未运行则自动启动（幂等）；失败 300ms 快速重试直到超时。
+ * 坐标：device.width/height 逻辑坐标，服务端换算到原始触摸轴。
+ * 生命周期：业务完成后调用 vt.stop()，脚本随之自然结束，避免旧连接占用
+ *           单连接的 vtouchws 导致下次连接失败。
+ * ============================================================= */
+"use strict";
+
+function Finger(t, s) { this.touch = t; this.slot = s; this.active = false; }
+
+Finger.prototype._p = function (x, y) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || x >= this.touch.width || y < 0 || y >= this.touch.height) return null;
+    return { x: x, y: y };
+};
+Finger.prototype.down = function (x, y) {
+    var p = this._p(x, y);
+    if (p) { this.touch._send('down ' + this.slot + ' ' + p.x + ' ' + p.y); this.active = true; }
+    else log('[vtouch] oob down');
+    return this;
+};
+Finger.prototype.move = function (x, y) {
+    if (!this.active) { log('[vtouch] not down'); return this; }
+    var p = this._p(x, y);
+    if (p) this.touch._send('move ' + this.slot + ' ' + p.x + ' ' + p.y);
+    return this;
+};
+Finger.prototype.up = function () {
+    if (this.active) { this.active = false; this.touch._send('up ' + this.slot); }
+    return this;
+};
+Finger.prototype.tap = function (x, y, ms) {       /* 同步：按下-sleep-抬起 */
+    ms = ms == null ? 60 : ms;
+    this.down(x, y); sleep(ms); this.up();
+    return this;
+};
+Finger.prototype.swipe = function (x1, y1, x2, y2, ms) {  /* 同步：按帧 sleep 插值 */
+    ms = ms == null ? 300 : ms;
+    var n = Math.max(2, Math.round(ms / 16)), i;
+    this.down(x1, y1);
+    for (i = 1; i <= n; i++) {
+        sleep(Math.max(1, ms / n));
+        if (!this.active) this.down(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n);
+        else this.move(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n);
+    }
+    this.up();
+    return this;
+};
+Finger.prototype.frame = function (st, x, y) { return this.touch.frame([{ slot: this.slot, state: st, x: x, y: y }]); };
+Finger.prototype.state = function () { return this.active ? 'down' : 'up'; };
+
+var VTouch = function (o) {
+    o = o || {};
+    this.url = o.url || 'ws://127.0.0.1:27183';
+    this.width = o.width || device.width;
+    this.height = o.height || device.height;
+    this.timeout = o.timeout || 15000;
+    this.onError = o.onError || null;
+    this.ws = null; this.opened = false; this._s = false;
+    this.q = []; this.fingers = {};
+};
+
+/* 幂等启动服务：已运行则秒退，否则拉起（只真正执行一次） */
+VTouch.prototype.start = function () {
+    if (this._s) return this;
+    this._s = true;
+    var B = '/data/local/tmp/vtouch-runtime',
+        c = 'B=' + B + ';M=/data/local/tmp/vtouchmerge;W=/data/local/tmp/vtouchws;'
+          + '[ -x $M ]&&[ -x $W ]||{ echo vtouch-bin-missing;exit 11; };mkdir -p $B;'
+          + 'if [ -S $B/merge.sock ]&&[ -f $B/websocket.pid ]&&kill -0 $(cat $B/websocket.pid) 2>/dev/null;then exit 0;fi;'
+          + 'killall vtouchmerge 2>/dev/null;killall vtouchws 2>/dev/null;rm -f $B/merge.sock $B/merge.pid $B/websocket.pid;'
+          + 'nohup $M -s $B/merge.sock -v 10 -w ' + this.width + ' -h ' + this.height + ' >/dev/null 2>&1 </dev/null &echo $!>$B/merge.pid;'
+          + 'nohup $W >/dev/null 2>&1 </dev/null &echo $!>$B/websocket.pid';
+    var r = shell(c, true);
+    if (r && r.code !== 0) throw new Error('vtouch start failed: ' + (r.error || r.result || ''));
+    return this;
+};
+
+/* 同步连接：阻塞到就绪或超时（须在 vt.run 子线程调用，主线程处理事件） */
+VTouch.prototype.connect = function () {
+    var self = this;
+    if (this.opened) return this;
+    this.start();
+    var t0 = Date.now();
+    function tryOnce() {
+        if (self.opened) return;
+        try {
+            self.ws = new WebSocket(self.url);
+            self.ws.on(WebSocket.EVENT_OPEN, function () { self.opened = true; self._flush(); })
+                .on(WebSocket.EVENT_TEXT, function (t) { t = String(t); if (t.slice(0, 3) === 'err' && self.onError) self.onError(t); })
+                .on(WebSocket.EVENT_CLOSED, function () { self.opened = false; })
+                .on(WebSocket.EVENT_FAILURE, function () { self.opened = false; });
+        } catch (e) { self.opened = false; }
+    }
+    tryOnce();
+    while (!this.opened && Date.now() - t0 < this.timeout) {
+        sleep(300);
+        if (!this.opened) { try { this.ws && this.ws.cancel(); } catch (e) {} tryOnce(); }
+    }
+    if (!this.opened) throw new Error('vtouch connect timeout');
+    return this;
+};
+
+/* 在子线程运行业务（同步式写法入口，主线程保持空闲） */
+VTouch.prototype.run = function (fn) { threads.start(fn); return this; };
+
+VTouch.prototype._flush = function () {
+    var m;
+    while (this.opened && this.q.length) {
+        m = this.q.shift();
+        try { if (!this.ws.send(m)) break; } catch (e) { this.close(); break; }
+    }
+};
+VTouch.prototype._send = function (m) { this.q.push(m); if (this.opened) this._flush(); };
+
+VTouch.prototype.finger = function (s) {
+    var i;
+    if (s == null) {
+        for (i = 0; i <= 9; i++) if (!this.fingers[i] || this.fingers[i].state() === 'up') break;
+        if (i > 9) throw new Error('no free slot');
+        s = i;
+    } else { s = Math.round(s); if (s < 0 || s > 9) throw new Error('slot 0~9'); }
+    if (!this.fingers[s]) this.fingers[s] = new Finger(this, s);
+    return this.fingers[s];
+};
+VTouch.prototype.frame = function (pts) {
+    var i, o, s, p, v = [];
+    if (!pts || !pts.length) throw new Error('frame empty');
+    for (i = 0; i < pts.length; i++) {
+        o = pts[i];
+        if (!o || ['down', 'move', 'up'].indexOf(o.state) < 0) throw new Error('bad state');
+        s = Math.round(o.slot);
+        p = { x: Math.round(o.x), y: Math.round(o.y) };
+        if (p.x < 0 || p.x >= this.width || p.y < 0 || p.y >= this.height) { log('[vtouch] oob'); continue; }
+        v.push({ slot: s, state: o.state, x: p.x, y: p.y });
+    }
+    if (!v.length) return this;
+    this._send('begin_frame');
+    for (i = 0; i < v.length; i++) {
+        this._send('point ' + v[i].slot + ' ' + v[i].state + ' ' + v[i].x + ' ' + v[i].y);
+        if (this.fingers[v[i].slot]) {
+            if (v[i].state === 'down') this.fingers[v[i].slot].active = true;
+            else if (v[i].state === 'up') this.fingers[v[i].slot].active = false;
+        }
+    }
+    this._send('end_frame');
+    return this;
+};
+VTouch.prototype.reset = function () { for (var k in this.fingers) this.fingers[k].active = false; this._send('reset'); return this; };
+VTouch.prototype.close = function () {
+    this.opened = false;
+    try { this.ws && this.ws.close(WebSocket.CODE_CLOSE_NORMAL, 'exit'); } catch (e) {}
+    return this;
+};
+VTouch.prototype.stop = function () {
+    this.close();
+    try { shell('killall vtouchmerge 2>/dev/null;killall vtouchws 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/merge.sock /data/local/tmp/vtouch-runtime/merge.pid /data/local/tmp/vtouch-runtime/websocket.pid', true); } catch (e) {}
+    return this;
+};
+VTouch.Finger = Finger;
     return VTouch;
 };
