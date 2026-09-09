@@ -135,6 +135,8 @@ def main() -> int:
         "            return this;\n"
         "        };\n"
         "    }\n"
+        "    VTouch.VERSION = \"2.0.0-plugin\";\n"
+        "    VTouch.Finger = Finger;\n"
         "    return VTouch;\n"
         "};\n",
         encoding="utf-8", newline="\n")
