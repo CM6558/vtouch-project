@@ -1,28 +1,23 @@
 "use strict";
-// 调试版：每步打点到 /sdcard/ex-debug.txt，看 8 行示例卡在哪。
+// 对比：Java 裸 Socket（status）vs OkHttp WebSocket，同进程同目标。
 var VTouch = plugins.load('org.vtouch.plugin');
 function mark(s) { try { files.append("/sdcard/ex-debug.txt", Date.now() + " " + s + "\n"); } catch (e) {} }
-mark("main start");
 var vt = new VTouch();
-mark("constructed");
-threads.start(function () {
-    mark("child start opened=" + vt.opened);
-    try {
-        for (var i = 0; i < 40; i++) {
-            if (vt.opened) break;
-            if (i % 4 === 0) mark("poll " + i + " opened=" + vt.opened);
-            sleep(500);
-        }
-        mark("after-poll opened=" + vt.opened);
-        vt.finger().tap(540, 1200);
-        mark("tapped state=" + vt.finger(0).state());
-        vt.close();
-        mark("closed");
-    } catch (e) {
-        mark("ERR " + e);
-        try { vt.close(); } catch (e2) {}
-    }
-    mark("child end");
-    exit();
-});
-mark("main end");
+mark("status=" + vt.status());
+var ws = null;
+try {
+    ws = new WebSocket("ws://127.0.0.1:27183");
+    mark("ws constructed");
+} catch (e) { mark("ws construct throw " + e); }
+if (ws) {
+    ws.on(WebSocket.EVENT_OPEN, function () { mark("ws OPEN"); try { ws.send("ping"); } catch (e) { mark("send throw " + e); } })
+      .on(WebSocket.EVENT_TEXT, function (t) { mark("ws TEXT " + t); })
+      .on(WebSocket.EVENT_FAILURE, function (e) { mark("ws FAILURE " + e); })
+      .on(WebSocket.EVENT_CLOSED, function (c, r) { mark("ws CLOSED " + c); });
+}
+var t0 = Date.now();
+while (Date.now() - t0 < 8000) sleep(500);
+mark("end");
+try { ws.cancel(); } catch (e) {}
+vt.close();
+exit();

@@ -3,7 +3,6 @@
  *
  * ---- 最简代码（复制即用） ----
  * var VTouch = plugins.load('org.vtouch.plugin');
- * var done = false;
  * device.wakeUpIfNeeded();
  * threads.start(function () {
  *     try {
@@ -14,10 +13,10 @@
  *         vt.close();                 // 发 reset + 关连接
  *         device.cancelKeepingAwake();
  *     } catch (e) { toastLog("vtouch 失败: " + e); }
- *     done = true;
  *     exit();
  * });
- * while (!done) sleep(200);
+ * // 主线程到此结束、不得 sleep 等待：脚本主体跑在 Looper 线程上，
+ * // 主体不结束，排队的 WebSocket 回调永远执行不了。引擎会等子线程跑完。
  *
  * ---- 1. 加载方式 ----
  *   plugins.load('org.vtouch.plugin')   应用插件（需安装 vtouch-plugin.apk，
@@ -61,10 +60,9 @@
  *   同一 slot 在一帧里只能出现一次；state 三选一；越界点自动跳过并打日志。
  *
  * ---- 5. 线程铁律（必读） ----
- *   构造 + tap / swipe / ready 全放业务线程（threads.start），主线程只做
- *   while(!done) sleep 保活。主线程提前结束会带走 WebSocket 事件循环，
- *   表现为 daemon 空闲、10 秒超时。退出用 exit()，清理自动走。
- *   后台运行时系统可能冻结脚本线程（现象：一次跑几十秒、ready 超时但后端明明活着）：
+ *   构造 + tap / swipe / ready 全放业务线程（threads.start）；主线程不得 sleep
+ *   等待——主体不结束，Looper 不泵事件，表现为 daemon 空闲、10 秒超时。
+ *   退出用 exit()，清理自动走。后台运行时系统可能冻结脚本线程：
  *   开头加 wakeUpIfNeeded + keepScreenOn，把 AutoJs6 切前台，并去“电池优化”里把
  *   AutoJs6 设为不优化，可基本消除。
  *
@@ -84,12 +82,10 @@
 "use strict";
 
 var VTouch = plugins.load('org.vtouch.plugin');
-var done = false;
-var t0 = Date.now();
-device.wakeUpIfNeeded();      // 亮屏：灭屏下系统会冻结脚本线程，表现为十几秒无响应
+device.wakeUpIfNeeded();
 threads.start(function () {
     try {
-        device.keepScreenOn(60 * 1000);   // 60 秒内不休眠（脚本结束前取消）
+        device.keepScreenOn(60 * 1000);
         var vt = new VTouch();
         vt.ready();
         vt.finger().tap(540, 1200);
@@ -98,7 +94,5 @@ threads.start(function () {
     } catch (e) {
         toastLog("vtouch 失败: " + e);
     }
-    done = true;
     exit();
 });
-while (!done && Date.now() - t0 < 30000) sleep(200);
