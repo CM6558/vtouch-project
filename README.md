@@ -12,9 +12,8 @@
 
 | 组件 | 说明 |
 |------|------|
-| `vtouchmerge` | 核心触摸合并程序（EVIOCGRAB + uinput） |
-| `vtouchws` | WebSocket 桥接 |
-| `vtouchsupervise` | Worker 监控 / 崩溃自动重启 |
+| `vtouchd` | 单进程合并器+WebSocket（EVIOCGRAB + uinput + 127.0.0.1:27183，推荐） |
+| `vtouchmerge` + `vtouchws` | 旧双进程实现（回滚备用，vtouchd 上机验证通过前保留） |
 | `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
 | `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
 
@@ -51,7 +50,7 @@ Android NDK r27d 交叉编译，详见 [docs/README.md](docs/README.md) 与 [src
 ## 目录
 
 ```
-src/                  C 源码（vtouchmerge、vtouchws、vtouchsupervise）
+src/                  C 源码（vtouchd、vtouchmerge、vtouchws）
 clients/              AutoJs6 SDK
 scripts/              安装 / 启动 / 打包脚本
 sdcard/vtouch-merge/  手机运行目录（随安装包分发）

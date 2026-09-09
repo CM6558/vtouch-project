@@ -37,9 +37,8 @@ vtouchmerge
 
 | 组件 | 说明 |
 |------|------|
-| `vtouchmerge` | 核心触摸合并程序，接管真实触摸并合并模拟触点 |
-| `vtouchws` | WebSocket 桥接，将 AutoJs6 调用转发到 vtouchmerge |
-| `vtouchsupervise` | Worker 监控器，崩溃时自动重启 |
+| `vtouchd` | 单进程合并器+WebSocket（推荐），崩溃由启动脚本重拉恢复 |
+| `vtouchmerge` + `vtouchws` | 旧双进程实现（回滚备用） |
 | `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
 | `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
 
@@ -54,8 +53,8 @@ aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24
 # vtouchmerge
 "$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchmerge.c -o build/vtouchmerge
 
-# vtouchsupervise
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DVT_MERGE_LIBRARY src/vtouchsupervise.c src/vtouchmerge.c -o build/vtouchsupervise
+# vtouchd
+"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
 
 # vtouchws
 "$aarch64" -O2 -Wall -Wextra src/vtouchws.c -o build/vtouchws

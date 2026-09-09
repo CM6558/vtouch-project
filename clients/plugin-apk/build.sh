@@ -8,7 +8,7 @@
 #      + JDK 17+（$JAVA_HOME；未设时自动用 Android Studio 自带 jbr）
 #   B) 或推到 GitHub 用 .github/workflows/build-apk.yml（推荐，自动装 NDK 双 ABI 构建）
 #
-# native 二进制: 优先用 NDK 交叉编译 arm64 + x86_64（vtouchmerge.c / vtouchws.c,
+# native 二进制: 优先用 NDK 交叉编译 arm64 + x86_64（vtouchd.c,
 #   纯 C 无 STL 依赖）；无 NDK 时回退只打包 sdcard/vtouch-merge 已有 arm64 产物
 #   （x86_64 模拟器支持需 NDK 重新构建）。
 # ============================================================================
@@ -43,8 +43,7 @@ fi
 build_native() {
     local abi=$1 clang=$2
     mkdir -p "build/native/$abi"
-    "$clang" -O2 -Wall -Wextra "$ROOT/src/vtouchmerge.c" -o "build/native/$abi/vtouchmerge"
-    "$clang" -O2 -Wall -Wextra "$ROOT/src/vtouchws.c" -o "build/native/$abi/vtouchws"
+    "$clang" -O2 -Wall -Wextra -D_GNU_SOURCE "$ROOT/src/vtouchd.c" -o "build/native/$abi/vtouchd"
     echo "native $abi: OK"
 }
 if [ -n "$NDK" ]; then
@@ -57,14 +56,14 @@ if [ -n "$NDK" ]; then
         *) echo "未知宿主平台: $ARCH_HOST"; exit 1 ;;
     esac
     P="$P/$PH/bin"
-    [ -x "$P/aarch64-linux-android24-clang$EXE" ] || { echo "NDK 缺少 aarch64 clang: $P"; exit 1; }
+    [ -f "$P/aarch64-linux-android24-clang$EXE" ] || { echo "NDK 缺少 aarch64 clang: $P"; exit 1; }
     build_native arm64-v8a "$P/aarch64-linux-android24-clang$EXE"
-    [ -x "$P/x86_64-linux-android24-clang$EXE" ] || { echo "NDK 缺少 x86_64 clang: $P"; exit 1; }
+    [ -f "$P/x86_64-linux-android24-clang$EXE" ] || { echo "NDK 缺少 x86_64 clang: $P"; exit 1; }
     build_native x86_64 "$P/x86_64-linux-android24-clang$EXE"
 else
     echo "WARN: 未检测到 NDK, 仅打包 arm64 (sdcard 已有产物); x86_64 模拟器支持需 NDK"
     mkdir -p build/native/arm64-v8a
-    cp -f "$ROOT/sdcard/vtouch-merge/vtouchmerge" "$ROOT/sdcard/vtouch-merge/vtouchws" build/native/arm64-v8a/
+    cp -f "$ROOT/sdcard/vtouch-merge/vtouchd" build/native/arm64-v8a/
 fi
 
 # ---- 2) 编译 manifest（不 -A assets：Windows 上 aapt2 会把条目名拼成反斜杠，

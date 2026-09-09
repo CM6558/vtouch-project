@@ -93,11 +93,16 @@ adb install out/vtouch-plugin.apk
 ```
 
 ```js
-// 任意脚本，无需项目结构（v2：自动连接 + 一行一个动作）
+// 任意脚本，无需项目结构（tap/swipe 含 sleep，请放业务线程）
 var VTouch = plugins.load('org.vtouch.plugin');
-var vt = new VTouch();                    // 自动释放二进制(如需) + 拉起服务 + 自动连接
-vt.tap(540, 1200);                        // 点击
-vt.swipe(200, 200, 1500, 2000, 1000);     // 滑动
+threads.start(function () {
+    var vt = new VTouch();
+    vt.ready();
+    vt.finger().tap(540, 1200);                 // 点击
+    vt.finger().swipe(200, 200, 1500, 2000, 500); // 滑动
+    vt.close();
+    exit();
+});
 // 退出自动 close + stopService
 ```
 
@@ -105,8 +110,8 @@ vt.swipe(200, 200, 1500, 2000, 1000);     // 滑动
 
 ## v2 架构（vtouchmerge 新架构）
 
-- SDK v2：`new VTouch()` 自动连接（先确保服务就绪再连 WebSocket，省去首次失败重试），
-  便捷 API `vt.tap/vt.swipe/vt.down/vt.move/vt.up` 一行一个动作，发送队列自动缓冲；
+- SDK：`new VTouch()` 自动连接（先确保服务就绪再连 WebSocket，省去首次失败重试），
+  Finger API `f.down/f.move/f.up/f.tap/f.swipe` + 原子帧 `vt.frame`，发送队列自动缓冲；
   脚本退出自动 `close() + stopService()`。
 - 插件 Java API 优先：胶水层覆盖 `startService/stopService`，走 `VTouchPlugin` 的
   Java 实现（root 进程内拉起/停止 vtouchmerge + vtouchws），失败自动回退 shell。

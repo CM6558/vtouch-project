@@ -5,7 +5,7 @@ Android touch simulation/merging system for rooted devices. Merges physical touc
 ## Project structure
 
 ```
-src/                  C source (vtouchmerge, vtouchws, vtouchsupervise)
+src/                  C source (vtouchd, vtouchmerge, vtouchws)
 clients/              AutoJs6 JavaScript SDK (vtouch_onefile_example.js)
 clients/plugins/      AutoJs6 项目插件版 SDK (vtouch.js, module.exports = VTouch)
 clients/vtouch_plugin_example.js  项目插件加载示例 (plugins.load('vtouch'))
@@ -35,8 +35,8 @@ aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24
 # vtouchmerge (core merger)
 "$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchmerge.c -o build/vtouchmerge
 
-# vtouchsupervise (worker supervisor)
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DVT_MERGE_LIBRARY src/vtouchsupervise.c src/vtouchmerge.c -o build/vtouchsupervise
+# vtouchd (merged single binary)
+"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
 
 # vtouchws (WebSocket bridge)
 "$aarch64" -O2 -Wall -Wextra src/vtouchws.c -o build/vtouchws

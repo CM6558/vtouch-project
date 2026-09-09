@@ -100,12 +100,13 @@ def main() -> int:
         return 0 if ok else 1
 
     sdk = minify(SRC.read_text(encoding="utf-8"))
+    version_line = 'VTouch.VERSION = "3.0.0-plugin";\n'
 
     # 1) 项目插件
     (ROOT / "clients" / "plugins" / "vtouch.js").write_text(
         '"use strict";\n' + sdk +
         '\n/* AutoJs6 项目插件导出：加载后返回 VTouch 构造函数（Finger 挂在 VTouch.Finger 上）。 */\n'
-        'module.exports = VTouch;\nVTouch.Finger = Finger;\nVTouch.VERSION = "2.0.0-plugin";\n',
+        'module.exports = VTouch;\nVTouch.Finger = Finger;\n' + version_line,
         encoding="utf-8", newline="\n")
 
     # 2) APK 胶水层
@@ -121,12 +122,20 @@ def main() -> int:
         "    if (plugin && typeof plugin.startVTouchService === 'function') {\n"
         "        var __origStart = VTouch.prototype.startService;\n"
         "        VTouch.prototype.startService = function () {\n"
-        "            if (plugin.isServiceReady && plugin.isServiceReady()) { this.serviceStarted = true; return this; }\n"
-        "            var ok = false;\n"
-        "            try { ok = plugin.startVTouchService(); } catch (e) { ok = false; }\n"
-        "            if (!ok) return __origStart.call(this);\n"
-        "            this.serviceStarted = true;\n"
-        "            return this;\n"
+        "            if (this.serviceStarted) return this;\n"
+        "            // 快路径优先：shell 幂等检查+启动一体（一次 su，50ms 级）；\n"
+        "            // 仅 shell 报缺二进制时才走 Java（解压 APK assets + 启动，一次性慢路径）。\n"
+        "            try { return __origStart.call(this); }\n"
+        "            catch (e) {\n"
+        "                log('[vtouch] shell 路径失败，Java 兜底: ' + e);\n"
+        "                var ok = false;\n"
+        "                if (plugin.startBackendDirect && typeof plugin.startBackendDirect === 'function') {\n"
+        "                    try { ok = plugin.startBackendDirect(); } catch (e2) { log('[vtouch] Java 直启失败: ' + e2); ok = false; }\n"
+        "                }\n"
+        "                if (!ok) throw e;\n"
+        "                this.serviceStarted = true;\n"
+        "                return this;\n"
+        "            }\n"
         "        };\n"
         "        var __origStop = VTouch.prototype.stopService;\n"
         "        VTouch.prototype.stopService = function () {\n"
@@ -135,7 +144,7 @@ def main() -> int:
         "            return this;\n"
         "        };\n"
         "    }\n"
-        "    VTouch.VERSION = \"2.0.0-plugin\";\n"
+        "    " + version_line +
         "    VTouch.Finger = Finger;\n"
         "    return VTouch;\n"
         "};\n",

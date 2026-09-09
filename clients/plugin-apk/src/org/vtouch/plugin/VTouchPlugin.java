@@ -42,18 +42,23 @@ public class VTouchPlugin implements ServiceConnection {
 
     private static final String TAG = "VTouchPlugin";
     private static final String RUNTIME_DIR = "/data/local/tmp/vtouch-runtime";
+    private static final String VTOUCHD_BIN = "/data/local/tmp/vtouchd";
     private static final String MERGE_BIN = "/data/local/tmp/vtouchmerge";
     private static final String WS_BIN = "/data/local/tmp/vtouchws";
+    private static final String VTOUCHD_PID = RUNTIME_DIR + "/vtouchd.pid";
     private static final String MERGE_SOCK = RUNTIME_DIR + "/merge.sock";
     private static final String MERGE_PID = RUNTIME_DIR + "/merge.pid";
     private static final String WS_PID = RUNTIME_DIR + "/websocket.pid";
 
-    /** AutoJs6 传入的应用上下文（createPackageContext 得到的插件包 Context），供跨包 startService。 */
+    /** AutoJs6 传入的应用上下文（宿主 AutoJs6 的 Context），供跨包 startService。 */
     private static Context sContext;
+    /** 插件自己的 Context（AutoJs6 通过 createPackageContext 创建），用于读取插件 APK 的 assets。 */
+    private static Context sPluginContext;
 
     /** AutoJs6 反射入口：返回插件实例（必须实现 ServiceConnection）。 */
     public static Object loadDefault(Context context, Context selfContext, Object runtime, Object topLevelScope) {
         sContext = context != null ? context : selfContext;
+        sPluginContext = selfContext;  // selfContext 是插件包 Context，能读 assets
         return new VTouchPlugin();
     }
 
@@ -79,29 +84,41 @@ public class VTouchPlugin implements ServiceConnection {
 
     /* ---- 供 JS 胶水层经 plugin 对象调用的 Java API ---- */
 
-    /** 服务健康检查（只读，不启动）。 */
+    /** 服务健康检查（只读，不启动）。vtouchd 单进程或旧双进程任一健康即就绪。 */
     public boolean isServiceReady() {
         return serviceReady();
     }
 
-    /** 插件负责服务运行：startForegroundService(VTouchService) 托管后端，失败回退进程内直启。
+    /** 插件负责服务运行：startForegroundService(VTouchService) 托管后端。
      *  ColorOS 启动管理：重装后应用视为"未打开"，后台拉起服务会被 OplusAppStartupManager 拦截
      *  （静默 prevent，不抛异常）。解决：先拉起一次 MainActivity（透明、即开即关）标记"已打开"，
-     *  再重试一次服务启动；仍失败才回退。 */
+     *  再重试一次服务启动。失败时返回 false，由 JS 胶水层决定是否回退并提示用户。
+     *  优化：首次检查是否已就绪，避免重复启动开销。 */
     public boolean startVTouchService() {
+        // 已就绪则快速返回（重复启动保护）
+        if (serviceReady()) {
+            Log.d(TAG, "startVTouchService: already ready, skip");
+            return true;
+        }
         Context ctx = sContext;
         if (ctx != null) {
             if (startServiceViaIntent(ctx)) return true;
             if (ensureOpened(ctx)) {
                 if (startServiceViaIntent(ctx)) return true;
             }
-            Log.e(TAG, "VTouchService 未能启动，回退进程内直启");
-            return startBackend();
+            Log.e(TAG, "VTouchService 未能启动（可能是权限/启动管理限制）");
         }
+        return false;
+    }
+
+    /** 进程内直接启动后端（回退方案，由 JS 胶水层显式调用）。 */
+    public boolean startBackendDirect() {
+        Log.w(TAG, "使用进程内直启后端（VTouchService 不可用）");
         return startBackend();
     }
 
-    /** startForegroundService(VTouchService) 并轮询就绪；就绪返回 true。 */
+    /** startForegroundService(VTouchService) 并轮询就绪；就绪返回 true。
+     *  优化：减少轮询次数和间隔，Service 启动失败时快速返回（从15次降到5次）。 */
     private static boolean startServiceViaIntent(Context ctx) {
         try {
             Intent i = new Intent();
@@ -125,8 +142,9 @@ public class VTouchPlugin implements ServiceConnection {
             Log.e(TAG, "startService intent failed: " + e);
             return false;
         }
-        /* 等待 VTouchService 内 startBackend() 把后端拉起（幂等：已就绪则快速返回）。 */
-        for (int i = 0; i < 15; i++) {
+        /* 等待 VTouchService 内 startBackend() 把后端拉起（幂等：已就绪则快速返回）。
+           优化：缩短超时从1.5秒到0.5秒（5次x100ms），Service被拦截时快速失败。 */
+        for (int i = 0; i < 5; i++) {
             if (serviceReady()) return true;
             try { Thread.sleep(100); } catch (InterruptedException e) { break; }
         }
@@ -183,7 +201,25 @@ public class VTouchPlugin implements ServiceConnection {
     /* ---- 内部实现 ---- */
 
     private static boolean serviceReady() {
+        if (serviceReadyFast()) return true;
+        /* 应用进程可能看不见 /data/local/tmp（挂载命名空间隔离），用 root 再确认一次。 */
         try {
+            String out = execRoot("B=" + RUNTIME_DIR + ";"
+                    + "([ -f $B/vtouchd.pid ] && kill -0 $(cat $B/vtouchd.pid 2>/dev/null) 2>/dev/null && echo VD_OK);"
+                    + "([ -S $B/merge.sock ] && kill -0 $(cat $B/merge.pid 2>/dev/null) 2>/dev/null"
+                    + " && kill -0 $(cat $B/websocket.pid 2>/dev/null) 2>/dev/null && echo LEGACY_OK)");
+            if (out != null && (out.contains("VD_OK") || out.contains("LEGACY_OK"))) return true;
+        } catch (Exception e) {
+            Log.e(TAG, "serviceReady root check failed: " + e);
+        }
+        return false;
+    }
+
+    /** 快速 File 检查（可见命名空间下命中则直接返回，不起 su）。 */
+    private static boolean serviceReadyFast() {
+        try {
+            File dp = new File(VTOUCHD_PID);
+            if (dp.exists() && isAlive(readPid(dp))) return true;
             File sock = new File(MERGE_SOCK);
             File mp = new File(MERGE_PID);
             File wp = new File(WS_PID);
@@ -207,31 +243,50 @@ public class VTouchPlugin implements ServiceConnection {
         return pid > 0 && new File("/proc/" + pid).exists();
     }
 
-    /** 确保 /data/local/tmp 下 vtouchmerge/vtouchws 存在（APK assets 自动释放）。
+    /** 确保 /data/local/tmp 下二进制已释放（APK assets 自动释放）。
      *  按运行时 ABI 从 assets/native/<abi>/ 选择二进制（arm64-v8a 实机 / x86_64 模拟器）。
      *  普通进程无权直接写 /data/local/tmp -> 先写 app 私有目录, 再 root cp + chmod。
-     *  幂等: 已存在且非空直接返回（二次脚本零开销）。 */
+     *  幂等: vtouchd 已存在且非空直接返回（二次脚本零开销）。旧双进程文件按需补齐。 */
     static boolean ensureBinaries() {
-        Context ctx = sContext;
-        if (ctx == null) return false;
+        Context ctx = sPluginContext != null ? sPluginContext : sContext;
+        if (ctx == null) {
+            Log.e(TAG, "ensureBinaries: sContext is null");
+            return false;
+        }
         try {
-            File m = new File(MERGE_BIN), w = new File(WS_BIN);
-            if (m.exists() && m.length() > 0 && w.exists() && w.length() > 0) return true;
+            File d = new File(VTOUCHD_BIN);
+            // 快速路径：同命名空间可见则直接返回，不起 su。
+            if (d.exists() && d.length() > 0) {
+                Log.d(TAG, "ensureBinaries: vtouchd already in /data/local/tmp");
+                return true;
+            }
+            // root 侧确认：应用挂载命名空间可能看不见 /data/local/tmp，
+            // 已安装则跳过解压（常见情况省一次 asset I/O + 一次 cp）。
+            String have = execRoot("[ -s " + VTOUCHD_BIN + " ] && echo HAVE_BIN");
+            if (have != null && have.contains("HAVE_BIN")) return true;
+            Log.d(TAG, "ensureBinaries: context pkg=" + ctx.getPackageName() + " filesDir=" + ctx.getFilesDir());
             String abi = (Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0)
                     ? Build.SUPPORTED_ABIS[0] : "arm64-v8a";
             String assetDir = "native/" + abi + "/";
-            File pm = new File(ctx.getFilesDir(), "vtouchmerge");
-            File pw = new File(ctx.getFilesDir(), "vtouchws");
-            if (!pm.exists() || pm.length() == 0) writeAsset(ctx, assetDir + "vtouchmerge", pm);
-            if (!pw.exists() || pw.length() == 0) writeAsset(ctx, assetDir + "vtouchws", pw);
-            String out = execRoot("cp -f '" + pm.getAbsolutePath() + "' " + MERGE_BIN
-                    + " && cp -f '" + pw.getAbsolutePath() + "' " + WS_BIN
-                    + " && chmod 755 " + MERGE_BIN + " " + WS_BIN);
-            if (out == null) {
+            Log.d(TAG, "ensureBinaries: ABI=" + abi + " assetDir=" + assetDir);
+            // 用宿主 Context 的 filesDir（AutoJs6 有写权限），插件 Context 的 filesDir 可能无权限
+            Context hostCtx = sContext != null ? sContext : ctx;
+            File filesDir = hostCtx.getFilesDir();
+            if (filesDir == null || (!filesDir.exists() && !filesDir.mkdirs())) {
+                Log.e(TAG, "ensureBinaries: cannot create filesDir");
+                return false;
+            }
+            File pd = new File(filesDir, "vtouchd");
+            Log.d(TAG, "ensureBinaries: extract to " + pd.getAbsolutePath());
+            if (!pd.exists() || pd.length() == 0) writeAsset(ctx, assetDir + "vtouchd", pd);
+            String out = execRoot("cp -f '" + pd.getAbsolutePath() + "' " + VTOUCHD_BIN
+                    + " && chmod 755 " + VTOUCHD_BIN
+                    + " && [ -s " + VTOUCHD_BIN + " ] && echo INSTALLED");
+            if (out == null || !out.contains("INSTALLED")) {
                 Log.e(TAG, "ensureBinaries: root cp failed");
                 return false;
             }
-            return m.exists() && m.length() > 0 && w.exists() && w.length() > 0;
+            return true;
         } catch (Exception e) {
             Log.e(TAG, "ensureBinaries failed", e);
             return false;
@@ -249,28 +304,36 @@ public class VTouchPlugin implements ServiceConnection {
         Log.i(TAG, "extracted asset " + asset + " -> " + dest.getAbsolutePath());
     }
 
-    /** 启动后端：确保二进制已释放，wm size 取真实分辨率，root 拉起 vtouchmerge/vtouchws。 */
+    /** 启动后端：vtouchd 单进程（wm size 取真实分辨率，root 拉起）。
+     *  su 调用压缩到最少：一次组合探测（就绪+HAVE），一次启动+存活确认。 */
     static boolean startBackend() {
         try {
-            if (serviceReady()) return true;
-            if (!ensureBinaries()) {
-                Log.e(TAG, "startBackend: binaries missing and auto-extract failed");
-                return false;
+            if (serviceReadyFast()) return true;
+            String probe = execRoot("B=" + RUNTIME_DIR + "; D=" + VTOUCHD_BIN + "; "
+                    + "([ -f $B/vtouchd.pid ] && kill -0 $(cat $B/vtouchd.pid 2>/dev/null) 2>/dev/null && echo VD_OK);"
+                    + "([ -S $B/merge.sock ] && kill -0 $(cat $B/merge.pid 2>/dev/null) 2>/dev/null"
+                    + " && kill -0 $(cat $B/websocket.pid 2>/dev/null) 2>/dev/null && echo LEGACY_OK);"
+                    + "[ -s $D ] && echo HAVE_BIN");
+            if (probe != null && (probe.contains("VD_OK") || probe.contains("LEGACY_OK"))) return true;
+            if (probe == null || !probe.contains("HAVE_BIN")) {
+                if (!ensureBinaries()) {
+                    Log.e(TAG, "startBackend: binaries missing and auto-extract failed");
+                    return false;
+                }
             }
             String cmd = "SIZE=$(wm size 2>/dev/null | sed -n 's/.*Physical size: //p' | head -n 1); "
                     + "W=${SIZE%x*}; H=${SIZE#*x}; "
                     + "case \"$W:$H\" in ''|*[!0-9:]*) echo 'no size'; exit 12;; esac; "
-                    + "B=" + RUNTIME_DIR + "; M=" + MERGE_BIN + "; W2=" + WS_BIN + "; "
-                    + "mkdir -p $B; killall vtouchmerge 2>/dev/null; killall vtouchws 2>/dev/null; "
-                    + "rm -f $B/merge.sock $B/merge.pid $B/websocket.pid; "
-                    + "nohup $M -s $B/merge.sock -v 10 -w $W -h $H >/dev/null 2>&1 </dev/null & echo $! > $B/merge.pid; "
-                    + "nohup $W2 >/dev/null 2>&1 </dev/null & echo $! > $B/websocket.pid";
+                    + "B=" + RUNTIME_DIR + "; D=" + VTOUCHD_BIN + "; "
+                    + "mkdir -p $B; killall vtouchd 2>/dev/null; killall vtouchmerge 2>/dev/null; killall vtouchws 2>/dev/null; "
+                    + "rm -f $B/vtouchd.pid $B/merge.sock $B/merge.pid $B/websocket.pid; "
+                    + "nohup $D -w $W -h $H -p 27183 >$B/vtouchd.log 2>&1 </dev/null & P=$!; echo $P > $B/vtouchd.pid; "
+                    /* 同一次 su 内等 0.3s 并确认子进程存活：初始化失败（无设备/uinput/grab）都发生在这之前。
+                       端口就绪由 JS 侧 WS 连接确认，不在这里轮询。 */
+                    + "sleep 0.3; kill -0 $P 2>/dev/null && echo STARTED";
             String out = execRoot(cmd);
             if (out != null && out.contains("no size")) return false;
-            for (int i = 0; i < 20; i++) {
-                if (serviceReady()) return true;
-                try { Thread.sleep(100); } catch (InterruptedException e) { break; }
-            }
+            if (out != null && out.contains("STARTED")) return true;
             return serviceReady();
         } catch (Exception e) {
             Log.e(TAG, "startBackend failed", e);
@@ -280,8 +343,8 @@ public class VTouchPlugin implements ServiceConnection {
 
     static boolean stopBackend() {
         try {
-            execRoot("killall vtouchmerge 2>/dev/null; killall vtouchws 2>/dev/null; "
-                    + "rm -f " + MERGE_SOCK + " " + MERGE_PID + " " + WS_PID);
+            execRoot("killall vtouchd 2>/dev/null; killall vtouchmerge 2>/dev/null; killall vtouchws 2>/dev/null; "
+                    + "rm -f " + VTOUCHD_PID + " " + MERGE_SOCK + " " + MERGE_PID + " " + WS_PID);
             return true;
         } catch (Exception e) {
             return false;

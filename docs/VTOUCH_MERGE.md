@@ -54,7 +54,7 @@ No KernelSU module or legacy `vtouchd`/`vtouchctl` is required.
 
 `vtouchmerge` requires logical display dimensions via `-w WIDTH -h HEIGHT`; start scripts read them dynamically from `wm size` and fail if unavailable. It dynamically selects the first `/dev/input/event*` device described by `/proc/bus/input/devices` whose ioctl capabilities include EV_ABS, ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_MT_POSITION_X/Y, and INPUT_PROP_DIRECT. It opens the source nonblocking, creates `vtouch-merged` on `/dev/uinput` using discovered raw ranges and `physical slots + virtual slots` (virtual slots default 10, bounded to 32), verifies UI_DEV_CREATE/UI_GET_SYSNAME, then grabs the physical source. Physical events remain raw; only virtual logical coordinates are converted with rounded, clamped integer mapping.
 
-`vtouchsupervise` forks the worker and receives heartbeat bytes over a pipe. The worker alone owns physical/uinput/socket descriptors; a crash therefore releases EVIOCGRAB during kernel fd close. The supervisor restarts with bounded exponential backoff.
+`vtouchd` 单进程直接对外提供 `ws://127.0.0.1:27183`，内部直调合并状态，无 UDS 跳转。坏客户端只关闭该连接并复位虚拟触点，不丢 grab；进程整体崩溃才丢触摸，由启动脚本重拉恢复。
 
 Socket default: `/data/local/tmp/vtouch-merge.sock`, mode 0660. Text protocol is line-oriented and intentionally non-JSON:
 
@@ -74,10 +74,7 @@ Virtual slots are numbered 0..V-1 and map after the physical slots. Every comple
 ```sh
 NDK=C:/Users/21102/android-ndk-r27d
 CC=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
-"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchmerge.c -o build/vtouchmerge
-"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DVT_MERGE_LIBRARY -c src/vtouchmerge.c -o build/vtouchmerge_lib.o
-"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -c src/vtouchsupervise.c -o build/vtouchsupervise_main.o
-"$CC" build/vtouchsupervise_main.o build/vtouchmerge_lib.o -o build/vtouchsupervise
+"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
 "$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -DVT_MERGE_TEST -fsyntax-only src/vtouchmerge.c
 ```
 

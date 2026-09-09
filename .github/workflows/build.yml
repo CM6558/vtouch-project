@@ -51,10 +51,10 @@ jobs:
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchmerge.c -o build/vtouchmerge
 
-      - name: Compile vtouchsupervise (worker supervisor)
+      - name: Compile vtouchd (merged single binary)
         run: |
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
-            -DVT_MERGE_LIBRARY src/vtouchsupervise.c src/vtouchmerge.c -o build/vtouchsupervise
+            src/vtouchd.c -o build/vtouchd
 
       - name: Compile vtouchws (WebSocket bridge)
         run: |
@@ -64,7 +64,7 @@ jobs:
       - name: Verify binaries
         run: |
           set -e
-          for f in build/vtouchmerge build/vtouchsupervise build/vtouchws; do
+          for f in build/vtouchd build/vtouchmerge build/vtouchws; do
             test -x "$f" || { echo "missing executable: $f"; exit 1; }
             file "$f"
           done
@@ -74,7 +74,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           # Refresh the shipped binaries with freshly compiled ones, then rebuild the install zips.
-          cp build/vtouchmerge build/vtouchws sdcard/vtouch-merge/
+          cp build/vtouchd build/vtouchmerge build/vtouchws sdcard/vtouch-merge/
           python3 scripts/make_install_archives.py
 
       - name: Upload build artifacts
@@ -82,8 +82,8 @@ jobs:
         with:
           name: vtouch-arm64-binaries
           path: |
+            build/vtouchd
             build/vtouchmerge
-            build/vtouchsupervise
             build/vtouchws
           if-no-files-found: error
 
@@ -92,8 +92,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            build/vtouchd
             build/vtouchmerge
-            build/vtouchsupervise
             build/vtouchws
             vtouch-merge-sdcard-latest.zip
             vtouch-merge-install-bundle.zip

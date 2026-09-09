@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +30,15 @@
 #endif
 
 static volatile sig_atomic_t g_stop;
+static volatile int g_current_client = -1;  /* 当前客户端 fd，用于强制断开 */
+
+/* 客户端状态 */
+struct client_state {
+    int udsfd;
+    size_t llen;
+    unsigned char line[MAX_PAYLOAD];
+};
+static struct client_state g_client_state = {-1, 0, {0}};
 
 static long long now_ms(void)
 {
@@ -204,33 +214,98 @@ static int proxy_line(int wsfd, int udsfd, unsigned char *line, size_t *line_len
 }
 static int client_loop(int fd)
 {
-    unsigned char hdr[2], ext[8], mask[4], payload[MAX_PAYLOAD], line[MAX_PAYLOAD], reply[MAX_PAYLOAD];
-    size_t llen=0, n, i; unsigned opcode, len7, fin, masked; uint64_t len;
-    int udsfd=uds_connect();
-    if (udsfd<0) return -1;
-    for (;;) {
-        if (read_full(fd,hdr,2)<0) { close(udsfd); return -1; } fin=hdr[0]>>7; opcode=hdr[0]&15; masked=hdr[1]>>7; len7=hdr[1]&127;
-        if (!masked || !fin || (opcode!=1 && opcode!=8 && opcode!=9 && opcode!=10)) { ws_send(fd,8,(const unsigned char *)"\x03\xea",2); close(udsfd); return -1; }
-        len=len7; if (len7==126) { if (read_full(fd,ext,2)<0){close(udsfd);return -1;} len=((uint64_t)ext[0]<<8)|ext[1]; }
-        else if (len7==127) { if (read_full(fd,ext,8)<0){close(udsfd);return -1;} len=0; for(i=0;i<8;i++) len=(len<<8)|ext[i]; }
-        if (len>MAX_PAYLOAD || (opcode>=8 && len>125)) { ws_send(fd,8,(const unsigned char *)"\x03\xef",2); close(udsfd); return -1; }
-        if (read_full(fd,mask,4)<0 || read_full(fd,payload,(size_t)len)<0){close(udsfd);return -1;} for(i=0;i<(size_t)len;i++) payload[i]^=mask[i&3];
-        if (opcode==8) { ws_send(fd,8,payload,(size_t)len); close(udsfd); return 0; }
-        if (opcode==9) { if(ws_send(fd,10,payload,(size_t)len)<0){close(udsfd);return -1;} continue; }
-        if (opcode==10) continue;
-        n=(size_t)len; for(i=0;i<n;i++) { if(llen>=MAX_PAYLOAD){close(udsfd);return -1;} line[llen++]=payload[i]; if(payload[i]=='\n' && proxy_line(fd,udsfd,line,&llen,reply)<0){close(udsfd);return -1;} }
-        /* A WebSocket text message is also a complete line when it has no LF. */
-        if (llen && proxy_line(fd,udsfd,line,&llen,reply)<0) { close(udsfd); return -1; }
+    unsigned char hdr[2], ext[8], mask[4], payload[MAX_PAYLOAD], reply[MAX_PAYLOAD];
+    size_t n, i; unsigned opcode, len7, fin, masked; uint64_t len;
+    struct client_state *st = &g_client_state;
+    
+    /* 首次调用：连接 UDS */
+    if(st->udsfd<0){
+        st->udsfd=uds_connect();
+        if (st->udsfd<0) return -1;
+        g_current_client = fd;
+        st->llen=0;
     }
+    
+    /* 被踢掉检查 */
+    if (g_current_client != fd) { 
+        if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}
+        st->llen=0;
+        return -1; 
+    }
+    
+    /* 非阻塞读取一帧 */
+    if (read_full(fd,hdr,2)<0) { 
+        if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}
+        g_current_client = -1; 
+        st->llen=0;
+        return -1; 
+    }
+    
+    fin=hdr[0]>>7; opcode=hdr[0]&15; masked=hdr[1]>>7; len7=hdr[1]&127;
+        if (!masked || !fin || (opcode!=1 && opcode!=8 && opcode!=9 && opcode!=10)) { ws_send(fd,8,(const unsigned char *)"\x03\xea",2); if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;} st->llen=0; return -1; }
+        len=len7; if (len7==126) { if (read_full(fd,ext,2)<0){if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}st->llen=0;return -1;} len=((uint64_t)ext[0]<<8)|ext[1]; }
+        else if (len7==127) { if (read_full(fd,ext,8)<0){if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}st->llen=0;return -1;} len=0; for(i=0;i<8;i++) len=(len<<8)|ext[i]; }
+        if (len>MAX_PAYLOAD || (opcode>=8 && len>125)) { ws_send(fd,8,(const unsigned char *)"\x03\xef",2); if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;} st->llen=0; return -1; }
+        if (read_full(fd,mask,4)<0 || read_full(fd,payload,(size_t)len)<0){if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}st->llen=0;return -1;} for(i=0;i<(size_t)len;i++) payload[i]^=mask[i&3];
+        if (opcode==8) { ws_send(fd,8,payload,(size_t)len); if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;} st->llen=0; return 0; }
+        if (opcode==9) { if(ws_send(fd,10,payload,(size_t)len)<0){if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}st->llen=0;return -1;} return 0; }
+        if (opcode==10) return 0;
+        for(i=0;i<(size_t)len;i++){if(payload[i]=='\n'||payload[i]=='\r')payload[i]=' ';}for(i=0;i<(size_t)len&&st->llen<MAX_PAYLOAD;i++)if(payload[i]!='\n'&&payload[i]!='\r')st->line[st->llen++]=payload[i];
+        if(proxy_line(fd,st->udsfd,st->line,&st->llen,reply)<0){if(st->udsfd>=0){close(st->udsfd);st->udsfd=-1;}st->llen=0;return -1;}
+    return 0;  /* 成功处理一帧，返回继续 poll */
 }
 int main(void)
 {
-    int lf,cf,opt=1; struct sockaddr_in a; struct sigaction sa;
+    int lf,cf,opt=1,nfds,i; 
+    struct sockaddr_in a; 
+    struct sigaction sa;
+    struct pollfd pfd[2];  /* 0=listen, 1=client */
     memset(&sa,0,sizeof(sa)); sa.sa_handler=on_signal; sigemptyset(&sa.sa_mask); sigaction(SIGTERM,&sa,0); sigaction(SIGINT,&sa,0); signal(SIGPIPE,SIG_IGN);
-    lf=socket(AF_INET,SOCK_STREAM,0); if(lf<0)return 1; setsockopt(lf,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)); memset(&a,0,sizeof(a)); a.sin_family=AF_INET; a.sin_port=htons(WS_PORT); if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1 || bind(lf,(struct sockaddr *)&a,sizeof(a))<0 || listen(lf,8)<0){close(lf);return 1;}
+    lf=socket(AF_INET,SOCK_STREAM,0); if(lf<0)return 1; 
+    setsockopt(lf,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)); 
+    memset(&a,0,sizeof(a)); a.sin_family=AF_INET; a.sin_port=htons(WS_PORT); 
+    if(inet_pton(AF_INET,"127.0.0.1",&a.sin_addr)!=1 || bind(lf,(struct sockaddr *)&a,sizeof(a))<0 || listen(lf,8)<0){close(lf);return 1;}
     fprintf(stderr,"vtouchws: listening t=%lld on 127.0.0.1:%d\n",now_ms(),WS_PORT);
-    while(!g_stop){ cf=accept(lf,0,0); if(cf<0){if(errno==EINTR)continue;break;} fprintf(stderr,"vtouchws: accepted t=%lld\n",now_ms()); fflush(stderr);
- if (websocket_handshake(cf)==0) { fprintf(stderr,"vtouchws: handshake ok t=%lld\n",now_ms()); fflush(stderr); (void)client_loop(cf); } else { fprintf(stderr,"vtouchws: handshake failed t=%lld\n",now_ms()); fflush(stderr); }
- close(cf); }
+    
+    cf=-1;
+    pfd[0].fd=lf; pfd[0].events=POLLIN;
+    pfd[1].fd=-1; pfd[1].events=POLLIN;
+    
+    while(!g_stop){ 
+        nfds=(cf>=0)?2:1;
+        if(poll(pfd,nfds,1000)<0){if(errno==EINTR)continue;break;}
+        
+        /* 新连接到来 */
+        if(pfd[0].revents&POLLIN){
+            int new_cf=accept(lf,0,0); 
+            if(new_cf>=0){
+                if(cf>=0){
+                    /* 踢掉旧连接 */
+                    fprintf(stderr,"vtouchws: kicking old client fd=%d t=%lld\n",cf,now_ms());
+                    close(cf);
+                    pfd[1].fd=-1;
+                }
+                cf=new_cf;
+                pfd[1].fd=cf;
+                fprintf(stderr,"vtouchws: accepted fd=%d t=%lld\n",cf,now_ms()); fflush(stderr);
+                if(websocket_handshake(cf)!=0){
+                    fprintf(stderr,"vtouchws: handshake failed t=%lld\n",now_ms()); fflush(stderr);
+                    close(cf); cf=-1; pfd[1].fd=-1;
+                }else{
+                    fprintf(stderr,"vtouchws: handshake ok t=%lld\n",now_ms()); fflush(stderr);
+                    g_current_client=cf;
+                }
+            }
+        }
+        
+        /* 已有客户端数据到达 */
+        if(cf>=0 && (pfd[1].revents&(POLLIN|POLLHUP|POLLERR))){
+            if(client_loop(cf)<0 || (pfd[1].revents&(POLLHUP|POLLERR))){
+                fprintf(stderr,"vtouchws: client disconnected fd=%d t=%lld\n",cf,now_ms());
+                close(cf); cf=-1; pfd[1].fd=-1; g_current_client=-1;
+            }
+        }
+    }
+    if(cf>=0)close(cf);
     close(lf); return 0;
 }
