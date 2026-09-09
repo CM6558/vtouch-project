@@ -17,7 +17,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "vtouchd"
 OUT = ROOT / "clients" / "vtouch_bundle.js"
-OUT_ONE = ROOT / "clients" / "vtouch_onefile_example.js"
 
 CORE = '''/* ============================================================================
  * VTouch 单文件包：二进制内嵌 + 一层薄函数。由 scripts/build_bundle.py 生成，勿手改。
@@ -279,6 +278,13 @@ module.exports = {
     frame: vtouchFrame,
     reset: vtouchReset,
     stop: vtouchStop,
+    loadRegions: rgLoad,
+    createEngine: rgCreateEngine,
+    ovShow: ovShow,
+    ovUpdate: ovUpdate,
+    ovFlash: ovFlash,
+    ovSetRegions: ovSetRegions,
+    ovClose: ovClose,
     BIN: VTOUCH_BIN,
     HOST: VTOUCH_HOST,
     PORT: VTOUCH_PORT
@@ -363,6 +369,10 @@ function ovShow(regions) {
         }
     });
 }
+function ovUpdate(fingers) { _ovFingers = fingers || []; }
+function ovFlash(id) { _ovFlash[id] = Date.now(); }
+function ovSetRegions(rs) { _ovRegions = rs; }
+function ovClose() { try { if (_ovW) _ovW.close(); } catch (e) {} _ovW = null; }
 '''
 
 ONE_RUN = '''
@@ -425,13 +435,10 @@ def main() -> int:
         "var VTOUCH_BIN_SIZE = %d;\n"
         'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), b64)
     )
-    if not write_out(OUT, CORE + "\n" + blob + "\n" + DEMO):
+    if not write_out(OUT, CORE + "\n" + blob + "\n" + ONE_LIB + "\n" + DEMO):
         return 1
+    print("bundle: %s (%d bytes)" % (OUT, OUT.stat().st_size))
     print("bundle syntax OK")
-    if not write_out(OUT_ONE, CORE + "\n" + blob + "\n" + ONE_LIB + "\n" + ONE_RUN):
-        return 1
-    print("onefile: %s (%d bytes)" % (OUT_ONE, OUT_ONE.stat().st_size))
-    print("onefile syntax OK")
     return 0
 
 
