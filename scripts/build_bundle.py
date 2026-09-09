@@ -174,6 +174,28 @@ function vtouchStop() {
     shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
 }
 
+/* ---- 入口：仪式全包，业务只写触摸逻辑 ----
+ * vt.run(function (c) { vt.finger(c).tap(540, 1200); });
+ * 主线程必须直接返回（Looper 泵事件），阻塞只在业务线程。 */
+function vtouchRun(fn) {
+    device.wakeUpIfNeeded();
+    threads.start(function () {
+        var c = null;
+        try {
+            device.keepScreenOn(60 * 1000);
+            vtouchEnsure();
+            c = vtouchConnect();
+            fn(c);
+            c.close();
+            device.cancelKeepingAwake();
+        } catch (e) {
+            toastLog("vtouch 失败: " + e);
+            try { if (c) c.close(); } catch (e2) {}
+        }
+        exit();
+    });
+}
+
 /* ---- Finger 对象：自动分配空闲 slot，也支持显式 slot ---- */
 function Finger(conn, slot) { this.conn = conn; this.slot = slot; this.downState = false; }
 Finger.prototype.down = function (x, y) {
@@ -231,35 +253,22 @@ function vtouchFrame(c, pts) {
 }
 '''
 
-DEMO = """
-/* ---- 演示：Finger 点一下 + 双指帧 ---- */
-device.wakeUpIfNeeded();
-threads.start(function () {
-    var c = null;
-    try {
-        device.keepScreenOn(60 * 1000);
-        vtouchEnsure();
-        c = vtouchConnect();
-        vtouchFinger(c).tap(540, 1200);
-        var a = vtouchFinger(c, 0), b = vtouchFinger(c, 1);
-        vtouchFrame(c, [
-            { slot: a.slot, state: "down", x: 500, y: 1200 },
-            { slot: b.slot, state: "down", x: 900, y: 1200 }
-        ]);
-        sleep(200);
-        vtouchFrame(c, [
-            { slot: a.slot, state: "up", x: 500, y: 1200 },
-            { slot: b.slot, state: "up", x: 900, y: 1200 }
-        ]);
-        if (a.state() !== "up" || b.state() !== "up") throw new Error("手指未释放");
-        c.close();
-        device.cancelKeepingAwake();
-    } catch (e) {
-        toastLog("vtouch 失败: " + e);
-        try { if (c) c.close(); } catch (e2) {}
-    }
-    exit();
-});
+DEMO = """/* ---- 纯库，无副作用：加载只定义函数，不执行任何动作 ---- */
+module.exports = {
+    run: vtouchRun,
+    ensure: vtouchEnsure,
+    install: vtouchInstall,
+    connect: vtouchConnect,
+    send: vtouchSend,
+    finger: vtouchFinger,
+    Finger: Finger,
+    frame: vtouchFrame,
+    reset: vtouchReset,
+    stop: vtouchStop,
+    BIN: VTOUCH_BIN,
+    HOST: VTOUCH_HOST,
+    PORT: VTOUCH_PORT
+};
 """
 
 
