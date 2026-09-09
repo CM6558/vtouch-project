@@ -59,13 +59,19 @@ VTouch.prototype.connect = function (onReady) {
     this.closed = false;
     this.connecting = true;
     try { this.startService(); } catch (e) { log("[vtouch] start: " + e); }
-    (function attempt() {
+    /* 重试统一下发：任何回调/异常都走这里，避免多路 setTimeout 叠加出并发 attempt。 */
+    function retryIn(ms) {
+        try { clearTimeout(self.retry); } catch (e) {}
+        if (!self.closed && !self.opened) self.retry = setTimeout(attempt, ms);
+    }
+    function attempt() {
         if (self.closed || self.opened) return;
         if (Date.now() - startedAt > self.timeout) { self.connecting = false; throw new Error("vtouch WS 连接超时"); }
-        attempts++;
-        var wd = setTimeout(function () { try { self.ws && self.ws.cancel(); } catch (e) {} }, 600);
-        try { self.ws = new WebSocket(self.url); }
-        catch (e) { clearTimeout(wd); self.retry = setTimeout(attempt, 100); return; }
+        try {
+            attempts++;
+            var wd = setTimeout(function () { try { self.ws && self.ws.cancel(); } catch (e) {} retryIn(100); }, 600);
+            try { self.ws = new WebSocket(self.url); }
+            catch (e) { clearTimeout(wd); retryIn(100); return; }
         self.ws.on(WebSocket.EVENT_OPEN, function () {
             clearTimeout(wd);
             self.connecting = false;
@@ -77,12 +83,18 @@ VTouch.prototype.connect = function (onReady) {
             if (t.indexOf("err") === 0) log("[vtouch] err: " + t);
         }).on(WebSocket.EVENT_CLOSED, function () {
             clearTimeout(wd); self.connecting = false; self.opened = false;
-            if (!self.closed) self.retry = setTimeout(attempt, attempts <= 5 ? 50 : 100);
+            retryIn(attempts <= 5 ? 50 : 100);
         }).on(WebSocket.EVENT_FAILURE, function (e) {
             clearTimeout(wd); self.connecting = false; self.opened = false; log("[vtouch] fail: " + e);
-            if (!self.closed) self.retry = setTimeout(attempt, attempts <= 5 ? 50 : 100);
+            retryIn(attempts <= 5 ? 50 : 100);
         });
-    })();
+        } catch (e) {
+            try { clearTimeout(wd); } catch (e2) {}
+            log("[vtouch] attempt err: " + e);
+            retryIn(100);
+        }
+    }
+    attempt();
     return this;
 };
 /* 同步等到 WS OPEN。内部 sleep，必须在业务线程调用。 */

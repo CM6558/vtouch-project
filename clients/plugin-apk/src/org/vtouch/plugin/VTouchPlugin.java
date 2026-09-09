@@ -198,6 +198,51 @@ public class VTouchPlugin implements ServiceConnection {
         return sendCommand(cmd);
     }
 
+    /** 后端状态自检（替代 verify 脚本）：pid 存活 + 27183 端口可连通；
+     *  任一不通则用 root 再复核一次（应用挂载命名空间可能看不见运行时文件）。 */
+    public String getBackendStatus() {
+        StringBuilder sb = new StringBuilder();
+        try {
+            int pid = readPid(new File(VTOUCHD_PID));
+            boolean pidOk = isAlive(pid);
+            boolean portOk = false;
+            Socket s = null;
+            try {
+                s = new Socket();
+                s.connect(new InetSocketAddress("127.0.0.1", 27183), 1500);
+                portOk = true;
+            } catch (Exception ignored) {
+            } finally {
+                if (s != null) { try { s.close(); } catch (Exception ignored) {} }
+            }
+            String rootNote = "";
+            if (!pidOk || !portOk) {
+                /* 应用挂载命名空间可能看不见运行时文件，root 说了算。 */
+                String out = execRoot("B=" + RUNTIME_DIR + "; P=$(cat $B/vtouchd.pid 2>/dev/null);"
+                        + "kill -0 $P 2>/dev/null && echo R_PID_OK PID=$P; ss -ltn 2>/dev/null | grep -q 27183 && echo R_PORT_OK");
+                if (out != null) {
+                    if (!pidOk && out.contains("R_PID_OK")) {
+                        pidOk = true;
+                        try {
+                            int ps = out.indexOf("PID=");
+                            if (ps >= 0) pid = Integer.parseInt(out.substring(ps + 4).trim().split("[^0-9]")[0]);
+                        } catch (Exception ignored) {}
+                    }
+                    if (!portOk && out.contains("R_PORT_OK")) portOk = true;
+                    rootNote = " root:{" + out.trim().replace('\n', ' ') + "}";
+                } else {
+                    rootNote = " root:{n/a}";
+                }
+            }
+            sb.append("pid=").append(pidOk ? pid + ":alive" : "-:dead").append(" ");
+            sb.append("port=27183:").append(portOk ? "open" : "closed").append(rootNote).append(" ");
+            sb.append(pidOk && portOk ? "STATUS=READY" : "STATUS=NOT_READY");
+        } catch (Exception e) {
+            sb.append("STATUS=ERROR ").append(e);
+        }
+        return sb.toString();
+    }
+
     /* ---- 内部实现 ---- */
 
     private static boolean serviceReady() {

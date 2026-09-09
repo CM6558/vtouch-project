@@ -62,20 +62,15 @@ aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24
 
 ## 安装与运行
 
-### 1. 共享存储安装（推荐测试）
+### 1. 安装 APK（自包含，无脚本）
 
 ```bash
-# 推送安装包到手机
-adb push vtouch-merge-sdcard-latest.zip /sdcard/
-adb shell "cd /sdcard && unzip -o vtouch-merge-sdcard-latest.zip -d vtouch-merge"
-
-# 执行安装脚本
-adb shell
-su
-sh /sdcard/vtouch-merge/install_from_sdcard.sh
+# 安装插件 APK 到手机
+adb install clients/plugin-apk/out/vtouch-plugin.apk
 ```
 
-输出 `[OK] VTOUCH_READY=1` 表示服务启动成功。
+在 AutoJs6 里运行任意脚本：`new VTouch()` 自动释放二进制（首次）、启动后端并连接。
+输出 tap/swipe 正常即成功；状态检查 `vt.status()`（APK 通道）。
 
 ### 2. 手动部署（可选）
 
@@ -138,10 +133,10 @@ var vt = new VTouch().connect(function (client) {
 vt.stopService();
 ```
 
-或手动停止：
+或在脚本里停止：
 
-```bash
-su -c "sh /data/local/tmp/vtouch-stop.sh"
+```js
+vt.close(); vt.stopService();
 ```
 
 ## 常见问题

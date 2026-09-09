@@ -1,40 +1,33 @@
-# Userspace merged touchscreen backend
+# Userspace merged touchscreen backend (vtouchd, single process)
 
-This version does not require KernelSU. Start and stop it with `su -c sh` scripts.
+No KernelSU required. No shell scripts: the APK is self-contained —
+install it, run any script, and `new VTouch()` auto-extracts the binary,
+starts the backend and connects. Lifecycle and health live in
+`VTouchPlugin` (startBackend/stopBackend/isServiceReady/getBackendStatus).
 
 ## Files on the phone
 
 ```text
-/data/local/tmp/vtouchmerge
-/data/local/tmp/vtouchws
-/data/local/tmp/vtouch-start.sh
-/data/local/tmp/vtouch-stop.sh
-/data/local/tmp/vtouch-runtime/merge.sock
+/data/local/tmp/vtouchd                  # single binary (APK assets → root cp)
+/data/local/tmp/vtouch-runtime/vtouchd.pid
+/data/local/tmp/vtouch-runtime/vtouchd.log
 ```
 
 ## Start
 
-```sh
-su -c 'sh /data/local/tmp/vtouch-start.sh'
-```
-
-The script stops stale `vtouchmerge`/`vtouchws` processes, starts the merger, waits for its Unix socket, starts the WebSocket bridge, and prints:
-
-```text
-[OK] VTOUCH_READY=1
+```js
+var vt = new VTouch();   // auto-extract (first run) + start + connect
+vt.ready();
 ```
 
 ## Stop completely
 
-```sh
-su -c 'sh /data/local/tmp/vtouch-stop.sh'
+```js
+vt.close(); vt.stopService();
 ```
 
-It sends TERM, then KILL if required, removes the socket and pid files, and prints:
-
-```text
-[OK] VTOUCH_STOPPED=1
-```
+It kills the daemon, removes pid files; the dead process closes fds and
+releases `EVIOCGRAB`. Status check: `vt.status()` (APK channel).
 
 The worker owns the physical input fd, so stopping it closes the fd and releases `EVIOCGRAB`.
 

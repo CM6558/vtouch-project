@@ -17,17 +17,14 @@
 | `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
 | `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
 
-## 快速安装（共享存储）
+## 安装（APK 自包含，无脚本）
 
 ```sh
-adb push vtouch-merge-sdcard-latest.zip /sdcard/
-adb shell "cd /sdcard && unzip -o vtouch-merge-sdcard-latest.zip -d vtouch-merge"
-adb shell
-su
-sh /sdcard/vtouch-merge/install_from_sdcard.sh
+adb install clients/plugin-apk/out/vtouch-plugin.apk
 ```
 
-输出 `[OK] VTOUCH_READY=1` 表示服务启动成功。
+在 AutoJs6 里运行任意脚本：`new VTouch()` 自动释放二进制（首次）、启动后端并连接。
+状态检查：`vt.status()`（APK 通道）。
 
 ## AutoJs6 SDK
 

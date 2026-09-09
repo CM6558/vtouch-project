@@ -143,6 +143,9 @@ def main() -> int:
         "            this.serviceStarted = false;\n"
         "            return this;\n"
         "        };\n"
+        "        VTouch.prototype.status = function () {\n"
+        "            try { return plugin.getBackendStatus(); } catch (e) { return 'unknown: ' + e; }\n"
+        "        };\n"
         "    }\n"
         "    " + version_line +
         "    VTouch.Finger = Finger;\n"

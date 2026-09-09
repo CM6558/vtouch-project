@@ -13,11 +13,9 @@ vtouch-project/
 │   ├── vtouch_plugin_example.js  # 插件用法示例
 │   └── vtouch_plugin_apk_test.js # 插件真机测试脚本
 ├── scripts/
-│   ├── install_from_sdcard.sh    # 手机端安装/启动（部署入口）
-│   ├── vtouch-start.sh           # 启动服务
-│   ├── vtouch-stop.sh            # 停止服务
-│   ├── verify_vtouch_merge.sh    # 服务健康检查
-│   └── make_install_archives.py  # 生成 sdcard 安装包 zip
+│   ├── build_sdk.py              # SDK 单源构建（分发 clients + APK 胶水）
+│   ├── vtouch-sdk.src.js         # SDK 唯一可读主源
+│   └── verify_vtouch_merge.sh    # 开发者诊断（adb 手动跑，不随包分发）
 ├── sdcard/vtouch-merge/          # 手机运行目录（随安装包分发）
 ├── docs/
 │   ├── README.md                 # 总文档
@@ -62,16 +60,8 @@ aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24
 ## 部署
 
 ```sh
-# 方式一：安装包（推荐）
-adb push vtouch-merge-sdcard-latest.zip /sdcard/
-adb shell
-su
-sh /sdcard/vtouch-merge/install_from_sdcard.sh
-
-# 方式二：手动部署
-adb push build/vtouchmerge /sdcard/vtouchmerge
-adb push build/vtouchws /sdcard/vtouchws
-adb shell 'su -c "cp /sdcard/vtouchmerge /data/local/tmp/vtouchmerge; cp /sdcard/vtouchws /data/local/tmp/vtouchws; chmod 755 /data/local/tmp/vtouchmerge /data/local/tmp/vtouchws"'
+# 安装 APK（自包含：启停/健康检查全在插件 Java 侧）
+adb install clients/plugin-apk/out/vtouch-plugin.apk
 ```
 
-先启动 `vtouchmerge`，再启动 `vtouchws`。AutoJs6 SDK 的 `startService()` 也会自动完成这一过程。
+先装 APK，`new VTouch()` 自动完成释放、启动与连接。
