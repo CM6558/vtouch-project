@@ -23,5 +23,7 @@ module.exports = function (plugin) {
             return this;
         };
     }
+    VTouch.VERSION = "2.0.0-plugin";
+    VTouch.Finger = Finger;
     return VTouch;
 };
