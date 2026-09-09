@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "vtouchd"
 OUT = ROOT / "clients" / "vtouch_bundle.js"
+OUT_ONE = ROOT / "clients" / "vtouch_onefile_example.js"
 
 CORE = '''/* ============================================================================
  * VTouch 单文件包：二进制内嵌 + 一层薄函数。由 scripts/build_bundle.py 生成，勿手改。
@@ -285,6 +286,132 @@ module.exports = {
 """
 
 
+def write_out(path, text):
+    path.write_text(text, encoding="utf-8", newline="\n")
+    r = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip())
+        return False
+    return True
+
+
+ONE_LIB = '''
+/* ---- 区域监听（store + engine + overlay，单文件内联） ----
+ * 区域格式: {id, name, x1, y1, x2, y2, enabled}，存 storages "vtouch_regions"。
+ * UI 框选页/管理页读写同一份，无需改这里。 */
+var _rgStore = storages.create("vtouch_regions");
+function rgLoad() {
+    try {
+        var rs = _rgStore.get("regions");
+        if (rs && rs.length) return rs;
+    } catch (e) {}
+    return [{ id: "btn", name: "按钮区", x1: 400, y1: 1000, x2: 1040, y2: 1400, enabled: true }];
+}
+function rgInRect(r, x, y) { return x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2; }
+function rgCreateEngine(regions, handlers) {
+    var inside = {}, fingers = {};
+    return {
+        fingers: function () { var o = [], k; for (k in fingers) o.push(fingers[k]); return o; },
+        setRegions: function (rs) { regions = rs; },
+        feed: function (p) {
+            var evts = [], i, r, f = fingers[p.slot] || (fingers[p.slot] = { slot: p.slot, x: 0, y: 0, down: false });
+            f.x = p.x; f.y = p.y;
+            if (p.action === "down") f.down = true;
+            if (p.action === "up") f.down = false;
+            if (!inside[p.slot]) inside[p.slot] = {};
+            for (i = 0; i < regions.length; i++) {
+                r = regions[i];
+                if (r.enabled === false) continue;
+                var hit = rgInRect(r, p.x, p.y), was = !!inside[p.slot][r.id];
+                if (p.action === "down" && hit) { inside[p.slot][r.id] = true; evts.push({ type: "down", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
+                else if (p.action === "up" && (hit || was)) { delete inside[p.slot][r.id]; evts.push({ type: "up", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
+                else if (p.action === "move" && hit) { inside[p.slot][r.id] = true; evts.push({ type: "move", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); if (!was) evts.push({ type: "enter", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
+                else if (hit && !was) { inside[p.slot][r.id] = true; evts.push({ type: "enter", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
+                else if (!hit && was) { delete inside[p.slot][r.id]; evts.push({ type: "exit", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
+            }
+            if (handlers) for (i = 0; i < evts.length; i++) {
+                var e = evts[i], h = handlers["on" + e.type[0].toUpperCase() + e.type.slice(1)];
+                if (h) h(e.region, e.finger);
+            }
+            return evts;
+        }
+    };
+}
+var _ovW = null, _ovRegions = [], _ovFingers = [], _ovFlash = {};
+function ovShow(regions) {
+    _ovRegions = regions;
+    if (_ovW) return;
+    _ovW = floaty.rawWindow('<frame><canvas id="board" layout_weight="1"/></frame>');
+    _ovW.setSize(device.width, device.height);
+    _ovW.setTouchable(false);
+    _ovW.board.on("draw", function (canvas) {
+        canvas.drawColor(0x00000000, android.graphics.PorterDuff.Mode.CLEAR);
+        var P = android.graphics.Paint, i, r, p;
+        for (i = 0; i < _ovRegions.length; i++) {
+            r = _ovRegions[i];
+            p = new P(); p.setStyle(P.Style.STROKE); p.setStrokeWidth(3); p.setColor(0x88FF0000);
+            if (_ovFlash[r.id] && Date.now() - _ovFlash[r.id] < 400) { p.setStrokeWidth(6); p.setColor(0xAA00FF00); }
+            canvas.drawRect(r.x1, r.y1, r.x2, r.y2, p);
+            p = new P(); p.setColor(0xDDFFFFFF); p.setTextSize(36);
+            canvas.drawText(r.name || r.id, r.x1 + 8, r.y1 + 40, p);
+        }
+        for (i = 0; i < _ovFingers.length; i++) {
+            var f = _ovFingers[i];
+            p = new P(); p.setColor(0xAA00B0FF);
+            canvas.drawCircle(f.x, f.y, 40, p);
+            canvas.drawText("s" + f.slot, f.x + 44, f.y, p);
+        }
+    });
+}
+'''
+
+ONE_RUN = '''
+/* ---- 可运行入口（常驻监听）：主线程只投递，业务线程 feed + 虚拟手指 ----
+ * 触发逻辑只改 handlers。结束脚本时自动关叠加层 + 停二进制。 */
+var rgRegions = rgLoad();
+ovShow(rgRegions);
+var rgHandlers = {
+    onDown: function (region, f) { _ovFlash[region.id] = Date.now(); },
+    onMove: function (region, f) {},
+    onEnter: function (region, f) { _ovFlash[region.id] = Date.now(); },
+    onExit: function (region, f) {},
+    onUp: function (region, f) {
+        if (region.id === "btn") vtouchFinger().tap((region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
+    }
+};
+var rgEng = rgCreateEngine(rgRegions, rgHandlers);
+var rgQ = new java.util.concurrent.LinkedBlockingQueue();
+function rgNorm(p) {
+    var a = p.action;
+    if (a === 0 || a === "down") a = "down";
+    else if (a === 1 || a === "up") a = "up";
+    else a = "move";
+    return { slot: p.pointerId || p.slot || 0, x: p.x, y: p.y, action: a };
+}
+vtouchEnsure();
+vtouchConnect();
+events.observeTouch();
+events.onTouch(function (p) {
+    try { rgQ.offer(rgNorm(p)); _ovFingers = rgEng.fingers(); } catch (e) {}
+});
+events.on("exit", function () {
+    try { if (_ovW) _ovW.close(); } catch (e) {}
+    try { vtouchStop(); } catch (e2) {}
+});
+threads.start(function () {
+    device.keepScreenOn(10 * 60 * 1000);
+    var last = Date.now();
+    while (true) {
+        var p = rgQ.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (Date.now() - last > 2000) {
+            rgRegions = rgLoad(); rgEng.setRegions(rgRegions); _ovRegions = rgRegions; last = Date.now();
+        }
+        if (p) rgEng.feed(p);
+    }
+});
+'''
+
+
 def main() -> int:
     if "--check" in sys.argv:
         r = subprocess.run(["node", "--check", str(OUT)], capture_output=True, text=True)
@@ -298,13 +425,13 @@ def main() -> int:
         "var VTOUCH_BIN_SIZE = %d;\n"
         'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), b64)
     )
-    OUT.write_text(CORE + "\n" + blob + "\n" + DEMO, encoding="utf-8", newline="\n")
-    print("bundle: %s (%d bytes, bin %d bytes)" % (OUT, OUT.stat().st_size, len(raw)))
-    r = subprocess.run(["node", "--check", str(OUT)], capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stderr.strip())
+    if not write_out(OUT, CORE + "\n" + blob + "\n" + DEMO):
         return 1
     print("bundle syntax OK")
+    if not write_out(OUT_ONE, CORE + "\n" + blob + "\n" + ONE_LIB + "\n" + ONE_RUN):
+        return 1
+    print("onefile: %s (%d bytes)" % (OUT_ONE, OUT_ONE.stat().st_size))
+    print("onefile syntax OK")
     return 0
 
 
