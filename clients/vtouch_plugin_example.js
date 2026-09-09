@@ -80,19 +80,12 @@
  * ============================================================================
  */
 "use strict";
+// JS 版（免插件）：直引 /sdcard/vtouch.js，后端二进制需事先就位
+// （装过插件跑过一次，或 adb push vtouchd 到 /data/local/tmp 并 chmod 755）。
+var VTouch = require("/sdcard/vtouch.js");
 
-var VTouch = plugins.load('org.vtouch.plugin');
-device.wakeUpIfNeeded();
-threads.start(function () {
-    try {
-        device.keepScreenOn(60 * 1000);
-        var vt = new VTouch();
-        vt.ready();
-        vt.finger().tap(540, 1200);
-        vt.close();
-        device.cancelKeepingAwake();
-    } catch (e) {
-        toastLog("vtouch 失败: " + e);
-    }
-    exit();
-});
+var vt = new VTouch();
+vt.ready();
+vt.finger().tap(540, 1200);
+vt.close();
+
