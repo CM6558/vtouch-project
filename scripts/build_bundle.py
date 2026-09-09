@@ -169,17 +169,55 @@ function vtouchConnectOnce(timeout) {
 }
 
 function vtouchSend(c, line) { c.drain(); c.send(line); }
-function vtouchDown(c, x, y, slot) { vtouchSend(c, "down " + (slot || 0) + " " + Math.round(x) + " " + Math.round(y)); }
-function vtouchMove(c, x, y, slot) { vtouchSend(c, "move " + (slot || 0) + " " + Math.round(x) + " " + Math.round(y)); }
-function vtouchUp(c, slot) { vtouchSend(c, "up " + (slot || 0)); }
-function vtouchTap(c, x, y, ms, slot) {
-    vtouchDown(c, x, y, slot); sleep(ms == null ? 60 : ms); vtouchUp(c, slot);
+function vtouchReset(c) { vtouchSend(c, "reset"); }
+function vtouchStop() {
+    shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
 }
-function vtouchSwipe(c, x1, y1, x2, y2, ms, slot) {
-    var total = ms == null ? 300 : ms, n = Math.max(2, Math.round(total / 16.7));
-    vtouchDown(c, x1, y1, slot);
-    for (var i = 1; i <= n; i++) { sleep(total / n); vtouchMove(c, x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n, slot); }
-    vtouchUp(c, slot);
+
+/* ---- Finger 对象：自动分配空闲 slot，也支持显式 slot ---- */
+function Finger(conn, slot) { this.conn = conn; this.slot = slot; this.downState = false; }
+Finger.prototype.down = function (x, y) {
+    vtouchSend(this.conn, "down " + this.slot + " " + Math.round(x) + " " + Math.round(y));
+    this.downState = true;
+    return this;
+};
+Finger.prototype.move = function (x, y) {
+    if (!this.downState) return this;
+    vtouchSend(this.conn, "move " + this.slot + " " + Math.round(x) + " " + Math.round(y));
+    return this;
+};
+Finger.prototype.up = function () {
+    if (!this.downState) return this;
+    vtouchSend(this.conn, "up " + this.slot);
+    this.downState = false;
+    return this;
+};
+Finger.prototype.tap = function (x, y, ms) {
+    this.down(x, y); sleep(ms == null ? 60 : ms); return this.up();
+};
+Finger.prototype.swipe = function (x1, y1, x2, y2, ms) {
+    var total = ms == null ? 300 : ms, n = Math.max(2, Math.round(total / 16.7)), i;
+    this.down(x1, y1);
+    for (i = 1; i <= n; i++) { sleep(total / n); this.move(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n); }
+    return this.up();
+};
+Finger.prototype.frame = function (state, x, y) {
+    return vtouchFrame(this.conn, [{ slot: this.slot, state: state, x: x, y: y }]);
+};
+Finger.prototype.state = function () { return this.downState ? "down" : "up"; };
+function vtouchFinger(conn, slot) {
+    var i;
+    if (!conn.fingers) conn.fingers = {};
+    if (slot === undefined || slot === null) {
+        for (i = 0; i <= 9; i++) if (!conn.fingers[i] || !conn.fingers[i].downState) break;
+        if (i > 9) throw new Error("无空闲 slot");
+        slot = i;
+    } else {
+        slot = Math.round(slot);
+        if (slot < 0 || slot > 9) throw new Error("slot 0~9");
+    }
+    if (!conn.fingers[slot]) conn.fingers[slot] = new Finger(conn, slot);
+    return conn.fingers[slot];
 }
 function vtouchFrame(c, pts) {
     var i, p;
@@ -187,17 +225,14 @@ function vtouchFrame(c, pts) {
     for (i = 0; i < pts.length; i++) {
         p = pts[i];
         vtouchSend(c, "point " + p.slot + " " + p.state + " " + Math.round(p.x) + " " + Math.round(p.y));
+        if (c.fingers && c.fingers[p.slot]) c.fingers[p.slot].downState = p.state !== "up";
     }
     vtouchSend(c, "end_frame");
-}
-function vtouchReset(c) { vtouchSend(c, "reset"); }
-function vtouchStop() {
-    shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
 }
 '''
 
 DEMO = """
-/* ---- 演示：点一下 ---- */
+/* ---- 演示：Finger 点一下 + 双指帧 ---- */
 device.wakeUpIfNeeded();
 threads.start(function () {
     var c = null;
@@ -205,7 +240,18 @@ threads.start(function () {
         device.keepScreenOn(60 * 1000);
         vtouchEnsure();
         c = vtouchConnect();
-        vtouchTap(c, 540, 1200);
+        vtouchFinger(c).tap(540, 1200);
+        var a = vtouchFinger(c, 0), b = vtouchFinger(c, 1);
+        vtouchFrame(c, [
+            { slot: a.slot, state: "down", x: 500, y: 1200 },
+            { slot: b.slot, state: "down", x: 900, y: 1200 }
+        ]);
+        sleep(200);
+        vtouchFrame(c, [
+            { slot: a.slot, state: "up", x: 500, y: 1200 },
+            { slot: b.slot, state: "up", x: 900, y: 1200 }
+        ]);
+        if (a.state() !== "up" || b.state() !== "up") throw new Error("手指未释放");
         c.close();
         device.cancelKeepingAwake();
     } catch (e) {
