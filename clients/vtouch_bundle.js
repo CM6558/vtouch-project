@@ -149,14 +149,20 @@ function vtouchConnectOnce(timeout) {
 }
 
 function vtouchSend(c, line) { c.drain(); c.send(line); }
-function vtouchReset(c) { vtouchSend(c, "reset"); }
+function vtouchReset() { vtouchSend(vtouchCur(), "reset"); }
 function vtouchStop() {
     shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
 }
 
 /* ---- 入口：仪式全包，业务只写触摸逻辑 ----
- * vt.run(function (c) { vt.finger(c).tap(540, 1200); });
- * 主线程必须直接返回（Looper 泵事件），阻塞只在业务线程。 */
+ * vt.run(function () { vt.finger().tap(540, 1200); });
+ * 主线程必须直接返回（Looper 泵事件），阻塞只在业务线程。
+ * run 内为当前连接，finger/frame/reset 直接用，不用传 c。 */
+var CURR = null;
+function vtouchCur() {
+    if (!CURR) throw new Error("请在 vt.run(function(){...}) 内调用");
+    return CURR;
+}
 function vtouchRun(fn) {
     device.wakeUpIfNeeded();
     threads.start(function () {
@@ -165,12 +171,15 @@ function vtouchRun(fn) {
             device.keepScreenOn(60 * 1000);
             vtouchEnsure();
             c = vtouchConnect();
-            fn(c);
+            CURR = c;
+            fn();
             c.close();
             device.cancelKeepingAwake();
         } catch (e) {
             toastLog("vtouch 失败: " + e);
             try { if (c) c.close(); } catch (e2) {}
+        } finally {
+            CURR = null;
         }
         exit();
     });
@@ -204,25 +213,25 @@ Finger.prototype.swipe = function (x1, y1, x2, y2, ms) {
     return this.up();
 };
 Finger.prototype.frame = function (state, x, y) {
-    return vtouchFrame(this.conn, [{ slot: this.slot, state: state, x: x, y: y }]);
+    return vtouchFrame([{ slot: this.slot, state: state, x: x, y: y }]);
 };
 Finger.prototype.state = function () { return this.downState ? "down" : "up"; };
-function vtouchFinger(conn, slot) {
-    var i;
-    if (!conn.fingers) conn.fingers = {};
+function vtouchFinger(slot) {
+    var c = vtouchCur(), i;
+    if (!c.fingers) c.fingers = {};
     if (slot === undefined || slot === null) {
-        for (i = 0; i <= 9; i++) if (!conn.fingers[i] || !conn.fingers[i].downState) break;
+        for (i = 0; i <= 9; i++) if (!c.fingers[i] || !c.fingers[i].downState) break;
         if (i > 9) throw new Error("无空闲 slot");
         slot = i;
     } else {
         slot = Math.round(slot);
         if (slot < 0 || slot > 9) throw new Error("slot 0~9");
     }
-    if (!conn.fingers[slot]) conn.fingers[slot] = new Finger(conn, slot);
-    return conn.fingers[slot];
+    if (!c.fingers[slot]) c.fingers[slot] = new Finger(c, slot);
+    return c.fingers[slot];
 }
-function vtouchFrame(c, pts) {
-    var i, p;
+function vtouchFrame(pts) {
+    var c = vtouchCur(), i, p;
     vtouchSend(c, "begin_frame");
     for (i = 0; i < pts.length; i++) {
         p = pts[i];
