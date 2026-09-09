@@ -351,25 +351,28 @@ function ovShow(regions) {
     _ovW.setSize(device.width, device.height);
     _ovW.setTouchable(false);
     _ovW.board.on("draw", function (canvas) {
-        canvas.drawColor(0x00000000, android.graphics.PorterDuff.Mode.CLEAR);
-        var P = android.graphics.Paint, i, r, p;
+        /* 文档写法：裸 Paint / Paint.Style / colors；禁用 PorterDuff 包路径（Invalid ID:63）。不清屏，靠视图自清。 */
+        var i, r, p;
         for (i = 0; i < _ovRegions.length; i++) {
             r = _ovRegions[i];
-            p = new P(); p.setStyle(P.Style.STROKE); p.setStrokeWidth(3); p.setColor(0x88FF0000);
-            if (_ovFlash[r.id] && Date.now() - _ovFlash[r.id] < 400) { p.setStrokeWidth(6); p.setColor(0xAA00FF00); }
+            p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
+            if (_ovFlash[r.id] && Date.now() - _ovFlash[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
             canvas.drawRect(r.x1, r.y1, r.x2, r.y2, p);
-            p = new P(); p.setColor(0xDDFFFFFF); p.setTextSize(36);
+            p = new Paint(); p.setColor(colors.WHITE); p.setTextSize(36);
             canvas.drawText(r.name || r.id, r.x1 + 8, r.y1 + 40, p);
         }
         for (i = 0; i < _ovFingers.length; i++) {
             var f = _ovFingers[i];
-            p = new P(); p.setColor(0xAA00B0FF);
+            p = new Paint(); p.setColor(colors.BLUE);
             canvas.drawCircle(f.x, f.y, 40, p);
             canvas.drawText("s" + f.slot, f.x + 44, f.y, p);
         }
     });
 }
-function ovUpdate(fingers) { _ovFingers = fingers || []; }
+function ovUpdate(fingers) {
+    _ovFingers = fingers || [];
+    try { _ovW.board.postInvalidate(); } catch (e) {}
+}
 function ovFlash(id) { _ovFlash[id] = Date.now(); }
 function ovSetRegions(rs) { _ovRegions = rs; }
 function ovClose() { try { if (_ovW) _ovW.close(); } catch (e) {} _ovW = null; }

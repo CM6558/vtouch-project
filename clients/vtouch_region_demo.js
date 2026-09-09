@@ -1,7 +1,6 @@
 /* 区域监听调用示例：只写触发逻辑，定义全在 vtouch_bundle.js 里。
- * 顺序不能换：floaty 悬浮窗建出来后 shell(true) 会失效（回码 1），
- * 所以 ensure/connect 必须在任何悬浮窗之前。
- * 可视化 canvas 在此 ROM 上首帧必崩（Invalid ID:63），已剥离，触发用 toast+log 反馈。
+ * 顺序不能换：ensure/connect 必须在 ovShow 之前（悬浮窗建出来后 shell(true) 回码 1）；
+ * 退出时先 stop 再关窗。可视化按官方文档写法（裸 Paint/Paint.Style/colors）。
  */
 "use strict";
 var vt = require("/sdcard/vtouch_bundle.js");
@@ -10,13 +9,15 @@ vt.ensure();
 vt.connect();
 
 var regions = vt.loadRegions();
+vt.ovShow(regions);
+
 var eng = vt.createEngine(regions, {
     onDown: function (region, f) {
-        toast("按下 " + (region.name || region.id));
+        vt.ovFlash(region.id);
         log("trig down " + region.id + " s" + f.slot + " " + Math.round(f.x) + "," + Math.round(f.y));
     },
     onMove: function (region, f) {},
-    onEnter: function (region, f) { log("trig enter " + region.id + " s" + f.slot); },
+    onEnter: function (region, f) { vt.ovFlash(region.id); },
     onExit: function (region, f) {},
     onUp: function (region, f) {
         log("trig up " + region.id + " s" + f.slot);
@@ -35,10 +36,11 @@ function norm(p) {
 
 events.observeTouch();
 events.onTouch(function (p) {
-    try { Q.offer(norm(p)); } catch (e) {}
+    try { Q.offer(norm(p)); vt.ovUpdate(eng.fingers()); } catch (e) {}
 });
 events.on("exit", function () {
     try { vt.stop(); } catch (e) {}
+    try { vt.ovClose(); } catch (e2) {}
 });
 
 threads.start(function () {
@@ -54,5 +56,6 @@ setInterval(function () {
     try {
         regions = vt.loadRegions();
         eng.setRegions(regions);
+        vt.ovSetRegions(regions);
     } catch (e) {}
 }, 2000);
