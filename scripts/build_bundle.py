@@ -30,6 +30,14 @@ var VTOUCH_BIN = "/data/local/tmp/vtouchd";
 var VTOUCH_HOST = "127.0.0.1";
 var VTOUCH_PORT = 27183;
 
+/* 当前连接：connect() 成功后自动设定，close()/stop() 后清除。
+ * finger/frame/reset 直接用它，run 之外不用传参。 */
+var CURR = null;
+function vtouchCur() {
+    if (!CURR) throw new Error("无当前连接：先调 vt.ensure() + vt.connect()，或在 vt.run 内调用");
+    return CURR;
+}
+
 /* 后端幂等启动：pid 存活直接返回；缺二进制则释放；然后拉起（不等端口）。 */
 function vtouchEnsure() {
     var r = shell("B=/data/local/tmp/vtouch-runtime;D=" + VTOUCH_BIN + ";"
@@ -164,25 +172,21 @@ function vtouchConnectOnce(timeout) {
     };
     /* 顺手排掉已到的回包，避免长会话撑满 TCP 缓冲。 */
     conn.drain = function () { try { while (conn.recv() !== null) {} } catch (e) {} };
-    conn.close = function () { try { conn.sock.close(); } catch (e) {} };
+    conn.close = function () { if (CURR === conn) CURR = null; try { conn.sock.close(); } catch (e) {} };
+    CURR = conn;
     return conn;
 }
 
 function vtouchSend(c, line) { c.drain(); c.send(line); }
 function vtouchReset() { vtouchSend(vtouchCur(), "reset"); }
 function vtouchStop() {
+    CURR = null;
     shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
 }
 
 /* ---- 入口：仪式全包，业务只写触摸逻辑 ----
  * vt.run(function () { vt.finger().tap(540, 1200); });
- * 主线程必须直接返回（Looper 泵事件），阻塞只在业务线程。
- * run 内为当前连接，finger/frame/reset 直接用，不用传 c。 */
-var CURR = null;
-function vtouchCur() {
-    if (!CURR) throw new Error("请在 vt.run(function(){...}) 内调用");
-    return CURR;
-}
+ * 主线程必须直接返回（Looper 泵事件），阻塞只在业务线程。 */
 function vtouchRun(fn) {
     device.wakeUpIfNeeded();
     threads.start(function () {
@@ -191,7 +195,6 @@ function vtouchRun(fn) {
             device.keepScreenOn(60 * 1000);
             vtouchEnsure();
             c = vtouchConnect();
-            CURR = c;
             fn();
             c.close();
             device.cancelKeepingAwake();
