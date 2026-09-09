@@ -181,6 +181,7 @@ function vtouchRun(fn) {
         } finally {
             CURR = null;
         }
+        try { vtouchStop(); } catch (e3) {}
         exit();
     });
 }
