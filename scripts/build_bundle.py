@@ -10,6 +10,7 @@ OkHttp WebSocket（其回调派发会间歇性卡死），改用 java.net.Socket
 用法: python scripts/build_bundle.py [--check]
 """
 import base64
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -279,12 +280,9 @@ module.exports = {
     reset: vtouchReset,
     stop: vtouchStop,
     loadRegions: rgLoad,
+    rgSave: rgSave,
     createEngine: rgCreateEngine,
-    ovShow: ovShow,
-    ovUpdate: ovUpdate,
-    ovFlash: ovFlash,
-    ovSetRegions: ovSetRegions,
-    ovClose: ovClose,
+    uiSource: VTOUCH_UI_SRC,
     BIN: VTOUCH_BIN,
     HOST: VTOUCH_HOST,
     PORT: VTOUCH_PORT
@@ -314,6 +312,11 @@ function rgLoad() {
     return [{ id: "btn", name: "按钮区", x1: 400, y1: 1000, x2: 1040, y2: 1400, enabled: true }];
 }
 function rgInRect(r, x, y) { return x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2; }
+function rgHit(r, x, y) {
+    if (r.type === "circle") { var dx = x - r.cx, dy = y - r.cy; return dx * dx + dy * dy <= r.r * r.r; }
+    return rgInRect(r, x, y); /* 老数据无 type，按矩形 */
+}
+function rgSave(rs) { try { _rgStore.put("regions", rs); } catch (e) {} }
 function rgCreateEngine(regions, handlers) {
     var inside = {}, fingers = {};
     return {
@@ -328,7 +331,7 @@ function rgCreateEngine(regions, handlers) {
             for (i = 0; i < regions.length; i++) {
                 r = regions[i];
                 if (r.enabled === false) continue;
-                var hit = rgInRect(r, p.x, p.y), was = !!inside[p.slot][r.id];
+                var hit = rgHit(r, p.x, p.y), was = !!inside[p.slot][r.id];
                 if (p.action === "down" && hit) { inside[p.slot][r.id] = true; evts.push({ type: "down", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
                 else if (p.action === "up" && (hit || was)) { delete inside[p.slot][r.id]; evts.push({ type: "up", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
                 else if (p.action === "move" && hit) { inside[p.slot][r.id] = true; evts.push({ type: "move", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); if (!was) evts.push({ type: "enter", region: r, finger: { slot: f.slot, x: f.x, y: f.y } }); }
@@ -343,85 +346,140 @@ function rgCreateEngine(regions, handlers) {
         }
     };
 }
-var _ovW = null, _ovRegions = [], _ovFingers = [], _ovFlash = {};
-function ovShow(regions) {
-    _ovRegions = regions;
-    if (_ovW) return;
-    _ovW = floaty.rawWindow('<frame><canvas id="board" layout_weight="1"/></frame>');
-    _ovW.setSize(device.width, device.height);
-    _ovW.setTouchable(false);
-    _ovW.board.on("draw", function (canvas) {
-        /* 文档写法：裸 Paint / Paint.Style / colors；禁用 PorterDuff 包路径（Invalid ID:63）。不清屏，靠视图自清。 */
-        var i, r, p;
-        for (i = 0; i < _ovRegions.length; i++) {
-            r = _ovRegions[i];
+'''
+
+UI_SRC = '''
+/* 区域 overlay + 管理 UI：必须在主上下文 eval 执行（Java bridge 回调不能定义在 require 模块里）。只用 vt.loadRegions / vt.rgSave。 */
+var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {};
+var g_uiW = null, g_capW = null, g_cap = null;
+var g_uiH = new android.os.Handler(android.os.Looper.getMainLooper());
+function ovShow(rs) {
+    g_ovR = rs;
+    if (g_ovW) return;
+    g_ovW = floaty.rawWindow('<frame><canvas id="board" layout_weight="1"/></frame>');
+    g_ovW.setSize(device.width, device.height);
+    g_ovW.setTouchable(false);
+    g_ovW.board.on("draw", function (canvas) {
+        var i, r, p, lx, ly;
+        for (i = 0; i < g_ovR.length; i++) {
+            r = g_ovR[i];
             p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
-            if (_ovFlash[r.id] && Date.now() - _ovFlash[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
-            canvas.drawRect(r.x1, r.y1, r.x2, r.y2, p);
+            if (g_ovH[r.id] && Date.now() - g_ovH[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
+            if (r.type === "circle") { canvas.drawCircle(r.cx, r.cy, r.r, p); lx = r.cx - r.r; ly = r.cy - r.r; }
+            else { canvas.drawRect(r.x1, r.y1, r.x2, r.y2, p); lx = r.x1; ly = r.y1; }
             p = new Paint(); p.setColor(colors.WHITE); p.setTextSize(36);
-            canvas.drawText(r.name || r.id, r.x1 + 8, r.y1 + 40, p);
+            canvas.drawText(r.name || r.id, lx + 8, ly + 40, p);
         }
-        for (i = 0; i < _ovFingers.length; i++) {
-            var f = _ovFingers[i];
+        for (i = 0; i < g_ovF.length; i++) {
+            var f = g_ovF[i];
             p = new Paint(); p.setColor(colors.BLUE);
             canvas.drawCircle(f.x, f.y, 40, p);
             canvas.drawText("s" + f.slot, f.x + 44, f.y, p);
         }
     });
 }
-function ovUpdate(fingers) {
-    _ovFingers = fingers || [];
-    try { _ovW.board.postInvalidate(); } catch (e) {}
+function ovUpdate(f) { g_ovF = f || []; try { g_ovW.board.postInvalidate(); } catch (e) {} }
+function ovFlash(id) { g_ovH[id] = Date.now(); }
+function ovSet(rs) { g_ovR = rs; }
+function ovClose() { try { if (g_ovW) g_ovW.close(); } catch (e) {} g_ovW = null; }
+function ovPreview(on) { if (on) ovShow(vt.loadRegions()); else ovClose(); }
+function rgInfo(r) {
+    if (r.type === "circle") return "O r=" + Math.round(r.r) + " @ " + Math.round(r.cx) + "," + Math.round(r.cy);
+    return "[] " + (r.x2 - r.x1) + "x" + (r.y2 - r.y1) + " @ " + r.x1 + "," + r.y1;
 }
-function ovFlash(id) { _ovFlash[id] = Date.now(); }
-function ovSetRegions(rs) { _ovRegions = rs; }
-function ovClose() { try { if (_ovW) _ovW.close(); } catch (e) {} _ovW = null; }
-'''
-
-ONE_RUN = '''
-/* ---- 可运行入口（常驻监听）：主线程只投递，业务线程 feed + 虚拟手指 ----
- * 触发逻辑只改 handlers。结束脚本时自动关叠加层 + 停二进制。 */
-var rgRegions = rgLoad();
-ovShow(rgRegions);
-var rgHandlers = {
-    onDown: function (region, f) { _ovFlash[region.id] = Date.now(); },
-    onMove: function (region, f) {},
-    onEnter: function (region, f) { _ovFlash[region.id] = Date.now(); },
-    onExit: function (region, f) {},
-    onUp: function (region, f) {
-        if (region.id === "btn") vtouchFinger().tap((region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
-    }
-};
-var rgEng = rgCreateEngine(rgRegions, rgHandlers);
-var rgQ = new java.util.concurrent.LinkedBlockingQueue();
-function rgNorm(p) {
-    var a = p.action;
-    if (a === 0 || a === "down") a = "down";
-    else if (a === 1 || a === "up") a = "up";
-    else a = "move";
-    return { slot: p.pointerId || p.slot || 0, x: p.x, y: p.y, action: a };
+function uiBtn(text, fn) {
+    var b = new android.widget.Button(context);
+    b.setText(text);
+    b.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+    b.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { try { fn(); } catch (e) {} } }));
+    return b;
 }
-vtouchEnsure();
-vtouchConnect();
-events.observeTouch();
-events.onTouch(function (p) {
-    try { rgQ.offer(rgNorm(p)); _ovFingers = rgEng.fingers(); } catch (e) {}
-});
-events.on("exit", function () {
-    try { if (_ovW) _ovW.close(); } catch (e) {}
-    try { vtouchStop(); } catch (e2) {}
-});
-threads.start(function () {
-    device.keepScreenOn(10 * 60 * 1000);
-    var last = Date.now();
-    while (true) {
-        var p = rgQ.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-        if (Date.now() - last > 2000) {
-            rgRegions = rgLoad(); rgEng.setRegions(rgRegions); _ovRegions = rgRegions; last = Date.now();
-        }
-        if (p) rgEng.feed(p);
-    }
-});
+function uiRefresh() {
+    if (!g_uiW) return;
+    try {
+        g_uiH.post(new JavaAdapter(java.lang.Runnable, { run: function () {
+            try { uiRefreshDo(); } catch (e) { log("uiRefresh FAIL " + e); }
+        } }));
+    } catch (e) { log("uiRefresh post FAIL " + e); }
+}
+function uiRefreshDo() {
+    var rs = vt.loadRegions(), i;
+    g_uiW.title.setText("区域管理 (" + rs.length + "个)");
+    g_uiW.rows.removeAllViews();
+    for (i = 0; i < rs.length; i++) (function (r) {
+        var h = new android.widget.LinearLayout(context);
+        h.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        var t = new android.widget.TextView(context);
+        t.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        t.setTextSize(13);
+        t.setText((r.enabled === false ? "[关] " : "[开] ") + (r.name || r.id) + " | " + rgInfo(r));
+        var row = vt.loadRegions();
+        h.addView(t);
+        h.addView(uiBtn(r.enabled === false ? "开" : "关", function () {
+            for (var k = 0; k < row.length; k++) if (row[k].id === r.id) row[k].enabled = (row[k].enabled === false);
+            vt.rgSave(row); ovSet(row); uiRefresh();
+        }));
+        h.addView(uiBtn("删", function () {
+            var all = [];
+            for (var k = 0; k < row.length; k++) if (row[k].id !== r.id) all.push(row[k]);
+            vt.rgSave(all); ovSet(all); uiRefresh();
+        }));
+        g_uiW.rows.addView(h);
+    })(rs[i]);
+}
+function capClose() { try { if (g_capW) g_capW.close(); } catch (e) {} g_capW = null; g_cap = null; }
+function capStart(mode) {
+    capClose();
+    g_cap = { mode: mode, sx: 0, sy: 0, cx: 0, cy: 0 };
+    g_capW = floaty.rawWindow('<frame id="cap"><canvas id="board" layout_weight="1"/></frame>');
+    g_capW.setSize(device.width, device.height);
+    g_capW.setTouchable(true);
+    g_capW.board.on("draw", function (canvas) {
+        if (!g_cap) return;
+        var dx = g_cap.cx - g_cap.sx, dy = g_cap.cy - g_cap.sy;
+        if (dx * dx + dy * dy < 400) return;
+        var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
+        if (g_cap.mode === "circle") canvas.drawCircle(g_cap.sx, g_cap.sy, Math.sqrt(dx * dx + dy * dy), p);
+        else canvas.drawRect(Math.min(g_cap.sx, g_cap.cx), Math.min(g_cap.sy, g_cap.cy), Math.max(g_cap.sx, g_cap.cx), Math.max(g_cap.sy, g_cap.cy), p);
+    });
+    g_capW.cap.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
+        try {
+            var a = ev.getAction(), x = ev.getX(), y = ev.getY();
+            if (a === 0) { g_cap.sx = x; g_cap.sy = y; g_cap.cx = x; g_cap.cy = y; }
+            else if (a === 2) { g_cap.cx = x; g_cap.cy = y; try { g_capW.board.postInvalidate(); } catch (e) {} }
+            else if (a === 1) {
+                var dx = x - g_cap.sx, dy = y - g_cap.sy;
+                if (dx * dx + dy * dy > 2500) {
+                    var n = vt.loadRegions().length + 1, r;
+                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx), cy: Math.round(g_cap.sy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
+                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x)), y1: Math.round(Math.min(g_cap.sy, y)), x2: Math.round(Math.max(g_cap.sx, x)), y2: Math.round(Math.max(g_cap.sy, y)), enabled: true };
+                    var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
+                }
+                capClose();
+            }
+        } catch (e) {}
+        return true;
+    } }));
+}
+function ui() {
+    if (g_uiW) { uiClose(); return; }
+    g_uiW = floaty.window(
+        '<vertical padding="12">' +
+        '<text id="title" textSize="16sp" textStyle="bold" text="区域管理"/>' +
+        '<scroll h="300"><vertical id="rows"/></scroll>' +
+        '<horizontal><button id="addRect" layout_weight="1" text="＋矩形"/><button id="addCircle" layout_weight="1" text="＋圆形"/></horizontal>' +
+        '<horizontal><button id="preview" layout_weight="1" text="预览开/关"/><button id="btnQuit" layout_weight="1" text="关闭"/></horizontal>' +
+        '</vertical>');
+    log("ui window ok");
+    g_uiW.addRect.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { toast("拖框画矩形，抬手保存"); capStart("rect"); } }));
+    g_uiW.addCircle.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { toast("起点为圆心，拖动定半径"); capStart("circle"); } }));
+    g_uiW.preview.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { ovPreview(!g_ovW); } }));
+    g_uiW.btnQuit.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { uiClose(); } }));
+    log("ui wired");
+    uiRefresh();
+    log("ui refreshed");
+}
+function uiClose() { capClose(); try { if (g_uiW) g_uiW.close(); } catch (e) {} g_uiW = null; }
 '''
 
 
@@ -438,7 +496,11 @@ def main() -> int:
         "var VTOUCH_BIN_SIZE = %d;\n"
         'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), b64)
     )
-    if not write_out(OUT, CORE + "\n" + blob + "\n" + ONE_LIB + "\n" + DEMO):
+    uisrc = (
+        "/* ---- UI/overlay 源码（调用侧 eval(vt.uiSource) 进主上下文执行） ---- */\n"
+        "var VTOUCH_UI_SRC = " + json.dumps(UI_SRC, ensure_ascii=False) + ";\n"
+    )
+    if not write_out(OUT, CORE + "\n" + blob + "\n" + uisrc + "\n" + ONE_LIB + "\n" + DEMO):
         return 1
     print("bundle: %s (%d bytes)" % (OUT, OUT.stat().st_size))
     print("bundle syntax OK")
