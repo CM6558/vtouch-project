@@ -7,52 +7,51 @@
 - WebSocket 接口（`ws://127.0.0.1:27183`）
 - 动态发现触摸设备，不硬编码 event 节点
 - 自动坐标转换（逻辑屏幕 ↔ 原始触摸轴）
+- 原生 region 区域匹配（≤32 区域，五事件监听，纯监听不代点）
 
 ## 组件
 
 | 组件 | 说明 |
 |------|------|
-| `vtouchd` | 单进程合并器+WebSocket（EVIOCGRAB + uinput + 127.0.0.1:27183，推荐） |
-| `vtouchmerge` + `vtouchws` | 旧双进程实现（回滚备用，vtouchd 上机验证通过前保留） |
-| `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
-| `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
+| `src/vtouchd.c` | 单进程合并器+WebSocket+区域匹配（EVIOCGRAB + uinput + 127.0.0.1:27183） |
+| `clients/vtouch_bundle.js` | **构建产物**：内嵌 vtouchd 二进制的 AutoJs6 单文件（自释放+连接+协议封装+管理 UI），由 GitHub Actions 生成 |
+| `clients/vtouch_region_demo.js` | 区域监听示例（五事件回调） |
 
-## 安装（APK 自包含，无脚本）
+## 部署
 
-```sh
-adb install clients/plugin-apk/out/vtouch-plugin.apk
-```
+二进制不随仓库分发，由 GitHub Actions 构建：
 
-在 AutoJs6 里运行任意脚本：`new VTouch()` 自动释放二进制（首次）、启动后端并连接。
-状态检查：`vt.status()`（APK 通道）。
+1. 推送源码（`sync_auto.py` 或 git）→ **Build vtouch (Android NDK)** 工作流自动运行
+2. 从 artifact 下载 `vtouch_bundle-arm64.js`（真机）/ `vtouch_bundle-x86_64.js`（AVD 测试）
+3. 放到手机 `/sdcard/vtouch_bundle.js`，运行任意示例脚本即可（bundle 自释放 vtouchd）
 
-## AutoJs6 SDK
+## 区域监听示例
 
 ```javascript
-var vt = new VTouch().connect(function (client) {
-    threads.start(function () {
-        var f = client.finger();
-        f.tap(client.width / 2, client.height / 2, 60); // 点击
-        f.swipe(200, 2000, 900, 2000, 1000); // 滑动
-    });
+var vt = require("/sdcard/vtouch_bundle.js");
+eval(vt.uiSource);   // 可选：管理 UI（框选添加区域）
+vt.connect({
+    onDown:  function (region, f) { log("down  " + region.id + " s" + f.slot); },
+    onMove:  function (region, f) { log("move  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
+    onUp:    function (region, f) { log("up    " + region.id + " s" + f.slot); },
+    onEnter: function (region, f) { log("enter " + region.id + " s" + f.slot); },
+    onExit:  function (region, f) { log("exit  " + region.id + " s" + f.slot); }
 });
 ```
 
-完整文档见 [docs/README.md](docs/README.md)。
+完整协议见 [docs/VTOUCH_PROTOCOL.md](docs/VTOUCH_PROTOCOL.md)。
 
 ## 构建
 
-Android NDK r27d 交叉编译，详见 [docs/README.md](docs/README.md) 与 [src/Android.mk](src/Android.mk)。
+GitHub Actions（`.github/workflows/build.yml`）用 Android NDK r27d 交叉编译 vtouchd（arm64 + x86_64），再跑 `scripts/build_bundle.py` 生成双 ABI bundle，产物上传 artifact。
 
 ## 目录
 
 ```
-src/                  C 源码（vtouchd、vtouchmerge、vtouchws）
-clients/              AutoJs6 SDK
-scripts/              安装 / 启动 / 打包脚本
-sdcard/vtouch-merge/  手机运行目录（随安装包分发）
-build/                编译产物
-tests/                Python 冒烟测试
+src/                  C 源码（vtouchd.c 单一二进制）
+clients/              AutoJs6 脚本（bundle 构建产物、示例）
+scripts/              构建 / 同步脚本
+tests/                WS 冒烟测试
 docs/                 文档
 extension/sync-ext/   Chrome 扩展（一键网页同步通道）
 ```
