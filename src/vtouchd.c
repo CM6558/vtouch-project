@@ -319,26 +319,7 @@ static void region_ev_send(const char *id, const char *ev, int slot, int lx, int
         (client_fd < 0 || !subscribed) ? " (NO-CLIENT/UNSUB)" : "");
 }
 
-/* 代点：区域中心注入一次 down+up。必须先于物理帧收尾后调用（调用方保证），
- * 内部两帧各自完整 emit_frame（SYN 边界正确），绝不插入物理帧中间。 */
-static void region_tap(const struct region *rg)
-{
-    int i, x, y, lx, ly;
-    if (u_fd < 0) return;
-    lx = (rg->type == 1) ? rg->a1 : (rg->a1 + rg->a3) / 2;
-    ly = (rg->type == 1) ? rg->a2 : (rg->a2 + rg->a4) / 2;
-    if (logical_to_raw(lx, 0, &x) || logical_to_raw(ly, 1, &y)) return;
-    for (i = 0; i < vslots; i++)
-        if (!virt[i].down && !virt[i].pending_up) break;
-    if (i >= vslots) return;                    /* 虚拟槽占满（10 指）则放弃，不硬插 */
-    if (set_virtual(virt, i, "down", x, y) < 0) return;
-    if (emit_frame() < 0) { set_virtual(virt, i, "up", x, y); emit_frame(); return; }
-    set_virtual(virt, i, "up", x, y);
-    if (emit_frame() < 0) stop_flag = 1;
-    fprintf(stderr, "vtouchd: region tap %s %d,%d (slot %d)\n", rg->id, lx, ly, i);
-}
-
-/* SYN 后、物理帧注入完成后调用：五事件匹配（down/up/enter/exit + 代点）。
+/* SYN 后、物理帧注入完成后调用：五事件匹配（down/up/enter/exit/move，纯监听无代点）。
  * ps_down 此时还是上一帧状态（broadcast_phys 之后才更新），正好用于新按下/刚抬起判定。
  * 全部只读 phys[]，失败即跳过，绝不阻塞注入路径。 */
 static void region_match(void)
@@ -366,8 +347,8 @@ static void region_match(void)
                     }
                 }
             } else if (ps_down[i] && slot_hit[i][rid] && hit) {
+                /* 纯监听：onUp 只推事件，不代点（用户明确不需要补充点击） */
                 region_ev_send(rg->id, "up", i, lx, ly);
-                region_tap(rg);              /* onUp 代点（区域中心） */
             }
             slot_in[i][rid] = (phys[i].down && hit) ? 1 : 0;
             if (!phys[i].down && !ps_down[i]) slot_hit[i][rid] = 0;
