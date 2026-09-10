@@ -5,109 +5,77 @@ Android touch simulation/merging system for rooted devices. Merges physical touc
 ## Project structure
 
 ```
-src/                  C source (vtouchd, vtouchmerge, vtouchws)
-clients/              AutoJs6 JavaScript SDK (vtouch_onefile_example.js)
-clients/plugins/      AutoJs6 项目插件版 SDK (vtouch.js, module.exports = VTouch)
-clients/vtouch_plugin_example.js  项目插件加载示例 (plugins.load('vtouch'))
-clients/plugin-apk/    AutoJs6 应用插件 APK 工程 (零依赖注册类 + 胶水层 + build.sh)
-scripts/              Install/start/stop scripts and packaging tool
-sdcard/vtouch-merge/  Files shipped in vtouch-merge-sdcard-latest.zip
-build/                Compiled arm64 binaries
-tests/                Python smoke tests
+src/vtouchd.c         C source (single binary: merger + WebSocket + region matching)
+clients/              AutoJs6 scripts (vtouch_bundle.js is Actions build output, NOT tracked;
+                      vtouch_region_demo.js / vtouch_bundle_example.js are tracked)
+scripts/              build_bundle.py + sync_auto*.py (GitHub API sync) + sync_web.py
+tests/                WebSocket smoke tests (ws_smoke.py, ws_kick.js)
 docs/                 Protocol and design docs
+extension/sync-ext/   Chrome extension (web sync channel fallback)
+.github/workflows/    build.yml: NDK r27d compile vtouchd (arm64+x86_64) + generate bundle
 ```
 
-## APK 构建环境（本机已装并验证）
+Binaries and bundles are **never committed** — GitHub Actions builds them, artifacts carry
+`vtouch_bundle-arm64.js` (device) / `vtouch_bundle-x86_64.js` (AVD) + `vtouchd`.
 
-- JDK 17：`C:\Program Files\Eclipse Adoptium\jdk-17.0.20.101-hotspot`
-- Android SDK：`C:\Users\21102\AppData\Local\Android\Sdk`（build-tools 34.0.0 + platforms android-24，腾讯镜像手动放置，无 cmdline-tools）
-- 环境变量 `ANDROID_HOME` / `JAVA_HOME` 已持久化（setx）
-- 构建：`bash clients/plugin-apk/build.sh`，产物 `out/vtouch-plugin.apk`（已本机验证：签名/包名/meta-data/assets 正斜杠条目/一致性）
+## Sync (local → GitHub, no git push)
+
+```sh
+python scripts/sync_auto.py          # one-shot REST API sync (token in D:\MYP\sync-config.json)
+python scripts/sync_auto_install.py install --watch 300   # background daemon
+```
+
+git is used only to align local repo state (`git fetch` + `git reset --hard origin/master`),
+never to push changes.
 
 ## Build
 
-Cross-compile with Android NDK r27d (Windows Git Bash):
+Local manual compile (NDK r27d):
 
 ```sh
-NDK=C:/Users/21102/android-ndk-r27d
-aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
-
-# vtouchmerge (core merger)
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchmerge.c -o build/vtouchmerge
-
-# vtouchd (merged single binary)
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
-
-# vtouchws (WebSocket bridge)
-"$aarch64" -O2 -Wall -Wextra src/vtouchws.c -o build/vtouchws
+NDK=D:/ANDROID/SDK/ndk/30.0.15729638/toolchains/llvm/prebuilt/windows-x86_64/bin
+"$NDK/aarch64-linux-android24-clang" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
 ```
 
-Or use Android.mk:
-
-```sh
-cd src && ndk-build
-```
+CI (`.github/workflows/build.yml`, workflow name **Build vtouch (Android NDK)**) does the same for
+arm64 + x86_64, then runs `python3 scripts/build_bundle.py` for each ABI and uploads artifacts.
 
 ## Test
 
-WebSocket smoke test (requires vtouchws running on 127.0.0.1:27183):
-
 ```sh
-python tests/ws_smoke.py
+python tests/ws_smoke.py        # requires vtouchd running on 127.0.0.1:27183
 ```
 
 ## Deploy to device
 
-1. Copy binaries to `/sdcard/vtouch-merge/`:
-
 ```sh
-adb push build/vtouchmerge sdcard/vtouch-merge/
-adb push build/vtouchws sdcard/vtouch-merge/
+adb push vtouch_bundle-arm64.js /sdcard/vtouch_bundle.js
+# in AutoJs6 run an example; bundle self-extracts vtouchd to /data/local/tmp/vtouchd and connects
 ```
-
-2. Install and start via shell:
-
-```sh
-adb shell
-su
-sh /sdcard/vtouch-merge/install_from_sdcard.sh
-```
-
-Or push entire sdcard directory:
-
-```sh
-adb push sdcard/vtouch-merge/ /sdcard/vtouch-merge/
-```
-
-## Run AutoJs6 SDK
-
-Push JS file to device:
-
-```sh
-adb push clients/vtouch_onefile_example.js /sdcard/vtouch-merge/
-```
-
-In AutoJs6, run `/sdcard/vtouch-merge/vtouch_onefile_example.js`.
 
 ## Conventions
 
 - C code: `-O2 -Wall -Wextra -Werror` flags, POSIX APIs, Android NDK APIs.
-- Shell scripts: `#!/system/bin/sh` (Android shell), no bashisms.
 - JavaScript: AutoJs6 API (`WebSocket.EVENT_*`, `threads.start()`, `events.on("exit")`).
-- Socket paths:
-  - Unix socket: `/data/local/tmp/vtouch-runtime/merge.sock`
-  - WebSocket: `ws://127.0.0.1:27183`
-- Device runtime: `/data/local/tmp/vtouch-runtime/` for PID files and sockets.
+- WebSocket: `ws://127.0.0.1:27183` only (loopback, single client, new kicks old).
+- Device runtime: `/data/local/tmp/vtouch-runtime/` for PID files and logs.
 
 ## Pitfalls
 
-- **`/sdcard` noexec**: Android mounts shared storage `noexec`. Never execute ELF directly from `/sdcard`—copy to `/data/local/tmp/` first.
-- **SELinux**: AutoJs6 app context may be denied access to `/data/local/tmp/` or Unix sockets. Use loopback WebSocket (port 27183) instead.
-- **`Shell.exec()` vs `shell(cmd, true)`**: `Shell` object uses terminal emulator (slow init); `shell(cmd, true)` uses `Runtime.exec` (faster for single commands). Prefer `shell(cmd, true)` for synchronous root commands.
-- **`sleep()` blocks event loop**: In AutoJs6, `sleep()` on main thread blocks WebSocket event callbacks. Use `setInterval` for non-blocking keepalive, or run blocking work in `threads.start()`.
-- **`EVIOCGRAB` recovery**: If merger crashes, physical touch is grabbed until fd closes. Supervisor must restart merger; otherwise physical touch is dead.
-- **Dynamic touch discovery**: Never hardcode `/dev/input/eventX`. Merger scans `/dev/input/event0..event63` for Type-B multitouch devices.
-- **Coordinate conversion**: AutoJs6 uses logical coordinates (device.width × height). Merger converts to raw touch axes via `-w`/`-h` flags.
-- **`new Shell(true)` slow**: Shell object initialization is slow (~2s). Use `shell(cmd, true)` for one-shot root commands.
-- **WebSocket retry**: `EVENT_FAILURE`/`EVENT_CLOSED` may not fire immediately. Add watchdog timeout (600ms) to break stalls.
-- **Service lifecycle**: `events.on("exit")` must call `stopService()` to kill merger and release physical touch grab. Strong kills (`SIGKILL`) skip exit handlers—call `vt.stopService()` explicitly in business logic if needed.
+- **`/sdcard` noexec**: Android mounts shared storage `noexec`. Never execute ELF directly from `/sdcard` — copy to `/data/local/tmp/` first (bundle does this).
+- **SELinux**: AutoJs6 app context may be denied access to `/data/local/tmp/` — `setenforce 0` (Permissive) for the su/self-extract path.
+- **`sleep()` blocks event loop**: In AutoJs6, `sleep()` on main thread blocks WebSocket event callbacks. Use `threads.start()` for blocking work.
+- **`EVIOCGRAB` recovery**: If vtouchd crashes, physical touch is grabbed until fd closes. AutoJs6-side bootWatch reconnects and re-extracts (seconds-level blind window).
+- **Dynamic touch discovery**: Never hardcode `/dev/input/eventX`. vtouchd scans `/dev/input/event0..63` for the first Type-B multitouch device.
+- **Coordinate conversion**: AutoJs6 uses logical coordinates; vtouchd converts via `-w`/`-h` flags (raw 0..32767 → logical).
+- **su for self-extract**: AutoJs6 `Runtime.exec("su")` is interactive stdin; a v8 wrapper (/data/local/tmp/su_wrap.sh + sud.sh daemon, sudq file queue) implements it on stock systems.
+- **Region matching is listen-only**: physical touch is always 1:1 forwarded; region_match never injects (no tap-backfill by design).
+- **Console injection on AVD**: emulator console `event mouse` down events carry no coordinates (ABS_X/Y type-A fallback added); move-under-down does not update position — physical `move` events must be validated on real hardware.
+
+## Debugging
+
+```sh
+# vtouchd log (unbuffered)
+adb shell tail -f /data/local/tmp/vtouch-runtime/vtouchd.log
+# region config + hit events are logged there (region add / ev <id> <type>)
+```
