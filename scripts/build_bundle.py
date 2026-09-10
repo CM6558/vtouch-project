@@ -518,6 +518,7 @@ function capStart(mode) {
     g_capW.setTouchable(true);
     g_capW.board.on("draw", function (canvas) {
         if (!g_cap) return;
+        try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
         var dx = g_cap.cx - g_cap.sx, dy = g_cap.cy - g_cap.sy;
         if (dx * dx + dy * dy < 400) return;
         var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
