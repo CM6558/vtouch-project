@@ -532,9 +532,16 @@ function capStart(mode) {
             else if (a === 1) {
                 var dx = x - g_cap.sx, dy = y - g_cap.sy;
                 if (dx * dx + dy * dy > 2500) {
+                    /* 存屏坐标：触摸是 view 相对坐标，加回窗体偏移（状态栏 inset） */
+                    var ox = 0, oy = 0;
+                    try {
+                        if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
+                        g_capW.cap.getLocationOnScreen(g_ovLoc);
+                        ox = g_ovLoc[0]; oy = g_ovLoc[1];
+                    } catch (e) {}
                     var n = vt.loadRegions().length + 1, r;
-                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx), cy: Math.round(g_cap.sy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
-                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x)), y1: Math.round(Math.min(g_cap.sy, y)), x2: Math.round(Math.max(g_cap.sx, x)), y2: Math.round(Math.max(g_cap.sy, y)), enabled: true };
+                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx + ox), cy: Math.round(g_cap.sy + oy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
+                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x) + ox), y1: Math.round(Math.min(g_cap.sy, y) + oy), x2: Math.round(Math.max(g_cap.sx, x) + ox), y2: Math.round(Math.max(g_cap.sy, y) + oy), enabled: true };
                     var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
                     toast("已保存 " + r.name);
                 }
