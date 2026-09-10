@@ -1,7 +1,6 @@
-/* 区域监听调用示例：物理触摸流来自 vtouchd 订阅（pev），不再用 observeTouch。
- * 用法：eval(vt.uiSource) 一次；ovPreview(true/false) 预览显隐。
- * 顺序不能换：ensure/connect 必须在 ovShow 之前（悬浮窗建出来后 shell(true) 回码 1）；
- * 退出时先 stop 再关窗。
+/* 区域监听完整样例：5 种事件全接 + 矩形/圆形双区域。
+ * 首次运行会自动往库里加一个圆形区（已有则跳过）。
+ * 反馈：toast 看屏，log 看 AutoJs6 日志，绿闪看预览。
  */
 var vt = require("/sdcard/vtouch_bundle.js");
 eval(vt.uiSource);
@@ -19,20 +18,43 @@ sleep(1500);
 vt.ensure();
 var c = vt.connect();
 
+/* 种子圆形区：库里没有圆形才加 */
+(function () {
+    var rs = vt.loadRegions(), i, hasCircle = false;
+    for (i = 0; i < rs.length; i++) if (rs[i].type === "circle") hasCircle = true;
+    if (!hasCircle) {
+        rs.push({ id: "c0", name: "圆形区", type: "circle", cx: 720, cy: 2400, r: 220, enabled: true });
+        vt.rgSave(rs);
+    }
+})();
+
 var regions = vt.loadRegions();
 ovShow(regions);
+var moveCount = 0;
 
 var eng = vt.createEngine(regions, {
     onDown: function (region, f) {
         ovFlash(region.id);
-        log("trig down " + region.id + " s" + f.slot + " " + Math.round(f.x) + "," + Math.round(f.y));
+        toast("按下 " + (region.name || region.id));
+        log("ev down " + region.id + " s" + f.slot + " " + Math.round(f.x) + "," + Math.round(f.y));
     },
-    onMove: function (region, f) {},
-    onEnter: function (region, f) { ovFlash(region.id); },
-    onExit: function (region, f) {},
+    onMove: function (region, f) {
+        moveCount++;
+        if (moveCount % 15 === 1) log("ev move " + region.id + " s" + f.slot + " " + Math.round(f.x) + "," + Math.round(f.y) + " (#" + moveCount + ")");
+    },
     onUp: function (region, f) {
-        log("trig up " + region.id + " s" + f.slot);
-        if (region.id === "btn") vt.finger().tap((region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
+        log("ev up " + region.id + " s" + f.slot);
+        var cx = region.type === "circle" ? region.cx : (region.x1 + region.x2) / 2;
+        var cy = region.type === "circle" ? region.cy : (region.y1 + region.y2) / 2;
+        toast("代点 " + (region.name || region.id));
+        vt.finger().tap(cx, cy);
+    },
+    onEnter: function (region, f) {
+        ovFlash(region.id);
+        log("ev enter " + region.id + " s" + f.slot);
+    },
+    onExit: function (region, f) {
+        log("ev exit " + region.id + " s" + f.slot);
     }
 });
 
