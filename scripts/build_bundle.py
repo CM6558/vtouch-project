@@ -575,9 +575,52 @@ function bootWatch(h) {
     var c = vt.connect();
     var regions = vt.loadRegions();
     ovShow(regions);
-    var eng = vt.createEngine(regions, h);
-    var Q = new java.util.concurrent.LinkedBlockingQueue();
+    /* B 方案：匹配在 vtouchd native 层（region add/clear + region_ev 推送），
+     * 这里只做：配置下发 + 事件分发到 handlers + overlay 手指绘制（pev 驱动）。 */
+    var FINGERS = {};
+    function pushRegions(rs) {
+        try {
+            c.send("region clear");
+            for (var i = 0; i < rs.length; i++) {
+                var r = rs[i], en = (r.enabled === false ? 0 : 1);
+                if (r.type === "circle")
+                    c.send("region add " + r.id + " 1 " + Math.round(r.cx) + " " + Math.round(r.cy) + " " + Math.round(r.r) + " 0 " + en);
+                else
+                    c.send("region add " + r.id + " 0 " + Math.round(r.x1) + " " + Math.round(r.y1) + " " + Math.round(r.x2) + " " + Math.round(r.y2) + " " + en);
+            }
+        } catch (e) {}
+    }
+    function dispatch(line) {
+        var p, i, region, f, k;
+        if (line.indexOf("region_ev ") === 0) {          /* region_ev <id> <ev> <slot> <x> <y> */
+            p = line.split(" ");
+            if (p.length === 6) {
+                region = null;
+                for (i = 0; i < regions.length; i++) if (regions[i].id === p[1]) { region = regions[i]; break; }
+                f = { slot: +p[3], x: +p[4], y: +p[5] };
+                if (region) {
+                    if (p[2] === "down" && h.onDown) h.onDown(region, f);
+                    else if (p[2] === "up" && h.onUp) h.onUp(region, f);
+                    else if (p[2] === "enter" && h.onEnter) h.onEnter(region, f);
+                    else if (p[2] === "exit" && h.onExit) h.onExit(region, f);
+                    if (p[2] === "down" || p[2] === "enter") ovFlash(region.id);
+                }
+            }
+            return;
+        }
+        if (line.indexOf("pev ") === 0) {                /* pev <slot> <down|move|up> <x> <y>: 只画手指 */
+            p = line.split(" ");
+            if (p.length === 5) {
+                if (p[2] === "up") delete FINGERS[p[1]];
+                else FINGERS[p[1]] = { x: +p[3], y: +p[4], down: true };
+                var a = [], k2;
+                for (k2 in FINGERS) a.push(FINGERS[k2]);
+                ovUpdate(a);
+            }
+        }
+    }
     vt.sub(c);
+    pushRegions(regions);
     events.on("exit", function () {
         try { vt.stop(); } catch (e) {}
         try { ovClose(); } catch (e2) {}
@@ -585,42 +628,36 @@ function bootWatch(h) {
     });
     threads.start(function () {
         log("vt-sub: on");
-        var cc = c, lastPing = 0;
+        var lastPing = 0;
         for (;;) {
             try {
                 for (;;) {
-                    var line = cc.recv();
+                    var line = c.recv();
                     if (line === null) {
-                        if (Date.now() - lastPing > 3000) { lastPing = Date.now(); cc.send("ping"); }
+                        if (Date.now() - lastPing > 3000) { lastPing = Date.now(); c.send("ping"); }
                         sleep(10);
                         continue;
                     }
-                    var e = vt.parseEv(line);
-                    if (e) Q.offer(e);
+                    dispatch(line);
                 }
             } catch (err) {
                 log("vt-sub 重连: " + err);
-                try { cc.close(); } catch (e2) {}
+                try { c.close(); } catch (e2) {}
                 sleep(1000);
-                try { vt.ensure(); cc = vt.connect(); vt.sub(cc); }
+                /* 必须更新全局 c：pushRegions/dispatch 闭包引用它，否则配置下发到旧连接被吞 */
+                try { vt.ensure(); c = vt.connect(); vt.sub(c); pushRegions(regions); }
                 catch (e3) { sleep(2000); }
             }
         }
     });
-    threads.start(function () {
-        log("vt-watch: on");
-        while (true) {
-            try {
-                var p = Q.take();
-                if (p) { eng.feed(p); ovUpdate(eng.fingers()); }
-            } catch (e) { sleep(500); }
-        }
-    });
     setInterval(function () {
         try {
-            regions = vt.loadRegions();
-            eng.setRegions(regions);
-            ovSet(regions);
+            var rs = vt.loadRegions();
+            if (JSON.stringify(rs) !== JSON.stringify(regions)) {
+                regions = rs;
+                pushRegions(rs);
+                ovSet(rs);
+            }
         } catch (e) {}
     }, 2000);
 }
