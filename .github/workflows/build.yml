@@ -16,7 +16,7 @@ env:
 
 jobs:
   build:
-    name: Compile arm64 binaries
+    name: Compile vtouchd + generate bundle
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -45,14 +45,9 @@ jobs:
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "$NDK/toolchains/llvm/prebuilt/${{ env.NDK_TOOLCHAIN_BIN }}/bin" >> "$GITHUB_PATH"
 
-      - name: Compile vtouchmerge (core merger)
-        run: |
-          mkdir -p build
-          aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
-            src/vtouchmerge.c -o build/vtouchmerge
-
       - name: Compile vtouchd (merged single binary, arm64)
         run: |
+          mkdir -p build
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchd.c -o build/vtouchd
 
@@ -73,28 +68,14 @@ jobs:
           mv build/vtouchd build/vtouchd-x86_64
           mv build/vtouchd.arm64 build/vtouchd
 
-      - name: Compile vtouchws (WebSocket bridge)
-        run: |
-          aarch64-linux-android24-clang -O2 -Wall -Wextra -pthread \
-            src/vtouchws.c -o build/vtouchws
-
       - name: Verify binaries
         run: |
           set -e
-          for f in build/vtouchd build/vtouchmerge build/vtouchws; do
-            test -x "$f" || { echo "missing executable: $f"; exit 1; }
-            file "$f"
-          done
+          test -x build/vtouchd || { echo "missing executable: vtouchd"; exit 1; }
+          file build/vtouchd
           ls -lh build/
           test -f build/vtouch_bundle-arm64.js || { echo "arm64 bundle missing"; exit 1; }
           test -f build/vtouch_bundle-x86_64.js || { echo "x86_64 bundle missing"; exit 1; }
-
-      - name: Package install archives (release only)
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          # Refresh the shipped binaries with freshly compiled ones, then rebuild the install zips.
-          cp build/vtouchd build/vtouchmerge build/vtouchws sdcard/vtouch-merge/
-          python3 scripts/make_install_archives.py
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -102,8 +83,6 @@ jobs:
           name: vtouch-arm64-binaries
           path: |
             build/vtouchd
-            build/vtouchmerge
-            build/vtouchws
             build/vtouch_bundle-arm64.js
             build/vtouch_bundle-x86_64.js
           if-no-files-found: error
@@ -114,7 +93,5 @@ jobs:
         with:
           files: |
             build/vtouchd
-            build/vtouchmerge
-            build/vtouchws
-            vtouch-merge-sdcard-latest.zip
-            vtouch-merge-install-bundle.zip
+            build/vtouch_bundle-arm64.js
+            build/vtouch_bundle-x86_64.js
