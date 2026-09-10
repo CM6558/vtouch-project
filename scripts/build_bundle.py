@@ -602,6 +602,7 @@ function bootWatch(h) {
                     if (p[2] === "down" && h.onDown) h.onDown(region, f);
                     else if (p[2] === "up" && h.onUp) h.onUp(region, f);
                     else if (p[2] === "enter" && h.onEnter) h.onEnter(region, f);
+                    else if (p[2] === "move" && h.onMove) h.onMove(region, f);
                     else if (p[2] === "exit" && h.onExit) h.onExit(region, f);
                     if (p[2] === "down" || p[2] === "enter") ovFlash(region.id);
                 }
