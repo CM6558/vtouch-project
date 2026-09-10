@@ -383,15 +383,19 @@ function ovShow(rs) {
     g_ovW.setTouchable(false);
     g_ovW.board.on("draw", function (canvas) {
         var i, r, p, lx, ly;
+        /* 线程池 draw（AutoJs6 6.x ScriptCanvasView mDrawingThreadPool）与 ovUpdate/ovSet/ovClose 并发：
+         * 先快照全局引用，防执行中途被置 null/换数组。 */
+        var w = g_ovW, rs = g_ovR, fs = g_ovF;
+        if (!w) return;
         try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
         var oy = 0, ox = 0;
         try {
             if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
-            g_ovW.board.getLocationOnScreen(g_ovLoc);
+            w.board.getLocationOnScreen(g_ovLoc);
             ox = g_ovLoc[0]; oy = g_ovLoc[1];
         } catch (e) {}
-        for (i = 0; i < g_ovR.length; i++) {
-            r = g_ovR[i];
+        for (i = 0; i < rs.length; i++) {
+            r = rs[i];
             if (r.hidden) continue;
             p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
             if (g_ovH[r.id] && Date.now() - g_ovH[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
@@ -400,8 +404,8 @@ function ovShow(rs) {
             p = new Paint(); p.setColor(colors.WHITE); p.setTextSize(36);
             canvas.drawText(r.name || r.id, lx - ox + 8, ly - oy + 40, p);
         }
-        for (i = 0; i < g_ovF.length; i++) {
-            var f = g_ovF[i];
+        for (i = 0; i < fs.length; i++) {
+            var f = fs[i];
             if (!f.down) continue;
             p = new Paint(); p.setColor(colors.BLUE);
             canvas.drawCircle(f.x - ox, f.y - oy, 40, p);
@@ -517,32 +521,36 @@ function capStart(mode) {
     g_capW.setSize(device.width, device.height);
     g_capW.setTouchable(true);
     g_capW.board.on("draw", function (canvas) {
-        if (!g_cap) return;
+        /* 线程池 draw 与 UI 线程 capClose/capStart 并发：快照局部，guard 后 cap 不会被并发置 null（TypeError 根因） */
+        var cap = g_cap;
+        if (!cap) return;
         try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
-        var dx = g_cap.cx - g_cap.sx, dy = g_cap.cy - g_cap.sy;
+        var dx = cap.cx - cap.sx, dy = cap.cy - cap.sy;
         if (dx * dx + dy * dy < 400) return;
         var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
-        if (g_cap.mode === "circle") canvas.drawCircle(g_cap.sx, g_cap.sy, Math.sqrt(dx * dx + dy * dy), p);
-        else canvas.drawRect(Math.min(g_cap.sx, g_cap.cx), Math.min(g_cap.sy, g_cap.cy), Math.max(g_cap.sx, g_cap.cx), Math.max(g_cap.sy, g_cap.cy), p);
+        if (cap.mode === "circle") canvas.drawCircle(cap.sx, cap.sy, Math.sqrt(dx * dx + dy * dy), p);
+        else canvas.drawRect(Math.min(cap.sx, cap.cx), Math.min(cap.sy, cap.cy), Math.max(cap.sx, cap.cx), Math.max(cap.sy, cap.cy), p);
     });
     g_capW.cap.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
         try {
+            var cap = g_cap, w = g_capW;
+            if (!cap || !w) return true;
             var a = ev.getAction(), x = ev.getX(), y = ev.getY();
-            if (a === 0) { g_cap.sx = x; g_cap.sy = y; g_cap.cx = x; g_cap.cy = y; }
-            else if (a === 2) { g_cap.cx = x; g_cap.cy = y; try { g_capW.board.postInvalidate(); } catch (e) {} }
+            if (a === 0) { cap.sx = x; cap.sy = y; cap.cx = x; cap.cy = y; }
+            else if (a === 2) { cap.cx = x; cap.cy = y; try { w.board.postInvalidate(); } catch (e) {} }
             else if (a === 1) {
-                var dx = x - g_cap.sx, dy = y - g_cap.sy;
+                var dx = x - cap.sx, dy = y - cap.sy;
                 if (dx * dx + dy * dy > 2500) {
                     /* 存屏坐标：触摸是 view 相对坐标，加回窗体偏移（状态栏 inset） */
                     var ox = 0, oy = 0;
                     try {
                         if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
-                        g_capW.cap.getLocationOnScreen(g_ovLoc);
+                        w.cap.getLocationOnScreen(g_ovLoc);
                         ox = g_ovLoc[0]; oy = g_ovLoc[1];
                     } catch (e) {}
                     var n = vt.loadRegions().length + 1, r;
-                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx + ox), cy: Math.round(g_cap.sy + oy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
-                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x) + ox), y1: Math.round(Math.min(g_cap.sy, y) + oy), x2: Math.round(Math.max(g_cap.sx, x) + ox), y2: Math.round(Math.max(g_cap.sy, y) + oy), enabled: true };
+                    if (cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(cap.sx + ox), cy: Math.round(cap.sy + oy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
+                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(cap.sx, x) + ox), y1: Math.round(Math.min(cap.sy, y) + oy), x2: Math.round(Math.max(cap.sx, x) + ox), y2: Math.round(Math.max(cap.sy, y) + oy), enabled: true };
                     var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
                     toast("已保存 " + r.name);
                 }
