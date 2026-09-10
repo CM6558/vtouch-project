@@ -30,6 +30,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define MAX_PHYS 64
@@ -132,15 +133,51 @@ static int discover(char *out, size_t n)
     return -1;
 }
 
-static int emit(int t, int c, int v)
+/* 组装帧事件：先填充 ev_buf，emit_frame 末尾一次 writev 提交。
+ * 帧完整性由内核按 event 顺序消费保证；iovec 上限 512（96 槽×5+3=483 < 512）。 */
+#define MAX_IOV 512
+static struct input_event ev_buf[MAX_IOV];
+static struct iovec ev_iov[MAX_IOV];
+static int ev_n;
+
+static void ev_add(int t, int c, int v)
 {
-    struct input_event e; ssize_t n;
-    memset(&e, 0, sizeof e); e.type = (unsigned short)t; e.code = (unsigned short)c; e.value = v;
-    do n = write(u_fd, &e, sizeof e); while (n < 0 && errno == EINTR);
-    return n == (ssize_t)sizeof e ? 0 : -1;
+    if (ev_n >= MAX_IOV) return;   /* 上限保护：宁可丢帧尾也不越界（正常不会触发） */
+    ev_buf[ev_n] = (struct input_event){ .type = (unsigned short)t, .code = (unsigned short)c, .value = v };
+    ev_iov[ev_n].iov_base = &ev_buf[ev_n];
+    ev_iov[ev_n].iov_len = sizeof(struct input_event);
+    ev_n++;
 }
 
-static int syn(void) { return emit(EV_SYN, SYN_REPORT, 0); }
+static int emit_iov_writev(void)
+{
+    ssize_t n, need = 0;
+    size_t off;
+    int i;
+    if (u_fd < 0) return -1;
+    for (i = 0; i < ev_n; i++) need += ev_iov[i].iov_len;
+    do { n = writev(u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
+    if (n < 0) { ev_n = 0; return -1; }
+    if ((size_t)n < (size_t)need) {
+        /* 短写（uinput 上极罕见）：从已写偏移逐块补发，不丢帧尾 */
+        off = (size_t)n;
+        for (i = 0; i < ev_n && off > 0; i++) {
+            if (off < ev_iov[i].iov_len) {
+                const unsigned char *p = (const unsigned char *)ev_iov[i].iov_base + off;
+                size_t left = ev_iov[i].iov_len - off;
+                while (left) {
+                    ssize_t k;
+                    do { k = write(u_fd, p, left); } while (k < 0 && errno == EINTR);
+                    if (k <= 0) { ev_n = 0; return -1; }
+                    p += k; left -= (size_t)k;
+                }
+                off = 0;
+            } else off -= ev_iov[i].iov_len;
+        }
+    }
+    ev_n = 0;
+    return 0;
+}
 
 static int setup_uinput(void)
 {
@@ -200,24 +237,34 @@ static int emit_frame(void)
 {
     int i;
     if (u_fd < 0) return -1;
+    ev_n = 0;
     for (i = 0; i < phys_slots; i++) if (phys[i].pending_up) {
-        if (emit(EV_ABS, ABS_MT_SLOT, i) || emit(EV_ABS, ABS_MT_TRACKING_ID, -1)) return -1;
+        ev_add(EV_ABS, ABS_MT_SLOT, i);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
     for (i = 0; i < phys_slots; i++) if (phys[i].down) {
-        if (emit(EV_ABS, ABS_MT_SLOT, i) || emit(EV_ABS, ABS_MT_TRACKING_ID, phys[i].id) ||
-            emit(EV_ABS, ABS_MT_POSITION_X, phys[i].x) || emit(EV_ABS, ABS_MT_POSITION_Y, phys[i].y) ||
-            emit(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER)) return -1;
+        ev_add(EV_ABS, ABS_MT_SLOT, i);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys[i].id);
+        ev_add(EV_ABS, ABS_MT_POSITION_X, phys[i].x);
+        ev_add(EV_ABS, ABS_MT_POSITION_Y, phys[i].y);
+        ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
     }
     for (i = 0; i < vslots; i++) {
         if (virt[i].pending_up) {
-            if (emit(EV_ABS, ABS_MT_SLOT, phys_slots + i) || emit(EV_ABS, ABS_MT_TRACKING_ID, -1)) return -1;
+            ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);
+            ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
         } else if (virt[i].down) {
-            if (emit(EV_ABS, ABS_MT_SLOT, phys_slots + i) || emit(EV_ABS, ABS_MT_TRACKING_ID, virt[i].id) ||
-                emit(EV_ABS, ABS_MT_POSITION_X, virt[i].x) || emit(EV_ABS, ABS_MT_POSITION_Y, virt[i].y) ||
-                emit(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER)) return -1;
+            ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);
+            ev_add(EV_ABS, ABS_MT_TRACKING_ID, virt[i].id);
+            ev_add(EV_ABS, ABS_MT_POSITION_X, virt[i].x);
+            ev_add(EV_ABS, ABS_MT_POSITION_Y, virt[i].y);
+            ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
         }
     }
-    if (emit(EV_KEY, BTN_TOUCH, any_down()) || emit(EV_KEY, BTN_TOOL_FINGER, any_down()) || syn()) return -1;
+    ev_add(EV_KEY, BTN_TOUCH, any_down());
+    ev_add(EV_KEY, BTN_TOOL_FINGER, any_down());
+    ev_add(EV_SYN, SYN_REPORT, 0);
+    if (emit_iov_writev() < 0) return -1;
     for (i = 0; i < phys_slots; i++) phys[i].pending_up = 0;
     for (i = 0; i < vslots; i++) virt[i].pending_up = 0;
     return 0;
