@@ -70,6 +70,12 @@ jobs:
           done
           ls -lh build/
 
+      - name: Generate vtouch_bundle.js (embed freshly built vtouchd)
+        run: |
+          python3 scripts/build_bundle.py
+          test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
+          ls -lh clients/vtouch_bundle.js
+
       - name: Package install archives (release only)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -85,6 +91,7 @@ jobs:
             build/vtouchd
             build/vtouchmerge
             build/vtouchws
+            clients/vtouch_bundle.js
           if-no-files-found: error
 
       - name: Create GitHub Release (release only)
