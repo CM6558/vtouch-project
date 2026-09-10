@@ -5,6 +5,14 @@ clients/plugin-apk/out/
 # 真机插件中心授权用的中间文件（在设备上生成，不入库）
 clients/plugin_center_authorization.xml
 
+# 二进制与构建产物：由 GitHub Actions 编译产出，仓库只存源码
+build/
+*.zip
+
+# Python 缓存
+__pycache__/
+*.pyc
+
 # 常见本地文件
 *.log
 .DS_Store
