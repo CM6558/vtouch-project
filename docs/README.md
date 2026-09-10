@@ -10,160 +10,82 @@
 - WebSocket 接口，支持 AutoJs6/第三方程序调用
 - 动态发现触摸设备，不硬编码 event 节点
 - 自动坐标转换（逻辑屏幕坐标 ↔ 原始触摸轴）
+- **原生 region 区域匹配**：≤32 区域（圆形/矩形），五事件监听（down/up/enter/exit/move），纯监听不代点
 
 ## 架构
 
 ```text
 真实触摸面板
     ↓ EVIOCGRAB
-vtouchmerge
-    ├── 真实触点
-    └── 模拟触点
-          ↓
-单一 merged uinput 设备
-          ↓
+vtouchd（单进程：合并器 + WebSocket + region 匹配，一个 poll 循环）
+    ├── 真实触点（1:1 透传）
+    └── 模拟触点（virt 槽，WS 注入）
+          ↓ /dev/uinput
 Android InputReader/InputDispatcher
           ↓
 应用 MotionEvent
 
-AutoJs6/第三方程序
+AutoJs6（clients/vtouch_bundle.js：自释放 + 连接 + 管理 UI）
     ↓ WebSocket (127.0.0.1:27183)
-vtouchws
-    ↓ Unix socket
-vtouchmerge
+vtouchd
+    ├── 物理事件流 pev（跟随订阅）
+    └── 区域事件 region_ev（匹配推送）
 ```
 
-## 组件
+## 部署
 
-| 组件 | 说明 |
-|------|------|
-| `vtouchd` | 单进程合并器+WebSocket（推荐），崩溃由启动脚本重拉恢复 |
-| `vtouchmerge` + `vtouchws` | 旧双进程实现（回滚备用） |
-| `clients/plugins/vtouch.js` | AutoJs6 SDK v2（项目插件） |
-| `clients/plugin-apk` | APK 应用插件（org.vtouch.plugin，SDK 唯一载体） |
-
-## 构建
-
-使用 Android NDK r27d 交叉编译：
+二进制不随仓库分发——由 GitHub Actions **Build vtouch (Android NDK)** 工作流构建，从 artifact 下载：
 
 ```bash
-NDK=C:/Users/21102/android-ndk-r27d
-aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
-
-# vtouchmerge
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchmerge.c -o build/vtouchmerge
-
-# vtouchd
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
-
-# vtouchws
-"$aarch64" -O2 -Wall -Wextra src/vtouchws.c -o build/vtouchws
+adb push vtouch_bundle-arm64.js /sdcard/vtouch_bundle.js
 ```
 
-## 安装与运行
+在 AutoJs6 里运行示例脚本即可：bundle 首次运行自释放 vtouchd 到 `/data/local/tmp/vtouchd`、启动并连接（依赖 root / su）。
 
-### 1. 安装 APK（自包含，无脚本）
-
-```bash
-# 安装插件 APK 到手机
-adb install clients/plugin-apk/out/vtouch-plugin.apk
-```
-
-在 AutoJs6 里运行任意脚本：`new VTouch()` 自动释放二进制（首次）、启动后端并连接。
-输出 tap/swipe 正常即成功；状态检查 `vt.status()`（APK 通道）。
-
-### 2. 手动部署（可选）
-
-```bash
-adb push build/vtouchmerge /sdcard/
-adb push build/vtouchws /sdcard/
-adb shell 'su -c "cp /sdcard/vtouchmerge /data/local/tmp/vtouchmerge; cp /sdcard/vtouchws /data/local/tmp/vtouchws; chmod 755 /data/local/tmp/vtouchmerge /data/local/tmp/vtouchws"'
-```
-
-### 3. 运行 AutoJs6 SDK
-
-SDK v2 以 APK 应用插件为载体（`clients/plugin-apk`，包名 `org.vtouch.plugin`）：
-在 AutoJs6 中 `plugins.load('org.vtouch.plugin')` 后按示例脚本使用
-（见 `clients/vtouch_plugin_example.js` 与 `clients/vtouch_plugin_apk_test.js`）。
-
-## AutoJs6 SDK 使用
+## 区域监听示例
 
 ```javascript
-var vt = new VTouch().connect(function (client) {
-    threads.start(function () {
-        var f = client.finger();
-        
-        // 点击
-        f.tap(client.width / 2, client.height / 2, 60);
-        
-        // 滑动
-        f.swipe(200, 2000, 900, 2000, 1000);
-        
-        // 按下、等待、移动、抬起
-        f.down(720, 1584);
-        sleep(1000);
-        f.move(760, 1584);
-        f.up();
-    });
+var vt = require("/sdcard/vtouch_bundle.js");
+eval(vt.uiSource);   // 可选：管理 UI（框选添加/删除区域，配置自动下发）
+
+vt.connect({
+    onDown:  function (region, f) { log("down  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
+    onMove:  function (region, f) { log("move  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
+    onUp:    function (region, f) { log("up    " + region.id + " s" + f.slot); },
+    onEnter: function (region, f) { log("enter " + region.id + " s" + f.slot); },
+    onExit:  function (region, f) { log("exit  " + region.id + " s" + f.slot); }
 });
 ```
 
-**Finger 对象方法：**
-- `f.down(x, y)` - 按下
-- `f.move(x, y)` - 移动
-- `f.up()` - 抬起
-- `f.tap(x, y, ms)` - 点击（默认 60ms）
-- `f.swipe(x1, y1, x2, y2, durationMs)` - 滑动（默认 300ms，内部线程插值）
-- `f.hold(ms, fn)` - 按住 ms 后执行回调
-- `f.press(x, y, ms, fn)` - down 后定时 up，自动释放按压
-- `f.state()` - 返回 "down" 或 "up"
-- `f.cancel()` - 取消本地定时器，不抬指
+## 协议
 
-**VTouch 对象方法：**
-- `vt.frame(points)` - 多指同帧原子提交（单次 SYN_REPORT）
-- `vt.gesture(frames[, durationMs])` - 帧序列，可选总时长
-- `vt.pinch(cx, cy, startGap, endGap, durationMs)` - 双指缩放
-- `vt.reset()` - 释放全部虚拟触点
-- `vt.close()` - 关闭连接
-- `vt.onError` - 服务端错误回调
-
-## 停止服务
-
-```javascript
-vt.stopService();
-```
-
-或在脚本里停止：
-
-```js
-vt.close(); vt.stopService();
-```
+- `docs/VTOUCH_PROTOCOL.md` —— WebSocket 协议（命令/事件/region 配置，含设计说明）
 
 ## 常见问题
 
 ### 连接失败
-- 检查服务是否运行：`su -c "ps -A | grep vtouch"`
+- 检查服务是否运行：`su -c "ps -A | grep vtouchd"`
 - 检查 WebSocket 端口：`su -c "netstat -tlnp | grep 27183"`
 
 ### 触摸无响应
-- 检查 SELinux：`su -c "getenforce"`
-- 检查虚拟设备：`su -c "dumpsys input | grep vtouch-merged"`
+- 检查 SELinux：`su -c "getenforce"`（需 Permissive）
+- 检查虚拟设备：`su -c "dumpsys input | grep vtouch"`
 
 ### 脚本立即退出
-- 确保 `events.on("exit")` 中调用 `stopService()`
-- 检查 WebSocket 重连逻辑
+- 检查 root：`su -c id`（AutoJs6 通过 su 调起 bundle 的自释放逻辑）
+- 检查 WebSocket 重连逻辑（bundle 内置 bootWatch 自动重连 + 重新下发配置）
 
 ## 文件结构
 
 ```
 vtouch-project/
-├── src/                    # C 源码
-├── clients/                # AutoJs6 SDK
-├── scripts/                # 安装/启动脚本与打包工具
-├── sdcard/vtouch-merge/    # 手机运行目录（随安装包分发）
-├── build/                  # 编译产物
-├── tests/                  # 测试脚本
-└── docs/                   # 文档
+├── src/vtouchd.c         # C 源码（单一二进制）
+├── clients/              # AutoJs6 脚本（bundle 构建产物、示例）
+├── scripts/              # 构建 / 同步脚本
+├── tests/                # WS 冒烟测试
+├── docs/                 # 文档
+├── extension/sync-ext/   # Chrome 扩展（网页同步通道）
+└── .github/workflows/    # Actions 构建
 ```
 
 ## 许可证
