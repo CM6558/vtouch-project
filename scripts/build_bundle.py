@@ -86,6 +86,8 @@ function vtouchWriteAll(out, bytes) {
     out.write(bytes);
     out.flush();
 }
+/* 发包全局锁：读线程的 ping 和业务线程的触摸包可能并发写同一 socket。 */
+var SEND_LOCK = threads.lock();
 function vtouchReadFull(ins, n) {
     var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n);
     var off = 0;
@@ -145,6 +147,8 @@ function vtouchConnectOnce(timeout) {
     if (!ok) { try { sock.close(); } catch (e) {} throw new Error("握手 accept 不匹配"); }
     var conn = { sock: sock, out: out, ins: ins, mask: new java.util.Random() };
     conn.send = function (text) {
+        SEND_LOCK.lock();
+        try {
         var data = new java.lang.String(text).getBytes("UTF-8");
         var n = data.length, i, m = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 4);
         conn.mask.nextBytes(m);
@@ -157,6 +161,7 @@ function vtouchConnectOnce(timeout) {
         var masked = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n);
         for (i = 0; i < n; i++) masked[i] = jb(data[i] ^ m[i & 3]);
         vtouchWriteAll(conn.out, masked);
+        } finally { SEND_LOCK.unlock(); }
     };
     /* 读一条服务端文本消息；无数据时返回 null（不阻塞）。 */
     conn.recv = function () {
@@ -178,8 +183,21 @@ function vtouchConnectOnce(timeout) {
     return conn;
 }
 
-function vtouchSend(c, line) { c.drain(); c.send(line); }
+function vtouchSend(c, line) { if (!c.watch) c.drain(); c.send(line); }
 function vtouchReset() { vtouchSend(vtouchCur(), "reset"); }
+/* 订阅物理触摸流：daemon 此后推送 pev 行；订阅后发包不再 drain（读线程消费回包）。 */
+function vtouchSub(c) { c.drain(); c.send("sub"); c.watch = true; }
+function vtouchUnsub(c) { c.watch = false; c.send("unsub"); c.drain(); }
+/* pev <slot> <down|move|up> <lx> <ly> -> {slot,action,x,y}；非 pev 行返回 null。 */
+function vtouchParseEv(line) {
+    if (!line || line.indexOf("pev ") !== 0) return null;
+    var p = line.split(" ");
+    if (p.length !== 5) return null;
+    var slot = +p[1], x = +p[3], y = +p[4];
+    if (isNaN(slot) || isNaN(x) || isNaN(y)) return null;
+    if (p[2] !== "down" && p[2] !== "move" && p[2] !== "up") return null;
+    return { slot: slot, action: p[2], x: x, y: y };
+}
 function vtouchStop() {
     CURR = null;
     shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
@@ -282,6 +300,9 @@ module.exports = {
     loadRegions: rgLoad,
     rgSave: rgSave,
     createEngine: rgCreateEngine,
+    sub: vtouchSub,
+    unsub: vtouchUnsub,
+    parseEv: vtouchParseEv,
     uiSource: VTOUCH_UI_SRC,
     BIN: VTOUCH_BIN,
     HOST: VTOUCH_HOST,
@@ -342,6 +363,7 @@ function rgCreateEngine(regions, handlers) {
                 var e = evts[i], h = handlers["on" + e.type[0].toUpperCase() + e.type.slice(1)];
                 if (h) h(e.region, e.finger);
             }
+            if (p.action === "up") delete fingers[p.slot];
             return evts;
         }
     };
@@ -349,10 +371,8 @@ function rgCreateEngine(regions, handlers) {
 '''
 
 UI_SRC = '''
-/* 区域 overlay + 管理 UI：必须在主上下文 eval 执行（Java bridge 回调不能定义在 require 模块里）。只用 vt.loadRegions / vt.rgSave。 */
+/* 区域 overlay（主上下文 eval 执行：Java bridge 回调不能定义在 require 模块里）。只用 vt.loadRegions。 */
 var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {};
-var g_uiW = null, g_capW = null, g_cap = null;
-var g_uiH = new android.os.Handler(android.os.Looper.getMainLooper());
 function ovShow(rs) {
     g_ovR = rs;
     if (g_ovW) return;
@@ -361,20 +381,25 @@ function ovShow(rs) {
     g_ovW.setTouchable(false);
     g_ovW.board.on("draw", function (canvas) {
         var i, r, p, lx, ly;
+        try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
+        /* 窗体被系统栏顶到 y>0（状态栏+指针条约 160px，随开关变化）：读自身位置自校准。 */
+        var oy = 0, ox = 0;
+        try { oy = g_ovW.getY(); ox = g_ovW.getX(); } catch (e) {}
         for (i = 0; i < g_ovR.length; i++) {
             r = g_ovR[i];
             p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
             if (g_ovH[r.id] && Date.now() - g_ovH[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
-            if (r.type === "circle") { canvas.drawCircle(r.cx, r.cy, r.r, p); lx = r.cx - r.r; ly = r.cy - r.r; }
-            else { canvas.drawRect(r.x1, r.y1, r.x2, r.y2, p); lx = r.x1; ly = r.y1; }
+            if (r.type === "circle") { canvas.drawCircle(r.cx - ox, r.cy - oy, r.r, p); lx = r.cx - r.r; ly = r.cy - r.r; }
+            else { canvas.drawRect(r.x1 - ox, r.y1 - oy, r.x2 - ox, r.y2 - oy, p); lx = r.x1; ly = r.y1; }
             p = new Paint(); p.setColor(colors.WHITE); p.setTextSize(36);
-            canvas.drawText(r.name || r.id, lx + 8, ly + 40, p);
+            canvas.drawText(r.name || r.id, lx - ox + 8, ly - oy + 40, p);
         }
         for (i = 0; i < g_ovF.length; i++) {
             var f = g_ovF[i];
+            if (!f.down) continue;
             p = new Paint(); p.setColor(colors.BLUE);
-            canvas.drawCircle(f.x, f.y, 40, p);
-            canvas.drawText("s" + f.slot, f.x + 44, f.y, p);
+            canvas.drawCircle(f.x - ox, f.y - oy, 40, p);
+            canvas.drawText("s" + f.slot, f.x - ox + 44, f.y - oy, p);
         }
     });
 }
@@ -383,103 +408,6 @@ function ovFlash(id) { g_ovH[id] = Date.now(); }
 function ovSet(rs) { g_ovR = rs; }
 function ovClose() { try { if (g_ovW) g_ovW.close(); } catch (e) {} g_ovW = null; }
 function ovPreview(on) { if (on) ovShow(vt.loadRegions()); else ovClose(); }
-function rgInfo(r) {
-    if (r.type === "circle") return "O r=" + Math.round(r.r) + " @ " + Math.round(r.cx) + "," + Math.round(r.cy);
-    return "[] " + (r.x2 - r.x1) + "x" + (r.y2 - r.y1) + " @ " + r.x1 + "," + r.y1;
-}
-function uiBtn(text, fn) {
-    var b = new android.widget.Button(context);
-    b.setText(text);
-    b.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-    b.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { try { fn(); } catch (e) {} } }));
-    return b;
-}
-function uiRefresh() {
-    if (!g_uiW) return;
-    try {
-        g_uiH.post(new JavaAdapter(java.lang.Runnable, { run: function () {
-            try { uiRefreshDo(); } catch (e) { log("uiRefresh FAIL " + e); }
-        } }));
-    } catch (e) { log("uiRefresh post FAIL " + e); }
-}
-function uiRefreshDo() {
-    var rs = vt.loadRegions(), i;
-    g_uiW.title.setText("区域管理 (" + rs.length + "个)");
-    g_uiW.rows.removeAllViews();
-    for (i = 0; i < rs.length; i++) (function (r) {
-        var h = new android.widget.LinearLayout(context);
-        h.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        var t = new android.widget.TextView(context);
-        t.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        t.setTextSize(13);
-        t.setText((r.enabled === false ? "[关] " : "[开] ") + (r.name || r.id) + " | " + rgInfo(r));
-        var row = vt.loadRegions();
-        h.addView(t);
-        h.addView(uiBtn(r.enabled === false ? "开" : "关", function () {
-            for (var k = 0; k < row.length; k++) if (row[k].id === r.id) row[k].enabled = (row[k].enabled === false);
-            vt.rgSave(row); ovSet(row); uiRefresh();
-        }));
-        h.addView(uiBtn("删", function () {
-            var all = [];
-            for (var k = 0; k < row.length; k++) if (row[k].id !== r.id) all.push(row[k]);
-            vt.rgSave(all); ovSet(all); uiRefresh();
-        }));
-        g_uiW.rows.addView(h);
-    })(rs[i]);
-}
-function capClose() { try { if (g_capW) g_capW.close(); } catch (e) {} g_capW = null; g_cap = null; }
-function capStart(mode) {
-    capClose();
-    g_cap = { mode: mode, sx: 0, sy: 0, cx: 0, cy: 0 };
-    g_capW = floaty.rawWindow('<frame id="cap"><canvas id="board" layout_weight="1"/></frame>');
-    g_capW.setSize(device.width, device.height);
-    g_capW.setTouchable(true);
-    g_capW.board.on("draw", function (canvas) {
-        if (!g_cap) return;
-        var dx = g_cap.cx - g_cap.sx, dy = g_cap.cy - g_cap.sy;
-        if (dx * dx + dy * dy < 400) return;
-        var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
-        if (g_cap.mode === "circle") canvas.drawCircle(g_cap.sx, g_cap.sy, Math.sqrt(dx * dx + dy * dy), p);
-        else canvas.drawRect(Math.min(g_cap.sx, g_cap.cx), Math.min(g_cap.sy, g_cap.cy), Math.max(g_cap.sx, g_cap.cx), Math.max(g_cap.sy, g_cap.cy), p);
-    });
-    g_capW.cap.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
-        try {
-            var a = ev.getAction(), x = ev.getX(), y = ev.getY();
-            if (a === 0) { g_cap.sx = x; g_cap.sy = y; g_cap.cx = x; g_cap.cy = y; }
-            else if (a === 2) { g_cap.cx = x; g_cap.cy = y; try { g_capW.board.postInvalidate(); } catch (e) {} }
-            else if (a === 1) {
-                var dx = x - g_cap.sx, dy = y - g_cap.sy;
-                if (dx * dx + dy * dy > 2500) {
-                    var n = vt.loadRegions().length + 1, r;
-                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx), cy: Math.round(g_cap.sy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
-                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x)), y1: Math.round(Math.min(g_cap.sy, y)), x2: Math.round(Math.max(g_cap.sx, x)), y2: Math.round(Math.max(g_cap.sy, y)), enabled: true };
-                    var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
-                }
-                capClose();
-            }
-        } catch (e) {}
-        return true;
-    } }));
-}
-function ui() {
-    if (g_uiW) { uiClose(); return; }
-    g_uiW = floaty.window(
-        '<vertical padding="12">' +
-        '<text id="title" textSize="16sp" textStyle="bold" text="区域管理"/>' +
-        '<scroll h="300"><vertical id="rows"/></scroll>' +
-        '<horizontal><button id="addRect" layout_weight="1" text="＋矩形"/><button id="addCircle" layout_weight="1" text="＋圆形"/></horizontal>' +
-        '<horizontal><button id="preview" layout_weight="1" text="预览开/关"/><button id="btnQuit" layout_weight="1" text="关闭"/></horizontal>' +
-        '</vertical>');
-    log("ui window ok");
-    g_uiW.addRect.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { toast("拖框画矩形，抬手保存"); capStart("rect"); } }));
-    g_uiW.addCircle.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { toast("起点为圆心，拖动定半径"); capStart("circle"); } }));
-    g_uiW.preview.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { ovPreview(!g_ovW); } }));
-    g_uiW.btnQuit.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { uiClose(); } }));
-    log("ui wired");
-    uiRefresh();
-    log("ui refreshed");
-}
-function uiClose() { capClose(); try { if (g_uiW) g_uiW.close(); } catch (e) {} g_uiW = null; }
 '''
 
 

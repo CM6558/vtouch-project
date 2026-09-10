@@ -10,6 +10,7 @@
  * crash loses the grab; run under service.sh (restart on exit) for recovery.
  *
  * Protocol (unchanged): ping/res/reset/down/move/up/begin_frame/point/end_frame
+ * Events (subscribe with "sub", stop with "unsub"): pev <slot> <down|move|up> <lx> <ly>
  * Build: same NDK line as vtouchmerge (no new dependencies).
  */
 #include <arpa/inet.h>
@@ -50,6 +51,11 @@ static int frame_open;
 static int frame_seen[MAX_VIRT];
 static struct contact staged[MAX_VIRT];
 static int staged_id;
+/* pev 订阅 + 已上报状态（变化才广播） */
+static int subscribed;
+static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
+static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n);
+static void drop_client(void);
 
 static void on_signal(int s) { (void)s; stop_flag = 1; }
 
@@ -72,6 +78,20 @@ static int logical_to_raw(int logical, int axis, int *raw)
     if (value < axmin[axis]) value = axmin[axis];
     if (value > axmax[axis]) value = axmax[axis];
     *raw = (int)value; return 0;
+}
+
+/* raw -> logical：供 pev 事件上报把物理坐标转回逻辑坐标。 */
+static int raw_to_logical(int raw, int axis, int *logical)
+{
+    int size = axis ? logical_height : logical_width;
+    long span = (long)axmax[axis] - axmin[axis];
+    long v;
+    if (size < 2 || span <= 0) return -1;
+    if (raw < axmin[axis]) raw = axmin[axis];
+    if (raw > axmax[axis]) raw = axmax[axis];
+    v = ((long)(raw - axmin[axis]) * (size - 1) + span / 2) / span;
+    if (v < 0) v = 0; if (v > size - 1) v = size - 1;
+    *logical = (int)v; return 0;
 }
 
 static int bit(const unsigned long *b, int n)
@@ -245,6 +265,12 @@ static int handle_line(char *line, char *resp, size_t cap)
     if (!strcmp(t, "reset")) {
         owner_reset(); snprintf(resp, cap, "ok"); return 0;
     }
+    if (!strcmp(t, "sub")) {
+        subscribed = 1; snprintf(resp, cap, "ok"); return 0;
+    }
+    if (!strcmp(t, "unsub")) {
+        subscribed = 0; snprintf(resp, cap, "ok"); return 0;
+    }
     if (!strcmp(t, "up")) {
         char *ss = strtok_r(NULL, " \t", &st);
         if (frame_open || !ss || strtok_r(NULL, " \t", &st) ||
@@ -294,9 +320,28 @@ static int handle_line(char *line, char *resp, size_t cap)
     snprintf(resp, cap, "err unknown"); return -1;
 }
 
+static void broadcast_phys(void)
+{
+    int i, lx, ly, n; char msg[64]; const char *st;
+    for (i = 0; i < phys_slots; i++) {
+        if (phys[i].down && !ps_down[i]) st = "down";
+        else if (!phys[i].down && ps_down[i]) st = "up";
+        else if (phys[i].down && (phys[i].x != ps_x[i] || phys[i].y != ps_y[i])) st = "move";
+        else continue;
+        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
+        if (phys[i].down) { ps_down[i] = 1; ps_x[i] = phys[i].x; ps_y[i] = phys[i].y; }
+        else ps_down[i] = 0;
+        n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i, st, lx, ly);
+        if (n <= 0 || (size_t)n >= sizeof msg ||
+            ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0) {
+            drop_client(); return;
+        }
+    }
+}
+
 static void physical_events(void)
 {
-    struct input_event e; ssize_t n;
+    struct input_event e; ssize_t n; int syn_seen = 0;
     while ((n = read(input_fd, &e, sizeof e)) == (ssize_t)sizeof e) {
         if (e.type == EV_ABS && e.code == ABS_MT_SLOT) {
             selected_slot = e.value;
@@ -311,8 +356,12 @@ static void physical_events(void)
                 phys[selected_slot].y = e.value;
             }
         }
-        if (e.type == EV_SYN && e.code == SYN_REPORT && emit_frame() < 0) stop_flag = 1;
+        if (e.type == EV_SYN && e.code == SYN_REPORT) {
+            syn_seen = 1;
+            if (emit_frame() < 0) { stop_flag = 1; return; }
+        }
     }
+    if (syn_seen && client_fd >= 0 && subscribed) broadcast_phys();
     if (n < 0 && (errno == ENODEV || errno == EIO)) stop_flag = 1;
 }
 
@@ -492,6 +541,7 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 static void drop_client(void)
 {
     if (client_fd >= 0) { close(client_fd); client_fd = -1; }
+    subscribed = 0;
     owner_reset();
 }
 
@@ -617,7 +667,7 @@ int main(int argc, char **argv)
             if (ncf >= 0) {
                 if (client_fd >= 0) {
                     fprintf(stderr, "vtouchd: kicking old ws client\n");
-                    close(client_fd); client_fd = -1; frame_open = 0;
+                    close(client_fd); client_fd = -1; frame_open = 0; subscribed = 0;
                 }
                 setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
                 setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);

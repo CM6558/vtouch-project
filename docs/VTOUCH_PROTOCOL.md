@@ -58,3 +58,19 @@ end_frame
 `end_frame` 会一次性提交全部点，并只发送一个 `SYN_REPORT`。每个 slot 在一帧中只能出现一次，状态支持 `down`、`move`、`up`。开启帧、提交点和结束帧必须来自同一个连接。
 
 注意：bridge 只接受最终（FIN=1）、客户端 masked 的文本帧，最大 4096 字节；支持 ping/pong 和 close。服务端绑定 `127.0.0.1`，不接受局域网连接。
+
+## 物理触摸订阅（pev）
+
+监听物理手指不再走 `events.observeTouch`，直接订阅 daemon 的物理触摸流（同一条 WS 连接，又发又收）：
+
+```text
+-> "sub"          -> "ok"   （开始推送；"unsub" 停止）
+<- "pev 0 down 540 1200"
+<- "pev 0 move 541 1210"
+<- "pev 0 up 541 1210"
+```
+
+- `pev <slot> <down|move|up> <lx> <ly>`：slot 为物理 Type-B 槽号，坐标已是逻辑坐标（与 down/move/up 入参同一坐标系）。
+- daemon 只在状态变化时推送（按下/抬起/坐标变化），静止不刷屏；无订阅者时零开销。
+- 新连接默认未订阅；连接被顶掉或断开后订阅清零，重连需重新 `sub`。
+- 订阅后发包不再 `drain`（读线程统一消费回包，避免吃掉 pev）。
