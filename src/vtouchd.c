@@ -262,6 +262,7 @@ static struct region regions[MAX_REGIONS];
 static int region_count;
 static unsigned char slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一帧该槽是否在区域内 */
 static unsigned char slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下时是否命中（onUp 代点依据） */
+static int slot_last_x[MAX_PHYS], slot_last_y[MAX_PHYS]; /* 上次 move 推送位置（位置变化才推） */
 
 static void regions_clear(void)
 {
@@ -269,6 +270,8 @@ static void regions_clear(void)
     memset(regions, 0, sizeof regions);
     memset(slot_in, 0, sizeof slot_in);
     memset(slot_hit, 0, sizeof slot_hit);
+    memset(slot_last_x, 0, sizeof slot_last_x);
+    memset(slot_last_y, 0, sizeof slot_last_y);
 }
 
 static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
@@ -352,9 +355,15 @@ static void region_match(void)
             if (phys[i].down) {
                 if (!ps_down[i]) {
                     if (hit) { slot_hit[i][rid] = 1; region_ev_send(rg->id, "down", i, lx, ly); }
+                    slot_last_x[i] = lx; slot_last_y[i] = ly;   /* 按下位置即 move 基准 */
                 } else {
                     if (hit && !slot_in[i][rid]) region_ev_send(rg->id, "enter", i, lx, ly);
                     else if (!hit && slot_in[i][rid]) region_ev_send(rg->id, "exit", i, lx, ly);
+                    /* move：仅在已在区域内时按位置变化推（enter/down 帧不重复推） */
+                    if (hit && slot_in[i][rid] && (slot_last_x[i] != lx || slot_last_y[i] != ly)) {
+                        slot_last_x[i] = lx; slot_last_y[i] = ly;
+                        region_ev_send(rg->id, "move", i, lx, ly);
+                    }
                 }
             } else if (ps_down[i] && slot_hit[i][rid] && hit) {
                 region_ev_send(rg->id, "up", i, lx, ly);
