@@ -372,7 +372,7 @@ function rgCreateEngine(regions, handlers) {
 
 UI_SRC = '''
 /* 区域 overlay（主上下文 eval 执行：Java bridge 回调不能定义在 require 模块里）。只用 vt.loadRegions。 */
-var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {};
+var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {}, g_ovLoc = null;
 function ovShow(rs) {
     g_ovR = rs;
     if (g_ovW) return;
@@ -382,9 +382,13 @@ function ovShow(rs) {
     g_ovW.board.on("draw", function (canvas) {
         var i, r, p, lx, ly;
         try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
-        /* 窗体被系统栏顶到 y>0（状态栏+指针条约 160px，随开关变化）：读自身位置自校准。 */
+        /* 内容被状态栏 inset 顶下 statusbar 高度（实测 160px）：量 canvas 自身屏幕坐标自校准。 */
         var oy = 0, ox = 0;
-        try { oy = g_ovW.getY(); ox = g_ovW.getX(); } catch (e) {}
+        try {
+            if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
+            g_ovW.board.getLocationOnScreen(g_ovLoc);
+            ox = g_ovLoc[0]; oy = g_ovLoc[1];
+        } catch (e) {}
         for (i = 0; i < g_ovR.length; i++) {
             r = g_ovR[i];
             p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);

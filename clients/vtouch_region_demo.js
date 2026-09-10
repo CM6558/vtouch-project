@@ -6,6 +6,16 @@
 var vt = require("/sdcard/vtouch_bundle.js");
 eval(vt.uiSource);
 
+/* 单实例接管：后来者广播，先到者自退（daemon 单 client，双活会互踢）。 */
+var MY = "" + Date.now() + "_" + Math.random();
+try {
+    events.broadcast.on("vt-takeover", function (tok) {
+        if (tok !== MY) { try { ovClose(); } catch (e) {} try { vt.stop(); } catch (e2) {} exit(); }
+    });
+} catch (e) {}
+try { events.broadcast.emit("vt-takeover", MY); } catch (e) {}
+sleep(1500);
+
 vt.ensure();
 var c = vt.connect();
 
