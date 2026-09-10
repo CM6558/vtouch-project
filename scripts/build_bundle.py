@@ -674,10 +674,12 @@ def main() -> int:
 
     raw = BIN.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
+    # B64 分行拼接：单行 30KB 连续 base64 会被内网 HIS WAF 拦（403）；分行后单行短
+    _b64js = '"\n    + "'.join(b64[i:i + 76] for i in range(0, len(b64), 76))
     blob = (
         "/* ---- 内嵌二进制（构建机填入） ---- */\n"
         "var VTOUCH_BIN_SIZE = %d;\n"
-        'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), b64)
+        'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), _b64js)
     )
     uisrc = (
         "/* ---- UI/overlay 源码（调用侧 eval(vt.uiSource) 进主上下文执行） ---- */\n"
