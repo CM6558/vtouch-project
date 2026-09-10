@@ -27,10 +27,6 @@ bootWatch({
     },
     onUp: function (region, f) {
         log("ev up " + region.id + " s" + f.slot);
-        var cx = region.type === "circle" ? region.cx : (region.x1 + region.x2) / 2;
-        var cy = region.type === "circle" ? region.cy : (region.y1 + region.y2) / 2;
-        toast("代点 " + (region.name || region.id));
-        vt.finger().tap(cx, cy);
     },
     onEnter: function (region, f) {
         ovFlash(region.id);
