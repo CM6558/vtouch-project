@@ -51,10 +51,27 @@ jobs:
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchmerge.c -o build/vtouchmerge
 
-      - name: Compile vtouchd (merged single binary)
+      - name: Compile vtouchd (merged single binary, arm64)
         run: |
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchd.c -o build/vtouchd
+
+      - name: Generate vtouch_bundle.js (arm64)
+        run: |
+          python3 scripts/build_bundle.py
+          test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
+          cp clients/vtouch_bundle.js build/vtouch_bundle-arm64.js
+
+      - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 bundle
+        run: |
+          x86_64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
+            src/vtouchd.c -o build/vtouchd-x86_64
+          mv build/vtouchd build/vtouchd.arm64
+          mv build/vtouchd-x86_64 build/vtouchd
+          python3 scripts/build_bundle.py
+          cp clients/vtouch_bundle.js build/vtouch_bundle-x86_64.js
+          mv build/vtouchd build/vtouchd-x86_64
+          mv build/vtouchd.arm64 build/vtouchd
 
       - name: Compile vtouchws (WebSocket bridge)
         run: |
@@ -69,12 +86,8 @@ jobs:
             file "$f"
           done
           ls -lh build/
-
-      - name: Generate vtouch_bundle.js (embed freshly built vtouchd)
-        run: |
-          python3 scripts/build_bundle.py
-          test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
-          ls -lh clients/vtouch_bundle.js
+          test -f build/vtouch_bundle-arm64.js || { echo "arm64 bundle missing"; exit 1; }
+          test -f build/vtouch_bundle-x86_64.js || { echo "x86_64 bundle missing"; exit 1; }
 
       - name: Package install archives (release only)
         if: startsWith(github.ref, 'refs/tags/')
@@ -91,7 +104,8 @@ jobs:
             build/vtouchd
             build/vtouchmerge
             build/vtouchws
-            clients/vtouch_bundle.js
+            build/vtouch_bundle-arm64.js
+            build/vtouch_bundle-x86_64.js
           if-no-files-found: error
 
       - name: Create GitHub Release (release only)
