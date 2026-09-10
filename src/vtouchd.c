@@ -249,6 +249,123 @@ static int set_virtual(struct contact *state, int slot, const char *name, int x,
     state[slot].x = x; state[slot].y = y; return 0;
 }
 
+/* ---- region 匹配（native，B 方案）：固定数组、无分配、纯只读匹配 ---- */
+#define MAX_REGIONS 32
+#define REGION_ID_MAX 15
+struct region {
+    char id[REGION_ID_MAX + 1];
+    int type;              /* 0=rect 1=circle */
+    int enabled;
+    int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
+};
+static struct region regions[MAX_REGIONS];
+static int region_count;
+static unsigned char slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一帧该槽是否在区域内 */
+static unsigned char slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下时是否命中（onUp 代点依据） */
+
+static void regions_clear(void)
+{
+    region_count = 0;
+    memset(regions, 0, sizeof regions);
+    memset(slot_in, 0, sizeof slot_in);
+    memset(slot_hit, 0, sizeof slot_hit);
+}
+
+static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
+{
+    struct region *rg;
+    size_t n;
+    if (region_count >= MAX_REGIONS || !id) return -1;
+    n = strlen(id);
+    if (n == 0 || n > REGION_ID_MAX) return -1;
+    if (type != 0 && type != 1) return -1;
+    if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
+    if (a1 >= logical_width || a2 >= logical_height) return -1;
+    rg = &regions[region_count++];
+    memset(rg, 0, sizeof *rg);
+    memcpy(rg->id, id, n);
+    rg->type = type;
+    rg->enabled = enabled ? 1 : 0;
+    rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+    fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
+        rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+    return 0;
+}
+
+static int region_hit(const struct region *rg, int lx, int ly)
+{
+    if (!rg->enabled) return 0;
+    if (rg->type == 1) {
+        int dx = lx - rg->a1, dy = ly - rg->a2;
+        return dx * dx + dy * dy <= rg->a3 * rg->a3;
+    }
+    return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
+}
+
+/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 subscribed */
+static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
+{
+    char msg[96];
+    int n;
+    if (client_fd < 0 || !subscribed) return;
+    n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    if (n > 0 && (size_t)n < sizeof msg &&
+        ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0)
+        drop_client();
+    fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d%s\n", id, ev, slot, lx, ly,
+        (client_fd < 0 || !subscribed) ? " (NO-CLIENT/UNSUB)" : "");
+}
+
+/* 代点：区域中心注入一次 down+up。必须先于物理帧收尾后调用（调用方保证），
+ * 内部两帧各自完整 emit_frame（SYN 边界正确），绝不插入物理帧中间。 */
+static void region_tap(const struct region *rg)
+{
+    int i, x, y, lx, ly;
+    if (u_fd < 0) return;
+    lx = (rg->type == 1) ? rg->a1 : (rg->a1 + rg->a3) / 2;
+    ly = (rg->type == 1) ? rg->a2 : (rg->a2 + rg->a4) / 2;
+    if (logical_to_raw(lx, 0, &x) || logical_to_raw(ly, 1, &y)) return;
+    for (i = 0; i < vslots; i++)
+        if (!virt[i].down && !virt[i].pending_up) break;
+    if (i >= vslots) return;                    /* 虚拟槽占满（10 指）则放弃，不硬插 */
+    if (set_virtual(virt, i, "down", x, y) < 0) return;
+    if (emit_frame() < 0) { set_virtual(virt, i, "up", x, y); emit_frame(); return; }
+    set_virtual(virt, i, "up", x, y);
+    if (emit_frame() < 0) stop_flag = 1;
+    fprintf(stderr, "vtouchd: region tap %s %d,%d (slot %d)\n", rg->id, lx, ly, i);
+}
+
+/* SYN 后、物理帧注入完成后调用：五事件匹配（down/up/enter/exit + 代点）。
+ * ps_down 此时还是上一帧状态（broadcast_phys 之后才更新），正好用于新按下/刚抬起判定。
+ * 全部只读 phys[]，失败即跳过，绝不阻塞注入路径。 */
+static void region_match(void)
+{
+    int i, rid, lx, ly, hit;
+    struct region *rg;
+    if (region_count <= 0) return;
+    for (i = 0; i < phys_slots; i++) {
+        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
+        for (rid = 0; rid < region_count; rid++) {
+            rg = &regions[rid];
+            if (!rg->enabled) { slot_in[i][rid] = 0; continue; }
+            hit = region_hit(rg, lx, ly);
+            if (phys[i].down) {
+                if (!ps_down[i]) {
+                    if (hit) { slot_hit[i][rid] = 1; region_ev_send(rg->id, "down", i, lx, ly); }
+                } else {
+                    if (hit && !slot_in[i][rid]) region_ev_send(rg->id, "enter", i, lx, ly);
+                    else if (!hit && slot_in[i][rid]) region_ev_send(rg->id, "exit", i, lx, ly);
+                }
+            } else if (ps_down[i] && slot_hit[i][rid] && hit) {
+                region_ev_send(rg->id, "up", i, lx, ly);
+                region_tap(rg);              /* onUp 代点（区域中心） */
+            }
+            slot_in[i][rid] = (phys[i].down && hit) ? 1 : 0;
+            if (!phys[i].down && !ps_down[i]) slot_hit[i][rid] = 0;
+        }
+    }
+}
+
 /* One command line -> one response line. Returns 0 on ok (resp filled). */
 static int handle_line(char *line, char *resp, size_t cap)
 {
@@ -264,6 +381,33 @@ static int handle_line(char *line, char *resp, size_t cap)
     }
     if (!strcmp(t, "reset")) {
         owner_reset(); snprintf(resp, cap, "ok"); return 0;
+    }
+    if (!strcmp(t, "region")) {
+        char *op = strtok_r(NULL, " \t", &st);
+        if (!op) { snprintf(resp, cap, "err region"); return -1; }
+        if (!strcmp(op, "clear")) {
+            regions_clear(); snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        if (!strcmp(op, "add")) {
+            char *sid = strtok_r(NULL, " \t", &st), *stype = strtok_r(NULL, " \t", &st);
+            char *sa1 = strtok_r(NULL, " \t", &st), *sa2 = strtok_r(NULL, " \t", &st);
+            char *sa3 = strtok_r(NULL, " \t", &st), *sa4 = strtok_r(NULL, " \t", &st);
+            char *sen = strtok_r(NULL, " \t", &st);
+            int type, a1, a2, a3, a4, en;
+            if (!sid || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
+                strtok_r(NULL, " \t", &st) ||
+                parse_long(stype, 0, 1, &type) ||
+                parse_long(sa1, 0, logical_width - 1, &a1) ||
+                parse_long(sa2, 0, logical_height - 1, &a2) ||
+                parse_long(sa3, 0, 100000, &a3) ||
+                parse_long(sa4, 0, logical_height - 1, &a4) ||
+                parse_long(sen, 0, 1, &en) ||
+                region_add(sid, type, a1, a2, a3, a4, en) < 0) {
+                snprintf(resp, cap, "err region"); return -1;
+            }
+            snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        snprintf(resp, cap, "err region"); return -1;
     }
     if (!strcmp(t, "sub")) {
         subscribed = 1; snprintf(resp, cap, "ok"); return 0;
@@ -354,11 +498,16 @@ static void physical_events(void)
                 phys[selected_slot].x = e.value;
             } else if (e.code == ABS_MT_POSITION_Y) {
                 phys[selected_slot].y = e.value;
+            } else if (e.code == ABS_X) {        /* type-A 兜底：部分模拟器 virtio 发 ABS_X/Y */
+                phys[selected_slot].x = e.value;
+            } else if (e.code == ABS_Y) {
+                phys[selected_slot].y = e.value;
             }
         }
         if (e.type == EV_SYN && e.code == SYN_REPORT) {
             syn_seen = 1;
             if (emit_frame() < 0) { stop_flag = 1; return; }
+            region_match();   /* 物理帧注入完成后才匹配+代点：帧边界安全，不阻塞注入 */
         }
     }
     if (syn_seen && client_fd >= 0 && subscribed) broadcast_phys();
@@ -626,6 +775,7 @@ int main(int argc, char **argv)
     struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
     memset(&sa, 0, sizeof sa); sa.sa_handler = on_signal; sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, 0); sigaction(SIGINT, &sa, 0); signal(SIGPIPE, SIG_IGN);
+    setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，避免全缓冲掩盖诊断 */
     apply_args(argc, argv);
     if (logical_width < 2 || logical_height < 2) {
         fprintf(stderr, "vtouchd: logical display size required (-w width -h height)\n");
