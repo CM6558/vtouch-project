@@ -7,7 +7,7 @@ Android touch simulation/merging system for rooted devices. Merges physical touc
 ```
 src/vtouchd.c         C source (single binary: merger + WebSocket + region matching)
 clients/              AutoJs6 scripts (vtouch_bundle.js is Actions build output, NOT tracked;
-                      vtouch_region_demo.js / vtouch_bundle_example.js are tracked)
+                      vtouch_touchback.js is tracked)
 scripts/              build_bundle.py + sync_auto*.py (GitHub API sync) + sync_web.py
 tests/                WebSocket smoke tests (ws_smoke.py, ws_kick.js)
 docs/                 Protocol and design docs

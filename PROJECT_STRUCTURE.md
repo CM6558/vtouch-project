@@ -6,8 +6,7 @@ vtouch-project/
 │   └── vtouchd.c                 # 单进程合并器 + WS + 区域匹配（唯一二进制）
 ├── clients/
 │   ├── vtouch_bundle.js          # 构建产物（内嵌 vtouchd，Actions 生成，不入库）
-│   ├── vtouch_region_demo.js     # 区域监听示例（五事件回调）
-│   └── vtouch_bundle_example.js  # bundle 用法示例
+│   ├── vtouch_touchback.js         # 监听+回触示例（区域触发→虚拟上滑/点按）
 ├── scripts/
 │   ├── build_bundle.py           # bundle 构建（内嵌二进制 + UI + 协议封装）
 │   ├── sync_auto.py              # 一键同步（GitHub REST API）
@@ -53,5 +52,5 @@ NDK=D:/ANDROID/SDK/ndk/30.0.15729638/toolchains/llvm/prebuilt/windows-x86_64/bin
 adb push vtouch_bundle-arm64.js /sdcard/vtouch_bundle.js
 # AutoJs6 运行示例（bundle 自释放 vtouchd 并连接）
 adb shell am start -n org.autojs.autojs6/org.autojs.autojs.external.open.RunIntentActivity \
-  -a android.intent.action.VIEW -d file:///sdcard/vtouch_region_demo.js -t application/x-javascript
+  -a android.intent.action.VIEW -d file:///sdcard/vtouch_touchback.js -t application/x-javascript
 ```

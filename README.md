@@ -15,7 +15,7 @@
 |------|------|
 | `src/vtouchd.c` | 单进程合并器+WebSocket+区域匹配（EVIOCGRAB + uinput + 127.0.0.1:27183） |
 | `clients/vtouch_bundle.js` | **构建产物**：内嵌 vtouchd 二进制的 AutoJs6 单文件（自释放+连接+协议封装+管理 UI），由 GitHub Actions 生成 |
-| `clients/vtouch_region_demo.js` | 区域监听示例（五事件回调） |
+| `clients/vtouch_touchback.js` | 监听+回触示例（区域触发→虚拟上滑/点按） |
 
 ## 部署
 
