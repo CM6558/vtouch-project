@@ -370,8 +370,10 @@ function rgCreateEngine(regions, handlers) {
 }
 '''
 
-UI_SRC = '''
-/* 区域 overlay（主上下文 eval 执行：Java bridge 回调不能定义在 require 模块里）。只用 vt.loadRegions。 */
+UI_SRC = '''/* 区域 overlay + 管理 UI + watcher 启动器：调用侧 eval(vt.uiSource) 进主上下文执行。
+ * 原因：Java bridge 回调（线程/事件/点击/画布）不能定义在 require 模块里。
+ * 只用 vt.loadRegions / vt.rgSave / vt.ensure / vt.connect / vt.sub / vt.createEngine / vt.parseEv / vt.finger / vt.stop。
+ * 调用侧只剩：eval + bootWatch(handlers) + 业务。管理：ui() 开 / uiClose() 关。 */
 var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {}, g_ovLoc = null;
 function ovShow(rs) {
     g_ovR = rs;
@@ -382,7 +384,6 @@ function ovShow(rs) {
     g_ovW.board.on("draw", function (canvas) {
         var i, r, p, lx, ly;
         try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
-        /* 内容被状态栏 inset 顶下 statusbar 高度（实测 160px）：量 canvas 自身屏幕坐标自校准。 */
         var oy = 0, ox = 0;
         try {
             if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
@@ -391,6 +392,7 @@ function ovShow(rs) {
         } catch (e) {}
         for (i = 0; i < g_ovR.length; i++) {
             r = g_ovR[i];
+            if (r.hidden) continue;
             p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
             if (g_ovH[r.id] && Date.now() - g_ovH[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
             if (r.type === "circle") { canvas.drawCircle(r.cx - ox, r.cy - oy, r.r, p); lx = r.cx - r.r; ly = r.cy - r.r; }
@@ -412,6 +414,201 @@ function ovFlash(id) { g_ovH[id] = Date.now(); }
 function ovSet(rs) { g_ovR = rs; }
 function ovClose() { try { if (g_ovW) g_ovW.close(); } catch (e) {} g_ovW = null; }
 function ovPreview(on) { if (on) ovShow(vt.loadRegions()); else ovClose(); }
+/* ---- 管理 UI（深色卡片）：列表查看 | 开关触发 | 显隐预览 | 删除 | ＋矩形/圆形框选 | 预览总开关 ---- */
+var g_uiW = null, g_capW = null, g_cap = null;
+var g_uiH = new android.os.Handler(android.os.Looper.getMainLooper());
+function rgInfo(r) {
+    var head = (r.enabled === false ? "[关] " : "[开] ") + (r.hidden ? "[隐] " : "") + (r.name || r.id);
+    if (r.type === "circle") return head + " | O r=" + r.r + " @ " + r.cx + "," + r.cy;
+    return head + " | 口 " + (r.x2 - r.x1) + "x" + (r.y2 - r.y1) + " @ " + r.x1 + "," + r.y1;
+}
+/* 八槽静态行：XML 里写死，不用程序化 view（API36 ColorOS 上程序化 Button 默认色会毒崩 TextView 绘制）。 */
+function uiRowAct(k, what) {
+    var rs = vt.loadRegions();
+    if (k < 0 || k >= rs.length) return;
+    var r = rs[k], i;
+    if (what === "t") r.enabled = (r.enabled === false);
+    else if (what === "v") r.hidden = !r.hidden;
+    else if (what === "d") { var all = []; for (i = 0; i < rs.length; i++) if (i !== k) all.push(rs[i]); rs = all; }
+    vt.rgSave(rs); ovSet(rs); uiRefresh();
+    toast(what === "d" ? "已删除" : "已更新 " + (r.name || r.id));
+}
+function uiRefresh() {
+    if (!g_uiW) return;
+    try {
+        g_uiH.post(new JavaAdapter(java.lang.Runnable, { run: function () {
+            try { uiRefreshDo(); } catch (e) { log("uiRefresh FAIL " + e); }
+        } }));
+    } catch (e) { log("uiRefresh post FAIL " + e); }
+}
+function uiRefreshDo() {
+    var rs = vt.loadRegions();
+    var extra = rs.length > 8 ? "（仅显示前8个）" : "";
+    g_uiW.title.setText("区域管理 (" + rs.length + "个)" + extra);
+    g_uiW.preview.setText(g_ovW ? "预览：开" : "预览：关");
+    if (rs.length > 0) { g_uiW.s0t.setText(rgInfo(rs[0])); g_uiW.s0.setVisibility(0); }
+    else { g_uiW.s0.setVisibility(8); }
+    if (rs.length > 1) { g_uiW.s1t.setText(rgInfo(rs[1])); g_uiW.s1.setVisibility(0); }
+    else { g_uiW.s1.setVisibility(8); }
+    if (rs.length > 2) { g_uiW.s2t.setText(rgInfo(rs[2])); g_uiW.s2.setVisibility(0); }
+    else { g_uiW.s2.setVisibility(8); }
+    if (rs.length > 3) { g_uiW.s3t.setText(rgInfo(rs[3])); g_uiW.s3.setVisibility(0); }
+    else { g_uiW.s3.setVisibility(8); }
+    if (rs.length > 4) { g_uiW.s4t.setText(rgInfo(rs[4])); g_uiW.s4.setVisibility(0); }
+    else { g_uiW.s4.setVisibility(8); }
+    if (rs.length > 5) { g_uiW.s5t.setText(rgInfo(rs[5])); g_uiW.s5.setVisibility(0); }
+    else { g_uiW.s5.setVisibility(8); }
+    if (rs.length > 6) { g_uiW.s6t.setText(rgInfo(rs[6])); g_uiW.s6.setVisibility(0); }
+    else { g_uiW.s6.setVisibility(8); }
+    if (rs.length > 7) { g_uiW.s7t.setText(rgInfo(rs[7])); g_uiW.s7.setVisibility(0); }
+    else { g_uiW.s7.setVisibility(8); }
+}
+function uiWire(v, fn) {
+    v.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { try { fn(); } catch (e) {} } }));
+}
+function ui() {
+    if (g_uiW) { uiClose(); return; }
+    g_uiW = floaty.window(
+        '<vertical bg="#1F2430" padding="16">' +
+        '<text id="title" textSize="17sp" textColor="#7FD4FF" text="区域管理"/>' +
+        '<text textSize="12sp" textColor="#9AA4B2" text="开/关=是否触发  显/隐=预览是否绘制"/>' +
+        '<scroll><vertical id="rows"><vertical id="s0"><text id="s0t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s0a" text="开关"/><button id="s0b" text="显隐"/><button id="s0c" text="删"/></horizontal></vertical><vertical id="s1"><text id="s1t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s1a" text="开关"/><button id="s1b" text="显隐"/><button id="s1c" text="删"/></horizontal></vertical><vertical id="s2"><text id="s2t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s2a" text="开关"/><button id="s2b" text="显隐"/><button id="s2c" text="删"/></horizontal></vertical><vertical id="s3"><text id="s3t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s3a" text="开关"/><button id="s3b" text="显隐"/><button id="s3c" text="删"/></horizontal></vertical><vertical id="s4"><text id="s4t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s4a" text="开关"/><button id="s4b" text="显隐"/><button id="s4c" text="删"/></horizontal></vertical><vertical id="s5"><text id="s5t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s5a" text="开关"/><button id="s5b" text="显隐"/><button id="s5c" text="删"/></horizontal></vertical><vertical id="s6"><text id="s6t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s6a" text="开关"/><button id="s6b" text="显隐"/><button id="s6c" text="删"/></horizontal></vertical><vertical id="s7"><text id="s7t" textSize="13sp" textColor="#E8ECF1" text=""/><horizontal><button id="s7a" text="开关"/><button id="s7b" text="显隐"/><button id="s7c" text="删"/></horizontal></vertical></vertical></scroll>' +
+        '<horizontal><button id="addRect" text="＋矩形"/><button id="addCircle" text="＋圆形"/></horizontal>' +
+        '<horizontal><button id="preview" text="预览：关"/><button id="btnQuit" text="关闭"/></horizontal>' +
+        '</vertical>');
+    log("ui window ok");
+    uiWire(g_uiW.s0a, function () { uiRowAct(0, "t"); });
+    uiWire(g_uiW.s0b, function () { uiRowAct(0, "v"); });
+    uiWire(g_uiW.s0c, function () { uiRowAct(0, "d"); });
+    uiWire(g_uiW.s1a, function () { uiRowAct(1, "t"); });
+    uiWire(g_uiW.s1b, function () { uiRowAct(1, "v"); });
+    uiWire(g_uiW.s1c, function () { uiRowAct(1, "d"); });
+    uiWire(g_uiW.s2a, function () { uiRowAct(2, "t"); });
+    uiWire(g_uiW.s2b, function () { uiRowAct(2, "v"); });
+    uiWire(g_uiW.s2c, function () { uiRowAct(2, "d"); });
+    uiWire(g_uiW.s3a, function () { uiRowAct(3, "t"); });
+    uiWire(g_uiW.s3b, function () { uiRowAct(3, "v"); });
+    uiWire(g_uiW.s3c, function () { uiRowAct(3, "d"); });
+    uiWire(g_uiW.s4a, function () { uiRowAct(4, "t"); });
+    uiWire(g_uiW.s4b, function () { uiRowAct(4, "v"); });
+    uiWire(g_uiW.s4c, function () { uiRowAct(4, "d"); });
+    uiWire(g_uiW.s5a, function () { uiRowAct(5, "t"); });
+    uiWire(g_uiW.s5b, function () { uiRowAct(5, "v"); });
+    uiWire(g_uiW.s5c, function () { uiRowAct(5, "d"); });
+    uiWire(g_uiW.s6a, function () { uiRowAct(6, "t"); });
+    uiWire(g_uiW.s6b, function () { uiRowAct(6, "v"); });
+    uiWire(g_uiW.s6c, function () { uiRowAct(6, "d"); });
+    uiWire(g_uiW.s7a, function () { uiRowAct(7, "t"); });
+    uiWire(g_uiW.s7b, function () { uiRowAct(7, "v"); });
+    uiWire(g_uiW.s7c, function () { uiRowAct(7, "d"); });
+    uiWire(g_uiW.addRect, function () { toast("拖框画矩形，抬手保存"); capStart("rect"); });
+    uiWire(g_uiW.addCircle, function () { toast("起点为圆心，拖动定半径"); capStart("circle"); });
+    uiWire(g_uiW.preview, function () { ovPreview(!g_ovW); uiRefresh(); });
+    uiWire(g_uiW.btnQuit, function () { uiClose(); });
+    log("ui wired");
+    uiRefresh();
+    log("ui refreshed");
+}
+function capClose() { try { if (g_capW) g_capW.close(); } catch (e) {} g_capW = null; g_cap = null; }
+function capStart(mode) {
+    capClose();
+    g_cap = { mode: mode, sx: 0, sy: 0, cx: 0, cy: 0 };
+    g_capW = floaty.rawWindow('<frame id="cap"><canvas id="board" layout_weight="1"/></frame>');
+    g_capW.setSize(device.width, device.height);
+    g_capW.setTouchable(true);
+    g_capW.board.on("draw", function (canvas) {
+        if (!g_cap) return;
+        var dx = g_cap.cx - g_cap.sx, dy = g_cap.cy - g_cap.sy;
+        if (dx * dx + dy * dy < 400) return;
+        var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
+        if (g_cap.mode === "circle") canvas.drawCircle(g_cap.sx, g_cap.sy, Math.sqrt(dx * dx + dy * dy), p);
+        else canvas.drawRect(Math.min(g_cap.sx, g_cap.cx), Math.min(g_cap.sy, g_cap.cy), Math.max(g_cap.sx, g_cap.cx), Math.max(g_cap.sy, g_cap.cy), p);
+    });
+    g_capW.cap.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
+        try {
+            var a = ev.getAction(), x = ev.getX(), y = ev.getY();
+            if (a === 0) { g_cap.sx = x; g_cap.sy = y; g_cap.cx = x; g_cap.cy = y; }
+            else if (a === 2) { g_cap.cx = x; g_cap.cy = y; try { g_capW.board.postInvalidate(); } catch (e) {} }
+            else if (a === 1) {
+                var dx = x - g_cap.sx, dy = y - g_cap.sy;
+                if (dx * dx + dy * dy > 2500) {
+                    var n = vt.loadRegions().length + 1, r;
+                    if (g_cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(g_cap.sx), cy: Math.round(g_cap.sy), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
+                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(g_cap.sx, x)), y1: Math.round(Math.min(g_cap.sy, y)), x2: Math.round(Math.max(g_cap.sx, x)), y2: Math.round(Math.max(g_cap.sy, y)), enabled: true };
+                    var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
+                    toast("已保存 " + r.name);
+                }
+                capClose();
+            }
+        } catch (e) {}
+        return true;
+    } }));
+}
+function uiClose() { capClose(); try { if (g_uiW) g_uiW.close(); } catch (e) {} g_uiW = null; }
+/* ---- watcher 启动器：仪式全包（接管/启动/订阅/双线程/退出清理/保活），业务只传 handlers ---- */
+function bootWatch(h) {
+    var MY = "" + Date.now() + "_" + Math.random();
+    try {
+        events.broadcast.on("vt-takeover", function (tok) {
+            if (tok !== MY) { try { ovClose(); } catch (e) {} try { uiClose(); } catch (e2) {} try { vt.stop(); } catch (e3) {} exit(); }
+        });
+    } catch (e) {}
+    try { events.broadcast.emit("vt-takeover", MY); } catch (e) {}
+    sleep(1500);
+    vt.ensure();
+    var c = vt.connect();
+    var regions = vt.loadRegions();
+    ovShow(regions);
+    var eng = vt.createEngine(regions, h);
+    var Q = new java.util.concurrent.LinkedBlockingQueue();
+    vt.sub(c);
+    events.on("exit", function () {
+        try { vt.stop(); } catch (e) {}
+        try { ovClose(); } catch (e2) {}
+        try { uiClose(); } catch (e3) {}
+    });
+    threads.start(function () {
+        log("vt-sub: on");
+        var cc = c, lastPing = 0;
+        for (;;) {
+            try {
+                for (;;) {
+                    var line = cc.recv();
+                    if (line === null) {
+                        if (Date.now() - lastPing > 3000) { lastPing = Date.now(); cc.send("ping"); }
+                        sleep(10);
+                        continue;
+                    }
+                    var e = vt.parseEv(line);
+                    if (e) Q.offer(e);
+                }
+            } catch (err) {
+                log("vt-sub 重连: " + err);
+                try { cc.close(); } catch (e2) {}
+                sleep(1000);
+                try { vt.ensure(); cc = vt.connect(); vt.sub(cc); }
+                catch (e3) { sleep(2000); }
+            }
+        }
+    });
+    threads.start(function () {
+        log("vt-watch: on");
+        while (true) {
+            try {
+                var p = Q.take();
+                if (p) { eng.feed(p); ovUpdate(eng.fingers()); }
+            } catch (e) { sleep(500); }
+        }
+    });
+    setInterval(function () {
+        try {
+            regions = vt.loadRegions();
+            eng.setRegions(regions);
+            ovSet(regions);
+        } catch (e) {}
+    }, 2000);
+}
+
 '''
 
 
