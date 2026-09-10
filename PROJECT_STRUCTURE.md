@@ -3,65 +3,55 @@
 ```text
 vtouch-project/
 ├── src/
-│   ├── vtouchd.c                 # 单进程合并器+WS（推荐；旧双进程见下）
-│   ├── vtouchmerge.c             # 旧双进程合并器（回滚备用）
-│   ├── vtouchws.c                # 旧双进程 WS bridge（回滚备用）
-│   └── Android.mk                # NDK integration
+│   └── vtouchd.c                 # 单进程合并器 + WS + 区域匹配（唯一二进制）
 ├── clients/
-│   ├── plugin-apk/               # APK 应用插件（org.vtouch.plugin，SDK v2 唯一载体）
-│   ├── plugins/vtouch.js         # AutoJs6 项目插件（SDK v2 分发）
-│   ├── vtouch_plugin_example.js  # 插件用法示例
-│   └── vtouch_plugin_apk_test.js # 插件真机测试脚本
+│   ├── vtouch_bundle.js          # 构建产物（内嵌 vtouchd，Actions 生成，不入库）
+│   ├── vtouch_region_demo.js     # 区域监听示例（五事件回调）
+│   └── vtouch_bundle_example.js  # bundle 用法示例
 ├── scripts/
-│   ├── build_sdk.py              # SDK 单源构建（分发 clients + APK 胶水）
-│   ├── vtouch-sdk.src.js         # SDK 唯一可读主源
-│   └── verify_vtouch_merge.sh    # 开发者诊断（adb 手动跑，不随包分发）
-├── sdcard/vtouch-merge/          # 手机运行目录（随安装包分发）
+│   ├── build_bundle.py           # bundle 构建（内嵌二进制 + UI + 协议封装）
+│   ├── sync_auto.py              # 一键同步（GitHub REST API）
+│   ├── sync_auto_install.py      # 同步守护注册/注销
+│   └── sync_web.py               # Chrome 扩展通道同步
 ├── docs/
 │   ├── README.md                 # 总文档
-│   ├── VTOUCH_MERGE.md           # 合并器架构文档
-│   ├── VTOUCH_PROTOCOL.md        # WebSocket/文本协议
-│   └── WEBSOCKET_DESIGN.md       # WebSocket 设计
+│   └── VTOUCH_PROTOCOL.md        # WebSocket 协议（命令/事件/region，含设计）
 ├── tests/
-│   └── ws_smoke.py               # WebSocket 握手、ping、tap 冒烟测试
-└── build/                        # arm64 构建产物
-    ├── vtouchd
-    ├── vtouchmerge                # 旧双进程（回滚备用）
-    └── vtouchws                   # 旧双进程（回滚备用）
+│   ├── ws_smoke.py               # WebSocket 握手、ping、tap 冒烟测试
+│   └── ws_kick.js                # 单客户端踢除测试
+├── extension/sync-ext/           # Chrome 扩展（网页同步通道）
+└── .github/workflows/build.yml   # Actions：编译 vtouchd 双 ABI + 生成 bundle
 ```
 
 ## 组件关系
 
 ```text
-AutoJs6 WebSocket
+AutoJs6 (bundle: 自释放 + 连接 + UI)
        │  ws://127.0.0.1:27183
        ▼
-   vtouchd（单进程：合并器 + WS，共用一个 poll 循环，无 UDS 跳转）
+vtouchd（合并器 + WS + region 匹配，共用一个 poll 循环）
        │  /dev/uinput
        ▼
 Android InputReader
 ```
 
-`vtouchd` 直接写入 `/dev/uinput`，只监听本机回环，不监听局域网。坏 WS 客户端只关闭该连接（虚拟触点复位），grab 不丢；只有进程整体崩溃才丢触摸，由启动脚本重拉恢复。旧 `vtouchmerge` + `vtouchws` 双进程仅作回滚备用。
+`vtouchd` 直接写入 `/dev/uinput`，只监听本机回环，不监听局域网。坏 WS 客户端只关闭该连接（虚拟触点复位），grab 不丢；只有进程整体崩溃才丢触摸，由 AutoJs6 侧重连循环自动拉起恢复。
 
-## 构建
+## 构建（GitHub Actions）
 
-在 Windows Git Bash 中（NDK r27d）：
+`.github/workflows/build.yml`（**Build vtouch (Android NDK)**）：NDK r27d 编译 vtouchd（arm64 + x86_64）→ 跑 `scripts/build_bundle.py` 生成 `vtouch_bundle-arm64.js` / `vtouch_bundle-x86_64.js` → artifact 上传。本地手动编译：
 
 ```sh
-NDK=C:/Users/<user>/android-ndk-r27d
-aarch64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
-
-"$aarch64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
+NDK=D:/ANDROID/SDK/ndk/30.0.15729638/toolchains/llvm/prebuilt/windows-x86_64/bin
+"$NDK/aarch64-linux-android24-clang" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
 ```
-
-或使用 `src/Android.mk`：`cd src && ndk-build`。
 
 ## 部署
 
 ```sh
-# 安装 APK（自包含：启停/健康检查全在插件 Java 侧）
-adb install clients/plugin-apk/out/vtouch-plugin.apk
+# 从 Actions artifact 下载 vtouch_bundle-arm64.js，放到手机
+adb push vtouch_bundle-arm64.js /sdcard/vtouch_bundle.js
+# AutoJs6 运行示例（bundle 自释放 vtouchd 并连接）
+adb shell am start -n org.autojs.autojs6/org.autojs.autojs.external.open.RunIntentActivity \
+  -a android.intent.action.VIEW -d file:///sdcard/vtouch_region_demo.js -t application/x-javascript
 ```
-
-先装 APK，`new VTouch()` 自动完成释放、启动与连接。
