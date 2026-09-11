@@ -3,7 +3,7 @@
 ```text
 vtouch-project/
 ├── src/
-│   └── vtouchd.c                 # 单进程合并器 + WS + 区域匹配（唯一二进制）
+│   └── vtouchd.c                 # 核心：合并器 + WS + 区域匹配（命令行二进制 / 库化接口 vtouch_init/poll_step/region_*/set_callbacks）
 ├── clients/
 │   ├── vtouch_bundle.js          # 构建产物（内嵌 vtouchd，Actions 生成，不入库）
 │   ├── vtouch_touchback.js         # 监听+回触示例（区域触发→虚拟上滑/点按）
@@ -14,7 +14,8 @@ vtouch-project/
 │   └── sync_web.py               # Chrome 扩展通道同步
 ├── docs/
 │   ├── README.md                 # 总文档
-│   └── VTOUCH_PROTOCOL.md        # WebSocket 协议（命令/事件/region，含设计）
+│   ├── VTOUCH_PROTOCOL.md        # WebSocket 协议（命令/事件/region，含设计）
+│   └── ui_approaches_research.md # UI 方案调研（floaty/ImgUI/单进程渲染集成选型）
 ├── tests/
 │   ├── ws_smoke.py               # WebSocket 握手、ping、tap 冒烟测试
 │   └── ws_kick.js                # 单客户端踢除测试
@@ -28,10 +29,17 @@ vtouch-project/
 AutoJs6 (bundle: 自释放 + 连接 + UI)
        │  ws://127.0.0.1:27183
        ▼
-vtouchd（合并器 + WS + region 匹配，共用一个 poll 循环）
+vtouchd 核心（EVIOCGRAB 采集 + uinput 注入 + region 匹配 + WS，一个 poll 循环）
        │  /dev/uinput
        ▼
 Android InputReader
+
+单进程 UI 整合（可选）：vtouchd 核心编译为 C 库嵌入 app_process 渲染进程
+app_process（Java ~80 行: SurfaceControl 图层）→ JNI → libtestimgui.so
+    ├── vtouchd 核心（同进程：触摸/匹配/WS）
+    ├── 触摸回调 → ImGui io / 框选 / overlay 着色（内存直连）
+    ├── 事件回调 → 面板日志 / 命中闪烁（无 WS 客户端也通知）
+    └── EGL GLES2 + Dear ImGui（管理面板 + 全屏透明 overlay）
 ```
 
 `vtouchd` 直接写入 `/dev/uinput`，只监听本机回环，不监听局域网。坏 WS 客户端只关闭该连接（虚拟触点复位），grab 不丢；只有进程整体崩溃才丢触摸，由 AutoJs6 侧重连循环自动拉起恢复。
