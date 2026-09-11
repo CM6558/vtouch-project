@@ -17,7 +17,7 @@
 ```text
 真实触摸面板
     ↓ EVIOCGRAB
-vtouchd（单进程：合并器 + WebSocket + region 匹配，一个 poll 循环）
+vtouchd 核心（合并器 + WebSocket + region 匹配，一个 poll 循环；库化接口可嵌入）
     ├── 真实触点（1:1 透传）
     └── 模拟触点（virt 槽，WS 注入）
           ↓ /dev/uinput
@@ -27,9 +27,16 @@ Android InputReader/InputDispatcher
 
 AutoJs6（clients/vtouch_bundle.js：自释放 + 连接 + 管理 UI）
     ↓ WebSocket (127.0.0.1:27183)
-vtouchd
+vtouchd 核心
     ├── 物理事件流 pev（跟随订阅）
     └── 区域事件 region_ev（匹配推送）
+
+单进程 UI 面板（vtouchd 核心同进程嵌入）
+app_process（Java 80 行拿 SurfaceControl 图层）
+    └── JNI → C++：EGL GLES2 + Dear ImGui + vtouchd 核心
+        ├── 区域管理（表格/开关/显隐/删除/＋矩形/＋圆形框选）
+        ├── 事件日志 + overlay 实时预览（触摸内绿外红 + 命中闪烁）
+        └── WS 服务器对外（AutoJs6 照常连接）
 ```
 
 ## 部署
