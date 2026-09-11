@@ -24,6 +24,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +36,7 @@
 
 #define MAX_PHYS 64
 #define MAX_VIRT 32
-#define MAX_LINE 512
+#define MAX_LINE 2048
 #define MAX_PAYLOAD 4096
 #define HTTP_MAX 8192
 
@@ -45,8 +46,43 @@ static int ws_port = 27183;
 static int vslots = 10, phys_slots, total_slots, axmin[2], axmax[2], selected_slot;
 static int logical_width, logical_height;
 struct contact { int id, x, y, down, pending_up; };
-static int next_tracking_id = 1;
 static struct contact phys[MAX_PHYS], virt[MAX_VIRT];
+static int raw_to_logical(int raw, int axis, int *logical);   /* 前向声明（定义在下方） */
+
+/* ---- UI 回调（单进程整合：面板在本进程内直接收触摸/事件，无 socket） ---- */
+static int ui_enabled = 0;   /* -ui：开启 UI 回调路径 */
+static void (*vtouch_touch_cb)(int x, int y, int state);   /* state: 1=down 2=move 0=up */
+static void (*vtouch_ev_cb)(const char *line);
+void vtouch_set_callbacks(void (*touch_cb)(int, int, int), void (*ev_cb)(const char *))
+{
+    vtouch_touch_cb = touch_cb;
+    vtouch_ev_cb = ev_cb;
+    fprintf(stderr, "vtouchd: callbacks set tc=%p ec=%p\n", (void *)touch_cb, (void *)ev_cb);
+}
+static int ui_last_down[MAX_PHYS], ui_last_x[MAX_PHYS], ui_last_y[MAX_PHYS];
+static void vtouch_ui_sync(void)
+{
+    int i, lx, ly;
+    if (!vtouch_touch_cb) { fprintf(stderr, "vtouchd: ui_sync cb NULL\n"); return; }
+    for (i = 0; i < phys_slots; i++) {
+        if (phys[i].down && !ui_last_down[i]) {
+            if (raw_to_logical(phys[i].x, 0, &lx) == 0 && raw_to_logical(phys[i].y, 1, &ly) == 0) {
+                vtouch_touch_cb(lx, ly, 1);
+                ui_last_x[i] = lx; ui_last_y[i] = ly;
+            }
+        } else if (phys[i].down && ui_last_down[i]) {
+            if (raw_to_logical(phys[i].x, 0, &lx) == 0 && raw_to_logical(phys[i].y, 1, &ly) == 0 &&
+                (lx != ui_last_x[i] || ly != ui_last_y[i])) {
+                vtouch_touch_cb(lx, ly, 2);
+                ui_last_x[i] = lx; ui_last_y[i] = ly;
+            }
+        } else if (!phys[i].down && ui_last_down[i]) {
+            vtouch_touch_cb(ui_last_x[i], ui_last_y[i], 0);
+        }
+        ui_last_down[i] = phys[i].down;
+    }
+}
+static int next_tracking_id = 1;
 /* single-client frame staging */
 static int frame_open;
 static int frame_seen[MAX_VIRT];
@@ -325,12 +361,26 @@ static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, 
 {
     struct region *rg;
     size_t n;
-    if (region_count >= MAX_REGIONS || !id) return -1;
+    int i;
+    if (!id) return -1;
     n = strlen(id);
     if (n == 0 || n > REGION_ID_MAX) return -1;
     if (type != 0 && type != 1) return -1;
     if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
     if (a1 >= logical_width || a2 >= logical_height) return -1;
+    /* 同 id 查重：存在则原地更新（面板开关/显隐只改属性，不新增） */
+    for (i = 0; i < region_count; i++) {
+        if (strcmp(regions[i].id, id) == 0) {
+            rg = &regions[i];
+            rg->type = type;
+            rg->enabled = enabled ? 1 : 0;
+            rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+            fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
+                rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+            return 0;
+        }
+    }
+    if (region_count >= MAX_REGIONS) return -1;
     rg = &regions[region_count++];
     memset(rg, 0, sizeof *rg);
     memcpy(rg->id, id, n);
@@ -352,18 +402,39 @@ static int region_hit(const struct region *rg, int lx, int ly)
     return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
 }
 
+/* ---- 导出接口（单进程整合：ImGui 面板直接读写 region 表） ---- */
+void vtouch_region_clear(void) { regions_clear(); }
+int vtouch_region_count(void) { return region_count; }
+int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
+{
+    return region_add(id, type, a1, a2, a3, a4, enabled);
+}
+int vtouch_get_region(int i, char *id, int idn, int *type, int *a1, int *a2, int *a3, int *a4, int *enabled)
+{
+    struct region *rg;
+    if (i < 0 || i >= region_count) return -1;
+    rg = &regions[i];
+    snprintf(id, idn, "%s", rg->id);
+    *type = rg->type; *a1 = rg->a1; *a2 = rg->a2; *a3 = rg->a3; *a4 = rg->a4;
+    *enabled = rg->enabled;
+    return 0;
+}
 /* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 subscribed */
 static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {
     char msg[96];
     int n;
-    if (client_fd < 0 || !subscribed) return;
     n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    if (vtouch_ev_cb) vtouch_ev_cb(msg);   /* 面板优先：无 WS 客户端也通知（闪烁/日志） */
+    if (client_fd < 0 || !subscribed) {
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (NO-CLIENT/UNSUB)\n",
+            id, ev, slot, lx, ly);
+        return;
+    }
     if (n > 0 && (size_t)n < sizeof msg &&
         ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0)
         drop_client();
-    fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d%s\n", id, ev, slot, lx, ly,
-        (client_fd < 0 || !subscribed) ? " (NO-CLIENT/UNSUB)" : "");
+    fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
 }
 
 /* SYN 后、物理帧注入完成后调用：五事件匹配（down/up/enter/exit/move，纯监听无代点）。
@@ -424,6 +495,21 @@ static int handle_line(char *line, char *resp, size_t cap)
         if (!op) { snprintf(resp, cap, "err region"); return -1; }
         if (!strcmp(op, "clear")) {
             regions_clear(); snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        if (!strcmp(op, "list")) {
+            /* 查询当前配置（面板需要）：每行 region <id> <type> <a1..a4> <en> */
+            size_t used = 0;
+            int i;
+            for (i = 0; i < region_count && used + 64 < cap; i++) {
+                used += (size_t)snprintf(resp + used, cap - used, "region %s %d %d %d %d %d %d\n",
+                                         regions[i].id, regions[i].type,
+                                         regions[i].a1, regions[i].a2,
+                                         regions[i].a3, regions[i].a4,
+                                         regions[i].enabled);
+            }
+            if (used == 0) { snprintf(resp, cap, "ok 0"); return 0; }
+            snprintf(resp + used, cap - used, "end %d", region_count);
+            return 0;
         }
         if (!strcmp(op, "add")) {
             char *sid = strtok_r(NULL, " \t", &st), *stype = strtok_r(NULL, " \t", &st);
@@ -545,6 +631,7 @@ static void physical_events(void)
             syn_seen = 1;
             if (emit_frame() < 0) { stop_flag = 1; return; }
             region_match();   /* 物理帧注入完成后才匹配+代点：帧边界安全，不阻塞注入 */
+            vtouch_ui_sync();   /* 进程内回调（透传注入不受影响） */
         }
     }
     if (syn_seen && client_fd >= 0 && subscribed) broadcast_phys();
@@ -705,7 +792,7 @@ static int websocket_handshake(int fd)
     sha1_final(&s, digest);
     if (base64(digest, 20, accept, sizeof accept) < 0) return -1;
     {
-        char response[256];
+        char response[2048];
         int len = snprintf(response, sizeof response,
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
             "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept);
@@ -794,6 +881,8 @@ static void apply_args(int argc, char **argv)
         } else if (!strcmp(argv[i], "-w") && i + 1 < argc && parse_long(argv[++i], 2, 100000, &logical_width) == 0) {
         } else if (!strcmp(argv[i], "-h") && i + 1 < argc && parse_long(argv[++i], 2, 100000, &logical_height) == 0) {
         } else if (!strcmp(argv[i], "-p") && i + 1 < argc && parse_long(argv[++i], 1, 65535, &ws_port) == 0) {
+        } else if (!strcmp(argv[i], "-ui")) {
+            ui_enabled = 1;   /* 触摸镜像转发给渲染进程 (127.0.0.1:27184) */
         } else if (!strcmp(argv[i], "-s") && i + 1 < argc) {
             ++i; /* accepted for compatibility with vtouchmerge start lines; unused */
         } else if (strcmp(argv[i], "-v") && strcmp(argv[i], "-w") && strcmp(argv[i], "-h") &&
@@ -803,81 +892,97 @@ static void apply_args(int argc, char **argv)
     }
 }
 
-int main(int argc, char **argv)
+int vtouch_init(int argc, char **argv)
 {
     char dev[PATH_MAX];
-    struct pollfd p[3];
     struct sigaction sa;
     int one = 1;
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
     memset(&sa, 0, sizeof sa); sa.sa_handler = on_signal; sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, 0); sigaction(SIGINT, &sa, 0); signal(SIGPIPE, SIG_IGN);
     setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，避免全缓冲掩盖诊断 */
     apply_args(argc, argv);
     if (logical_width < 2 || logical_height < 2) {
         fprintf(stderr, "vtouchd: logical display size required (-w width -h height)\n");
-        return 2;
+        return -2;
     }
     memset(phys, 0, sizeof phys); memset(virt, 0, sizeof virt);
     if (discover(dev, sizeof dev) < 0) {
         fprintf(stderr, "vtouchd: no Type-B touchscreen found\n");
-        return 2;
+        return -2;
     }
     total_slots = phys_slots + vslots;
     if (total_slots > MAX_PHYS + MAX_VIRT) total_slots = MAX_PHYS + MAX_VIRT;
     if (setup_uinput() < 0) {
         fprintf(stderr, "vtouchd: uinput setup failed: %s\n", strerror(errno));
-        return 3;
+        return -3;
     }
     input_fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (input_fd < 0) { cleanup(); return 4; }
+    if (input_fd < 0) { cleanup(); return -4; }
     /* Socket first, grab last: a socket failure must never leave touch grabbed. */
     listen_fd = make_listen();
-    if (listen_fd < 0) { cleanup(); return 6; }
+    if (listen_fd < 0) { cleanup(); return -6; }
 #ifndef VT_MERGE_TEST
-    if (ioctl(input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return 5; }
+    if (ioctl(input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return -5; }
 #endif
     setsockopt(listen_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     fprintf(stderr, "vtouchd: dev=%s phys=%d virt=%d ws=127.0.0.1:%d size=%dx%d\n",
         dev, phys_slots, vslots, ws_port, logical_width, logical_height);
-    while (!stop_flag) {
-        p[0] = (struct pollfd){ input_fd, POLLIN | POLLHUP | POLLERR, 0 };
-        p[1] = (struct pollfd){ listen_fd, POLLIN, 0 };
-        p[2] = (struct pollfd){ client_fd, -1, 0 };
-        if (client_fd >= 0) p[2].events = POLLIN | POLLHUP | POLLERR;
-        int r = poll(p, client_fd >= 0 ? 3 : 2, 1000);
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (p[0].revents & POLLIN) physical_events();
-        if (p[0].revents & (POLLHUP | POLLERR)) break;
-        if (p[1].revents & POLLIN) {
-            int ncf = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-            if (ncf >= 0) {
-                if (client_fd >= 0) {
-                    fprintf(stderr, "vtouchd: kicking old ws client\n");
-                    close(client_fd); client_fd = -1; frame_open = 0; subscribed = 0;
-                }
-                setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-                setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-                if (websocket_handshake(ncf) != 0) {
-                    fprintf(stderr, "vtouchd: ws handshake failed\n");
-                    close(ncf);
-                } else {
-                    client_fd = ncf;
-                    fprintf(stderr, "vtouchd: ws client connected\n");
-                }
+    return 0;
+}
+
+/* 单次 poll 迭代：触摸/WS 数据。timeout_ms<0 用默认 1000。返回 0=继续 -1=停止 */
+int vtouch_poll_step(int timeout_ms)
+{
+    struct pollfd p[3];
+    int one = 1;
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
+    if (stop_flag) return -1;
+    p[0] = (struct pollfd){ input_fd, POLLIN | POLLHUP | POLLERR, 0 };
+    p[1] = (struct pollfd){ listen_fd, POLLIN, 0 };
+    p[2] = (struct pollfd){ client_fd, -1, 0 };
+    if (client_fd >= 0) p[2].events = POLLIN | POLLHUP | POLLERR;
+    int r = poll(p, client_fd >= 0 ? 3 : 2, timeout_ms < 0 ? 1000 : timeout_ms);
+    if (r < 0) { if (errno == EINTR) return 0; return -1; }
+    if (p[0].revents & POLLIN) physical_events();
+    if (p[0].revents & (POLLHUP | POLLERR)) return -1;
+    if (p[1].revents & POLLIN) {
+        int ncf = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        if (ncf >= 0) {
+            if (client_fd >= 0) {
+                fprintf(stderr, "vtouchd: kicking old ws client\n");
+                close(client_fd); client_fd = -1; frame_open = 0; subscribed = 0;
             }
-        }
-        if (client_fd >= 0 && (p[2].revents & (POLLHUP | POLLERR))) {
-            fprintf(stderr, "vtouchd: ws client hung up\n");
-            drop_client(); continue;
-        }
-        if (client_fd >= 0 && (p[2].revents & POLLIN)) {
-            if (client_frame() < 0) {
-                fprintf(stderr, "vtouchd: ws client dropped\n");
-                drop_client();
+            setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            if (websocket_handshake(ncf) != 0) {
+                fprintf(stderr, "vtouchd: ws handshake failed\n");
+                close(ncf);
+            } else {
+                client_fd = ncf;
+                fprintf(stderr, "vtouchd: ws client connected\n");
             }
         }
     }
-    cleanup();
+    if (client_fd >= 0 && (p[2].revents & (POLLHUP | POLLERR))) {
+        fprintf(stderr, "vtouchd: ws client hung up\n");
+        drop_client(); return 0;
+    }
+    if (client_fd >= 0 && (p[2].revents & POLLIN)) {
+        if (client_frame() < 0) {
+            fprintf(stderr, "vtouchd: ws client dropped\n");
+            drop_client();
+        }
+    }
+    return 0;
+}
+
+void vtouch_cleanup(void) { cleanup(); }
+
+int main(int argc, char **argv)
+{
+    if (vtouch_init(argc, argv) != 0) return 2;
+    while (vtouch_poll_step(-1) == 0)
+        ;
+    vtouch_cleanup();
     return 0;
 }
