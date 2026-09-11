@@ -1,5 +1,9 @@
 # vtouchd 管理 UI 调研报告（Phase 1 产出）
 
+> **历史存档（已被取代，勿当现状）**：本报告是 2026-09-11 的选型调研原始记录，其中 floaty 载体、AutoJs6 侧 `UI_SRC`/`eval` 方案、WebUI 方案均**未采用且源码已删除**。
+> 结论已落地为 `src-ui/` 的 app_process + composer 图层 + ImGui 面板（见 `PROJECT_STRUCTURE.md` 与技能 `vtouch-autojs6`）；文中提到的 `storages vtouch_regions` 也已废除，区域唯一归属是面板的 `regions.conf`。
+
+
 日期：2026-09-11
 范围：AutoJs6 环境 / 独立 App 的悬浮管理 UI 实现方案（网上实践）
 前提：vtouchd 二进制（触摸合并/区域检测/WS）与 AutoJs6 事件侧不动；UI 是 vtouchd 的独立管理器，随时悬浮、含即时预览、样式美观、性能兼容兼顾。

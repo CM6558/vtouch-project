@@ -10,6 +10,8 @@ OkHttp WebSocket（其回调派发会间歇性卡死），改用 java.net.Socket
 用法: python scripts/build_bundle.py [--check]
 """
 import base64
+import gzip
+import hashlib
 import json
 import subprocess
 import sys
@@ -18,9 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "vtouchd"
 OUT = ROOT / "clients" / "vtouch_bundle.js"
+UI_DIR = ROOT / "build" / "ui"
+UI_SO = UI_DIR / "libtestimgui.so"
+UI_DEX = UI_DIR / "classes.dex"
 
 CORE = '''/* ============================================================================
- * VTouch 单文件包：二进制内嵌 + 一层薄函数。由 scripts/build_bundle.py 生成，勿手改。
+ * VTouch 单文件包：二进制内嵌（vtouchd + ImGui 面板 dex/so）+ 一层薄函数。由 scripts/build_bundle.py 生成，勿手改。
  * 手机上只要这一个文件。首次运行自动释放二进制（需 root，一次），之后直启。
  * 阻塞调用只能在业务线程调，主线程调会卡死 Looper。
  * ============================================================================
@@ -42,10 +47,12 @@ function vtouchCur() {
 /* 后端幂等启动：pid 存活直接返回；缺二进制则释放；然后拉起（不等端口）。
  * daemon 坐标系恒为竖屏物理（wm size portrait）：W/H 归一化 min/max，横屏开机也不错位。 */
 function vtouchEnsure() {
+    /* 面板就是 daemon（grab + WS 27183 + regions.conf）：已在跑就别再起第二个抢端口。 */
+    if (vtouchUiAlive()) return;
     var r = shell("B=/data/local/tmp/vtouch-runtime;D=" + VTOUCH_BIN + ";"
         + "[ -f $B/vtouchd.pid ]&&kill -0 $(cat $B/vtouchd.pid 2>/dev/null) 2>/dev/null&&exit 0;"
         + "[ -x $D ]||exit 11;"
-        + "mkdir -p $B;killall vtouchd 2>/dev/null;rm -f $B/vtouchd.pid;"
+        + "mkdir -p $B;kill -9 $(pidof vtouchd);rm -f $B/vtouchd.pid;"
         + "S=$(wm size 2>/dev/null);S=${S##*Physical size: };W=${S%%x*};H=${S##*x};"
         + "if [ $W -gt $H ];then T=$W;W=$H;H=$T;fi;"
         + "nohup $D -w $W -h $H -p " + VTOUCH_PORT + " >$B/vtouchd.log 2>&1 </dev/null&echo $!>$B/vtouchd.pid", true);
@@ -67,7 +74,7 @@ function vtouchInstall() {
     if (!cp || cp.code !== 0) throw new Error("释放失败: " + ((cp && (cp.error || cp.result)) || "unknown"));
     log("[vtouch] 二进制就绪");
     var r2 = shell("B=/data/local/tmp/vtouch-runtime;D=" + VTOUCH_BIN + ";"
-        + "mkdir -p $B;killall vtouchd 2>/dev/null;rm -f $B/vtouchd.pid;"
+        + "mkdir -p $B;kill -9 $(pidof vtouchd);rm -f $B/vtouchd.pid;"
         + "S=$(wm size 2>/dev/null);S=${S##*Physical size: };W=${S%%x*};H=${S##*x};"
         + "if [ $W -gt $H ];then T=$W;W=$H;H=$T;fi;"
         + "nohup $D -w $W -h $H -p " + VTOUCH_PORT + " >$B/vtouchd.log 2>&1 </dev/null&echo $!>$B/vtouchd.pid", true);
@@ -203,12 +210,22 @@ function vtouchParseEv(line) {
 }
 function vtouchStop() {
     CURR = null;
-    shell("killall vtouchd 2>/dev/null;rm -f /data/local/tmp/vtouch-runtime/vtouchd.pid", true);
+    /* 面板 full 模式就是 daemon：脚本退出时一并收掉（EVIOCGRAB 随进程退出释放）。 */
+    if (vtouchUiAlive()) {
+        /* 脚本没有常驻逻辑（读循环 / setInterval）时，调完 uiStart 立刻就走到这里：
+         * 面板起来不到 2 秒又被收掉，肉眼就是「窗口不弹出来」。这种静默失败要喊出来。 */
+        if (UI_T0 && Date.now() - UI_T0 < 2000)
+            toastLog("面板起来不到 2s 就被脚本退出收掉了：脚本末尾缺少常驻逻辑（读循环 / setInterval）");
+        vtouchUiStop();
+    }
+    var dp = "/data/local/tmp/vtouch-runtime/vtouchd.pid";
+    vtouchKillAll("vtouchd");
+    shell("rm -f " + dp, true);
 }
 
 /* ---- 旋转坐标层：daemon 只认竖屏物理坐标（启动时 -w/-h portrait）。
  * 横屏时 device.width/height 会对调，注入前 C2P、绘制/回调用 P2C。
- * 方向走 Display.getRotation（无 shell，floaty 建出后也可用）。
+ * 方向走 Display.getRotation（无 shell，面板起来后也可用）。
  * R1 方向经 PJZ110 横屏真机闭环验证（tap 落点误差≤1px）；R2 为 180° 无歧义；R3 取 R1 镜像对称，待验证。 */
 function vtouchRot() {
     try {
@@ -334,17 +351,127 @@ module.exports = {
     rot: vtouchRot,
     c2p: vtC2P,
     p2c: vtP2C,
-    loadRegions: rgLoad,
-    rgSave: rgSave,
+    rgPush: rgPush,
+    rgList: rgList,
     createEngine: rgCreateEngine,
+    rgParseEv: rgParseEv,
     sub: vtouchSub,
     unsub: vtouchUnsub,
     parseEv: vtouchParseEv,
-    uiSource: VTOUCH_UI_SRC,
+    uiStart: vtouchUiStart,
+    uiStop: vtouchUiStop,
+    uiRestart: vtouchUiRestart,
+    uiAlive: vtouchUiAlive,
+    uiPid: vtouchUiPid,
+    uiDeploy: vtouchUiDeploy,
+    uiTail: vtouchUiTail,
+    UI_DIR: VTOUCH_UI_DIR,
     BIN: VTOUCH_BIN,
     HOST: VTOUCH_HOST,
     PORT: VTOUCH_PORT
 };
+"""
+
+
+UI_BOOT = r"""
+/* ---- ImGui 面板启动：单文件、脚本一键控制（设备侧不需要任何 .sh） ----
+ * dex + so 内嵌在本文件里：首次 uiStart() 释放到 /data/local/tmp/vtouch-ui/（root，一次），
+ * 之后 md5 一致就直接复用。起来的面板就是 daemon：
+ *   EVIOCGRAB 物理触摸 + WS 127.0.0.1:27183 + regions.conf；触摸合并后照常回到系统。
+ *
+ *   var vt = require("/sdcard/vtouch_bundle.js");
+ *   vt.uiStart();          // 起面板；已在跑则复用
+ *   ...业务：vt.run(...) / vt.connect() + Finger / 回触...
+ *   vt.uiStop();           // 收面板并释放 grab（vt.stop() 也会连面板一起收）
+ *
+ * 进程真相只认 /proc：app_process 把 comm 设成 nice-name，pid 文件只是书签，不作存活依据。 */
+var VTOUCH_UI_DIR = "/data/local/tmp/vtouch-ui";
+var VTOUCH_UI_RUN = "/data/local/tmp/vtouch-runtime";
+var VTOUCH_UI_PID = VTOUCH_UI_RUN + "/vtouch-ui.pid";
+var VTOUCH_UI_LOG = VTOUCH_UI_RUN + "/vtouch-ui.log";
+
+/* 进程真相 = pidof（app_process 的 /proc/<pid>/comm 是 "main"，不是 nice-name，
+ * comm/pid 文件都不能当依据）。pidof 是单条短命令：不用循环、不用管道，AutoJS 的
+ * shell(cmd,true) 处理得稳。 */
+function vtouchPids(name) {
+    var r = shell("pidof " + name, true);
+    var str = (r && r.result) ? String(r.result).replace(/^\s+|\s+$/g, "") : "";
+    return str.length ? str.split(/\s+/) : [];
+}
+function vtouchKillAll(name) {
+    var i, p = vtouchPids(name);
+    for (i = 0; i < 8 && p.length; i++) {
+        shell("kill -9 " + p.join(" "), true);
+        sleep(150);
+        p = vtouchPids(name);
+    }
+    return p;
+}
+function vtouchUiAlive() { return vtouchPids("vtouch-ui").length > 0; }
+function vtouchUiPid() { var p = vtouchPids("vtouch-ui"); return p.length ? p[0] : null; }
+function vtouchUiTail(n) {
+    var r = shell("tail -n " + (n || 20) + " " + VTOUCH_UI_LOG, true);
+    return (r && r.result) ? String(r.result) : "";
+}
+/* 释放内嵌二进制：md5 与设备一致就跳过，别每次启动都写 1MB */
+function vtouchUiDeployed() {
+    var r = shell("md5sum " + VTOUCH_UI_DIR + "/classes.dex " + VTOUCH_UI_DIR + "/libtestimgui.so", true);
+    var str = (r && r.result) ? String(r.result) : "";
+    return str.indexOf(VTOUCH_UI_DEX_MD5) >= 0 && str.indexOf(VTOUCH_UI_SO_MD5) >= 0;
+}
+function vtouchUiStage(bytes, name) {
+    var f = context.getFilesDir().getAbsolutePath() + "/" + name;
+    var fos = new java.io.FileOutputStream(f);
+    try { fos.write(bytes); } finally { try { fos.close(); } catch (e) {} }
+    return f;
+}
+function vtouchUiGunzip(b64) {
+    var gz = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+    var ins = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(gz));
+    var out = new java.io.ByteArrayOutputStream(VTOUCH_UI_SO_SIZE);
+    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 65536);
+    var n; while ((n = ins.read(buf)) > 0) out.write(buf, 0, n);
+    ins.close();
+    return out.toByteArray();
+}
+function vtouchUiDeploy() {
+    if (vtouchUiDeployed()) return false;
+    log("[vtouch] 释放面板 dex=" + VTOUCH_UI_DEX_SIZE + "B so=" + VTOUCH_UI_SO_SIZE + "B（内嵌 gz " + VTOUCH_UI_SO_GZ_SIZE + "B）");
+    var dex = vtouchUiStage(android.util.Base64.decode(VTOUCH_UI_DEX_B64, android.util.Base64.DEFAULT), "vtouch-ui.dex.stage");
+    var so = vtouchUiStage(vtouchUiGunzip(VTOUCH_UI_SO_GZ_B64), "vtouch-ui.so.stage");
+    var r = shell("mkdir -p " + VTOUCH_UI_DIR
+        + " && cp -f '" + dex + "' " + VTOUCH_UI_DIR + "/classes.dex"
+        + " && cp -f '" + so + "' " + VTOUCH_UI_DIR + "/libtestimgui.so"
+        + " && chmod 644 " + VTOUCH_UI_DIR + "/classes.dex " + VTOUCH_UI_DIR + "/libtestimgui.so", true);
+    if (!r || r.code !== 0) throw new Error("面板释放失败: " + ((r && (r.error || r.result)) || "unknown"));
+    if (!vtouchUiDeployed()) throw new Error("面板释放后 md5 不符，检查 /data/local/tmp/vtouch-ui/");
+    log("[vtouch] 面板二进制就绪");
+    return true;
+}
+/* 启动：直接在当前 root shell 里后台起（套 sh -c 反而会被 su 收走子进程，别改） */
+var UI_T0 = 0;   /* 本次脚本里面板起来的时刻（只用于「刚起就被脚本退出收掉」这条诊断） */
+function vtouchUiStart() {
+    if (vtouchUiAlive()) return true;
+    var left = vtouchKillAll("vtouch-ui");
+    if (left.length) throw new Error("旧面板清不掉 pid=" + left.join(","));
+    vtouchUiDeploy();
+    var launch = "U=" + VTOUCH_UI_DIR + ";R=" + VTOUCH_UI_RUN + ";mkdir -p $R;"
+        + "S=$(wm size);S=${S##*Physical size: };W=${S%%x*};H=${S##*x};if [ $W -gt $H ];then T=$W;W=$H;H=$T;fi;"
+        + "CLASSPATH=$U/classes.dex nohup app_process /system/bin --nice-name=vtouch-ui VTouchUI $W $H"
+        + " >$R/vtouch-ui.log 2>&1 </dev/null & echo $!>$R/vtouch-ui.pid";
+    shell(launch, true);
+    var i;
+    for (i = 0; i < 24 && !vtouchUiAlive(); i++) sleep(150);
+    if (!vtouchUiAlive()) throw new Error("面板没起来: " + vtouchUiTail(8));
+    UI_T0 = Date.now();
+    return true;
+}
+function vtouchUiStop() {
+    vtouchKillAll("vtouch-ui");
+    shell("rm -f " + VTOUCH_UI_PID, true);
+    return !vtouchUiAlive();
+}
+function vtouchUiRestart() { vtouchUiStop(); return vtouchUiStart(); }
 """
 
 
@@ -357,25 +484,71 @@ def write_out(path, text):
     return True
 
 
-ONE_LIB = '''
-/* ---- 区域监听（store + engine + overlay，单文件内联） ----
+ONE_LIB = r'''
+/* ---- 区域：唯一归属是面板（面板读写 /data/local/tmp/vtouch-runtime/regions.conf），
+ * 脚本侧不落任何库：只「回读」面板当前表 / 「下发」自己的表。这样不存在第二份状态，
+ * 也不会把旧版本存下来的区域再捞回来。
  * 区域格式: {id, name, x1, y1, x2, y2, enabled}（矩形）/{id, name, type:"circle", cx, cy, r}，
- * 一律存竖屏物理坐标（daemon 坐标系）；横屏时绘制/回调由 P2C 换算。存 storages "vtouch_regions"。
- * UI 框选页/管理页读写同一份，无需改这里。JS 内 engine 的 feed 吃竖屏坐标（pev 原样）。 */
-var _rgStore = storages.create("vtouch_regions");
-function rgLoad() {
-    try {
-        var rs = _rgStore.get("regions");
-        if (rs && rs.length) return rs;
-    } catch (e) {}
-    return [{ id: "btn", name: "按钮区", x1: 400, y1: 1000, x2: 1040, y2: 1400, enabled: true }];
-}
+ * 一律竖屏物理坐标（daemon 坐标系）；engine.feed 吃的也是竖屏坐标（pev 原样）。
+ * 名称只活在脚本侧（线协议只有 id + 几何），所以 rgList 回的 name 就是 id。 */
 function rgInRect(r, x, y) { return x >= r.x1 && x <= r.x2 && y >= r.y1 && y <= r.y2; }
 function rgHit(r, x, y) {
     if (r.type === "circle") { var dx = x - r.cx, dy = y - r.cy; return dx * dx + dy * dy <= r.r * r.r; }
-    return rgInRect(r, x, y); /* 老数据无 type，按矩形 */
+    return rgInRect(r, x, y);
 }
-function rgSave(rs) { try { _rgStore.put("regions", rs); } catch (e) {} }
+/* 下发：region clear + 逐条 add；面板收到即生效并落盘（重启还在）。c = vt.connect() 的连接。 */
+function rgPush(c, rs) {
+    var i, r, en;
+    if (!c || !c.send) return false;
+    try {
+        c.send("region clear");
+        for (i = 0; i < rs.length; i++) {
+            r = rs[i]; en = (r.enabled === false ? 0 : 1);
+            if (r.type === "circle")
+                c.send("region add " + r.id + " 1 " + Math.round(r.cx) + " " + Math.round(r.cy) + " " + Math.round(r.r) + " 0 " + en);
+            else
+                c.send("region add " + r.id + " 0 " + Math.round(r.x1) + " " + Math.round(r.y1) + " " + Math.round(r.x2) + " " + Math.round(r.y2) + " " + en);
+        }
+        return true;
+    } catch (e) { return false; }
+}
+/* 回读面板当前表；必须在开读包循环之前调（会消费回包行），超时/无连接返回 []。 */
+function rgList(c) {
+    var out = [], dl, i, p, lines, s, id, t;
+    if (!c || !c.send) return out;
+    try {
+        c.drain();   /* 先把队列里 rgPush/clear/add 的 ok 回包吃掉，否则 region 行还没到就超时 */
+        c.send("region list");
+        dl = Date.now() + 600;
+        while (Date.now() < dl) {
+            s = c.recv();
+            if (!s) { sleep(10); continue; }
+            lines = ("" + s).split("\n");
+            for (i = 0; i < lines.length; i++) {
+                p = lines[i].replace(/^\s+|\s+$/g, "").split(" ");
+                if (p[0] === "region" && p.length >= 8) {
+                    id = p[1]; t = +p[2];
+                    if (t === 1) out.push({ id: id, name: id, type: "circle", cx: +p[3], cy: +p[4], r: +p[5], enabled: p[7] !== "0" });
+                    else out.push({ id: id, name: id, x1: +p[3], y1: +p[4], x2: +p[5], y2: +p[6], enabled: p[7] !== "0" });
+                } else if (p[0] === "end" || (p[0] === "ok" && p[1] === "0")) {
+                    return out;
+                }
+            }
+        }
+    } catch (e) {}
+    return out;
+}
+/* daemon 原生区域事件：region_ev <id> <down|up|enter|exit|move> <slot> <lx> <ly>
+ * -> {id, ev, slot, x, y}；不是 region_ev 行返回 null。
+ * 用它可以「只按 id 分发」，不必在脚本里再存一份区域表、再算一遍命中。
+ * 注意：只报物理手指（daemon 只扫物理槽），虚拟触摸不产生事件。 */
+function rgParseEv(line) {
+    var p;
+    if (!line || line.indexOf("region_ev ") !== 0) return null;
+    p = line.replace(/^\s+|\s+$/g, "").split(" ");
+    if (p.length < 6) return null;
+    return { id: p[1], ev: p[2], slot: +p[3], x: +p[4], y: +p[5] };
+}
 function rgCreateEngine(regions, handlers) {
     var inside = {}, fingers = {};
     return {
@@ -408,498 +581,9 @@ function rgCreateEngine(regions, handlers) {
 }
 '''
 
-UI_SRC = '''/* 区域 overlay + 管理 UI + watcher 启动器：调用侧 eval(vt.uiSource) 进主上下文执行。
- * 原因：Java bridge 回调（线程/事件/点击/画布）不能定义在 require 模块里。
- * 只用 vt.loadRegions / vt.rgSave / vt.ensure / vt.connect / vt.sub / vt.createEngine / vt.parseEv / vt.finger / vt.stop。
- * 调用侧只剩：eval + bootWatch(handlers) + 业务。管理：ui() 开 / uiClose() 关。
- * 注意：本源码 eval 进调用者主上下文，只能用 vt 导出的函数；裸内部函数不可见，
- * 旋转换算走别名 vtC2P/vtP2C/vtouchRot（= vt.c2p/vt.p2c/vt.rot）。 */
-var vtC2P = vt.c2p, vtP2C = vt.p2c, vtouchRot = vt.rot;
-var g_ovW = null, g_ovR = [], g_ovF = [], g_ovH = {}, g_ovLoc = null;
-var g_ovRot = -1, g_ovWdt = 0, g_ovHgt = 0;
-function ovShow(rs) {
-    g_ovR = rs;
-    if (g_ovW) return;
-    g_ovW = floaty.rawWindow('<frame><canvas id="board" layout_weight="1"/></frame>');
-    g_ovW.setSize(device.width, device.height);
-    g_ovW.setTouchable(false);
-    try { g_ovRot = vtouchRot(); } catch (e) { g_ovRot = 0; }
-    g_ovWdt = device.width; g_ovHgt = device.height;
-    g_ovW.board.on("draw", function (canvas) {
-        var i, r, p, q, qa, qb, lx, ly;
-        /* 线程池 draw（AutoJs6 6.x ScriptCanvasView mDrawingThreadPool）与 ovUpdate/ovSet/ovClose 并发：
-         * 先快照全局引用，防执行中途被置 null/换数组。区域存竖屏坐标，这里 P2C 到当前屏绘制。 */
-        var w = g_ovW, rs = g_ovR, fs = g_ovF;
-        if (!w) return;
-        try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
-        var oy = 0, ox = 0;
-        try {
-            if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
-            w.board.getLocationOnScreen(g_ovLoc);
-            ox = g_ovLoc[0]; oy = g_ovLoc[1];
-        } catch (e) {}
-        for (i = 0; i < rs.length; i++) {
-            r = rs[i];
-            if (r.hidden) continue;
-            p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(colors.RED);
-            if (g_ovH[r.id] && Date.now() - g_ovH[r.id] < 400) { p.setStrokeWidth(6); p.setColor(colors.GREEN); }
-            if (r.type === "circle") { q = vtP2C(r.cx, r.cy); canvas.drawCircle(q.x - ox, q.y - oy, r.r, p); lx = q.x - r.r; ly = q.y - r.r; }
-            else { qa = vtP2C(r.x1, r.y1); qb = vtP2C(r.x2, r.y2); lx = Math.min(qa.x, qb.x); ly = Math.min(qa.y, qb.y); canvas.drawRect(lx - ox, ly - oy, Math.max(qa.x, qb.x) - ox, Math.max(qa.y, qb.y) - oy, p); }
-            p = new Paint(); p.setColor(colors.WHITE); p.setTextSize(36);
-            canvas.drawText(r.name || r.id, lx - ox + 8, ly - oy + 40, p);
-        }
-        for (i = 0; i < fs.length; i++) {
-            var f = fs[i];
-            if (!f.down) continue;
-            q = vtP2C(f.x, f.y);
-            p = new Paint(); p.setColor(colors.BLUE);
-            canvas.drawCircle(q.x - ox, q.y - oy, 40, p);
-            canvas.drawText("s" + f.slot, q.x - ox + 44, q.y - oy, p);
-        }
-    });
-}
-/* 管理窗/小球建在 overlay 之后会盖住区域：重建 overlay 回顶到最上（区域/手指状态保留）。 */
-function ovRetop() {
-    if (!g_ovW) return;
-    var rs = g_ovR, fs = g_ovF;
-    try { g_ovW.close(); } catch (e) {}
-    g_ovW = null;
-    ovShow(rs); g_ovF = fs;
-    try { g_ovW.board.postInvalidate(); } catch (e2) {}
-}
-/* 旋转后 overlay 尺寸过期：重设尺寸（映射每帧实时读方向，不用动别的）。 */
-function ovSync() {
-    var r = 0, w = device.width, h = device.height;
-    try { r = vtouchRot(); } catch (e) {}
-    if (g_ovW && (r !== g_ovRot || w !== g_ovWdt || h !== g_ovHgt)) {
-        g_ovRot = r; g_ovWdt = w; g_ovHgt = h;
-        try { g_ovW.setSize(w, h); } catch (e2) {}
-        try { g_ovW.board.postInvalidate(); } catch (e3) {}
-    } else if (!g_ovW) { g_ovRot = r; g_ovWdt = w; g_ovHgt = h; }
-}
-/* 统一旋转同步（2 秒轮询里调）：overlay 重建回顶 + 管理窗改尺寸/拉回屏内 + 框选关闭。
- * overlay 重建比重设尺寸更彻底（尺寸+层级一次到位）；管理窗只调尺寸位置，列表状态不动。 */
-function rotSync() {
-    var r = 0, w = device.width, h = device.height, hadCap = false, first = false;
-    try { r = vtouchRot(); } catch (e) {}
-    /* 一致性门：监听回调有时跑在 metrics 刷新前（方向已变、尺寸还是旧的），
-     * 此时刷一遍等于没刷。方向奇偶必须和宽高对调一致，否则等一拍再看。 */
-    if ((r % 2 !== 0) !== (w > h)) {
-        try { setTimeout(function () { try { rotSync(); } catch (e2) {} }, 500); } catch (e3) {}
-        return;
-    }
-    first = (g_uiRot === -1);
-    if (!first && r === g_uiRot && w === g_uiWdt && h === g_uiHgt) return;
-    g_uiRot = r; g_uiWdt = w; g_uiHgt = h;
-    hadCap = !!g_capW;
-    try {
-        uiRun(function () {
-            /* 首 sync 若 overlay 刚建好且尺寸已对（ovShow 缓存一致），跳过重建防闪屏。 */
-            var ovMatch = false;
-            try { ovMatch = !!g_ovW && r === g_ovRot && w === g_ovWdt && h === g_ovHgt; } catch (e0) {}
-            if (g_ovW && !ovMatch) {
-                var rs = g_ovR, fs = g_ovF;
-                try { g_ovW.close(); } catch (e2) {}
-                g_ovW = null;
-                ovShow(rs); g_ovF = fs;
-                try { g_ovW.board.postInvalidate(); } catch (e3) {}
-            }
-            if (g_uiW) {
-                try { var __s2 = uiSize(); g_uiW.setSize(__s2.w, __s2.h); } catch (e4) {}
-                try {
-                    var x = g_uiW.getX(), y = g_uiW.getY();
-                    g_uiW.setPosition(Math.max(0, Math.min(x, w - 200)), Math.max(0, Math.min(y, h - 200)));
-                } catch (e5) {}
-            }
-            if (g_capW) capClose();
-        });
-    } catch (e6) { try { log("rotSync FAIL " + e6); } catch (e7) {} }
-    if (!first) {
-        try { toast("已旋转自适应"); } catch (e8) {}
-        if (hadCap) { try { toast("框选中断，请重框"); } catch (e9) {} }
-    }
-    /* 确认复核：门只保证方向尺寸一致，900ms 后再看一眼，metrics 若还有滞后自动纠正（无变化则早退零开销）。 */
-    try { setTimeout(function () { try { rotSync(); } catch (e10) {} }, 900); } catch (e11) {}
-}
-function ovUpdate(f) { g_ovF = f || []; try { g_ovW.board.postInvalidate(); } catch (e) {} }
-function ovFlash(id) { g_ovH[id] = Date.now(); }
-function ovSet(rs) { g_ovR = rs; }
-function ovClose() { try { if (g_ovW) g_ovW.close(); } catch (e) {} g_ovW = null; }
-function ovPreview(on) { if (on) ovShow(vt.loadRegions()); else ovClose(); }
-/* ---- 管理 UI（深色卡片）：列表查看 | 开关触发 | 显隐预览 | 删除 | ＋矩形/圆形框选 | 预览总开关
- * 标题栏按住拖动；最小化成小悬浮球（点球恢复，可拖）。
- * 窗体固定尺寸 + scroll 权重，多行真滚动；打开后 ovRetop() 把区域层顶回最上。 */
-var g_uiW = null, g_capW = null, g_cap = null, g_minW = null;
-var g_uiRot = -1, g_uiWdt = 0, g_uiHgt = 0;
-var g_uiH = new android.os.Handler(android.os.Looper.getMainLooper());
-function rgInfo(r) {
-    var head = (r.enabled === false ? "[关] " : "[开] ") + (r.hidden ? "[隐] " : "") + (r.name || r.id);
-    if (r.type === "circle") return head + " | O r=" + r.r + " @ " + r.cx + "," + r.cy;
-    return head + " | 口 " + (r.x2 - r.x1) + "x" + (r.y2 - r.y1) + " @ " + r.x1 + "," + r.y1;
-}
-/* 八槽静态行：XML 里写死，不用程序化 view（API36 ColorOS 上程序化 Button 默认色会毒崩 TextView 绘制）。 */
-function uiRowAct(k, what) {
-    var rs = vt.loadRegions();
-    if (k < 0 || k >= rs.length) return;
-    var r = rs[k], i;
-    if (what === "t") r.enabled = (r.enabled === false);
-    else if (what === "v") r.hidden = !r.hidden;
-    else if (what === "d") { var all = []; for (i = 0; i < rs.length; i++) if (i !== k) all.push(rs[i]); rs = all; }
-    vt.rgSave(rs); ovSet(rs); uiRefresh();
-    toast(what === "d" ? "已删除" : "已更新 " + (r.name || r.id));
-}
-function uiRefresh() {
-    if (!g_uiW) return;
-    try {
-        g_uiH.post(new JavaAdapter(java.lang.Runnable, { run: function () {
-            try { uiRefreshDo(); } catch (e) { log("uiRefresh FAIL " + e); }
-        } }));
-    } catch (e) { log("uiRefresh post FAIL " + e); }
-}
-function uiRefreshDo() {
-    var rs = vt.loadRegions();
-    var extra = rs.length > 8 ? "（仅显示前8个）" : "";
-    g_uiW.title.setText("区域管理 (" + rs.length + "个)" + extra);
-    g_uiW.preview.setText(g_ovW ? "预览：开" : "预览：关");
-    if (rs.length > 0) { g_uiW.s0t.setText(rgName(rs[0])); g_uiW.s0m.setText(rgMeta(rs[0])); g_uiW.s0d.setText(rs[0].enabled === false ? "○" : "●"); g_uiW.s0.setVisibility(0); }
-    else { g_uiW.s0.setVisibility(8); }
-    if (rs.length > 1) { g_uiW.s1t.setText(rgName(rs[1])); g_uiW.s1m.setText(rgMeta(rs[1])); g_uiW.s1d.setText(rs[1].enabled === false ? "○" : "●"); g_uiW.s1.setVisibility(0); }
-    else { g_uiW.s1.setVisibility(8); }
-    if (rs.length > 2) { g_uiW.s2t.setText(rgName(rs[2])); g_uiW.s2m.setText(rgMeta(rs[2])); g_uiW.s2d.setText(rs[2].enabled === false ? "○" : "●"); g_uiW.s2.setVisibility(0); }
-    else { g_uiW.s2.setVisibility(8); }
-    if (rs.length > 3) { g_uiW.s3t.setText(rgName(rs[3])); g_uiW.s3m.setText(rgMeta(rs[3])); g_uiW.s3d.setText(rs[3].enabled === false ? "○" : "●"); g_uiW.s3.setVisibility(0); }
-    else { g_uiW.s3.setVisibility(8); }
-    if (rs.length > 4) { g_uiW.s4t.setText(rgName(rs[4])); g_uiW.s4m.setText(rgMeta(rs[4])); g_uiW.s4d.setText(rs[4].enabled === false ? "○" : "●"); g_uiW.s4.setVisibility(0); }
-    else { g_uiW.s4.setVisibility(8); }
-    if (rs.length > 5) { g_uiW.s5t.setText(rgName(rs[5])); g_uiW.s5m.setText(rgMeta(rs[5])); g_uiW.s5d.setText(rs[5].enabled === false ? "○" : "●"); g_uiW.s5.setVisibility(0); }
-    else { g_uiW.s5.setVisibility(8); }
-    if (rs.length > 6) { g_uiW.s6t.setText(rgName(rs[6])); g_uiW.s6m.setText(rgMeta(rs[6])); g_uiW.s6d.setText(rs[6].enabled === false ? "○" : "●"); g_uiW.s6.setVisibility(0); }
-    else { g_uiW.s6.setVisibility(8); }
-    if (rs.length > 7) { g_uiW.s7t.setText(rgName(rs[7])); g_uiW.s7m.setText(rgMeta(rs[7])); g_uiW.s7d.setText(rs[7].enabled === false ? "○" : "●"); g_uiW.s7.setVisibility(0); }
-    else { g_uiW.s7.setVisibility(8); }
-}
-function uiWire(v, fn) {
-    v.setOnClickListener(new JavaAdapter(android.view.View.OnClickListener, { onClick: function () { try { fn(); } catch (e) {} } }));
-}
-/* 脚本线程调 view 写操作（收起/开关等）必须过主 looper，否则 CalledFromWrongThread。
- * 等前先清中断旗：AutoJs6 运行时偶发残留中断（sleep/广播后），否则 await 进去就抛 InterruptedException。 */
-function uiOnMain(fn) {
-    var latch = new java.util.concurrent.CountDownLatch(1), err = null;
-    try { java.lang.Thread.interrupted(); } catch (e0) {}
-    g_uiH.post(new JavaAdapter(java.lang.Runnable, { run: function () {
-        try { fn(); } catch (e) { err = e; }
-        latch.countDown();
-    } }));
-    var ok = false;
-    try { ok = latch.await(3, java.util.concurrent.TimeUnit.SECONDS); } catch (e2) { throw new Error("ui 等待被中断: " + e2); }
-    if (!ok) throw new Error("ui 主线程无响应");
-    if (err) throw err;
-}
-/* 显示监听回调跑在主线程，直接调 uiOnMain 会自锁；同线程直跑，非主线程才过 latch。 */
-function uiRun(fn) {
-    var same = false;
-    try { same = android.os.Looper.myLooper() === android.os.Looper.getMainLooper(); } catch (e) {}
-    if (same) fn(); else uiOnMain(fn);
-}
-/* 低开销旋转监听：只在显示变化时回调（零轮询），触发 rotSync（内部自带无变化早退，天然防抖）。 */
-var g_dispL = null, g_dispM = null;
-function rotWatch() {
-    if (g_dispL) return;
-    try {
-        g_dispM = context.getSystemService(android.content.Context.DISPLAY_SERVICE);
-        g_dispL = new JavaAdapter(android.hardware.display.DisplayManager.DisplayListener, {
-            onDisplayAdded: function (id) {},
-            onDisplayRemoved: function (id) {},
-            onDisplayChanged: function (id) { try { if (id === 0) rotSync(); } catch (e) {} }
-        });
-        g_dispM.registerDisplayListener(g_dispL, g_uiH);
-    } catch (e2) { try { log("rotWatch FAIL " + e2); } catch (e3) {} g_dispL = null; g_dispM = null; }
-}
-function rotUnwatch() {
-    try { if (g_dispM && g_dispL) g_dispM.unregisterDisplayListener(g_dispL); } catch (e) {}
-    g_dispL = null; g_dispM = null;
-}
-function uiDragBar() {
-    var lx = 0, ly = 0;
-    try {
-        g_uiW.titlebar.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
-            try {
-                var a = ev.getAction();
-                if (a === 0) { lx = ev.getRawX(); ly = ev.getRawY(); }
-                else if (a === 2) {
-                    var dx = ev.getRawX() - lx, dy = ev.getRawY() - ly;
-                    lx = ev.getRawX(); ly = ev.getRawY();
-                    try { g_uiW.setPosition(g_uiW.getX() + Math.round(dx), g_uiW.getY() + Math.round(dy)); } catch (e) {}
-                }
-            } catch (e2) {}
-            return true;
-        } }));
-    } catch (e3) {}
-}
-function uiMinClose() { try { if (g_minW) g_minW.close(); } catch (e) {} g_minW = null; }
-/* 最小化：关管理窗，留小悬浮球（可拖，点球恢复管理窗）。overlay 保持不动。 */
-function uiMin() {
-    uiClose();
-    if (g_minW) return;
-    g_minW = floaty.window('<button id="ball" text="管理" textSize="15sp" textColor="#FFFFFF" backgroundTint="#2563EB"/>');
-    try { g_minW.setSize(208, 208); } catch (e) {}
-    var sx = 0, sy = 0, wx = 0, wy = 0, moved = false;
-    try {
-        g_minW.ball.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
-            try {
-                var a = ev.getAction();
-                if (a === 0) { sx = ev.getRawX(); sy = ev.getRawY(); wx = g_minW.getX(); wy = g_minW.getY(); moved = false; }
-                else if (a === 2) {
-                    if (Math.abs(ev.getRawX() - sx) + Math.abs(ev.getRawY() - sy) > 12) moved = true;
-                    if (moved) { try { g_minW.setPosition(Math.round(wx + ev.getRawX() - sx), Math.round(wy + ev.getRawY() - sy)); } catch (e2) {} }
-                }
-                else if (a === 1 && !moved) { try { uiMinClose(); ui(); } catch (e3) {} }
-            } catch (e4) {}
-            return true;
-        } }));
-    } catch (e5) {}
-}
-/* 管理窗尺寸：宽按屏 88% 但封顶（横屏不再满幅）；高竖屏 62%、横屏 92%。 */
-function uiSize() {
-    var w = device.width, h = device.height;
-    return { w: Math.round(Math.min(w * 0.88, 1250)), h: Math.round(h * (w > h ? 0.92 : 0.62)) };
-}
-function rgName(r) { return (r.enabled === false ? "[关] " : "") + (r.name || r.id); }
-function rgMeta(r) {
-    var s = (r.hidden ? "[隐] " : "");
-    if (r.type === "circle") return s + "圆 r=" + r.r + " @ " + r.cx + "," + r.cy;
-    return s + "方 " + (r.x2 - r.x1) + "x" + (r.y2 - r.y1) + " @ " + r.x1 + "," + r.y1;
-}
-function uiRowXml(k) {
-    /* 尺寸一律显式 dp：光写数字按 px 算，在高 dpi 屏上会被压扁截断；按钮用 padding 自适应宽，永不截断。 */
-    return '<vertical id="s' + k + '" padding="12dp 10dp 12dp 10dp">'
-        + '<horizontal gravity="center_vertical">'
-        + '<text id="s' + k + 'd" text="●" textSize="12sp" textColor="#16A34A"/>'
-        + '<text id="s' + k + 't" layout_weight="1" textSize="15sp" textStyle="bold" textColor="#111827" maxLines="1" ellipsize="end" marginLeft="6dp" text=""/>'
-        + '</horizontal>'
-        + '<text id="s' + k + 'm" textSize="12sp" textColor="#6B7280" maxLines="1" ellipsize="end" marginTop="2dp" text=""/>'
-        + '<horizontal marginTop="8dp">'
-        + '<button id="s' + k + 'a" layout_weight="1" text="开关" textSize="12sp" textColor="#374151" padding="0dp 8dp 0dp 8dp"/>'
-        + '<button id="s' + k + 'b" layout_weight="1" text="显隐" textSize="12sp" textColor="#374151" padding="0dp 8dp 0dp 8dp" marginLeft="6dp"/>'
-        + '<button id="s' + k + 'c" layout_weight="1" text="删除" textSize="12sp" textColor="#DC2626" padding="0dp 8dp 0dp 8dp" marginLeft="6dp"/>'
-        + '</horizontal></vertical>'
-        + '<view bg="#E5E7EB" h="1dp" marginLeft="12dp" marginRight="12dp"/>';
-}
-function ui() {
-    if (g_uiW) { uiClose(); return; }
-    uiMinClose();
-    g_uiRot = -1;
-    g_uiW = floaty.window(
-        '<vertical padding="10dp" bg="#00000000">'
-        + '<card cardCornerRadius="12dp" cardBackgroundColor="#FFFFFF" cardElevation="4dp" w="*" h="*">'
-        + '<vertical padding="16dp 14dp 16dp 14dp" w="*" h="*">'
-        + '<horizontal id="titlebar" gravity="center_vertical"><text id="title" layout_weight="1" textSize="18sp" textStyle="bold" textColor="#111827" text="区域管理"/>'
-        + '<text id="btnMin" text="–" gravity="center" textSize="20sp" textColor="#6B7280" padding="16dp 12dp 16dp 12dp"/>'
-        + '<text id="btnQuitTop" text="×" gravity="center" textSize="22sp" textColor="#6B7280" padding="16dp 12dp 16dp 12dp"/></horizontal>'
-        + '<text textSize="12sp" textColor="#6B7280" maxLines="1" ellipsize="end" marginTop="2dp" text="开/关=是否触发 · 显/隐=预览是否绘制"/>'
-        + '<scroll layout_weight="1" marginTop="8dp"><vertical id="rows">'
-        + uiRowXml(0) + uiRowXml(1) + uiRowXml(2) + uiRowXml(3) + uiRowXml(4) + uiRowXml(5) + uiRowXml(6) + uiRowXml(7)
-        + '</vertical></scroll>'
-        + '<horizontal marginTop="10dp"><button id="addRect" layout_weight="1" text="＋矩形" textSize="14sp" textColor="#FFFFFF" backgroundTint="#2563EB" padding="0dp 12dp 0dp 12dp"/><button id="addCircle" layout_weight="1" text="＋圆形" textSize="14sp" textColor="#FFFFFF" backgroundTint="#2563EB" padding="0dp 12dp 0dp 12dp" marginLeft="10dp"/></horizontal>'
-        + '<button id="preview" text="预览：关" textSize="14sp" marginTop="10dp" w="*" padding="0dp 12dp 0dp 12dp"/>'
-        + '</vertical></card></vertical>');
-    try { var __sz = uiSize(); g_uiW.setSize(__sz.w, __sz.h); } catch (e) {}
-    g_uiRot = -1;
-    log("ui window ok");
-    /* 接线必须在 UI 线程：窗体贴上主线程后，脚本线程 setOnClickListener 必炸（竞态，时好时坏）。 */
-    uiRun(function () {
-    uiWire(g_uiW.s0a, function () { uiRowAct(0, "t"); });
-    uiWire(g_uiW.s0b, function () { uiRowAct(0, "v"); });
-    uiWire(g_uiW.s0c, function () { uiRowAct(0, "d"); });
-    uiWire(g_uiW.s1a, function () { uiRowAct(1, "t"); });
-    uiWire(g_uiW.s1b, function () { uiRowAct(1, "v"); });
-    uiWire(g_uiW.s1c, function () { uiRowAct(1, "d"); });
-    uiWire(g_uiW.s2a, function () { uiRowAct(2, "t"); });
-    uiWire(g_uiW.s2b, function () { uiRowAct(2, "v"); });
-    uiWire(g_uiW.s2c, function () { uiRowAct(2, "d"); });
-    uiWire(g_uiW.s3a, function () { uiRowAct(3, "t"); });
-    uiWire(g_uiW.s3b, function () { uiRowAct(3, "v"); });
-    uiWire(g_uiW.s3c, function () { uiRowAct(3, "d"); });
-    uiWire(g_uiW.s4a, function () { uiRowAct(4, "t"); });
-    uiWire(g_uiW.s4b, function () { uiRowAct(4, "v"); });
-    uiWire(g_uiW.s4c, function () { uiRowAct(4, "d"); });
-    uiWire(g_uiW.s5a, function () { uiRowAct(5, "t"); });
-    uiWire(g_uiW.s5b, function () { uiRowAct(5, "v"); });
-    uiWire(g_uiW.s5c, function () { uiRowAct(5, "d"); });
-    uiWire(g_uiW.s6a, function () { uiRowAct(6, "t"); });
-    uiWire(g_uiW.s6b, function () { uiRowAct(6, "v"); });
-    uiWire(g_uiW.s6c, function () { uiRowAct(6, "d"); });
-    uiWire(g_uiW.s7a, function () { uiRowAct(7, "t"); });
-    uiWire(g_uiW.s7b, function () { uiRowAct(7, "v"); });
-    uiWire(g_uiW.s7c, function () { uiRowAct(7, "d"); });
-    uiWire(g_uiW.addRect, function () { toast("拖框画矩形，抬手保存"); capStart("rect"); });
-    uiWire(g_uiW.addCircle, function () { toast("起点为圆心，拖动定半径"); capStart("circle"); });
-    uiWire(g_uiW.preview, function () { ovPreview(!g_ovW); uiRefresh(); });
-    uiWire(g_uiW.btnQuitTop, function () { uiClose(); });
-    uiWire(g_uiW.btnMin, function () { uiMin(); });
-    uiDragBar();
-    log("ui wired");
-    uiRefresh();
-    ovRetop();
-    log("ui refreshed");
-    });
-}
-function capClose() { try { if (g_capW) g_capW.close(); } catch (e) {} g_capW = null; g_cap = null; }
-function capStart(mode) {
-    capClose();
-    g_cap = { mode: mode, sx: 0, sy: 0, cx: 0, cy: 0 };
-    g_capW = floaty.rawWindow('<frame id="cap"><canvas id="board" layout_weight="1"/></frame>');
-    g_capW.setSize(device.width, device.height);
-    g_capW.setTouchable(true);
-    g_capW.board.on("draw", function (canvas) {
-        /* 线程池 draw 与 UI 线程 capClose/capStart 并发：快照局部，guard 后 cap 不会被并发置 null（TypeError 根因） */
-        var cap = g_cap;
-        if (!cap) return;
-        try { canvas.drawColor(colors.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR); } catch (e) {}
-        var dx = cap.cx - cap.sx, dy = cap.cy - cap.sy;
-        if (dx * dx + dy * dy < 400) return;
-        var p = new Paint(); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(colors.GREEN);
-        if (cap.mode === "circle") canvas.drawCircle(cap.sx, cap.sy, Math.sqrt(dx * dx + dy * dy), p);
-        else canvas.drawRect(Math.min(cap.sx, cap.cx), Math.min(cap.sy, cap.cy), Math.max(cap.sx, cap.cx), Math.max(cap.sy, cap.cy), p);
-    });
-    g_capW.cap.setOnTouchListener(new JavaAdapter(android.view.View.OnTouchListener, { onTouch: function (v, ev) {
-        try {
-            var cap = g_cap, w = g_capW;
-            if (!cap || !w) return true;
-            var a = ev.getAction(), x = ev.getX(), y = ev.getY();
-            if (a === 0) { cap.sx = x; cap.sy = y; cap.cx = x; cap.cy = y; }
-            else if (a === 2) { cap.cx = x; cap.cy = y; try { w.board.postInvalidate(); } catch (e) {} }
-            else if (a === 1) {
-                var dx = x - cap.sx, dy = y - cap.sy;
-                if (dx * dx + dy * dy > 2500) {
-                    /* 存竖屏坐标：触摸是当前屏 view 相对坐标，先加回窗体偏移，再 C2P 进竖屏存储。 */
-                    var ox = 0, oy = 0;
-                    try {
-                        if (!g_ovLoc) g_ovLoc = java.lang.reflect.Array.newInstance(java.lang.Integer.TYPE, 2);
-                        w.cap.getLocationOnScreen(g_ovLoc);
-                        ox = g_ovLoc[0]; oy = g_ovLoc[1];
-                    } catch (e) {}
-                    var n = vt.loadRegions().length + 1, r;
-                    var pc = vtC2P(cap.sx + ox, cap.sy + oy), pe = vtC2P(x + ox, y + oy);
-                    if (cap.mode === "circle") r = { id: "c" + Date.now() % 100000, name: "圆形" + n, type: "circle", cx: Math.round(pc.x), cy: Math.round(pc.y), r: Math.round(Math.sqrt(dx * dx + dy * dy)), enabled: true };
-                    else r = { id: "r" + Date.now() % 100000, name: "矩形" + n, x1: Math.round(Math.min(pc.x, pe.x)), y1: Math.round(Math.min(pc.y, pe.y)), x2: Math.round(Math.max(pc.x, pe.x)), y2: Math.round(Math.max(pc.y, pe.y)), enabled: true };
-                    var all = vt.loadRegions(); all.push(r); vt.rgSave(all); ovSet(all); uiRefresh();
-                    toast("已保存 " + r.name);
-                }
-                capClose();
-            }
-        } catch (e) {}
-        return true;
-    } }));
-}
-function uiClose() { capClose(); uiMinClose(); try { if (g_uiW) g_uiW.close(); } catch (e) {} g_uiW = null; }
-/* ---- watcher 启动器：仪式全包（接管/启动/订阅/双线程/退出清理/保活），业务只传 handlers ---- */
-function bootWatch(h) {
-    var MY = "" + Date.now() + "_" + Math.random();
-    try {
-        events.broadcast.on("vt-takeover", function (tok) {
-            if (tok !== MY) { try { ovClose(); } catch (e) {} try { uiClose(); } catch (e2) {} try { vt.stop(); } catch (e3) {} exit(); }
-        });
-    } catch (e) {}
-    try { events.broadcast.emit("vt-takeover", MY); } catch (e) {}
-    sleep(1500);
-    vt.ensure();
-    var c = vt.connect();
-    var regions = vt.loadRegions();
-    ovShow(regions);
-    /* B 方案：匹配在 vtouchd native 层（region add/clear + region_ev 推送），
-     * 这里只做：配置下发 + 事件分发到 handlers + overlay 手指绘制（pev 驱动）。 */
-    var FINGERS = {};
-    function pushRegions(rs) {
-        try {
-            c.send("region clear");
-            for (var i = 0; i < rs.length; i++) {
-                var r = rs[i], en = (r.enabled === false ? 0 : 1);
-                if (r.type === "circle")
-                    c.send("region add " + r.id + " 1 " + Math.round(r.cx) + " " + Math.round(r.cy) + " " + Math.round(r.r) + " 0 " + en);
-                else
-                    c.send("region add " + r.id + " 0 " + Math.round(r.x1) + " " + Math.round(r.y1) + " " + Math.round(r.x2) + " " + Math.round(r.y2) + " " + en);
-            }
-        } catch (e) {}
-    }
-    function dispatch(line) {
-        var p, i, region, f, k;
-        if (line.indexOf("region_ev ") === 0) {          /* region_ev <id> <ev> <slot> <x> <y>（竖屏） */
-            p = line.split(" ");
-            if (p.length === 6) {
-                region = null;
-                for (i = 0; i < regions.length; i++) if (regions[i].id === p[1]) { region = regions[i]; break; }
-                f = (function () { var q = vtP2C(+p[4], +p[5]); return { slot: +p[3], x: q.x, y: q.y }; })();
-                if (region) {
-                    if (p[2] === "down" && h.onDown) h.onDown(region, f);
-                    else if (p[2] === "up" && h.onUp) h.onUp(region, f);
-                    else if (p[2] === "enter" && h.onEnter) h.onEnter(region, f);
-                    else if (p[2] === "move" && h.onMove) h.onMove(region, f);
-                    else if (p[2] === "exit" && h.onExit) h.onExit(region, f);
-                    if (p[2] === "down" || p[2] === "enter") ovFlash(region.id);
-                }
-            }
-            return;
-        }
-        if (line.indexOf("pev ") === 0) {                /* pev <slot> <down|move|up> <x> <y>: 只画手指 */
-            p = line.split(" ");
-            if (p.length === 5) {
-                if (p[2] === "up") delete FINGERS[p[1]];
-                else FINGERS[p[1]] = { x: +p[3], y: +p[4], down: true };
-                var a = [], k2;
-                for (k2 in FINGERS) a.push(FINGERS[k2]);
-                ovUpdate(a);
-            }
-        }
-    }
-    vt.sub(c);
-    pushRegions(regions);
-    try { rotWatch(); } catch (e0) {}
-    events.on("exit", function () {
-        try { rotUnwatch(); } catch (e4) {}
-        try { vt.stop(); } catch (e) {}
-        try { ovClose(); } catch (e2) {}
-        try { uiClose(); } catch (e3) {}
-    });
-    threads.start(function () {
-        log("vt-sub: on");
-        var lastPing = 0;
-        for (;;) {
-            try {
-                for (;;) {
-                    var line = c.recv();
-                    if (line === null) {
-                        if (Date.now() - lastPing > 3000) { lastPing = Date.now(); c.send("ping"); }
-                        sleep(10);
-                        continue;
-                    }
-                    dispatch(line);
-                }
-            } catch (err) {
-                log("vt-sub 重连: " + err);
-                try { c.close(); } catch (e2) {}
-                sleep(1000);
-                /* 必须更新全局 c：pushRegions/dispatch 闭包引用它，否则配置下发到旧连接被吞 */
-                try { vt.ensure(); c = vt.connect(); vt.sub(c); pushRegions(regions); }
-                catch (e3) { sleep(2000); }
-            }
-        }
-    });
-    /* 主力是 rotWatch 事件回调；这里 5 秒兜底一次，防监听漏事件。 */
-    setInterval(function () {
-        try { rotSync(); } catch (e) {}
-        try {
-            var rs = vt.loadRegions();
-            if (JSON.stringify(rs) !== JSON.stringify(regions)) {
-                regions = rs;
-                pushRegions(rs);
-                ovSet(rs);
-            }
-        } catch (e2) {}
-    }, 5000);
-}
-
-'''
+def _b64_lines(b64, n=76):
+    """分行拼接：单行超长 base64 会被中间设备/WAF 拦（403），分行后单行短。"""
+    return '"\n    + "'.join(b64[i:i + n] for i in range(0, len(b64), n))
 
 
 def main() -> int:
@@ -911,19 +595,35 @@ def main() -> int:
     raw = BIN.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
     # B64 分行拼接：单行 30KB 连续 base64 会被内网 HIS WAF 拦（403）；分行后单行短
-    _b64js = '"\n    + "'.join(b64[i:i + 76] for i in range(0, len(b64), 76))
+    _b64js = _b64_lines(b64)
     blob = (
         "/* ---- 内嵌二进制（构建机填入） ---- */\n"
         "var VTOUCH_BIN_SIZE = %d;\n"
         'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), _b64js)
     )
-    uisrc = (
-        "/* ---- UI/overlay 源码（调用侧 eval(vt.uiSource) 进主上下文执行） ---- */\n"
-        "var VTOUCH_UI_SRC = " + json.dumps(UI_SRC, ensure_ascii=False) + ";\n"
+    for f in (UI_SO, UI_DEX):
+        if not f.exists():
+            print("缺 %s — 先跑: sh scripts/build_ui.sh" % f)
+            return 1
+    so_raw = UI_SO.read_bytes()
+    so_gz = gzip.compress(so_raw, 9)
+    dex_raw = UI_DEX.read_bytes()
+    uiblob = (
+        "/* ---- 内嵌面板（构建机填入）：dex 原样 b64；so 走 gz+b64（%dKB → %dKB） ---- */\n"
+        % (len(so_raw) // 1024, len(so_gz) // 1024)
+        + "var VTOUCH_UI_DEX_SIZE = %d;\n" % len(dex_raw)
+        + 'var VTOUCH_UI_DEX_B64 = "%s";\n' % _b64_lines(base64.b64encode(dex_raw).decode("ascii"))
+        + "var VTOUCH_UI_SO_SIZE = %d;\n" % len(so_raw)
+        + "var VTOUCH_UI_SO_GZ_SIZE = %d;\n" % len(so_gz)
+        + 'var VTOUCH_UI_SO_GZ_B64 = "%s";\n' % _b64_lines(base64.b64encode(so_gz).decode("ascii"))
+        + 'var VTOUCH_UI_DEX_MD5 = "%s";\n' % hashlib.md5(dex_raw).hexdigest()
+        + 'var VTOUCH_UI_SO_MD5 = "%s";\n' % hashlib.md5(so_raw).hexdigest()
     )
-    if not write_out(OUT, CORE + "\n" + blob + "\n" + uisrc + "\n" + ONE_LIB + "\n" + DEMO):
+    if not write_out(OUT, CORE + "\n" + blob + "\n" + uiblob + "\n" + ONE_LIB + "\n" + UI_BOOT + "\n" + DEMO):
         return 1
     print("bundle: %s (%d bytes)" % (OUT, OUT.stat().st_size))
+    print("panel in bundle: dex=%dB so=%dB(gz %dB) md5 dex=%s so=%s"
+          % (len(dex_raw), len(so_raw), len(so_gz), hashlib.md5(dex_raw).hexdigest()[:8], hashlib.md5(so_raw).hexdigest()[:8]))
     print("bundle syntax OK")
     return 0
 

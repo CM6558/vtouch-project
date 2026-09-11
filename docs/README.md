@@ -25,7 +25,7 @@ Android InputReader/InputDispatcher
           ↓
 应用 MotionEvent
 
-AutoJs6（clients/vtouch_bundle.js：自释放 + 连接 + 管理 UI）
+AutoJs6（require("/sdcard/vtouch_bundle.js")：二进制自释放 + 连接 + 面板生命周期）
     ↓ WebSocket (127.0.0.1:27183)
 vtouchd 核心
     ├── 物理事件流 pev（跟随订阅）
@@ -43,30 +43,61 @@ app_process（Java 80 行拿 SurfaceControl 图层）
 
 二进制不随仓库分发——由 GitHub Actions **Build vtouch (Android NDK)** 工作流构建，从 artifact 下载：
 
+**只需一个文件**：面板（`classes.dex` + `libtestimgui.so`）与 vtouchd 都内嵌在 bundle 里，设备侧不需要任何 `.sh`。
+
 ```bash
-adb push vtouch_bundle-arm64.js /sdcard/vtouch_bundle.js
+adb push clients/vtouch_bundle.js /sdcard/vtouch_bundle.js
 ```
 
-在 AutoJs6 里运行示例脚本即可：bundle 首次运行自释放 vtouchd 到 `/data/local/tmp/vtouchd`、启动并连接（依赖 root / su）。
-
-## 区域监听示例
+启动完全由脚本控制（AutoJs6 里 require 这一个文件）：
 
 ```javascript
 var vt = require("/sdcard/vtouch_bundle.js");
-eval(vt.uiSource);   // 可选：管理 UI（框选添加/删除区域，配置自动下发）
-
-vt.connect({
-    onDown:  function (region, f) { log("down  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
-    onMove:  function (region, f) { log("move  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
-    onUp:    function (region, f) { log("up    " + region.id + " s" + f.slot); },
-    onEnter: function (region, f) { log("enter " + region.id + " s" + f.slot); },
-    onExit:  function (region, f) { log("exit  " + region.id + " s" + f.slot); }
-});
+vt.uiStart();          // 面板 = UI + daemon（grab 物理触摸 + WS 27183 + 读 regions.conf）；首次自动释放二进制
+vt.uiAlive();          // true（走 pidof vtouch-ui，不信 pid 文件）
+vt.uiStop();                 // 收掉面板并释放 EVIOCGRAB；vt.stop() 也会连同面板一起收
 ```
+
+## 区域监听示例
+
+区域唯一归属是**面板**（改完自动存 `regions.conf`，首行带格式版本号，旧版本文件会被整份丢弃）；脚本只做回读 + 下发，自己不存任何区域状态：
+
+```javascript
+var vt = require("/sdcard/vtouch_bundle.js");
+vt.uiStart();                  // 面板就是 daemon，不要再 ensure()
+var c = vt.connect();          // 连 ws://127.0.0.1:27183
+
+var rs = vt.rgList(c);         // 回读面板当前表（必须在开收包循环之前调）
+rs.push({ id: "swipeL", name: "左滑区", x1: 60, y1: 2200, x2: 660, y2: 2900, enabled: true });
+vt.rgPush(c, rs);              // 整表下发：面板立刻生效并落盘（内部先 region clear）
+
+var eng = vt.createEngine(rs, {
+    onDown:  function (r) { log("down  " + r.id); },
+    onUp:    function (r) { log("up    " + r.id); },
+    onEnter: function (r) { log("enter " + r.id); },
+    onExit:  function (r) { log("exit  " + r.id); }
+});
+
+vt.sub(c);                     // 订阅物理事件流 pev
+threads.start(function () {    // 读线程必须常驻；recv() 非阻塞，空转 sleep 让一下
+    for (;;) {
+        var line = null;
+        try { line = c.recv(); } catch (e) { break; }
+        if (line) { var ev = vt.parseEv(line); if (ev) eng.feed(ev); }
+        else sleep(8);
+    }
+});
+events.on("exit", function () { try { c.close(); } catch (e) {} vt.stop(); });
+```
+
+拿不动引擎就直接读事件行也可以：`vt.parseEv(c.recv())` 返回 `{slot, action, x, y}`。
+只想「按 id 分发、脚本不存区域表」就走 daemon 原生区域事件：`vt.rgParseEv(line)` → `{id, ev, slot, x, y}`（id 永远是面板里的最新名字）。
+可运行示例：`clients/vtouch_region_min.js`（最小区域触发点击）、`clients/vtouch_touchback.js`（回触）、`clients/vtouch_orient_demo.js`（四角换算复核）。
 
 ## 协议
 
 - `docs/VTOUCH_PROTOCOL.md` —— WebSocket 协议（命令/事件/region 配置，含设计说明）
+- `docs/VTOUCH_BUNDLE.md` —— 单文件包完整使用手册（API 全表 / 线协议 / 区域系统 / 注意事项 / 排障）
 
 ## 常见问题
 
@@ -75,12 +106,12 @@ vt.connect({
 - 检查 WebSocket 端口：`su -c "netstat -tlnp | grep 27183"`
 
 ### 触摸无响应
-- 检查 SELinux：`su -c "getenforce"`（需 Permissive）
+- SELinux 保持 Enforcing 即可（root 域释放二进制、建 composer 图层已实测通过）；`su -c "getenforce"` 仅用于确认
 - 检查虚拟设备：`su -c "dumpsys input | grep vtouch"`
 
 ### 脚本立即退出
 - 检查 root：`su -c id`（AutoJs6 通过 su 调起 bundle 的自释放逻辑）
-- 检查 WebSocket 重连逻辑（bundle 内置 bootWatch 自动重连 + 重新下发配置）
+- 确认脚本末尾有常驻逻辑（读循环 / setInterval）：脚本一结束就触发 `events.on("exit")` → `vt.stop()`，把面板一起收掉，表现为「窗口一闪就没」
 
 ## 文件结构
 

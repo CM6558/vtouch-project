@@ -13,6 +13,12 @@ build/
 __pycache__/
 *.pyc
 
+# 第三方源码（自拉，不入库）：Dear ImGui 上游
+thirdparty/
+
 # 常见本地文件
 *.log
 .DS_Store
+
+# 单文件 bundle：生成物，由 scripts/build_bundle.py 产出（历史上有 del 提交，仅存源码）
+clients/vtouch_bundle.js

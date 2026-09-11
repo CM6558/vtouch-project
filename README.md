@@ -31,13 +31,20 @@
 
 ```javascript
 var vt = require("/sdcard/vtouch_bundle.js");
-eval(vt.uiSource);   // 可选：JS 管理 UI（框选添加区域）
-vt.connect({
-    onDown:  function (region, f) { log("down  " + region.id + " s" + f.slot); },
-    onMove:  function (region, f) { log("move  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
-    onUp:    function (region, f) { log("up    " + region.id + " s" + f.slot); },
-    onEnter: function (region, f) { log("enter " + region.id + " s" + f.slot); },
-    onExit:  function (region, f) { log("exit  " + region.id + " s" + f.slot); }
+vt.uiStart();                      // 起 ImGui 面板（面板 = UI + daemon，首次自动释放 dex/so）
+var c = vt.connect();              // 连 ws://127.0.0.1:27183（别另调 ensure()，会抢端口）
+var rs = vt.rgList(c);             // 回读面板里的区域（面板是唯一归属，必须在开收包循环前调）
+vt.rgPush(c, rs);                  // 整表下发（内部先 region clear）；面板改过的区域照旧保留
+
+var eng = vt.createEngine(rs, {
+    onDown: function (r) { log("down  " + r.id); },
+    onEnter: function (r) { log("enter " + r.id); },
+    onExit:  function (r) { log("exit  " + r.id); }
+});
+vt.sub(c);                         // 订阅物理触摸流
+threads.start(function () {        // 读线程：recv() 非阻塞，空转让一下
+    for (;;) { var l = null; try { l = c.recv(); } catch (e) { break; }
+               if (l) { var ev = vt.parseEv(l); if (ev) eng.feed(ev); } else sleep(8); }
 });
 ```
 
