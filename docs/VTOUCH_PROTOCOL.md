@@ -25,7 +25,8 @@ res                           -> 逻辑分辨率与 raw 坐标范围
 sub | unsub                   -> 订阅/退订物理触摸流（pev）；默认未订阅，断连后清零
 region clear                  -> 清空全部区域
 region add <id> <type> <a1> <a2> <a3> <a4> <en>
-                              -> 添加区域（type 0=矩形, 1=圆形；≤32 个；非法参数/超限拒绝）
+                              -> 添加/更新区域（type 0=矩形, 1=圆形；≤32 个；非法参数/超限拒绝）
+region list                   -> 查询当前全部区域配置（每行一条 region ...，末尾 end <n>）
 down | move | up <slot> <x> <y>
                               -> 虚拟触点注入（virt 槽，逻辑坐标）
 begin_frame                   -> 开启原子多指帧
@@ -43,7 +44,18 @@ end_frame                     -> 提交帧（单次 SYN_REPORT）
 ```
 
 - 坐标逻辑坐标系；`en` 0/1 启用开关
+- **同 id 查重更新**：`region add` 已存在同 id 时原地更新属性（type/坐标/en），不新增（UI 开关/改配置安全）
 - 越界/非法（区域数 >32、参数非数字、type 非 0/1）→ `err region`，不影响已有配置
+
+### region list 响应
+
+```text
+region <id> <type> <a1> <a2> <a3> <a4> <en>
+region ...
+end <n>
+```
+
+面板/客户端启动时可拉取当前配置（`region list` 后逐行读取直到 `end <n>`），与 `region add` 共用同一张表（≤32 行）。
 
 ### 原子多指帧
 
@@ -86,6 +98,8 @@ region_ev <id> <ev> <slot> <lx> <ly>
 
 - 区域匹配在物理帧透传注入之后执行（SYN 帧后），**绝不阻塞/修改触摸路径**
 - 物理触摸始终 1:1 透传；区域命中只推事件，不拦截、不代点
+- **单进程面板直通**：`region_ev` 在 WS 推送之前先调进程内事件回调（`vtouch_set_callbacks`）——
+  UI 面板即使无 WS 客户端也能收到事件（闪烁/日志）；触摸事件经 `vtouch_ui_sync` 回调面板（喂 ImGui io + overlay 实时着色）
 
 ## 性能
 
