@@ -1,20 +1,22 @@
 # vtouch：Android 触摸合并系统
 
-通过用户态 `EVIOCGRAB` + `uinput` 将真实触摸与模拟触摸合并为单一统一触摸设备，供 AutoJs6 / 第三方程序通过 WebSocket 调用。
+通过用户态 `EVIOCGRAB` + `uinput` 将真实触摸与模拟触摸合并为单一统一触摸设备，供 AutoJs6 / 第三方程序通过 WebSocket 调用；**区域匹配、UI 管理面板、触摸注入全部可单进程运行**。
 
 - 用户态实现，无需内核模块（.ko）
 - 真实触摸与模拟触摸共存、互不干扰
 - WebSocket 接口（`ws://127.0.0.1:27183`）
 - 动态发现触摸设备，不硬编码 event 节点
 - 自动坐标转换（逻辑屏幕 ↔ 原始触摸轴）
-- 原生 region 区域匹配（≤32 区域，五事件监听，纯监听不代点）
+- 原生 region 区域匹配（≤32 区域，五事件监听，**纯监听不代点**；同 id 重复添加=更新属性）
+- **单进程 UI 整合**：vtouchd 核心编译为 C 库（`vtouch_init/poll_step/region_*/set_callbacks`），可嵌入 app_process 渲染进程（SurfaceControl 图层 → EGL GLES2 → Dear ImGui），UI 与触摸/匹配/WS 全部同进程直连，无 socket 转发
 
 ## 组件
 
 | 组件 | 说明 |
 |------|------|
-| `src/vtouchd.c` | 单进程合并器+WebSocket+区域匹配（EVIOCGRAB + uinput + 127.0.0.1:27183） |
-| `clients/vtouch_bundle.js` | **构建产物**：内嵌 vtouchd 二进制的 AutoJs6 单文件（自释放+连接+协议封装+管理 UI），由 GitHub Actions 生成 |
+| `src/vtouchd.c` | 核心：EVIOCGRAB 采集 + uinput 注入 + region 匹配 + WS 服务器（127.0.0.1:27183）。**库化接口**：`vtouch_init/vtouch_poll_step/vtouch_cleanup`（嵌入用）、`vtouch_region_clear/count/add/get_region`（面板直读写）、`vtouch_set_callbacks`（触摸/事件进程内回调）；命令行入口保留（`-w -h [-v] [-p] [-ui]`） |
+| 渲染进程（app_process + `libtestimgui.so`） | **单进程管理面板**：Java 仅 ~80 行拿 SurfaceControl 图层（隐藏 API 反射），其余全 C++——EGL GLES2 + Dear ImGui 渲染；vtouchd 核心同进程（JNI 直调）。功能：区域表格（名称/形状/坐标/开关/显隐/删除）、＋矩形/＋圆形框选、事件日志、全屏透明 overlay（区域描边实时着色：**触摸在内绿/在外红**、命中亮绿闪烁） |
+| `clients/vtouch_bundle.js` | **构建产物**：内嵌 vtouchd 二进制的 AutoJs6 单文件（自释放+连接+协议封装+JS 管理 UI），由 GitHub Actions 生成 |
 | `clients/vtouch_touchback.js` | 监听+回触示例（区域触发→虚拟上滑/点按） |
 
 ## 部署
@@ -29,7 +31,7 @@
 
 ```javascript
 var vt = require("/sdcard/vtouch_bundle.js");
-eval(vt.uiSource);   // 可选：管理 UI（框选添加区域）
+eval(vt.uiSource);   // 可选：JS 管理 UI（框选添加区域）
 vt.connect({
     onDown:  function (region, f) { log("down  " + region.id + " s" + f.slot); },
     onMove:  function (region, f) { log("move  " + region.id + " s" + f.slot + " " + f.x + "," + f.y); },
@@ -41,6 +43,22 @@ vt.connect({
 
 完整协议见 [docs/VTOUCH_PROTOCOL.md](docs/VTOUCH_PROTOCOL.md)。
 
+## UI 渲染架构（单进程整合）
+
+```
+app_process（Java ~80 行: SurfaceControl 反射拿图层）
+└── JNI → libtestimgui.so（C++）
+     ├── vtouchd 核心（同进程 C 库）: EVIOCGRAB 触摸 + uinput 注入 + region 匹配 + WS 服务器
+     ├── 触摸回调 vtouch_set_callbacks → 面板 io / 框选 / overlay 着色（内存直连，无 socket）
+     ├── 事件回调 region_ev → 日志 + 命中闪烁（无 WS 客户端也通知面板）
+     └── EGL GLES2 + Dear ImGui：管理面板 + 全屏透明 overlay
+```
+
+- **无两个进程、无 socket 转发、无"链接不上"**：面板与核心是同一程序的内部调用
+- WS 服务器保留：AutoJs6/外部程序照常连接收 `region_ev`/`pev`，配置通过 `region add/list/clear` 与面板共用同一张表
+- 渲染要点：透明合成（`glClearColor(0,0,0,0)` + RGBA8888）、全屏图层（`wm size` 动态解析）、CJK 字体（NotoSansCJK）
+- 性能：**脏检查渲染**（静态跳过合成省 CPU；触摸/事件/配置变化立即渲染）；AVD 用 `-gpu host`（composer 软合成是瓶颈，host GPU 后帧率 60）
+
 ## 构建
 
 GitHub Actions（`.github/workflows/build.yml`）用 Android NDK r27d 交叉编译 vtouchd（arm64 + x86_64），再跑 `scripts/build_bundle.py` 生成双 ABI bundle，产物上传 artifact。
@@ -48,11 +66,11 @@ GitHub Actions（`.github/workflows/build.yml`）用 Android NDK r27d 交叉编�
 ## 目录
 
 ```
-src/                  C 源码（vtouchd.c 单一二进制）
+src/                  C 源码（vtouchd.c：核心 + 库化接口）
 clients/              AutoJs6 脚本（bundle 构建产物、示例）
 scripts/              构建 / 同步脚本
 tests/                WS 冒烟测试
-docs/                 文档
+docs/                 文档（协议 / UI 方案调研）
 extension/sync-ext/   Chrome 扩展（一键网页同步通道）
 ```
 
