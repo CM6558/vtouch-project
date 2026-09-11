@@ -40,8 +40,16 @@ function vtouchCur() {
 }
 
 /* 后端幂等启动：pid 存活直接返回；缺二进制则释放；然后拉起（不等端口）。
- * daemon 坐标系恒为竖屏物理（wm size portrait）：W/H 归一化 min/max，横屏开机也不错位。 */
+ * daemon 坐标系恒为竖屏物理（wm size portrait）：W/H 归一化 min/max，横屏开机也不错位。
+ * 免 su 直启：先做纯 TCP 探测（127.0.0.1:27183 通 = vtouchd 已在运行，如 AVD 上 adb root 直启），
+ * 通则完全不碰 su——su 通道不可用时（守护未起/无 root）也能直连已运行的 vtouchd。 */
 function vtouchEnsure() {
+    try {
+        var __s = new java.net.Socket();
+        __s.connect(new java.net.InetSocketAddress("127.0.0.1", VTOUCH_PORT), 200);
+        __s.close();
+        return;
+    } catch (e) {}
     var r = shell("B=/data/local/tmp/vtouch-runtime;D=" + VTOUCH_BIN + ";"
         + "[ -f $B/vtouchd.pid ]&&kill -0 $(cat $B/vtouchd.pid 2>/dev/null) 2>/dev/null&&exit 0;"
         + "[ -x $D ]||exit 11;"
