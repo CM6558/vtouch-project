@@ -1,6 +1,7 @@
 name: Build vtouch (Android NDK)
-# CI 只出 headless bundle（面板 dex/so 要 Android SDK build-tools，CI 不装）；
-# 要带面板的完整 bundle 在本机跑: sh scripts/build_ui.sh && python scripts/build_bundle.py
+# arm64: 完整 bundle（内嵌面板 dex/so，可部署到真机）
+# x86_64: headless bundle（AVD 测试用；面板 .so 是 arm64 的，x86_64 装不了）
+# 本机等价命令见 README「构建」：编译核心 → sh scripts/build_ui.sh → python scripts/build_bundle.py
 
 on:
   push:
@@ -15,10 +16,13 @@ permissions:
 env:
   NDK_VERSION: r27d
   NDK_TOOLCHAIN_BIN: linux-x86_64
+  BUILD_TOOLS_VERSION: "34.0.0"
+  API_LEVEL: "24"
+  IMGUI_VERSION: v1.91.8          # 与 thirdparty/imgui 同版本，面板编译依赖
 
 jobs:
   build:
-    name: Compile vtouchd + generate bundle
+    name: Compile vtouchd + panel + bundle
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,19 +51,56 @@ jobs:
           echo "NDK=$NDK" >> "$GITHUB_ENV"
           echo "$NDK/toolchains/llvm/prebuilt/${{ env.NDK_TOOLCHAIN_BIN }}/bin" >> "$GITHUB_PATH"
 
+      - name: Cache Dear ImGui ${{ env.IMGUI_VERSION }}
+        id: cache-imgui
+        uses: actions/cache@v4
+        with:
+          path: thirdparty/imgui
+          key: imgui-${{ env.IMGUI_VERSION }}
+
+      - name: Fetch Dear ImGui ${{ env.IMGUI_VERSION }}
+        if: steps.cache-imgui.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p thirdparty
+          git clone --depth 1 -b "${{ env.IMGUI_VERSION }}" \
+            https://github.com/ocornut/imgui thirdparty/imgui
+          test -f thirdparty/imgui/imgui.h
+
+      - name: Set up JDK 17 (javac + d8)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android SDK packages (platform ${{ env.API_LEVEL }} + build-tools ${{ env.BUILD_TOOLS_VERSION }})
+        run: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-${{ env.API_LEVEL }}" "build-tools;${{ env.BUILD_TOOLS_VERSION }}"
+          test -f "$SDK/platforms/android-${{ env.API_LEVEL }}/android.jar"
+          test -x "$SDK/build-tools/${{ env.BUILD_TOOLS_VERSION }}/d8"
+
       - name: Compile vtouchd (merged single binary, arm64)
         run: |
           mkdir -p build
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchd.c -o build/vtouchd
 
-      - name: Generate vtouch_bundle.js (arm64, headless)
-        run: |
-          python3 scripts/build_bundle.py --headless
-          test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
-          cp clients/vtouch_bundle.js build/vtouch_bundle-arm64-headless.js
+      - name: Build panel (classes.dex + libtestimgui.so)
+        env:
+          NDK_ROOT: ${{ runner.tool_cache }}/android-ndk-${{ env.NDK_VERSION }}
+        run: sh scripts/build_ui.sh
 
-      - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 bundle
+      - name: Generate vtouch_bundle.js (arm64, 带面板)
+        run: |
+          python3 scripts/build_bundle.py
+          test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
+          cp clients/vtouch_bundle.js build/vtouch_bundle-arm64.js
+
+      - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 headless bundle
         run: |
           x86_64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchd.c -o build/vtouchd-x86_64
@@ -76,8 +117,14 @@ jobs:
           test -x build/vtouchd || { echo "missing executable: vtouchd"; exit 1; }
           file build/vtouchd
           ls -lh build/
-          test -f build/vtouch_bundle-arm64-headless.js || { echo "arm64 bundle missing"; exit 1; }
+          test -f build/vtouch_bundle-arm64.js || { echo "arm64 bundle missing"; exit 1; }
           test -f build/vtouch_bundle-x86_64-headless.js || { echo "x86_64 bundle missing"; exit 1; }
+          # arm64 必须真的带面板（headless 只有 ~40KB，带面板 ~750KB）
+          grep -q 'VTOUCH_UI_SO_GZ_B64 = "' build/vtouch_bundle-arm64.js || { echo "arm64 bundle 没有内嵌面板"; exit 1; }
+          SIZE=$(stat -c%s build/vtouch_bundle-arm64.js)
+          test "$SIZE" -gt 400000 || { echo "arm64 bundle 只有 ${SIZE}B，面板没进去"; exit 1; }
+          echo "arm64 bundle ${SIZE}B（含面板）"
+          md5sum build/vtouch_bundle-arm64.js build/vtouch_bundle-x86_64-headless.js
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -85,7 +132,7 @@ jobs:
           name: vtouch-arm64-binaries
           path: |
             build/vtouchd
-            build/vtouch_bundle-arm64-headless.js
+            build/vtouch_bundle-arm64.js
             build/vtouch_bundle-x86_64-headless.js
           if-no-files-found: error
 
@@ -95,5 +142,5 @@ jobs:
         with:
           files: |
             build/vtouchd
-            build/vtouch_bundle-arm64-headless.js
+            build/vtouch_bundle-arm64.js
             build/vtouch_bundle-x86_64-headless.js
