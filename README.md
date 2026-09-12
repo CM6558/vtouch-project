@@ -60,7 +60,7 @@ python scripts/package_dist.py --verify --bin build/vtouchd --ui build/ui       
 各产物的作用、**哪个才是手机可运行的最小包**、设备侧落盘位置见 [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md)。
 只要纯 daemon、不需要面板时用 headless 构建：`python scripts/build_bundle.py --headless`（此时 `uiStart()` 会明确报错，不会静默起不来）；默认不带这个开关**必须**有面板产物，避免误发一个没有 UI 的包。
 
-CI（`.github/workflows/build.yml`）跑的就是上面三步：装 JDK 17 + Android SDK build-tools + 拉 `thirdparty/imgui` v1.91.8（都有 cache），**arm64 出的是带面板的完整 bundle**（产物 `vtouch_bundle-arm64.js`，并断言 >400KB 且内嵌面板）；x86_64 因面板 `.so` 是 arm64 的，只出 `vtouch_bundle-x86_64-headless.js`（AVD 测试用）。
+CI（`.github/workflows/build.yml`）跑的就是上面三步：装 JDK 17 + Android SDK build-tools + 拉 `thirdparty/imgui` v1.91.8（都有 cache），对账通过后打成交付包（bundle + 说明 + 调用示例），发布两个 artifact：`vtouch-bundle-arm64`（真机用，含 `README.md`/`example.js`/`md5.txt`）与 `vtouch-bundle-x86_64-headless`（AVD 用）；x86_64 没有面板是因为面板 `.so` 只有 arm64 版。
 
 ## 部署与验证
 

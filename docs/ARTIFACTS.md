@@ -73,11 +73,16 @@ CI（`.github/workflows/build.yml`）每次 push 都会跑同一份脚本：arm6
 
 ## 5. CI 产物（`.github/workflows/build.yml`，每次 push master 跑一次）
 
-| 产物 | 大小 | 说明 |
+两个 artifact，按用途拆开、内部不重复：
+
+| artifact | 内容 | 说明 |
 |---|---|---|
-| `vtouch_bundle-arm64.js` | ~750 KB | 与本地同款**带面板完整包**；断言「内嵌面板 + 体积 >400 KB + 内嵌项 = 本次刚编出的产物」，不达标直接 fail |
-| `vtouch_bundle-x86_64-headless.js` | ~40 KB | AVD 测试用；面板 `.so` 只有 arm64 版，所以 x86_64 只出 headless（`uiStart()` 会明确报错） |
-| `vtouchd` | 32 KB | arm64 纯 daemon |
+| `vtouch-bundle-arm64` | `vtouch_bundle.js` + `README.md` + `example.js` + `md5.txt` | **真机就用它**：交付包本体（= `build/dist/vtouch-bundle-<短md5>-arm64/` 的内容）。不再单独放散装 bundle 或包内 zip——artifact 下载本身就是 zip，重复放等于同一份文件出现三次 |
+| `vtouch-bundle-x86_64-headless` | `vtouch_bundle-x86_64-headless.js` | AVD 测试用（面板 `.so` 只有 arm64 版，所以是 headless） |
+
+裸 `build/vtouchd` **不再单独上传**：它已经内嵌在 bundle 里（`verify_bundle.py` 逐字节比对保证是本次编译产物）。
+确实要裸二进制时：本地编（README 第 ① 步），或从 bundle 里解出来。
+Release（打 tag 时）附 `build/dist/*.zip` + `vtouch_bundle-x86_64-headless.js`。
 
 ## 6. 重建（本机 Git Bash）
 
