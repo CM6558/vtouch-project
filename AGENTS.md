@@ -1,113 +1,81 @@
 # vtouch-project
 
-Android touch simulation/merging system for rooted devices. Merges physical touch input with virtual touches via userspace `EVIOCGRAB` + `uinput`, exposing a single unified touchscreen to Android.
+Android 触摸模拟/合并系统：用户态 `EVIOCGRAB` + `uinput`，把真实触摸与虚拟触摸合成**一条**统一触摸流，供 AutoJs6 通过本地 WebSocket 调用。**面板（ImGui）本身就是 daemon**——采集、注入、区域匹配、WS、UI 全在一个进程里。
 
-## Project structure
+## 结构
 
 ```
-src/vtouchd.c         C source (single binary: merger + WebSocket + region matching)
-src-ui/               ImGui panel (vtouch_ui.cpp + VTouchUI.java); embedded INTO the bundle
-clients/              AutoJs6 scripts (vtouch_bundle.js is Actions build output, NOT tracked;
-                      vtouch_touchback.js is tracked)
-scripts/              build_bundle.py (single source -> clients/vtouch_bundle.js), build_ui.sh
-                      (panel build), sync_auto*.py, sync_web.py
-tests/                WebSocket smoke tests (ws_smoke.py, ws_kick.js)
-docs/                 Protocol and design docs
-extension/sync-ext/   Chrome extension (web sync channel fallback)
-.github/workflows/    build.yml: NDK r27d compile vtouchd (arm64+x86_64) + generate bundle
+src/vtouchd.c             核心：EVIOCGRAB 采集 + uinput 注入 + region 匹配 + WS(127.0.0.1:27183)
+                          库化接口 vtouch_init/poll_step/cleanup、region_*、set_callbacks；命令行入口保留
+src-ui/vtouch_ui.cpp      面板实现（EGL GLES2 + Dear ImGui + 触摸路由 + regions.conf 读写）
+src-ui/VTouchUI.java      ~80 行：反射拿 SurfaceControl 图层 → JNI 进 C++
+scripts/build_bundle.py   唯一来源：装配 clients/vtouch_bundle.js（内嵌 build/vtouchd + 面板 dex/so + JS 库）
+scripts/build_ui.sh       编面板：javac → d8 → ndk cc → link → strip（产出 build/ui/）
+clients/vtouch_bundle.js  生成物（大文件，gitignore；设备侧唯一交付物）
+clients/vtouch_region_min.js  最小示例；vtouch_touchback.js / vtouch_orient_demo.js 回触、转屏示例
+tests/onregion_harness.js 主机侧 Node 桩测（假 AutoJs6 + 假 daemon，46 项断言）
+docs/VTOUCH_BUNDLE.md     使用手册（客户端 API / 区域监听 / 生命周期 / FAQ）
+docs/VTOUCH_PROTOCOL.md   WS 线协议
+docs/diagrams/            工程图：JSON 源 + SVG/PNG（README 里有重渲命令与自检清单）
+.github/workflows/        CI：NDK r27d 编 arm64 + x86_64 bundle
+thirdparty/imgui          面板依赖，不入库（自备；build_ui.sh 需要）
 ```
 
-Binaries and bundles are **never committed** — GitHub Actions builds them, artifacts carry
-`vtouch_bundle-arm64.js` (device) / `vtouch_bundle-x86_64.js` (AVD) + `vtouchd`.
-
-## Sync (local → GitHub, no git push)
+## 构建（Windows Git Bash，产物都在被 gitignore 的 `build/`）
 
 ```sh
-python scripts/sync_auto.py          # one-shot REST API sync (token in D:\MYP\sync-config.json)
-python scripts/sync_auto_install.py install --watch 300   # background daemon
+NDK=C:/Users/21102/android-ndk-r27d
+A64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
+"$A64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd   # ① 核心
+sh scripts/build_ui.sh                                                          # ② 面板 dex + so
+python scripts/build_bundle.py                                                  # ③ 出 bundle
+python scripts/build_bundle.py --check                                          # 可选：node --check 语法门
 ```
 
-git is used only to align local repo state (`git fetch` + `git reset --hard origin/master`),
-never to push changes.
+C 代码统一 `-O2 -Wall -Wextra -Werror -D_GNU_SOURCE`；`src-ui/vtouch_ui.cpp` 另需 `-DIMGUI_IMPL_OPENGL_ES2`。
+`build/` 整个删掉也能重建，重跑上面三步即可。
 
-## Build
-
-Local manual compile (NDK r27d):
+## 测试
 
 ```sh
-NDK=D:/ANDROID/SDK/ndk/30.0.15729638/toolchains/llvm/prebuilt/windows-x86_64/bin
-"$NDK/aarch64-linux-android24-clang" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
+node tests/onregion_harness.js     # 期望 ALL PASS 46/46，退出码 0
 ```
 
-CI (`.github/workflows/build.yml`, workflow name **Build vtouch (Android NDK)**) does the same for
-arm64 + x86_64, then runs `python3 scripts/build_bundle.py` for each ABI and uploads artifacts.
+覆盖：WS 握手与分片帧拼接、`sub` 选择性订阅、`region list` 探针校验、ping/pong 探活、被新实例接管让位、退出自动收尾、逃生门 `autoStop(false)`。
 
-## Test
+## 部署与验证（真机 PJZ110 / ColorOS / KernelSU）
 
 ```sh
-python tests/ws_smoke.py        # requires vtouchd running on 127.0.0.1:27183
+adb push clients/vtouch_bundle.js /sdcard/
+adb shell md5sum /sdcard/vtouch_bundle.js          # 回读对账，别信 push 回执
+adb shell am start -a android.intent.action.VIEW \
+  -d file:///sdcard/vtouch_region_min.js -t application/x-javascript \
+  -n org.autojs.autojs6/org.autojs.autojs.external.open.RunIntentActivity
+adb shell su -c "pidof vtouch-ui"                  # 有 pid = 面板在跑 = 抓着 EVIOCGRAB
+adb shell su -c "tail -30 /data/local/tmp/vtouch-runtime/vtouch-ui.log"
 ```
 
-## Deploy to device
+设备侧路径：部署 `/data/local/tmp/vtouch-ui/`（`classes.dex` + `libtestimgui.so`）；运行 `/data/local/tmp/vtouch-runtime/`（`vtouch-ui.log`、`regions.conf`、`vtouch-ui.pid`、`vtouchd.pid`）；headless 二进制 `/data/local/tmp/vtouchd`。
+面板由 `CLASSPATH=…/classes.dex app_process /system/bin --nice-name=vtouch-ui VTouchUI <w> <h>` 起；**存活只认 `pidof`**（`app_process` 的 `/proc/<pid>/comm` 是 `main`，pid 文件只是书签）。
 
-**One file. No device-side scripts.** `clients/vtouch_bundle.js` carries everything: vtouchd,
-the ImGui panel (`classes.dex` + `libtestimgui.so`, stored gz+b64), region store/engine, Finger API.
+## 约定
 
-```sh
-adb push clients/vtouch_bundle.js /sdcard/vtouch_bundle.js
-```
+- 脚本只写业务：`vt.onRegion(id, [ev], fn)` 是唯一推荐入口，起面板/连接/订阅/校验/读线程/收尾全在库内。
+- `ev` 省略 = `down/up/enter/exit`（**不含 move**，按需显式写 `"move"`/`"down,move"`/数组/`"*"`）；`id` 省略或 `"*"` = 所有区域；回调入参 `h = {id, ev, slot, x, y}`。
+- 回调统一丢子线程执行，脚本里可直接 `sleep()` 做长按/拖拽；分发按 FIFO。
+- 区域表唯一归属是面板（`/data/local/tmp/vtouch-runtime/regions.conf`），脚本侧不要另存一份。
+- 客户端 API 刻意用短名（`onRegion`/`finger`/`uiStart`/`rgList`/`sub`），避免与脚本里常见通用名撞车。
+- 改 `clients/*.js`、`scripts/*.py` 保持 CRLF；`\r\n` 字面量按字节比对（见坑）。
 
-Everything else is script-controlled from AutoJs6:
+## 坑（都踩过）
 
-```javascript
-var vt = require("/sdcard/vtouch_bundle.js");
-vt.uiStart();         // 面板起来 = UI + daemon（EVIOCGRAB + WS 27183 + regions.conf）；dex/so 首次自动释放
-var c = vt.connect();  // 别另调 ensure()：面板本身就是 daemon，会抢 27183
-...
-vt.stop();             // 连面板一起收，释放 EVIOCGRAB（面板内「退出」按钮同效）
-```
-
-- `vt.uiStart()` 无参数、无模式开关：面板即 daemon（grab + WS 27183 + regions.conf）
-- 另有 `uiAlive / uiPid / uiRestart / uiStop / uiDeploy / uiTail(n)`
-- 进程真相只认 `pidof vtouch-ui`（`--nice-name` 后 `/proc/<pid>/comm` 是 `main`、`cmdline` 只剩 nice-name，pid 文件只是书签）：`uiAlive()` 走 pidof，收尾 `kill -9` 后回读确认
-- 区域唯一归属是面板：面板读写 `/data/local/tmp/vtouch-runtime/regions.conf`（首行带版本号 `#vtouch-regions v2`，版本不符整份丢弃），脚本侧不存任何区域状态；`vt.rgList(c)` 回读面板当前表、`vt.rgPush(c, rs)` 整表下发（内部先 `region clear`）。先 `rgList` 后开收包循环
-
-## Conventions
-
-- C code: `-O2 -Wall -Wextra -Werror` flags, POSIX APIs, Android NDK APIs.
-- JavaScript: AutoJs6 API (`WebSocket.EVENT_*`, `threads.start()`, `events.on("exit")`).
-- WebSocket: `ws://127.0.0.1:27183` only (loopback, single client, new kicks old).
-- Device runtime: `/data/local/tmp/vtouch-runtime/` for PID files and logs.
-- Panel binaries: `/data/local/tmp/vtouch-ui/{classes.dex,libtestimgui.so}` — written by the bundle only.
-- Panel runtime files: `vtouch-runtime/vtouch-ui.{pid,mode,log}` — `pid` says alive, `mode` says which mode
-  (native writes it at startup; `/proc/<pid>/cmdline` is unusable, see Pitfalls).
-- WebSocket is **single client, new kicks old** — never run two subscriber scripts at once.
-
-## Pitfalls
-
-- **`/sdcard` noexec**: Android mounts shared storage `noexec`. Never execute ELF directly from `/sdcard` — copy to `/data/local/tmp/` first (bundle does this).
-- **SELinux**: AutoJs6 app context may be denied access to `/data/local/tmp/` — `setenforce 0` (Permissive) for the su/self-extract path.
-- **`sleep()` blocks event loop**: In AutoJs6, `sleep()` on main thread blocks WebSocket event callbacks. Use `threads.start()` for blocking work.
-- **`EVIOCGRAB` recovery**: If vtouchd crashes, physical touch is grabbed until fd closes. AutoJs6-side bootWatch reconnects and re-extracts (seconds-level blind window).
-- **Dynamic touch discovery**: Never hardcode `/dev/input/eventX`. vtouchd scans `/dev/input/event0..63` for the first Type-B multitouch device.
-- **Coordinate conversion**: AutoJs6 uses logical coordinates; vtouchd converts via `-w`/`-h` flags (raw 0..32767 → logical).
-- **su for self-extract**: AutoJs6 `Runtime.exec("su")` is interactive stdin; a v8 wrapper (/data/local/tmp/su_wrap.sh + sud.sh daemon, sudq file queue) implements it on stock systems.
-- **`--nice-name` eats `/proc/<pid>/cmdline`**: `app_process --nice-name=vtouch-ui` rewrites argv, so
-  `/proc/<pid>/cmdline` only holds `vtouch-ui` and the mode is unrecoverable there. Native writes
-  `vtouch-runtime/vtouch-ui.mode` instead; scripts do alive=(pid file + `kill -0`), mode=(that file).
-- **CRLF kills on-device scripts**: writing `.sh` from Windows tooling injects `\r`, and device `sh`
-  fails with `bad number`. Keep device-bound scripts LF-only (`newline="\n"`).
-- **Embed gz, not raw**: `libtestimgui.so` is 937 KB raw / 441 KB gz (~588 KB as b64). The bundle embeds
-  gz+b64 and gunzips in Java (`GZIPInputStream`), keeping the single file at ~769 KB instead of ~1.5 MB.
-- **Deploy is md5-idempotent**: `uiDeploy()` compares the embedded md5 with on-device `md5sum` and only
-  rewrites on mismatch — never hand-copy dex/so over the deployed pair.
-- **Region matching is listen-only**: physical touch is always 1:1 forwarded; region_match never injects (no tap-backfill by design).
-- **Console injection on AVD**: emulator console `event mouse` down events carry no coordinates (ABS_X/Y type-A fallback added); move-under-down does not update position — physical `move` events must be validated on real hardware.
-
-## Debugging
-
-```sh
-# vtouchd log (unbuffered)
-adb shell tail -f /data/local/tmp/vtouch-runtime/vtouchd.log
-# region config + hit events are logged there (region add / ev <id> <type>)
-```
+- **`/sdcard` 是 noexec**：ELF 必须落到 `/data/local/tmp/` 才能执行（bundle 自释放就是干这个的）。
+- **应用进程看不见 `/data/local/tmp`**（挂载命名空间不同）：判文件存在/进程存活一律走 root 回读，别用应用侧 `File`。
+- **强杀（强行停止）跳过 `exit` 事件** → 收尾钩子不执行，面板留在后台抓着触摸。手动清：`kill -9 $(pidof vtouch-ui)`。
+- **WS 单客户端**：新连接踢旧连接；旧实例自退且**不收面板**（面板归新实例），避免「先退的把共用面板收走」。
+- **区域 id 写错/被禁用不会触发**：库内启动时用 `region list` 探针校验并 toast 报错，别退回「静默没反应」。
+- **面板只监听不代点**：命中区域只发 `region_ev`，要动作必须走虚拟回注（`finger()`）。
+- **EVIOCGRAB 是独占的**：面板崩了就没人转发物理触摸，必须重启；fd 关闭才释放 grab。
+- **ColorOS 日志**：AutoJs6 的 `console`/`toastLog` 走 `GlobalConsole`，是 **D 级**——`logcat *:E` 抓不到，按 tag 或级别筛。
+- **别让编辑器/补丁工具改写 JS 里的 `\r\n` 转义**（WS 帧分隔），会静默破坏握手；这类文件整份重写、改完跑桩测。
+- **改坐标转换/事件语义后**，真机回归看 daemon 日志 `vtouchd: ev <id> <ev> slot<n> x,y` 与脚本侧输出是否逐字一致。
