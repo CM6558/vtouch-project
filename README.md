@@ -52,7 +52,9 @@ python scripts/build_bundle.py                                                  
 ```
 
 `build_ui.sh` 需要 JDK（`javac`/`d8`）与 Android SDK `platforms/android-24`、`build-tools/34.0.0`，以及 `thirdparty/imgui`（本仓库不入库，需自备）。
-CI（`.github/workflows/build.yml`）用 Android NDK r27d 编 arm64 + x86_64 双 ABI 并上传 bundle 产物。
+只要纯 daemon、不需要面板时用 headless 构建：`python scripts/build_bundle.py --headless`（此时 `uiStart()` 会明确报错，不会静默起不来）；默认不带这个开关**必须**有面板产物，避免误发一个没有 UI 的包。
+
+CI（`.github/workflows/build.yml`）用 Android NDK r27d 编 arm64 + x86_64 双 ABI，跑的就是 `--headless`，产物名带 `-headless` 后缀：CI 不装 Android SDK build-tools（`d8`），编不出面板 dex/so；**要带面板的可部署 bundle 就在本机跑上面三步**。
 
 ## 部署与验证
 

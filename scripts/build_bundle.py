@@ -476,6 +476,8 @@ function vtouchUiGunzip(b64) {
     return out.toByteArray();
 }
 function vtouchUiDeploy() {
+    if (!VTOUCH_UI_SO_GZ_B64)
+        throw new Error("这个 bundle 是 headless 构建（未内嵌面板）：uiStart() 不可用；在本机跑 sh scripts/build_ui.sh 后重建 bundle");
     if (vtouchUiDeployed()) return false;
     log("[vtouch] 释放面板 dex=" + VTOUCH_UI_DEX_SIZE + "B so=" + VTOUCH_UI_SO_SIZE + "B（内嵌 gz " + VTOUCH_UI_SO_GZ_SIZE + "B）");
     var dex = vtouchUiStage(android.util.Base64.decode(VTOUCH_UI_DEX_B64, android.util.Base64.DEFAULT), "vtouch-ui.dex.stage");
@@ -805,6 +807,10 @@ def main() -> int:
         print("bundle check:", "OK" if r.returncode == 0 else r.stderr.strip())
         return 0 if r.returncode == 0 else 1
 
+    headless = ("--headless" in sys.argv) or ("--no-panel" in sys.argv)
+    if not BIN.exists():
+        print("缺 %s — 先编核心（README 第 ① 步）；只想要 headless bundle 也得先有它" % BIN)
+        return 1
     raw = BIN.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
     # B64 分行拼接：单行 30KB 连续 base64 会被内网 HIS WAF 拦（403）；分行后单行短
@@ -814,29 +820,42 @@ def main() -> int:
         "var VTOUCH_BIN_SIZE = %d;\n"
         'var VTOUCH_BIN_B64 = "%s";\n' % (len(raw), _b64js)
     )
-    for f in (UI_SO, UI_DEX):
-        if not f.exists():
-            print("缺 %s — 先跑: sh scripts/build_ui.sh" % f)
-            return 1
-    so_raw = UI_SO.read_bytes()
-    so_gz = gzip.compress(so_raw, 9)
-    dex_raw = UI_DEX.read_bytes()
-    uiblob = (
-        "/* ---- 内嵌面板（构建机填入）：dex 原样 b64；so 走 gz+b64（%dKB → %dKB） ---- */\n"
-        % (len(so_raw) // 1024, len(so_gz) // 1024)
-        + "var VTOUCH_UI_DEX_SIZE = %d;\n" % len(dex_raw)
-        + 'var VTOUCH_UI_DEX_B64 = "%s";\n' % _b64_lines(base64.b64encode(dex_raw).decode("ascii"))
-        + "var VTOUCH_UI_SO_SIZE = %d;\n" % len(so_raw)
-        + "var VTOUCH_UI_SO_GZ_SIZE = %d;\n" % len(so_gz)
-        + 'var VTOUCH_UI_SO_GZ_B64 = "%s";\n' % _b64_lines(base64.b64encode(so_gz).decode("ascii"))
-        + 'var VTOUCH_UI_DEX_MD5 = "%s";\n' % hashlib.md5(dex_raw).hexdigest()
-        + 'var VTOUCH_UI_SO_MD5 = "%s";\n' % hashlib.md5(so_raw).hexdigest()
-    )
+    uiblob = ""
+    if headless:
+        # CI / 无 Android SDK 环境：只出 headless bundle（面板要 dex+so，编不了就不假装有）
+        uiblob = ("/* ---- headless 构建：未内嵌面板（uiStart() 会明确报错） ---- */\n"
+                  "var VTOUCH_UI_DEX_SIZE = 0, VTOUCH_UI_DEX_B64 = \"\";\n"
+                  "var VTOUCH_UI_SO_SIZE = 0, VTOUCH_UI_SO_GZ_SIZE = 0, VTOUCH_UI_SO_GZ_B64 = \"\";\n"
+                  "var VTOUCH_UI_DEX_MD5 = \"\", VTOUCH_UI_SO_MD5 = \"\";\n")
+        print("headless：不内嵌面板（本机构建要面板就别加 --headless）")
+    else:
+        for f in (UI_SO, UI_DEX):
+            if not f.exists():
+                print("缺 %s — 先跑: sh scripts/build_ui.sh（或加 --headless 出 headless bundle）" % f)
+                return 1
+        so_raw = UI_SO.read_bytes()
+        so_gz = gzip.compress(so_raw, 9)
+        dex_raw = UI_DEX.read_bytes()
+        uiblob = (
+            "/* ---- 内嵌面板（构建机填入）：dex 原样 b64；so 走 gz+b64（%dKB → %dKB） ---- */\n"
+            % (len(so_raw) // 1024, len(so_gz) // 1024)
+            + "var VTOUCH_UI_DEX_SIZE = %d;\n" % len(dex_raw)
+            + 'var VTOUCH_UI_DEX_B64 = "%s";\n' % _b64_lines(base64.b64encode(dex_raw).decode("ascii"))
+            + "var VTOUCH_UI_SO_SIZE = %d;\n" % len(so_raw)
+            + "var VTOUCH_UI_SO_GZ_SIZE = %d;\n" % len(so_gz)
+            + 'var VTOUCH_UI_SO_GZ_B64 = "%s";\n' % _b64_lines(base64.b64encode(so_gz).decode("ascii"))
+            + 'var VTOUCH_UI_DEX_MD5 = "%s";\n' % hashlib.md5(dex_raw).hexdigest()
+            + 'var VTOUCH_UI_SO_MD5 = "%s";\n' % hashlib.md5(so_raw).hexdigest()
+        )
     if not write_out(OUT, CORE + "\n" + blob + "\n" + uiblob + "\n" + ONE_LIB + "\n" + UI_BOOT + "\n" + ON_REGION + "\n" + DEMO):
         return 1
     print("bundle: %s (%d bytes)" % (OUT, OUT.stat().st_size))
-    print("panel in bundle: dex=%dB so=%dB(gz %dB) md5 dex=%s so=%s"
-          % (len(dex_raw), len(so_raw), len(so_gz), hashlib.md5(dex_raw).hexdigest()[:8], hashlib.md5(so_raw).hexdigest()[:8]))
+    if headless:
+        print("panel in bundle: 无（headless）")
+    else:
+        print("panel in bundle: dex=%dB so=%dB(gz %dB) md5 dex=%s so=%s"
+              % (len(dex_raw), len(so_raw), len(so_gz),
+                 hashlib.md5(dex_raw).hexdigest()[:8], hashlib.md5(so_raw).hexdigest()[:8]))
     print("bundle syntax OK")
     return 0
 

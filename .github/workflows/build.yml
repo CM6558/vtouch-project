@@ -1,4 +1,6 @@
 name: Build vtouch (Android NDK)
+# CI 只出 headless bundle（面板 dex/so 要 Android SDK build-tools，CI 不装）；
+# 要带面板的完整 bundle 在本机跑: sh scripts/build_ui.sh && python scripts/build_bundle.py
 
 on:
   push:
@@ -51,11 +53,11 @@ jobs:
           aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
             src/vtouchd.c -o build/vtouchd
 
-      - name: Generate vtouch_bundle.js (arm64)
+      - name: Generate vtouch_bundle.js (arm64, headless)
         run: |
-          python3 scripts/build_bundle.py
+          python3 scripts/build_bundle.py --headless
           test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
-          cp clients/vtouch_bundle.js build/vtouch_bundle-arm64.js
+          cp clients/vtouch_bundle.js build/vtouch_bundle-arm64-headless.js
 
       - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 bundle
         run: |
@@ -63,8 +65,8 @@ jobs:
             src/vtouchd.c -o build/vtouchd-x86_64
           mv build/vtouchd build/vtouchd.arm64
           mv build/vtouchd-x86_64 build/vtouchd
-          python3 scripts/build_bundle.py
-          cp clients/vtouch_bundle.js build/vtouch_bundle-x86_64.js
+          python3 scripts/build_bundle.py --headless
+          cp clients/vtouch_bundle.js build/vtouch_bundle-x86_64-headless.js
           mv build/vtouchd build/vtouchd-x86_64
           mv build/vtouchd.arm64 build/vtouchd
 
@@ -74,8 +76,8 @@ jobs:
           test -x build/vtouchd || { echo "missing executable: vtouchd"; exit 1; }
           file build/vtouchd
           ls -lh build/
-          test -f build/vtouch_bundle-arm64.js || { echo "arm64 bundle missing"; exit 1; }
-          test -f build/vtouch_bundle-x86_64.js || { echo "x86_64 bundle missing"; exit 1; }
+          test -f build/vtouch_bundle-arm64-headless.js || { echo "arm64 bundle missing"; exit 1; }
+          test -f build/vtouch_bundle-x86_64-headless.js || { echo "x86_64 bundle missing"; exit 1; }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -83,8 +85,8 @@ jobs:
           name: vtouch-arm64-binaries
           path: |
             build/vtouchd
-            build/vtouch_bundle-arm64.js
-            build/vtouch_bundle-x86_64.js
+            build/vtouch_bundle-arm64-headless.js
+            build/vtouch_bundle-x86_64-headless.js
           if-no-files-found: error
 
       - name: Create GitHub Release (release only)
@@ -93,5 +95,5 @@ jobs:
         with:
           files: |
             build/vtouchd
-            build/vtouch_bundle-arm64.js
-            build/vtouch_bundle-x86_64.js
+            build/vtouch_bundle-arm64-headless.js
+            build/vtouch_bundle-x86_64-headless.js
