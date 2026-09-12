@@ -34,8 +34,9 @@ python scripts/build_bundle.py --check                                          
 
 `build_bundle.py` **默认要求面板产物**（`build/ui/`），缺了就报错退出——避免误发一个没有 UI 的包；
 只出纯 daemon 包（CI、无 Android SDK 的环境）加 `--headless`，此时 `uiStart()` 会明确抛错而不是静默起不来。
-CI（`.github/workflows/build.yml`）编不了面板（不装 `build-tools`/`d8`，也取不到 `thirdparty/imgui`），所以跑 `--headless`，
-产物名带 `-headless` 后缀；**要带面板的可部署 bundle 在本机跑上面三步**。
+CI（`.github/workflows/build.yml`）跑的就是这三步：装 JDK 17 + `build-tools;34.0.0` + 拉 `thirdparty/imgui` v1.91.8（都带 cache），
+arm64 出**带面板的完整 bundle**（断言 >400KB 且内嵌面板），x86_64 因面板 `.so` 只有 arm64 版所以只出 headless bundle。
+`build_ui.sh` 的路径全部可用环境变量覆盖（`NDK_ROOT` / `ANDROID_SDK_ROOT` / `BUILD_TOOLS_VERSION` / `API_LEVEL`），CI 靠这个复用同一份脚本。
 
 C 代码统一 `-O2 -Wall -Wextra -Werror -D_GNU_SOURCE`；`src-ui/vtouch_ui.cpp` 另需 `-DIMGUI_IMPL_OPENGL_ES2`。
 `build/` 整个删掉也能重建，重跑上面三步即可。
