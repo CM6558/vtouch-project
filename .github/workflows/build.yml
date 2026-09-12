@@ -2,6 +2,7 @@ name: Build vtouch (Android NDK)
 # arm64: 完整 bundle（内嵌面板 dex/so，可部署到真机）
 # x86_64: headless bundle（AVD 测试用；面板 .so 是 arm64 的，x86_64 装不了）
 # 本机等价命令见 README「构建」：编译核心 → sh scripts/build_ui.sh → python scripts/build_bundle.py
+# → verify_bundle.py（对账）→ package_dist.py（出含文档与调用示例的交付包）
 
 on:
   push:
@@ -108,6 +109,14 @@ jobs:
             --bundle build/vtouch_bundle-arm64.js --bin build/vtouchd --ui build/ui | tee /tmp/verify-arm64.txt
           grep -q "校验通过" /tmp/verify-arm64.txt
 
+      - name: Package dist (bundle + 文档 + 调用示例)
+        run: |
+          set -e
+          # 对账通过后再打包；产物含 README.md（用法说明）与 example.js（可直接跑的示例）
+          python3 scripts/package_dist.py \
+            --bundle build/vtouch_bundle-arm64.js --bin build/vtouchd --ui build/ui --verify
+          ls -l build/dist/ build/dist/*/ || true
+
       - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 headless bundle
         run: |
           x86_64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
@@ -156,6 +165,7 @@ jobs:
             build/vtouchd
             build/vtouch_bundle-arm64.js
             build/vtouch_bundle-x86_64-headless.js
+            build/dist/**
           if-no-files-found: error
 
       - name: Create GitHub Release (release only)
@@ -166,3 +176,4 @@ jobs:
             build/vtouchd
             build/vtouch_bundle-arm64.js
             build/vtouch_bundle-x86_64-headless.js
+            build/dist/*.zip

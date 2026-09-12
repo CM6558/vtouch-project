@@ -93,3 +93,22 @@ python scripts/verify_bundle.py --bin build/vtouchd --ui build/ui               
 依赖：NDK r27d、JDK（`javac`）、Android SDK `platforms;android-24` + `build-tools;34.0.0`、`thirdparty/imgui` v1.91.8（自拉）。
 路径都能用环境变量覆盖：`NDK_ROOT` / `ANDROID_SDK_ROOT` / `BUILD_TOOLS_VERSION` / `API_LEVEL`（CI 就是靠这个复用同一份脚本）。
 只想要纯 daemon 包：`python scripts/build_bundle.py --headless`；默认不带开关时**必须有面板产物**，缺了直接报错退出，防止误发没有 UI 的包。
+
+## 7. 交付包（含文档与调用示例）
+
+```sh
+python scripts/package_dist.py --verify --bin build/vtouchd --ui build/ui    # ⑤ 打包（对账通过才打）
+```
+
+产出 `build/dist/vtouch-bundle-<短md5>-arm64/`（外加同名 `.zip`，方便下载/转发）：
+
+| 文件 | 内容 |
+|---|---|
+| `vtouch_bundle.js` | 交付物本体（唯一要推手机的文件） |
+| `example.js` | 调用示例 = `clients/vtouch_region_min.js` + 自动生成的头部（写明配套 bundle 的 md5，示例只有单一来源，不手抄） |
+| `README.md` | 包内说明：前置条件、三步部署、`onRegion` 参数表、其它常用 API、区域从哪来、退出/强杀清理、自检排错命令、包内文件清单。模板在 `scripts/templates/dist-README.md`，打包时填入版本/md5/日期/commit |
+| `md5.txt` | 各文件 md5，回读对账用 |
+
+CI 每次 push 都会打这个包：`build/dist/**` 随 artifact 一起上传，release 时附上 `.zip`。
+所以下载 CI 产物即得到「一个 bundle + 一份说明 + 一个能跑的示例」，不用回仓库翻文档。
+

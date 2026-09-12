@@ -35,6 +35,8 @@ vt.onRegion("s3", function (h) {
 | `src-ui/vtouch_ui.cpp` + `VTouchUI.java` | 单进程面板：Java 只反射拿 SurfaceControl 图层，其余全 C++（EGL GLES2 + Dear ImGui）。区域表格（名称/形状/坐标/开关/显隐/删除）、＋矩形/＋圆形框选、事件日志、全屏透明 overlay（区域描边着色，命中闪烁） |
 | `scripts/build_ui.sh` | 编面板 → `build/ui/libtestimgui.so` + `build/ui/classes.dex` |
 | `scripts/build_bundle.py` | **唯一来源**：把 `build/vtouchd` + 面板 dex/so + JS 库装配成 `clients/vtouch_bundle.js` |
+| `scripts/verify_bundle.py` | **对账**：把 bundle 内嵌的 bin/dex/so 与本次编译产物逐字节/md5 比对，不匹配即失败（CI 与本地同一份） |
+| `scripts/package_dist.py` | **打包交付**：`build/dist/vtouch-bundle-<短md5>-arm64/` = bundle + README 说明 + `example.js` 调用示例 + md5.txt（模板 `scripts/templates/dist-README.md`） |
 | `clients/vtouch_bundle.js` | 生成物（设备侧唯一交付物）：自释放二进制 + WS 协议封装 + `onRegion` 库。文件较大，不入库 |
 | `clients/vtouch_region_min.js` | 最小可跑示例（一行 `onRegion` + 业务回调） |
 | `clients/vtouch_touchback.js`、`vtouch_orient_demo.js` | 示例：区域触发回触（滑/点）、转屏演示 |
@@ -50,6 +52,7 @@ A64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-cla
 sh scripts/build_ui.sh                                                          # ② 面板 dex + so
 python scripts/build_bundle.py                                                  # ③ 出 bundle
 python scripts/verify_bundle.py --bin build/vtouchd --ui build/ui                # ④ 对账：内嵌项 vs 本次产物（发设备前跑）
+python scripts/package_dist.py --verify --bin build/vtouchd --ui build/ui        # ⑤ 打包：bundle + 说明 + 调用示例 → build/dist/
 ```
 
 `build_ui.sh` 需要 JDK（`javac`/`d8`）与 Android SDK `platforms/android-24`、`build-tools/34.0.0`，以及 `thirdparty/imgui`（本仓库不入库，需自备）。
