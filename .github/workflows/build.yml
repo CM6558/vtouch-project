@@ -100,6 +100,14 @@ jobs:
           test -f clients/vtouch_bundle.js || { echo "bundle not generated"; exit 1; }
           cp clients/vtouch_bundle.js build/vtouch_bundle-arm64.js
 
+      - name: Verify arm64 bundle matches THIS build (内嵌项 vs 刚编出的产物)
+        run: |
+          set -e
+          # 逐字节比对：包内 daemon == build/vtouchd；包内 dex/so md5 == build/ui/*
+          python3 scripts/verify_bundle.py \
+            --bundle build/vtouch_bundle-arm64.js --bin build/vtouchd --ui build/ui | tee /tmp/verify-arm64.txt
+          grep -q "校验通过" /tmp/verify-arm64.txt
+
       - name: Compile vtouchd x86_64 (AVD 测试) + generate x86_64 headless bundle
         run: |
           x86_64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
@@ -108,6 +116,8 @@ jobs:
           mv build/vtouchd-x86_64 build/vtouchd
           python3 scripts/build_bundle.py --headless
           cp clients/vtouch_bundle.js build/vtouch_bundle-x86_64-headless.js
+          python3 scripts/verify_bundle.py \
+            --bundle build/vtouch_bundle-x86_64-headless.js --bin build/vtouchd --allow-headless
           mv build/vtouchd build/vtouchd-x86_64
           mv build/vtouchd.arm64 build/vtouchd
 
@@ -125,6 +135,18 @@ jobs:
           test "$SIZE" -gt 400000 || { echo "arm64 bundle 只有 ${SIZE}B，面板没进去"; exit 1; }
           echo "arm64 bundle ${SIZE}B（含面板）"
           md5sum build/vtouch_bundle-arm64.js build/vtouch_bundle-x86_64-headless.js
+          {
+            echo "## vtouch 构建产物（commit \`${GITHUB_SHA:0:7}\`）"
+            echo
+            echo "| 产物 | 大小 | md5 |"
+            echo "|---|---|---|"
+            for f in build/vtouchd build/vtouch_bundle-arm64.js build/vtouch_bundle-x86_64-headless.js; do
+              echo "| \`$f\` | $(stat -c%s "$f") B | \`$(md5sum "$f" | cut -d' ' -f1)\` |"
+            done
+            echo
+            echo "内嵌 daemon = \`build/vtouchd\`（逐字节比对通过）；内嵌面板 dex/so = \`build/ui/*\`（md5 比对通过）。"
+            echo "本机构建同一 commit 应得到逐字节相同的 arm64 bundle（已验证可复现的项：libtestimgui.so）。"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

@@ -49,6 +49,7 @@ A64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-cla
 "$A64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd   # ① 核心
 sh scripts/build_ui.sh                                                          # ② 面板 dex + so
 python scripts/build_bundle.py                                                  # ③ 出 bundle
+python scripts/verify_bundle.py --bin build/vtouchd --ui build/ui                # ④ 对账：内嵌项 vs 本次产物（发设备前跑）
 ```
 
 `build_ui.sh` 需要 JDK（`javac`/`d8`）与 Android SDK `platforms/android-24`、`build-tools/34.0.0`，以及 `thirdparty/imgui`（本仓库不入库，需自备）。
