@@ -14,6 +14,7 @@ scripts/build_ui.sh       编面板：javac → d8 → ndk cc → link → strip
 clients/vtouch_bundle.js  生成物（大文件，gitignore；设备侧唯一交付物）
 clients/vtouch_region_min.js  最小示例；vtouch_touchback.js / vtouch_orient_demo.js 回触、转屏示例
 tests/onregion_harness.js 主机侧 Node 桩测（假 AutoJs6 + 假 daemon，46 项断言）
+docs/ARTIFACTS.md         编译产物说明：哪个产物是手机可跑的最小包（一个 vtouch_bundle.js）、设备侧落盘、CI 产物
 docs/VTOUCH_BUNDLE.md     使用手册（客户端 API / 区域监听 / 生命周期 / FAQ）
 docs/VTOUCH_PROTOCOL.md   WS 线协议
 docs/diagrams/            工程图：JSON 源 + SVG/PNG（README 里有重渲命令与自检清单）

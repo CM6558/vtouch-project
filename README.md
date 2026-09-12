@@ -52,6 +52,8 @@ python scripts/build_bundle.py                                                  
 ```
 
 `build_ui.sh` 需要 JDK（`javac`/`d8`）与 Android SDK `platforms/android-24`、`build-tools/34.0.0`，以及 `thirdparty/imgui`（本仓库不入库，需自备）。
+路径都可用环境变量覆盖（`NDK_ROOT` / `ANDROID_SDK_ROOT` / `BUILD_TOOLS_VERSION` / `API_LEVEL`）。
+各产物的作用、**哪个才是手机可运行的最小包**、设备侧落盘位置见 [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md)。
 只要纯 daemon、不需要面板时用 headless 构建：`python scripts/build_bundle.py --headless`（此时 `uiStart()` 会明确报错，不会静默起不来）；默认不带这个开关**必须**有面板产物，避免误发一个没有 UI 的包。
 
 CI（`.github/workflows/build.yml`）跑的就是上面三步：装 JDK 17 + Android SDK build-tools + 拉 `thirdparty/imgui` v1.91.8（都有 cache），**arm64 出的是带面板的完整 bundle**（产物 `vtouch_bundle-arm64.js`，并断言 >400KB 且内嵌面板）；x86_64 因面板 `.so` 是 arm64 的，只出 `vtouch_bundle-x86_64-headless.js`（AVD 测试用）。
@@ -76,6 +78,7 @@ node tests/onregion_harness.js     # 期望 ALL PASS 46/46
 
 ## 文档
 
+- [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) — **编译产物说明**：哪个产物才是手机可运行的最小包（一个 `vtouch_bundle.js`）、各中间产物作用、设备侧落盘位置、CI 产物、完整性判据
 - [`docs/VTOUCH_BUNDLE.md`](docs/VTOUCH_BUNDLE.md) — **使用手册**（客户端 API / 区域监听 / 生命周期 / 常见问题）
 - [`docs/VTOUCH_PROTOCOL.md`](docs/VTOUCH_PROTOCOL.md) — WS 线协议（`sub` / `region` / `pev` / `region_ev` / `set_virtual` …）
 - [`docs/diagrams/`](docs/diagrams/README.md) — 工程图（全流程总览、优化前后对照；JSON 源 + SVG/PNG，可重渲）
