@@ -157,15 +157,24 @@ jobs:
             echo "本机构建同一 commit 应得到逐字节相同的 arm64 bundle（已验证可复现的项：libtestimgui.so）。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload build artifacts
+      # 产物按「用途」拆成两个，且不重复：
+      #   ① 真机要的就是交付包（bundle + 文档 + 示例）——不要再单独放一份 bundle 或 dist 的 zip，
+      #      artifact 下载本身就是 zip，重复放等于同一份文件出现三次。
+      #   ② AVD 测试用的 x86_64 headless 包单独一个（架构不同，混在一起容易拿错）。
+      # 裸 vtouchd 不再单独上传：它已经内嵌在 bundle 里（build_bundle.py 会逐字节比对保证），
+      # 真要裸二进制就本地编（README 第 ① 步）或从 bundle 解出来。
+      - name: Upload bundle (arm64, 含文档与示例)
         uses: actions/upload-artifact@v4
         with:
-          name: vtouch-arm64-binaries
-          path: |
-            build/vtouchd
-            build/vtouch_bundle-arm64.js
-            build/vtouch_bundle-x86_64-headless.js
-            build/dist/**
+          name: vtouch-bundle-arm64
+          path: build/dist/vtouch-bundle-*-arm64/
+          if-no-files-found: error
+
+      - name: Upload AVD bundle (x86_64, headless)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtouch-bundle-x86_64-headless
+          path: build/vtouch_bundle-x86_64-headless.js
           if-no-files-found: error
 
       - name: Create GitHub Release (release only)
@@ -173,7 +182,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/vtouchd
-            build/vtouch_bundle-arm64.js
-            build/vtouch_bundle-x86_64-headless.js
             build/dist/*.zip
+            build/vtouch_bundle-x86_64-headless.js
