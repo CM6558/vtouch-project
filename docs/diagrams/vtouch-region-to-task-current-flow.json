@@ -1,0 +1,384 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 960,
+  "height": 1340,
+  "title": "当前流程：区域命中 → AutoJs6 任务落地",
+  "subtitle": "vtouch 单文件包现状 · 面板进程即 daemon（EVIOCGRAB 独占 + uinput 合并转发）· 每步标注「必需 / 机制（该收进库）/ 纯仪式」",
+  "containers": [
+    {
+      "id": "src",
+      "x": 100,
+      "y": 124,
+      "width": 700,
+      "height": 108,
+      "label": "① 物理输入（内核）"
+    },
+    {
+      "id": "daemon",
+      "x": 100,
+      "y": 252,
+      "width": 700,
+      "height": 388,
+      "label": "② 面板进程 = daemon"
+    },
+    {
+      "id": "script",
+      "x": 100,
+      "y": 660,
+      "width": 700,
+      "height": 458,
+      "label": "③ AutoJs6 脚本（6 步仪式 + 1 步业务）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "touch",
+      "kind": "rect",
+      "x": 150,
+      "y": 160,
+      "width": 580,
+      "height": 56,
+      "label": "触摸屏 /dev/input/eventN",
+      "sublabel": "Type-B MT 帧（ABS_MT_*）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d1",
+      "kind": "rect",
+      "x": 150,
+      "y": 288,
+      "width": 580,
+      "height": 56,
+      "label": "physical_events()",
+      "sublabel": "解析进 phys[] · vtouchd.c:606",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d2",
+      "kind": "rect",
+      "x": 150,
+      "y": 358,
+      "width": 580,
+      "height": 56,
+      "label": "emit_frame()",
+      "sublabel": "物理槽 + 虚拟槽 + SYN → 一次 writev · :246",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d3",
+      "kind": "rect",
+      "x": 150,
+      "y": 428,
+      "width": 580,
+      "height": 56,
+      "label": "region_match()",
+      "sublabel": "SYN 后扫 phys[]：down/up/enter/exit/move · :436",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d4",
+      "kind": "rect",
+      "x": 150,
+      "y": 498,
+      "width": 580,
+      "height": 56,
+      "label": "region_ev_send()",
+      "sublabel": "订阅门：!subscribed → (NO-CLIENT/UNSUB) 丢弃 · :422",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d5",
+      "kind": "rect",
+      "x": 150,
+      "y": 568,
+      "width": 580,
+      "height": 56,
+      "label": "WS 127.0.0.1:27183",
+      "sublabel": "region_ev 出 · sub / 触摸命令进 · 单客户端，新踢旧",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "c1",
+      "kind": "rect",
+      "x": 150,
+      "y": 696,
+      "width": 580,
+      "height": 56,
+      "label": "vt.uiStart()",
+      "sublabel": "必需 · 起面板 = 起 daemon（grab + WS + regions.conf）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "c2",
+      "kind": "rect",
+      "x": 150,
+      "y": 766,
+      "width": 580,
+      "height": 56,
+      "label": "vt.connect() → vt.sub(c)",
+      "sublabel": "机制（可收进库）· 不 sub 一个字节都收不到",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "c3",
+      "kind": "rect",
+      "x": 150,
+      "y": 836,
+      "width": 580,
+      "height": 56,
+      "label": "while(true){ c.recv(); sleep(10) }",
+      "sublabel": "机制（可收进库）· 常驻 + 手写读循环",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "c4",
+      "kind": "rect",
+      "x": 150,
+      "y": 906,
+      "width": 580,
+      "height": 56,
+      "label": "rgParseEv(line) + id/ev 判等",
+      "sublabel": "纯仪式 · 手工分发样板（可换成 onRegion）",
+      "fill": "#fef2f2",
+      "stroke": "#dc2626",
+      "flat": true
+    },
+    {
+      "id": "c5",
+      "kind": "rect",
+      "x": 150,
+      "y": 976,
+      "width": 580,
+      "height": 56,
+      "label": "threads.start(function () { … })",
+      "sublabel": "机制（可收进库）· tap 含 sleep，防堵读线程",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "c6",
+      "kind": "rect",
+      "x": 150,
+      "y": 1046,
+      "width": 580,
+      "height": 56,
+      "label": "业务任务：vt.finger().tap(x, y)",
+      "sublabel": "必需 · 真正要写的东西",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "sink",
+      "kind": "rect",
+      "x": 150,
+      "y": 1144,
+      "width": 580,
+      "height": 68,
+      "label": "uinput: vtouch-merged → 目标 App",
+      "sublabel": "物理与虚拟同一条流（先物理后虚拟）· 回注命令经 set_virtual",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "source": "touch",
+      "target": "d1",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a2",
+      "source": "d1",
+      "target": "d2",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a3",
+      "source": "d2",
+      "target": "d3",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a4",
+      "source": "d3",
+      "target": "d4",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "a5",
+      "source": "d4",
+      "target": "d5",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "a6",
+      "source": "d5",
+      "target": "c3",
+      "source_port": "right",
+      "target_port": "right",
+      "flow": "control",
+      "label": "region_ev",
+      "corridor_x": [
+        880
+      ],
+      "route_points": [
+        [
+          880,
+          596
+        ],
+        [
+          880,
+          864
+        ]
+      ]
+    },
+    {
+      "id": "sub",
+      "source": "c2",
+      "target": "d5",
+      "source_port": "left",
+      "target_port": "left",
+      "flow": "data",
+      "dashed": true,
+      "label": "sub",
+      "corridor_x": [
+        70
+      ]
+    },
+    {
+      "id": "s1",
+      "source": "c1",
+      "target": "c2",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "s2",
+      "source": "c2",
+      "target": "c3",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "s3",
+      "source": "c3",
+      "target": "c4",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "s4",
+      "source": "c4",
+      "target": "c5",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "s5",
+      "source": "c5",
+      "target": "c6",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "inject",
+      "source": "c6",
+      "target": "sink",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "write",
+      "label": "回注"
+    },
+    {
+      "id": "phys",
+      "source": "d2",
+      "target": "sink",
+      "source_port": "right",
+      "target_port": "right",
+      "flow": "read",
+      "label": "物理穿透",
+      "corridor_x": [
+        920
+      ],
+      "route_points": [
+        [
+          920,
+          386
+        ],
+        [
+          920,
+          1178
+        ]
+      ]
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 100,
+  "legend_y": 1240,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸"
+    },
+    {
+      "flow": "control",
+      "label": "区域事件"
+    },
+    {
+      "flow": "data",
+      "label": "订阅命令"
+    },
+    {
+      "flow": "write",
+      "label": "虚拟注入"
+    },
+    {
+      "flow": "neutral",
+      "label": "脚本步骤"
+    }
+  ],
+  "footer": "收尾 events.on(\"exit\") → vt.stop() 属「机制（可收进库）」：漏写 = 面板被脚本自己收掉",
+  "footer_x": 100,
+  "footer_y": 1310
+}

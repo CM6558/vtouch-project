@@ -1,34 +1,31 @@
 /**
- * 最小「区域触发点击任务」示例 —— vtouch_bundle.js 单文件版
+ * 最小「区域触发任务」示例 —— vtouch_bundle.js 单文件版（仪式全收进库）
  *
- * 只有两件事是必须的：
- *   1) vt.sub(c)  —— 区域事件（region_ev）只在订阅后推送，不订阅一个字节都收不到；
- *   2) while 常驻  —— 面板就是后端 daemon，脚本一「运行结束」就 events.on("exit") → vt.stop()
- *                    把面板一起收掉（视觉上就是「窗口不弹出」）。
+ * 现在只剩一件事必须写：onRegion(区域 id, [事件], 回调)。库里自动完成：
+ *   uiStart（面板 = 后端）→ connect → sub → 读线程 → 事件过滤 → 回调丢子线程
+ *   → 脚本退出收尾（释放 EVIOCGRAB）→ 主线程保活。
  *
- * 事件两个维度：h.id = 哪个区域（面板里可随时改名），h.slot = 哪根手指（0~9）。
- * rgParseEv 走 daemon 原生事件，id 永远是最新的，脚本不用自己存区域表、不用自己算命中。
+ * 事件（第二参）规则：**不指定 = down / up / enter / exit（默认不含 move）**；
+ *   指定就只传指定的，可以给 "down" / "up" / "enter" / "exit" / "move"；
+ *   要多个写成 "down,move" 或 ["down","move"]；"*" / "any" = 全部（含 move）。
+ *   为什么默认不含 move：它是高频事件（手指在区域内每帧一条），灌进业务回调没意义。
+ *
+ * 回调收到 h：
+ *   id   命中区域的名字（面板卡片名，改名后永远是最新的）
+ *   ev   down / up / enter / exit / move
+ *   slot 哪根手指（0~9）
+ *   x,y  逻辑坐标（当前屏幕坐标，直接用）
+ *
+ * 回调已经跑在子线程，里面可以直接写含 sleep 的动作（长按/拖拽 = down → sleep → move → up）。
+ * 不限区域：vt.onRegion(function (h) { … });            // 所有区域 + 全部事件
+ *           vt.onRegion(function (h) { … }, "up");     // 所有区域 + 只要抬起
+ * 想中途停监听用返回的句柄 handle.stop()（不断面板；面板归脚本退出时的 exit 钩子收）。
  */
 var vt = require("/sdcard/vtouch_bundle.js");
 
-var REGION_ID = "s3";        // ← 面板里那个区域的 id（点卡片上的名字可改）
+var REGION_ID = "s3";        // ← 面板里那个区域的 id（写错/被禁用/面板没画，启动时会立刻 toast 提示）
 
-vt.uiStart();                // 面板没起就起（幂等；已在跑则直接复用）
-var c = vt.connect();
-vt.sub(c);                   // 打开事件通道（同时也会收到 pev 行，不想要就丢掉）
-toastLog("监听区域 " + REGION_ID + " …");
-
-events.on("exit", function () { vt.stop(); });   // 释放 EVIOCGRAB + 收掉面板
-
-while (true) {
-    var line = c.recv();                 // 非阻塞：没有数据返回 null
-    if (!line) { sleep(10); continue; }
-
-    var h = vt.rgParseEv(line);          // {id, ev, slot, x, y}，非 region_ev 行返回 null
-    if (!h || h.id !== REGION_ID || h.ev !== "down") continue;
-
-    threads.start(function () {          // 触摸注入不能占着读线程
-        vt.finger().tap(h.x, h.y);       // 把「按到这个区域」变成一次点击（也可点任意坐标）
-    });
-    toastLog(REGION_ID + " 被 slot" + h.slot + " 按下 @ " + h.x + "," + h.y);
-}
+vt.onRegion(REGION_ID, "down", function (h) {
+    toastLog(REGION_ID + " 被 slot" + h.slot + " 按下 @" + h.x + "," + h.y);
+    vt.finger().tap(h.x, h.y);       // 把「按到这个区域」变成一次点击（也可以点任意坐标）
+});

@@ -59,5 +59,5 @@ setInterval(function () {
     } catch (e) {}
 }, 1000);
 
-events.on("exit", function () { try { c.close(); } catch (e) {} vt.stop(); });
+/* 收尾自动：首次 connect() 时库注册退出钩子（vt.autoStop(false) 可关） */
 say("四角区域就绪（rotation=" + vt.rot() + "）：点一下某个角看看命中对不对");

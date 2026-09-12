@@ -22,7 +22,10 @@ AutoJs6 (clients/vtouch_bundle.js)  -> ws://127.0.0.1:27183 -> vtouchd -> /dev/u
 ```text
 ping                          -> pong
 res                           -> 逻辑分辨率与 raw 坐标范围
-sub | unsub                   -> 订阅/退订物理触摸流（pev）；默认未订阅，断连后清零
+sub [region|phys|all] | unsub
+                             -> 订阅/退订事件通道；不带参数 = region+phys 都订（向后兼容），
+                                sub region 只订区域事件（region_ev）、sub phys 只订原始轨迹（pev）；
+                                默认未订阅，断连/被顶掉后清零，重连需重新 sub
 region clear                  -> 清空全部区域
 region add <id> <type> <a1> <a2> <a3> <a4> <en>
                               -> 添加/更新区域（type 0=矩形, 1=圆形；≤32 个；非法参数/超限拒绝）

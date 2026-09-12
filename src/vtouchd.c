@@ -62,8 +62,11 @@ static int frame_open;
 static int frame_seen[MAX_VIRT];
 static struct contact staged[MAX_VIRT];
 static int staged_id;
-/* pev 订阅 + 已上报状态（变化才广播） */
-static int subscribed;
+/* 订阅通道位掩码（0 = 未订阅）：裸 sub 两个通道都订（老客户端语义不变），
+ * sub region 只订区域事件、sub phys 只订原始轨迹 —— 纯区域脚本不必再白收 pev。 */
+#define SUB_REGION 1
+#define SUB_PHYS   2
+static int sub_mask;
 static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
 static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n);
 static void drop_client(void);
@@ -412,14 +415,14 @@ int vtouch_phys_get(int i, int *down, int *lx, int *ly)
     if (raw_to_logical(x, 0, lx) < 0 || raw_to_logical(y, 1, ly) < 0) return -1;
     return 0;
 }
-/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 subscribed */
+/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 SUB_REGION 订阅位 */
 static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {
     char msg[96];
     int n;
     n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
     if (vtouch_ev_cb) vtouch_ev_cb(msg);   /* 面板优先：无 WS 客户端也通知（闪烁/日志） */
-    if (client_fd < 0 || !subscribed) {
+    if (client_fd < 0 || !(sub_mask & SUB_REGION)) {
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (NO-CLIENT/UNSUB)\n",
             id, ev, slot, lx, ly);
         return;
@@ -526,10 +529,24 @@ static int handle_line(char *line, char *resp, size_t cap)
         snprintf(resp, cap, "err region"); return -1;
     }
     if (!strcmp(t, "sub")) {
-        subscribed = 1; snprintf(resp, cap, "ok"); return 0;
+        /* sub [region|phys|all]...：不带参数 = 两个通道都订（向后兼容） */
+        char *sm = strtok_r(NULL, " \t", &st);
+        int mask = SUB_REGION | SUB_PHYS;
+        if (sm) {
+            mask = 0;
+            do {
+                if (!strcmp(sm, "region")) mask |= SUB_REGION;
+                else if (!strcmp(sm, "phys")) mask |= SUB_PHYS;
+                else if (!strcmp(sm, "all") || !strcmp(sm, "both")) mask = SUB_REGION | SUB_PHYS;
+                else { snprintf(resp, cap, "err sub"); return -1; }
+            } while ((sm = strtok_r(NULL, " \t", &st)));
+        }
+        if (!mask) { snprintf(resp, cap, "err sub"); return -1; }
+        sub_mask = mask;
+        snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "unsub")) {
-        subscribed = 0; snprintf(resp, cap, "ok"); return 0;
+        sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "up")) {
         char *ss = strtok_r(NULL, " \t", &st);
@@ -630,7 +647,7 @@ static void physical_events(void)
             region_match();   /* 物理帧注入完成后才匹配+代点：帧边界安全，不阻塞注入 */
         }
     }
-    if (syn_seen) broadcast_phys(client_fd >= 0 && subscribed);
+    if (syn_seen) broadcast_phys(client_fd >= 0 && (sub_mask & SUB_PHYS));
     if (n < 0 && (errno == ENODEV || errno == EIO)) stop_flag = 1;
 }
 
@@ -810,7 +827,7 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 static void drop_client(void)
 {
     if (client_fd >= 0) { close(client_fd); client_fd = -1; }
-    subscribed = 0;
+    sub_mask = 0;
     owner_reset();
 }
 
@@ -946,7 +963,7 @@ int vtouch_poll_step(int timeout_ms)
         if (ncf >= 0) {
             if (client_fd >= 0) {
                 fprintf(stderr, "vtouchd: kicking old ws client\n");
-                close(client_fd); client_fd = -1; frame_open = 0; subscribed = 0;
+                close(client_fd); client_fd = -1; frame_open = 0; sub_mask = 0;
             }
             setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
             setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);

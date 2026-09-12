@@ -9,9 +9,9 @@
 
 | 项 | 值 |
 |---|---|
-| 生成物 | `clients/vtouch_bundle.js`（741,659 B，md5 `f82a11c3…`） |
-| 唯一来源 | `scripts/build_bundle.py`（632 行；装配在第 622 行） |
-| 面板段 md5 常量 | `VTOUCH_UI_DEX_MD5` = `271cf78e…`、`VTOUCH_UI_SO_MD5` = `52e7aa59…` |
+| 生成物 | `clients/vtouch_bundle.js`（753,715 B，md5 `61bb5fd9…`） |
+| 唯一来源 | `scripts/build_bundle.py`（822 行；装配在第 811 行） |
+| 面板段 md5 常量 | `VTOUCH_UI_DEX_MD5` = `271cf78e…`、`VTOUCH_UI_SO_MD5` = `da1f0940…` |
 | 后端 | 面板进程本身就是 daemon：EVIOCGRAB + uinput 合并 + WS `127.0.0.1:27183` + `regions.conf` |
 | 设备侧目录 | 部署 `/data/local/tmp/vtouch-ui/`；运行 `/data/local/tmp/vtouch-runtime/` |
 
@@ -19,26 +19,31 @@
 
 ## 0. 30 秒上手
 
+> 工程图（全流程总览 / 优化前后对照）见 **`docs/diagrams/`**（每张图 = JSON 源 + SVG/PNG，可重渲）。
+
 ```js
 var vt = require("/sdcard/vtouch_bundle.js");
 
-vt.uiStart();                                  // 起面板（幂等），首次会自动释放内嵌二进制（需 root）
-var c = vt.connect();                          // 连 127.0.0.1:27183（面板即后端）
-vt.sub(c);                                     // ⚠ 打开事件通道，不调就收不到任何区域/手指事件
-
-events.on("exit", function () { vt.stop(); }); // 收面板 + 释放 EVIOCGRAB
-
-while (true) {                                 // ⚠ 必须常驻，否则脚本一结束面板就被自己收掉
-    var line = c.recv();                       // 非阻塞，无数据返回 null
-    if (!line) { sleep(10); continue; }
-    var h = vt.rgParseEv(line);                // {id, ev, slot, x, y}
-    if (h && h.id === "s3" && h.ev === "down") {
-        threads.start(function () { vt.finger().tap(h.x, h.y); });
-    }
-}
+vt.onRegion("s3", "down", function (h) {       // 区域 id = 面板卡片名（h = {id,ev,slot,x,y}）
+    vt.finger().tap(h.x, h.y);                 // 库内自动：uiStart → connect → sub → 读线程
+});                                            //          → 过滤 → 回调丢子线程 → exit 收尾 → 保活
 ```
 
-完整可运行版：`clients/vtouch_region_min.js`（约 35 行，已推到 `/sdcard/vtouch_region_min.js`）。
+**事件（第二参）**：**不指定 = `down`/`up`/`enter`/`exit`（默认不含 `move`）**；指定就只传指定的，
+多个用 `"down,move"` 或 `["down","move"]`，`"*"`/`"any"` = 全部（含 `move`）。
+默认把 `move` 排除的理由是实测的：拖着手指 15 秒 = 104 条 move（§10.1 第 14 条）。
+**不限区域**：`vt.onRegion(function (h) { … })` 或 `vt.onRegion(function (h) { … }, "up")`。
+**被新实例顶掉时旧实例自退**（并让出面板），不会留下「活着但收不到事件」的僵尸（§4.3）。
+
+就这两行。**「起后端 + 连接 + 订阅 + 常驻读循环 + 解析分发 + 并发保护 + 退出收尾」全在库内**
+（`vt.onRegion` `build_bundle.py`，真机实测：脚本启动 → 手指按进区域 → 回调拿到 `{id,ev,slot,x,y}`
+→ `tap` 落地；脚本常驻不退出，面板不动）。
+
+需要自己控读循环时（要 `pev` 轨迹、要自己算命中）才用底层写法：
+`vt.uiStart()` → `vt.connect()` → `vt.sub(c)` → `while(true){ c.recv(); … }`，见 §9.2 / §9.4 / §9.5
+（退出收尾同样自动，不必手写 `events.on("exit", vt.stop)`）。
+
+完整可运行版：`clients/vtouch_region_min.js`（已推到 `/sdcard/vtouch_region_min.js` 与 `/sdcard/脚本/`）。
 
 ---
 
@@ -78,8 +83,8 @@ daemon 进程（= 面板进程本体；EVIOCGRAB 独占该设备）
 
 | # | 阶段 | 执行者 | 关键代码 | 做对了的判据 |
 |---|---|---|---|---|
-| 0 | 起后端 | 脚本主线程 | `vt.uiStart()` | `pidof vtouch-ui` 有值 |
-| 0b | 连接 + 订阅 | 脚本 | `vt.connect()` / `vt.sub(c)` | 日志里没有 `NO-CLIENT/UNSUB` |
+| 0 | 起后端 | 脚本主线程 | `vt.uiStart()`（`vt.onRegion` 内部自动调） | `pidof vtouch-ui` 有值 |
+| 0b | 连接 + 订阅 | 脚本 | `vt.connect()` / `vt.sub(c)`（`vt.onRegion` 内部自动做完） | 日志里没有 `NO-CLIENT/UNSUB` |
 | 1 | 采集物理触摸 | daemon poll 线程 | `physical_events()` `vtouchd.c:606`，`EVIOCGRAB` `:921` | 静默（无日志） |
 | 2 | 合并转发到系统 | 同上 | `emit_frame()` `:246`（末尾一次 `writev` `:277`） | 手指照常操作系统 |
 | 3 | 区域命中判定 | 同上，SYN 帧内 | `region_match()` `:436`、`region_hit()` `:372` | 面板上区域圈闪一下 |
@@ -101,7 +106,7 @@ daemon 进程（= 面板进程本体；EVIOCGRAB 独占该设备）
    退出后才更新，`:633`），所以"新按下"和"刚抬起"能精确区分；`slot_hit[i][rid]` 保证 `up` 只推给
    "按下时确实命中过"的区域；`move` 只在区域内且坐标变化时推（`:455`）。
 4. **推送**：`region_ev_send()` 先调 `vtouch_ev_cb`（同进程面板据此闪圈 + 写日志），再判断
-   `client_fd < 0 || !subscribed` → 只写一行 `(NO-CLIENT/UNSUB)` 就 return。**没 `sub` 就一个字节都收不到**
+   `client_fd < 0 || !(sub_mask & SUB_REGION)` → 只写一行 `(NO-CLIENT/UNSUB)` 就 return（`pev` 那条门是 `sub_mask & SUB_PHYS`）。**没 `sub` 就一个字节都收不到**（而且可以只订要的通道：`sub region` 的脚本一条 `pev` 都不收）
    （§6.1）。写失败即 `drop_client()`（顺带 `owner_reset()` 把虚拟触点抬掉）。同一帧命中多个区域/多指会推多条。
 5. **读**：`recv()` 用 `available() < 2` 提前返回 `null`，所以循环里必须自己 `sleep()` 让位；
    收到 `opcode 8` 会抛"服务端关闭"；`ok`/`region …`/`end`/`pong` 与事件行**同一条流**，`vt.sub` 之后
@@ -146,6 +151,47 @@ daemon 进程（= 面板进程本体；EVIOCGRAB 独占该设备）
 | 注入生效 | 脚本里 `vt.finger().tap(720, 1584)` | 屏上出现一次点击 |
 | 物理穿透 | 常规操作系统界面 | 正常；同帧日志还会有 `pev` 行（订阅状态下） |
 
+### 1.7 「区域监听 → 脚本任务」这条链上：哪些步是必需的，哪些是仪式
+
+把八个阶段按「谁必须记住」重排一遍。判据是：**删掉它会不会丢功能**——不丢功能的都是仪式，
+应该收进库里（脚本只留业务）。脚本侧的现状写法见 `clients/vtouch_region_min.js`（35 行）。
+
+| 步 | 现状（脚本必须自己写） | 判定 | 为什么 / 能怎么收 |
+|---|---|---|---|
+| 起后端 | `vt.uiStart()` | **必需** | 面板 = daemon：grab + WS + `regions.conf` 都在它身上（`build_bundle.py:453`） |
+| 连接 + 订阅 | `vt.connect()` + `vt.sub(c)` | 必需机制、**仪式化写法** | 不 `sub` 一个字节都收不到（`vtouchd.c:422`）；但这是「打开通道」，不是业务，应由监听入口一次做完 |
+| ~~收尾~~ | ~~`events.on("exit")` + `vt.stop()`~~ | **已收进库** | 库在首次 `connect`/`uiStart` 就注册退出钩子（`vt.autoStop(false)` 可关），底层写法也不再漏 |
+| 常驻 | 主线程 `while(true){ recv; sleep(10) }` 或 `setInterval` | 必需机制、**不该由每个脚本重写** | 得有人读 socket、有人保活；读线程与保活 `setInterval` 都归库（子线程保不住，见 §4.2） |
+| 解析分发 | `vt.rgParseEv(line)` + `h.id === …` + `h.ev === "down"` | **仪式** | 库可做 `onRegion(id, fn)`，id/ev 过滤放在库里 |
+| 并发保护 | `threads.start(function () { vt.finger().tap(…) })` | 必需机制、**不该由每个脚本重写** | `tap` 含 sleep，占着读线程会堵住后续事件；分发侧统一丢子线程 |
+| 业务 | 真正的任务 | **必需** | 只应该留这一条 |
+
+结论（三个可核对的事实）：
+
+1. 保留「起后端 + 业务」两行是可能的：其余四步（连订 / 收尾 / 常驻 / 分发+并发）是**同一套机制**，
+   每个脚本重抄一遍，抄错就是 §1.5 的断点 1 / 2 / 4。
+2. `vt.createEngine()` 在「按区域触发任务」的用法里是**冗余的**：daemon 的原生 `region_ev` 已经把
+   `id` 与 `down/up/enter/exit/move` 都算好推过来了（`vtouchd.c:436-468`），本地引擎等于把同一份命中判定
+   再算一遍；且 `rs` 是闭包快照，改名后回调里的 `r.id` 仍是旧名（§7.1 路线 B 那一行）。
+3. ~~还有一层流量上的多余~~（**C 已消掉**：`sub region` 后 daemon 根本不发 `pev`）：`sub` 之后 `pev`（每根手指每帧）与 `region_ev` 走同一条流
+   （`vtouchd.c:633` 与 `:422` 同受 `subscribed` 管）。纯区域脚本不消费 `pev`，却要为它付解析成本，
+   TCP 缓冲也更容易被顶住（§1.5 第 4 条）。原生侧「按通道选择性订阅」是一处小改动。
+
+优化档位（**A 已实施**，B / C 待拍板；A 不动任何既有 API 的语义）：
+
+| 档 | 改动 | 脚本形态 | 代价 |
+|---|---|---|---|
+| **A 已实施** | 库内监听入口 `vt.onRegion(id, [ev], fn)`（`build_bundle.py` ON_REGION 段）：`uiStart` → `connect` → `sub region` → 读线程 → 分发（过滤 id/ev、回调丢子线程）→ 退出钩子收尾 → 主线程 `setInterval` 保活；返回 `{stop()}` | `vt.onRegion("s3", function (h) { vt.finger().tap(h.x, h.y); })` | 只增不改；老写法（`sub` + 自写循环）继续可用。验证：主机侧桩测（`tests/onregion_harness.js`，现 **46/46**）+ 真机 PJZ110 回调落值一致 |
+| **B 已实施** | A + 启动时用私有探针（`vtouchRegionProbe`）读面板区域表校验 id：**写错 / 被禁用 / 面板一个都没有** 三种都当场 toast；探针没答复则静默（不误报） | 同上，id 写错立刻报错，不再静默 | 一次 `region list`（<600 ms，只在读线程启动前调）。验证：桩测 + 真机 `面板里没有区域 "nope123"；现有：s3, r1` |
+| **C 已实施** | A + 原生选择性订阅：`vtouchd.c` 的 `subscribed` → `sub_mask` 位掩码（`SUB_REGION`/`SUB_PHYS`），`sub region` / `sub phys` / 裸 `sub`（两者都订，向后兼容）；`vt.onRegion` 内部用 `sub region` | 语义不变，纯区域脚本一条 `pev` 都不收 | 改 C + 重编面板 `.so`（md5 `da1f09407856db4a373d88c84da8eda5`）+ bundle；真机复核：`sub region` 20 s 得 region_ev=219/pev=0，`sub phys` 得 pev=454/region_ev=0 |
+
+全流程总览图（交付 → 面板进程 → 脚本 → 落地，含物理穿透 / 区域事件 / 虚拟回注三条流）：
+`docs/diagrams/vtouch-full-flow.svg`（见该目录 README）。
+
+另有一处**不是仪式而是耦合**：面板框选自动给的 id（`r1/r2/c1…`）要靠人手抄进脚本的 `REGION_ID`
+（`clients/vtouch_region_min.js:14`）。根治办法是让脚本「声明自己的区域」（按稳定 id upsert 进面板表），
+面板仍可改名 / 停用——这条要不要做，一并拍板。
+
 ## 2. 文件与设备布局
 
 | 路径 | 谁写 | 用途 |
@@ -170,7 +216,7 @@ daemon 进程（= 面板进程本体；EVIOCGRAB 独占该设备）
 
 | | 形态 B（带 UI，日常用） | 形态 A（headless 兜底） |
 |---|---|---|
-| 产物 | `build/ui/libtestimgui.so`（936,136 B） | `build/vtouchd`（31,824 B） |
+| 产物 | `build/ui/libtestimgui.so`（936,360 B） | `build/vtouchd`（31,968 B） |
 | 构成 | `vtouchd.o` + `src-ui/vtouch_ui.cpp` + ImGui，链成 `.so` | 同一个 `vtouchd.c` 直接编可执行 |
 | 启动 | `app_process ... VTouchUI $W $H`（Java 层 load so → SurfaceControl composer 图层 → shell 循环） | `nohup /data/local/tmp/vtouchd -w $W -h $H -p 27183` |
 | 观察窗口 | 有（悬浮面板） | 无 |
@@ -207,7 +253,7 @@ daemon 进程（= 面板进程本体；EVIOCGRAB 独占该设备）
 
 ---
 
-## 4. 生命周期契约（必须遵守的三条）
+## 4. 生命周期契约（三条 + 自动收尾）
 
 ### 4.1 存活判定只认 `pidof`
 
@@ -238,21 +284,40 @@ uiStart() → 面板起来 → 脚本没有 while/setInterval → 运行结束�
 - 主线程读循环（`while (true) { … sleep(10) }`，见 §0）；
 - 主线程 `setInterval(...)`（**主线程**；子线程 `while(true)` 保不住，主脚本结束会被连带掐掉）。
 
-只想"起面板、干完事就走"的场景：不要调 `vt.stop()`，直接 `c.close()` 关连接（面板继续活着），
-或用 `vt.uiStart()` + `exit()` 前显式 `events.on("exit") { /* 不 stop */ }`。**但要记住放手的代价**：
-面板留着 = 物理触摸一直被抓着（合并后照常回系统，只是多了个进程）。
+**现在默认就是自动收尾**：库在第一次 `connect()` / `uiStart()` 时注册（只注册一次）一个退出钩子——
+脚本一结束就 `vt.stop()`（收面板 + 释放 `EVIOCGRAB`）。所以 `uiStart` / `connect` / `sub` 的底层写法
+**不需要再手写** `events.on("exit", vt.stop)`；`vt.onRegion` 走的也是同一个钩子
+（`HANDOVER` 时不动面板，见 §4.3）。
+
+只想"起面板、干完事就走"（面板留着继续用）才需要逃生门：
+
+```js
+vt.autoStop(false);     // 退出只关连接；面板留着（代价：物理触摸一直被它抓着）
+vt.autoStop();          // 恢复默认（退出手收面板）
+```
+
+**强杀例外**：`am force-stop` / 用户在系统里"强行停止"跳过 exit 事件，钩子不会执行，面板会留在后台
+抓着触摸——此时手动 `kill -9 $(pidof vtouch-ui)`。
 
 ### 4.3 单客户端：新连接踢旧连接
 
 daemon 只有一个 WS 客户端位。新连接会 `kicking old ws client` 并把旧的 `subscribed` 清 0。
 所以**同时只能有一个脚本在收事件**，两个订阅脚本一起跑会互踢（表现为事件忽有忽无）。
-`events.on("exit")` 里不 `stop()` 而反复重跑，也会踩到这条（建议一进一出：跑新脚本前先停旧的）。
+
+用 `vt.onRegion` 起的脚本**已经处理了这条**：旧实例每 2 s 发一条 `ping`、6 s 收不到 `pong` 就判定断线
+（不能指望读异常——`recv()` 用 `available()` 判断，对端只 `close()` 时它会永远返回 `null`），
+发现通道被顶掉且面板还活着 → 判定为"被接管" → `toastLog` 提示后 `vtouchListenStop()` 并 `exit()` 自退，
+**不动面板**（`HANDOVER` 标志让 `exit` 钩子跳过 `vt.stop()`）。判据是"面板进程还在"，
+所以面板自己死掉的那种断开仍然照实报「事件通道已断开」，不会误判成接管。
+
+底层写法（自己 `sub` + 读循环）仍需手动"一进一出"：跑新脚本前先停旧的，否则旧实例会变成
+活着的僵尸，之后你停它还会把新实例正在用的面板一起收走。
 
 ---
 
 ## 5. API 全表
 
-`module.exports` 共 31 项（`build_bundle.py:340-372`）。凡标"阻塞"的调用都要在**业务线程**跑，主线程调会卡 Looper。
+`module.exports` 共 32 项（`build_bundle.py:350-382`）。凡标"阻塞"的调用都要在**业务线程**跑，主线程调会卡 Looper。
 
 ### 5.1 后端与连接
 
@@ -269,6 +334,7 @@ daemon 只有一个 WS 客户端位。新连接会 `kicking old ws client` 并�
 | `vt.connect(timeout=10000)` | 连 WS 并完成握手，**阻塞**（失败每 300 ms 重试到超时）。返回 `conn`，同时设为"当前连接" |
 | `vt.run(fn)` | 全包入口：唤醒屏幕 / 保活 60 s / `ensure()` / `connect()` / `fn()` / 关连接 / `stop()` / `exit()`，内部在子线程跑。**结束会收面板** |
 | `vt.stop()` | 关当前连接；面板在跑就收面板；再 `kill vtouchd` + 删 pid。**这是"释放 EVIOCGRAB"的开关** |
+| `vt.autoStop(on?)` | 退出自动收尾开关（默认 `true`；首次 `connect`/`uiStart` 自动注册退出钩子）。`vt.autoStop(false)` = 脚本结束时只关连接、面板留着；`vt.autoStop()` 恢复默认 |
 | `vt.HOST` `vt.PORT` `vt.BIN` `vt.UI_DIR` | 常量：`127.0.0.1` / `27183` / `/data/local/tmp/vtouchd` / `/data/local/tmp/vtouch-ui` |
 
 `conn` 对象：
@@ -316,7 +382,7 @@ daemon 坐标系恒为竖屏；区域一律存竖屏坐标，native 匹配不动
 | `vt.createEngine(rs, handlers)` | 本地引擎：吃 `pev` 行（`eng.feed({slot,action,x,y})`）自己算命中，回调 `(region, finger)`。`handlers` 键：`onDown/onUp/onMove/onEnter/onExit`。`eng.setRegions(rs)` 换表、`eng.fingers()` 列当前手指 |
 | `vt.rgPush(c, rs)` | 整表下发：`region clear` + 逐条 `region add`，面板收到即生效并落盘 |
 | `vt.rgList(c)` | 回读面板当前表，**600 ms 超时**，失败/无连接返回 `[]`。**必须在开读包循环之前调**（它会消费回包行） |
-| `vt.sub(c)` / `vt.unsub(c)` | 开/关事件通道（见 §6.1）。`sub` 会先 `drain()` |
+| `vt.sub(c, mode?)` / `vt.unsub(c)` | 开/关事件通道（见 §6.1）。**`mode` 选通道**：省略 = `region`+`phys` 都订（老语义）；`"region"` = 只收区域事件（`vt.onRegion` 用的就是它）；`"phys"` = 只收原始轨迹。`sub` 会先 `drain()` |
 | `vt.parseEv(line)` | `pev` 行 → `{slot, action, x, y}`；非 `pev` 行返回 `null` |
 
 区域对象格式（两种，坐标都是**竖屏逻辑**）：
@@ -336,6 +402,8 @@ daemon 坐标系恒为竖屏；区域一律存竖屏坐标，native 匹配不动
 | `pev <slot> <down\|move\|up> <lx> <ly>` | 物理手指原始轨迹（订阅后） | `vt.parseEv(line)` |
 | `ok` / `ok N` / `err …` / `pong` / `res …` / `region …` / `end N` | 命令回包 | 一般忽略（`rgList` 内部消费） |
 
+| `vt.onRegion(id, [ev], fn)` | 不是行协议，是**库侧监听入口**：内部完成 uiStart + connect + sub + 读线程，只把匹配的 `region_ev` 交给 `fn(h)`（回调在子线程）。`id` 省略=所有区域；**`ev` 省略=`down`/`up`/`enter`/`exit`（不含 `move`）**，指定只传指定的（`"up"`/`"move"`/`"down,move"`/数组；`"*"`/`"any"`=全部含 move） |
+
 **两个维度分工**：`id` = 哪个区域，`slot` = 哪根手指（0~9）。
 **只报物理手指**：虚拟触点不产生 `pev`/`region_ev`，所以"回触自己"不会自激。
 
@@ -350,7 +418,7 @@ daemon 坐标系恒为竖屏；区域一律存竖屏坐标，native 匹配不动
 | `ping` | `pong` | 探活（读线程每 3 s 一次） |
 | `res` | `res <lw> <lh> raw <axmin0> <axmax0> <axmin1> <axmax1>` | 查逻辑尺寸与 raw 轴范围 |
 | `reset` | `ok` | 清虚拟触点状态 |
-| `sub` / `unsub` | `ok` | **事件通道总开关**（`subscribed` 唯一来源） |
+| `sub [region\|phys\|all]…` / `unsub` | `ok` / `err sub` | **事件通道总开关**，`sub_mask` 位掩码唯一来源：不带参数 = 两个通道都订（老客户端语义不变），`sub region` 只订区域事件、`sub phys` 只订原始轨迹 |
 | `down <slot> <x> <y>` | `ok` | 逻辑坐标，越界 → `err point` |
 | `move <slot> <x> <y>` | `ok` | 同上 |
 | `up <slot>` | `ok` | 成帧前（`begin_frame` 与 `end_frame` 之间）调用 → `err point` |
@@ -363,7 +431,7 @@ daemon 坐标系恒为竖屏；区域一律存竖屏坐标，native 匹配不动
 - 圆形：`type=1`，`a1 a2 a3 a4 = cx cy r 0`（`a3` 上限 100000；第 5 个几何位是占位 0）。
 - `id ≤ 15` 字符（`REGION_ID_MAX`），最多 **32** 个区域（`MAX_REGIONS`）；越界 → `err region`。
 
-### 6.1 `sub` 为什么是必须的（不是可选优化）
+### 6.1 `sub` 为什么是必须的（不是可选优化）+ 通道选择
 
 ```c
 /* src/vtouchd.c:416 */
@@ -491,17 +559,39 @@ Rhino 比 V8 慢一个量级，按 5–20× 估约 0.5–2 µs/行，仍是**每
 
 ## 9. 脚本骨架（可直接抄）
 
-### 9.1 最小：区域触发点击（正本）
+### 9.1 最小：区域触发点击（正本，= 现在唯一推荐写法）
 
-见 `clients/vtouch_region_min.js` 与 §0。
+```js
+var vt = require("/sdcard/vtouch_bundle.js");
+
+vt.onRegion("s3", "down", function (h) {   // h = {id, ev, slot, x, y}
+    vt.finger().tap(h.x, h.y);             // 回调在子线程：里面可以直接写 sleep/长按/拖拽
+});
+
+// 事件过滤：不指定 = down/up/enter/exit（不含 move）；指定 = 只传指定的
+// vt.onRegion("s3", function (h) { … });              // 默认集（不含高频 move）
+// vt.onRegion("s3", "up", function (h) { … });        // 只看抬起
+// vt.onRegion("s3", "down,move", function (h) { … }); // 显式要 move（数组也行）
+// vt.onRegion("s3", "*", function (h) { … });         // 全部（含 move）
+// vt.onRegion(function (h) { … }, "up");              // 不限区域，只要抬起
+// var handle = vt.onRegion(…) ;  handle.stop();       // 中途停监听（不断面板）
+```
+
+库里替你做完的六件事：`uiStart`（面板 = 后端）→ `connect` → `sub` → 常驻读线程 →
+`rgParseEv` + id/ev 过滤 → 回调丢子线程（`tap` 含 sleep 不会堵读线程）；再加两条生命周期：
+脚本退出自动 `vt.stop()`（释放 EVIOCGRAB）、主线程 `setInterval` 保活（脚本不会 2 秒就退）。
+
+启动时会自动校验 `id`：面板里**没有这个区域 / 该区域被禁用 / 面板一个都没有** 三种都会立刻
+`toastLog` 指出（私有探针读 `region list`，只读线程启动前调一次；探针没答复则静默，不误报）。
+
+见 `clients/vtouch_region_min.js`（真机正本）与 §0。
 
 ### 9.2 区域 → 多指判定（id × slot）
 
 ```js
 var vt = require("/sdcard/vtouch_bundle.js");
 vt.uiStart();
-var c = vt.connect(); vt.sub(c);
-events.on("exit", function () { vt.stop(); });
+var c = vt.connect(); vt.sub(c);            // 退出自动收尾由库注册，不必手写 exit 钩子
 
 while (true) {
     var h = vt.rgParseEv(c.recv() || "");
@@ -570,9 +660,23 @@ vt.rgPush(c, rs);          // region clear + 逐条 add，面板立即生效并�
    横屏时要在屏幕上画图/对齐请用 `vt.p2c()`。
 8. `slot` 0~9；`vt.finger()` 自动分配只在"未按下"里找，未 `up` 的手指会一直占槽。
 9. **回触不会自激**：虚拟触点不产生 `pev`/`region_ev`，所以"区域触发点击"不会自己再触发一次。
-10. `vt.stop()` 才是收面板/释放 grab 的开关；`c.close()` 只关连接。
+10. `vt.stop()` 才是收面板/释放 grab 的开关；`c.close()` 只关连接。**退出自动收尾默认开着**
+    （第一次 `connect`/`uiStart` 就注册好钩子），底层写法不用再写 `events.on("exit", vt.stop)`；
+    要留面板用 `vt.autoStop(false)`（§4.2）。
 11. `vt.run(fn)` 结束会 `stop()`（收面板）——需要面板常驻就别用 `run()`。
 12. `vt.ensure()` 在面板活着时不会再起 daemon；面板活着时别调 headless 那条路。
+13. **走 `vt.onRegion` 时第 1–4 条已由库接管**：它自动 `uiStart` + `connect` + `sub` + 常驻读线程 +
+    回调丢子线程 + 退出收尾 + 保活。此时**不要再自己写 `while(recv)`**——同一个 socket 两个读者会抢帧。
+14. `vt.onRegion` **不指定事件 = `down/up/enter/exit`（默认不含 `move`）**，指定 = 只传指定的，
+    多个用 `"down,move"` / 数组，`"*"` = 全部。实测：在 s3 里拖 15 秒收到 104 条 `move` —— 
+    这就是 `move` 不进默认集的原因；要轨迹（画线、摇杆）才显式加。
+    回调只吃物理手指（虚拟触摸不产生事件，回触不自激）。
+15. 返回句柄 `handle.stop()` 只摘掉这一个回调；**最后一个摘掉才停监听**（`unsub` + 关连接），
+    且不会收面板——面板归脚本退出时的 `exit` 钩子（`vt.stop()`）。
+
+16. **重跑不用先停旧实例**：新实例一连接，daemon 就踢掉旧连接；旧实例（`vt.onRegion` 起的）发现
+    自己被顶掉后**自动让位退出**（`exit()`，`toastLog` 会说「已被新的订阅者接管」），并且**不收面板**——
+    面板归新实例。所以「双活互踢 → 面板被先退的那个收掉 → 另一个变聋」这条老坑已经消掉。
 
 ### 10.2 进程与部署侧
 
@@ -615,9 +719,13 @@ vt.rgPush(c, rs);          // region clear + 逐条 add，面板立即生效并�
 | 症状 | 先查 | 常见原因 → 处理 |
 |---|---|---|
 | 面板不弹 / 一闪就没 | `logcat -d \| grep GlobalConsole` 里是否有 `运行结束 (用时 ≈2 秒)` | 脚本没有常驻逻辑 → 加 `while`/`setInterval`（§4.2） |
+| 脚本结束后面板还在、触摸被它抓着 | 脚本里有没有 `vt.autoStop(false)`；或是不是被强杀（`force-stop`） | 强杀跳过 exit 事件 → 手动 `kill -9 $(pidof vtouch-ui)`；正常退出应自动收 |
 | 面板连不上 / 起不来 | `vt.uiTail(20)`、`pidof vtouch-ui` | 端口被旧 headless 占（先 `uiStop()`）、`.so` 释放失败（看 md5 报错） |
-| 脚本收不到区域事件 | 面板日志里有没有 `(NO-CLIENT/UNSUB)` | 没 `sub(c)`；或另一个脚本把连接抢了（单客户端） |
-| 事件忽有忽无 | 是否有两个订阅脚本 | 互踢 → 只留一个 |
+| 脚本收不到区域事件 | 面板日志里有没有 `(NO-CLIENT/UNSUB)` | 用底层写法时没 `sub(c)`；`vt.onRegion` 写法下先查 **id 与面板卡片名是否一致**（不传 id 可收全部）；或另一个脚本把连接抢了（单客户端） |
+| 用了 `vt.onRegion` 却一次都没回调 | 面板日志有没有 `vtouchd: ev <id> down` 行 | 有 ev 行 = 事件到了 daemon 侧，问题在 id 不匹配（改名/写错）；连 ev 行都没有 = 手指没按进区域（`enabled` 开关也要看） |
+| 事件忽有忽无 / 脚本莫名退出 | 是否有两个订阅脚本；logcat 有没有「已被新的订阅者接管」 | 互踢 → 用 `vt.onRegion` 时旧实例会自退（正常）；底层写法要手动只留一个 |
+| 启动就提示 `面板里没有区域 "x"；现有：…` | 面板卡片名 vs 脚本里的 id（B 的启动校验） | 照提示改名或改脚本；`enabled=0` 会另外提示「已被禁用」 |
+| 启动提示 `面板里还没有区域` | 面板区域表 | 先在面板画一个，或脚本 `vt.rgPush` 下发 |
 | 按了区域但触摸没到应用 | 注入是否在子线程、`c.recv()` 是否被阻塞 | `tap/swipe` 的 `sleep` 占了读线程；用 `threads.start` |
 | 点了区域触发两次 | 是否同时用了 `createEngine` 和 `rgParseEv` | 两条路都喂会重复处理 → 只留一条 |
 | 改区域 id 后脚本还用旧名 | 走的哪条路线 | `createEngine` 快照 → 换 `rgParseEv`（§7.1） |
@@ -698,8 +806,8 @@ adb shell su -c "cat /data/local/tmp/vtouch-runtime/regions.conf"    # 区域表
 
 | 项 | 当前值 |
 |---|---|
-| `vtouch_bundle.js` | 741,659 B，md5 `f82a11c3…`（设备 = 本机） |
-| `libtestimgui.so` | md5 `52e7aa59…`（设备 = bundle 内嵌） |
+| `vtouch_bundle.js` | 753,715 B，md5 `61bb5fd9e2d93316249fc58273da9849`（设备 = 本机，已回读对账） |
+| `libtestimgui.so` | 936,360 B，md5 `da1f09407856db4a373d88c84da8eda5`（设备 = bundle 内嵌，已回读对账） |
 | `classes.dex` | md5 `271cf78e…`（设备 = bundle 内嵌） |
 | 区域表 | `#vtouch-regions v2` + 用户手绘 `s3` + 脚本补的 `swipeL` / `tapR` |
 

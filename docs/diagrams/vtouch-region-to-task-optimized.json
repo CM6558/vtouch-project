@@ -1,0 +1,461 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 960,
+  "height": 1350,
+  "title": "对照：区域命中 → AutoJs6 任务（现状 vs 优化后）",
+  "subtitle": "同一条后端链路（① ② 一字未改）· 差别只在脚本侧：6 步仪式 → 1 步入场，其余收进 vtouch 库",
+  "containers": [
+    {
+      "id": "src",
+      "x": 100,
+      "y": 120,
+      "width": 700,
+      "height": 100,
+      "label": "① 物理输入（内核）"
+    },
+    {
+      "id": "daemon",
+      "x": 100,
+      "y": 252,
+      "width": 700,
+      "height": 388,
+      "label": "② 面板进程 = daemon（后端不变）"
+    },
+    {
+      "id": "now",
+      "x": 70,
+      "y": 700,
+      "width": 380,
+      "height": 406,
+      "label": "③ 现状：6 步仪式 + 1 步业务（7 段）"
+    },
+    {
+      "id": "opt",
+      "x": 510,
+      "y": 700,
+      "width": 360,
+      "height": 320,
+      "label": "④ 优化后：1 步入场 + 1 步业务（2 行）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "touch",
+      "kind": "rect",
+      "x": 150,
+      "y": 160,
+      "width": 580,
+      "height": 56,
+      "label": "触摸屏 /dev/input/eventN",
+      "sublabel": "Type-B MT 帧（ABS_MT_*）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d1",
+      "kind": "rect",
+      "x": 150,
+      "y": 288,
+      "width": 580,
+      "height": 56,
+      "label": "physical_events()",
+      "sublabel": "解析进 phys[] · vtouchd.c:606",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d2",
+      "kind": "rect",
+      "x": 150,
+      "y": 358,
+      "width": 580,
+      "height": 56,
+      "label": "emit_frame()",
+      "sublabel": "物理槽 + 虚拟槽 + SYN → 一次 writev · :246",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d3",
+      "kind": "rect",
+      "x": 150,
+      "y": 428,
+      "width": 580,
+      "height": 56,
+      "label": "region_match()",
+      "sublabel": "SYN 后扫 phys[]：down/up/enter/exit/move · :436",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d4",
+      "kind": "rect",
+      "x": 150,
+      "y": 498,
+      "width": 580,
+      "height": 56,
+      "label": "region_ev_send()",
+      "sublabel": "订阅门：!subscribed → (NO-CLIENT/UNSUB) 丢弃 · :422",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d5",
+      "kind": "rect",
+      "x": 150,
+      "y": 568,
+      "width": 580,
+      "height": 56,
+      "label": "WS 127.0.0.1:27183",
+      "sublabel": "region_ev 出 · sub / 触摸命令进 · 单客户端",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "L1",
+      "kind": "rect",
+      "x": 100,
+      "y": 736,
+      "width": 320,
+      "height": 52,
+      "label": "vt.uiStart()",
+      "sublabel": "必需 · 起后端",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "L2",
+      "kind": "rect",
+      "x": 100,
+      "y": 796,
+      "width": 320,
+      "height": 52,
+      "label": "vt.connect() → vt.sub(c)",
+      "sublabel": "机制 → 收进库",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "L3",
+      "kind": "rect",
+      "x": 100,
+      "y": 856,
+      "width": 320,
+      "height": 52,
+      "label": "while(true){ recv; sleep(10) }",
+      "sublabel": "机制 → 收进库",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "L4",
+      "kind": "rect",
+      "x": 100,
+      "y": 916,
+      "width": 320,
+      "height": 52,
+      "label": "rgParseEv + id/ev 判等",
+      "sublabel": "纯仪式 → 删掉",
+      "fill": "#fef2f2",
+      "stroke": "#dc2626",
+      "flat": true
+    },
+    {
+      "id": "L5",
+      "kind": "rect",
+      "x": 100,
+      "y": 976,
+      "width": 320,
+      "height": 52,
+      "label": "threads.start(function(){ … })",
+      "sublabel": "机制 → 收进库",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "L6",
+      "kind": "rect",
+      "x": 100,
+      "y": 1036,
+      "width": 320,
+      "height": 52,
+      "label": "业务任务：tap(x, y)",
+      "sublabel": "必需 · 保留",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "R1",
+      "kind": "rect",
+      "x": 530,
+      "y": 736,
+      "width": 320,
+      "height": 52,
+      "label": "vt.onRegion(id, fn)",
+      "sublabel": "唯一入口（新增 1 行）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "R2",
+      "kind": "rect",
+      "x": 530,
+      "y": 800,
+      "width": 320,
+      "height": 110,
+      "label": "库内自动完成 6 件事",
+      "sublabel": "uiStart · connect+sub · 读循环 · 过滤 · 并发 · 收尾",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "R3",
+      "kind": "rect",
+      "x": 530,
+      "y": 922,
+      "width": 320,
+      "height": 52,
+      "label": "业务任务（回调内）",
+      "sublabel": "保留：tap(h.x, h.y)",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "sink",
+      "kind": "rect",
+      "x": 200,
+      "y": 1140,
+      "width": 600,
+      "height": 68,
+      "label": "uinput: vtouch-merged → 目标 App",
+      "sublabel": "物理与虚拟同一条流（先物理后虚拟）· 两侧最终都落到这里",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "source": "touch",
+      "target": "d1",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a2",
+      "source": "d1",
+      "target": "d2",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a3",
+      "source": "d2",
+      "target": "d3",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "a4",
+      "source": "d3",
+      "target": "d4",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "a5",
+      "source": "d4",
+      "target": "d5",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "l1",
+      "source": "L1",
+      "target": "L2",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "l2",
+      "source": "L2",
+      "target": "L3",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "l3",
+      "source": "L3",
+      "target": "L4",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "l4",
+      "source": "L4",
+      "target": "L5",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "l5",
+      "source": "L5",
+      "target": "L6",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "r1",
+      "source": "R1",
+      "target": "R2",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "r2",
+      "source": "R2",
+      "target": "R3",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "ev1",
+      "source": "d5",
+      "target": "R1",
+      "source_port": "right",
+      "target_port": "top",
+      "flow": "control",
+      "label": "region_ev"
+    },
+    {
+      "id": "ev2",
+      "source": "d5",
+      "target": "L3",
+      "source_port": "left",
+      "target_port": "left",
+      "flow": "control",
+      "label": "事件",
+      "route_points": [
+        [
+          42,
+          596
+        ],
+        [
+          42,
+          882
+        ]
+      ]
+    },
+    {
+      "id": "sub",
+      "source": "L2",
+      "target": "d5",
+      "source_port": "right",
+      "target_port": "bottom",
+      "flow": "data",
+      "dashed": true,
+      "label": "sub",
+      "route_points": [
+        [
+          480,
+          822
+        ]
+      ],
+      "label_dx": 22
+    },
+    {
+      "id": "inj1",
+      "source": "L6",
+      "target": "sink",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "write"
+    },
+    {
+      "id": "inj2",
+      "source": "R3",
+      "target": "sink",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "write"
+    },
+    {
+      "id": "phys",
+      "source": "d2",
+      "target": "sink",
+      "source_port": "right",
+      "target_port": "right",
+      "flow": "read",
+      "label": "穿透",
+      "route_points": [
+        [
+          915,
+          386
+        ],
+        [
+          915,
+          1174
+        ]
+      ]
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1258,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸"
+    },
+    {
+      "flow": "control",
+      "label": "区域事件"
+    },
+    {
+      "flow": "data",
+      "label": "订阅命令"
+    },
+    {
+      "flow": "write",
+      "label": "虚拟注入"
+    },
+    {
+      "flow": "neutral",
+      "label": "脚本步骤"
+    }
+  ],
+  "footer": "净效果：脚本从 7 段（含 5 段仪式）降到 2 行；grab / WS / 区域表 / 穿透链路一字未改",
+  "footer_x": 70,
+  "footer_y": 1320
+}

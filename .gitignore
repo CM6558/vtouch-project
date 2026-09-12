@@ -1,11 +1,4 @@
-# APK 构建中间产物、签名密钥（密钥绝不提交）与安装包
-clients/plugin-apk/build/
-clients/plugin-apk/out/
-
-# 真机插件中心授权用的中间文件（在设备上生成，不入库）
-clients/plugin_center_authorization.xml
-
-# 二进制与构建产物：由 GitHub Actions 编译产出，仓库只存源码
+# 二进制与构建产物：仓库只存源码，build/ 由本地三步或 CI 重新产出
 build/
 *.zip
 
@@ -20,5 +13,5 @@ thirdparty/
 *.log
 .DS_Store
 
-# 单文件 bundle：生成物，由 scripts/build_bundle.py 产出（历史上有 del 提交，仅存源码）
+# 单文件 bundle：生成物，由 scripts/build_bundle.py 产出（只存源码）
 clients/vtouch_bundle.js

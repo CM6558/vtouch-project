@@ -75,9 +75,7 @@ threads.start(function () {   /* 读线程常驻；recv() 非阻塞，空转 sle
     }
 });
 
-events.on("exit", function () {
-    try { c.close(); } catch (e) {}
-    vt.stop();   /* 面板 full 模式持有 EVIOCGRAB：不收掉它会一直吃物理触摸 */
-});
+/* 收尾不用自己写：第一次 connect() 时库就注册了退出钩子，脚本结束自动 vt.stop()
+ * （收面板 + 释放 EVIOCGRAB）。要故意留面板用 vt.autoStop(false)。 */
 
 toastLog("回触已就绪（面板在跑）：左滑区 / 右点区 各按一下试试");

@@ -1,0 +1,480 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1420,
+  "title": "vtouch 全流程（当前实现）",
+  "subtitle": "交付 → 面板进程（物理穿透 / 区域事件）→ 脚本 onRegion → 回注落地；生命周期与收尾全在库内",
+  "containers": [
+    {
+      "id": "deliver",
+      "x": 60,
+      "y": 108,
+      "width": 1000,
+      "height": 118,
+      "label": "① 交付：单文件（唯一来源 = build_bundle.py）"
+    },
+    {
+      "id": "daemon",
+      "x": 60,
+      "y": 250,
+      "width": 1000,
+      "height": 442,
+      "label": "② 面板进程 = daemon（EVIOCGRAB + uinput 合并 + WS）"
+    },
+    {
+      "id": "script",
+      "x": 60,
+      "y": 716,
+      "width": 1000,
+      "height": 414,
+      "label": "③ 脚本"
+    },
+    {
+      "id": "sink",
+      "x": 340,
+      "y": 1160,
+      "width": 440,
+      "height": 112,
+      "label": "④ 落地"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "build",
+      "kind": "rect",
+      "x": 90,
+      "y": 150,
+      "width": 250,
+      "height": 56,
+      "label": "scripts/build_bundle.py",
+      "sublabel": "内嵌 vtouchd + 面板 dex/so",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "bundle",
+      "kind": "rect",
+      "x": 380,
+      "y": 150,
+      "width": 250,
+      "height": 56,
+      "label": "/sdcard/vtouch_bundle.js",
+      "sublabel": "单文件；AutoJs6 require 它",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "uistart",
+      "kind": "rect",
+      "x": 670,
+      "y": 150,
+      "width": 160,
+      "height": 56,
+      "label": "vt.uiStart()",
+      "sublabel": "md5 幂等释放",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "deployed",
+      "kind": "rect",
+      "x": 850,
+      "y": 150,
+      "width": 180,
+      "height": 56,
+      "label": "vtouch-ui/",
+      "sublabel": "classes.dex + so",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "proc",
+      "kind": "rect",
+      "x": 380,
+      "y": 286,
+      "width": 360,
+      "height": 52,
+      "label": "vtouch-ui 进程（面板 = daemon）",
+      "sublabel": "图层 + ImGui + WS + grab",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "touch",
+      "kind": "rect",
+      "x": 110,
+      "y": 380,
+      "width": 360,
+      "height": 56,
+      "label": "触摸屏 /dev/input/eventN",
+      "sublabel": "EVIOCGRAB 独占（Type-B MT 帧）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "parse",
+      "kind": "rect",
+      "x": 110,
+      "y": 456,
+      "width": 360,
+      "height": 56,
+      "label": "physical_events()",
+      "sublabel": "解析进 phys[] · vtouchd.c:606",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "emit",
+      "kind": "rect",
+      "x": 110,
+      "y": 532,
+      "width": 360,
+      "height": 56,
+      "label": "emit_frame()",
+      "sublabel": "物理槽 + 虚拟槽 + SYN，一次 writev",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "uinput",
+      "kind": "rect",
+      "x": 110,
+      "y": 608,
+      "width": 360,
+      "height": 56,
+      "label": "uinput: vtouch-merged",
+      "sublabel": "先物理后虚拟，同一条流",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "regions",
+      "kind": "rect",
+      "x": 650,
+      "y": 380,
+      "width": 360,
+      "height": 56,
+      "label": "regions.conf + 面板 UI",
+      "sublabel": "区域表唯一归属：框选 / 改名 / 开关",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "match",
+      "kind": "rect",
+      "x": 650,
+      "y": 456,
+      "width": 360,
+      "height": 56,
+      "label": "region_match()",
+      "sublabel": "SYN 后扫 phys[]：down/up/enter/exit/move",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "evsend",
+      "kind": "rect",
+      "x": 650,
+      "y": 532,
+      "width": 360,
+      "height": 56,
+      "label": "region_ev_send()",
+      "sublabel": "门：SUB_REGION（sub region）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "ws",
+      "kind": "rect",
+      "x": 650,
+      "y": 608,
+      "width": 360,
+      "height": 56,
+      "label": "WS 127.0.0.1:27183",
+      "sublabel": "单客户端，新连接踢旧连接",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "onregion",
+      "kind": "rect",
+      "x": 620,
+      "y": 752,
+      "width": 360,
+      "height": 56,
+      "label": "vt.onRegion(id, [ev], fn)",
+      "sublabel": "唯一入口：脚本侧只写这个",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "lib",
+      "kind": "rect",
+      "x": 360,
+      "y": 838,
+      "width": 600,
+      "height": 110,
+      "label": "库内自动完成（脚本不写）",
+      "sublabel": "uiStart → connect → sub region → 校验 id → 读线程 → 过滤 → 分发 → 保活",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "cb",
+      "kind": "rect",
+      "x": 360,
+      "y": 978,
+      "width": 600,
+      "height": 56,
+      "label": "业务回调 fn(h)",
+      "sublabel": "h = {id, ev, slot, x, y}；回调在子线程（可直接 sleep）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "exithook",
+      "kind": "rect",
+      "x": 360,
+      "y": 1054,
+      "width": 600,
+      "height": 56,
+      "label": "退出钩子（自动）",
+      "sublabel": "脚本结束 → vt.stop() 收面板；vt.autoStop(false) 可留面板",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "app",
+      "kind": "rect",
+      "x": 380,
+      "y": 1204,
+      "width": 360,
+      "height": 56,
+      "label": "uinput → 目标 App",
+      "sublabel": "物理与虚拟同一流（先物理后虚拟）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "d1",
+      "source": "build",
+      "target": "bundle",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data"
+    },
+    {
+      "id": "d2",
+      "source": "bundle",
+      "target": "uistart",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data"
+    },
+    {
+      "id": "d3",
+      "source": "uistart",
+      "target": "deployed",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "data"
+    },
+    {
+      "id": "d4",
+      "source": "deployed",
+      "target": "proc",
+      "source_port": "bottom",
+      "target_port": "right",
+      "flow": "data",
+      "label": "启动"
+    },
+    {
+      "id": "p0",
+      "source": "proc",
+      "target": "touch",
+      "source_port": "left",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "p1",
+      "source": "touch",
+      "target": "parse",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "p2",
+      "source": "parse",
+      "target": "emit",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "p3",
+      "source": "emit",
+      "target": "uinput",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "read"
+    },
+    {
+      "id": "e1",
+      "source": "parse",
+      "target": "match",
+      "source_port": "right",
+      "target_port": "left",
+      "flow": "read",
+      "label": "phys[]"
+    },
+    {
+      "id": "e2",
+      "source": "regions",
+      "target": "match",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "data"
+    },
+    {
+      "id": "e3",
+      "source": "match",
+      "target": "evsend",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "e4",
+      "source": "evsend",
+      "target": "ws",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control"
+    },
+    {
+      "id": "e5",
+      "source": "ws",
+      "target": "onregion",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "control",
+      "label": "region_ev"
+    },
+    {
+      "id": "c1",
+      "source": "onregion",
+      "target": "lib",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "c2",
+      "source": "lib",
+      "target": "cb",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "c3",
+      "source": "cb",
+      "target": "exithook",
+      "source_port": "bottom",
+      "target_port": "top",
+      "flow": "neutral"
+    },
+    {
+      "id": "inject",
+      "source": "cb",
+      "target": "app",
+      "source_port": "right",
+      "target_port": "right",
+      "flow": "write",
+      "label": "虚拟回注",
+      "route_points": [
+        [
+          1030,
+          1006
+        ],
+        [
+          1030,
+          1232
+        ]
+      ]
+    },
+    {
+      "id": "phys",
+      "source": "uinput",
+      "target": "app",
+      "source_port": "bottom",
+      "target_port": "left",
+      "flow": "read",
+      "label": "物理穿透",
+      "route_points": [
+        [
+          290,
+          664
+        ],
+        [
+          290,
+          1232
+        ]
+      ]
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1330,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸"
+    },
+    {
+      "flow": "control",
+      "label": "区域事件"
+    },
+    {
+      "flow": "write",
+      "label": "虚拟回注"
+    },
+    {
+      "flow": "data",
+      "label": "交付 / 配置"
+    },
+    {
+      "flow": "neutral",
+      "label": "库内步骤"
+    }
+  ],
+  "footer": "回注：回调 → tap/swipe → down/move/up → WS → set_virtual → emit_frame（虚拟槽）→ uinput；退出自动收面板并释放 grab（autoStop(false) 可留）；被新实例顶掉则自退让位；强杀跳过收尾需手动 kill",
+  "footer_x": 70,
+  "footer_y": 1385
+}

@@ -190,13 +190,22 @@ function vtouchConnectOnce(timeout) {
     conn.drain = function () { try { while (conn.recv() !== null) {} } catch (e) {} };
     conn.close = function () { if (CURR === conn) CURR = null; try { conn.sock.close(); } catch (e) {} };
     CURR = conn;
+    vtouchExitHook();        /* 连上就算在用面板了：脚本结束时自动收尾 */
     return conn;
 }
 
 function vtouchSend(c, line) { if (!c.watch) c.drain(); c.send(line); }
 function vtouchReset() { vtouchSend(vtouchCur(), "reset"); }
-/* 订阅物理触摸流：daemon 此后推送 pev 行；订阅后发包不再 drain（读线程消费回包）。 */
-function vtouchSub(c) { c.drain(); c.send("sub"); c.watch = true; }
+/* 订阅事件通道（mode 省略 = region + phys 都订，向后兼容）：
+ *   vt.sub(c, "region") —— 只收 region_ev：区域脚本用这个，不再白收高频 pev
+ *   vt.sub(c, "phys")   —— 只收 pev：自己算命中的本地引擎路线用这个
+ * 订阅后发包不再 drain（读循环自己消费回包）。 */
+function vtouchSub(c, mode) {
+    var m = (mode === undefined || mode === null || mode === "") ? "" : (" " + mode);
+    c.drain();
+    c.send("sub" + m);
+    c.watch = true;
+}
 function vtouchUnsub(c) { c.watch = false; c.send("unsub"); c.drain(); }
 /* pev <slot> <down|move|up> <lx> <ly> -> {slot,action,x,y}；非 pev 行返回 null。 */
 function vtouchParseEv(line) {
@@ -208,7 +217,37 @@ function vtouchParseEv(line) {
     if (p[2] !== "down" && p[2] !== "move" && p[2] !== "up") return null;
     return { slot: slot, action: p[2], x: x, y: y };
 }
+/* ---- 退出自动收尾（默认开）----
+ * 任何用过面板/连接的脚本结束时，都收面板 + 释放 EVIOCGRAB；只注册一次。
+ * 以前只有 vt.onRegion / vt.run 会收，底层写法（自己 uiStart+connect+sub）跑完会把面板漏在后台
+ * 继续抓着物理触摸——这是最容易忘、也最危险的一步。要故意留着面板（"起面板、干完事就走"）：
+ *   vt.autoStop(false);   // 退出只关连接，面板留着 */
+var AUTOSTOP = true;
+var HANDOVER = false;      /* 被新实例接管：退出别收面板 */
+var EXIT_HOOK = false;
+function vtouchAutoStop(on) {
+    AUTOSTOP = (on === undefined) ? true : !!on;
+    if (AUTOSTOP) vtouchExitHook();
+    return AUTOSTOP;
+}
+function vtouchExitHook() {
+    if (EXIT_HOOK) return;
+    EXIT_HOOK = true;
+    events.on("exit", function () {
+        try {
+            if (HANDOVER || !AUTOSTOP) {
+                /* 面板留着：只把我们这条连接关掉（底层下法也要干净退出） */
+                vtouchListenStop();
+                if (CURR) { try { CURR.close(); } catch (e1) {} }
+                return;
+            }
+            vtouchStop();
+        } catch (e) {}
+    });
+}
 function vtouchStop() {
+    /* 先干净地停监听（清保活定时器 + 关 socket），否则读线程会把正常收尾报成「通道断开」 */
+    try { if (typeof vtouchListenStop === "function") vtouchListenStop(); } catch (e0) {}
     CURR = null;
     /* 面板 full 模式就是 daemon：脚本退出时一并收掉（EVIOCGRAB 随进程退出释放）。 */
     if (vtouchUiAlive()) {
@@ -355,6 +394,8 @@ module.exports = {
     rgList: rgList,
     createEngine: rgCreateEngine,
     rgParseEv: rgParseEv,
+    onRegion: vtouchOnRegion,
+    autoStop: vtouchAutoStop,
     sub: vtouchSub,
     unsub: vtouchUnsub,
     parseEv: vtouchParseEv,
@@ -464,6 +505,7 @@ function vtouchUiStart() {
     for (i = 0; i < 24 && !vtouchUiAlive(); i++) sleep(150);
     if (!vtouchUiAlive()) throw new Error("面板没起来: " + vtouchUiTail(8));
     UI_T0 = Date.now();
+    vtouchExitHook();        /* 起了面板就负责收：脚本一结束自动放掉 grab */
     return true;
 }
 function vtouchUiStop() {
@@ -474,6 +516,138 @@ function vtouchUiStop() {
 function vtouchUiRestart() { vtouchUiStop(); return vtouchUiStart(); }
 """
 
+
+ON_REGION = r'''
+/* ---- 监听入口 vt.onRegion（方案 A：把仪式全收进库） --------------------------
+ *   vt.onRegion("s3", function (h) { … });                 // 区域 s3（默认事件，不含 move）
+ *   vt.onRegion("s3", "down", function (h) { … });         // 区域 s3，只要按下
+ *   vt.onRegion("s3", "down,move", function (h) { … });    // 显式带上 move（数组也可以）
+ *   vt.onRegion(function (h) { … });                       // 不限区域
+ *   vt.onRegion(function (h) { … }, "up");                 // 不限区域，只要抬起
+ * h = {id, ev, slot, x, y}。
+ * **事件过滤**：不指定 ev = down/up/enter/exit（**默认不含 move**——手指在区域内每帧一条，
+ * 高频事件默认灌进回调没有意义）；要 move 就显式写（"move" / "down,move" / ["down","move"]）。
+ * "*" / "any" = 全部（含 move）。指定就只传指定的。
+ * 库内自动：uiStart → connect → sub → 读线程 → 过滤 → 回调丢子线程 → exit 收尾 → 主线程保活。
+ * 回调一律跑在子线程（tap/swipe 含 sleep，占住读线程会堵后续事件）；回调抛错只 toast，不杀脚本。
+ * 只推物理手指：虚拟触摸不产生 region_ev（回触不会自激）。
+ * 返回 {stop()}：摘掉这一个注册；最后一个注册也摘掉时停监听（不断面板，面板归 exit 钩子收）。 */
+var LISTEN = null;       /* HANDOVER 见 CORE 的退出钩子段 */
+/* 默认事件集：高频的 move 不在里面。用户拍板——默认别灌 move，需要就显式要。 */
+var VT_DEF_EV = "down,up,enter,exit";
+function vtouchEvSet(spec) {
+    var set = {}, parts, i, k;
+    if (spec === null || spec === undefined || spec === "") spec = VT_DEF_EV;
+    if (spec === "*" || spec === "any") return "*";
+    if (typeof spec === "string") parts = spec.split(/[,\s|]+/);
+    else if (spec.length !== undefined) parts = spec;
+    else throw new Error('onRegion: ev 只支持字符串或数组（"down" / "down,move" / ["down","move"]）');
+    for (i = 0; i < parts.length; i++) { k = "" + parts[i]; if (k) set[k] = 1; }
+    return set;
+}
+function vtouchRegMatch(reg, h) {
+    if (reg.ev !== "*" && !reg.ev[h.ev]) return false;   /* reg.ev 已是集合 */
+    return reg.id === null || reg.id === "" || reg.id === "*" || reg.id === h.id;
+}
+function vtouchDispatch(h) {
+    var live = LISTEN, regs, i, reg;
+    if (!live) return;
+    regs = live.regs.slice(0);   /* 快照：回调里可能再注册/摘注册 */
+    for (i = 0; i < regs.length; i++) {
+        reg = regs[i];
+        if (!vtouchRegMatch(reg, h)) continue;
+        (function (fn, hh) {
+            threads.start(function () {
+                try { fn(hh); }
+                catch (e) { try { toastLog("onRegion 回调异常: " + e); } catch (e2) {} }
+            });
+        })(reg.fn, { id: h.id, ev: h.ev, slot: h.slot, x: h.x, y: h.y });
+    }
+}
+/* 停监听（不碰面板）：读线程靠 closing 标志区分「正常收尾」和「真断了」。 */
+function vtouchListenStop() {
+    var live = LISTEN;
+    if (!live) return false;
+    LISTEN = null;
+    live.closing = true;
+    if (live.timer !== null) { try { clearInterval(live.timer); } catch (e) {} live.timer = null; }
+    try { vtouchUnsub(live.conn); } catch (e) {}
+    try { live.conn.close(); } catch (e) {}
+    return true;
+}
+function vtouchOnRegion(a, b, c) {
+    var id = null, ev = null, fn = null;
+    var isEv = function (v) { return typeof v === "string" || (v !== null && v !== undefined && v.length !== undefined && typeof v !== "function"); };
+    if (typeof a === "function") { fn = a; if (isEv(b)) ev = b; }
+    else { if (a !== undefined && a !== null) id = a; if (isEv(b)) { ev = b; fn = c; } else fn = b; }
+    ev = vtouchEvSet(ev);               /* null → 默认集（不含 move）；"*" → 全部 */
+    if (typeof fn !== "function") throw new Error("onRegion(id, [ev], fn): 缺少回调函数");
+    if (!LISTEN) {
+        vtouchUiStart();                 /* 面板 = 后端，幂等：在跑就直接复用 */
+        var conn = vtouchConnect();
+        vtouchSub(conn, "region");       /* 只订区域事件：不再白收高频 pev（C） */
+        var live = { conn: conn, regs: [], timer: null, closing: false, lastPing: 0, lastPong: Date.now(), probe: null };
+        LISTEN = live;
+        /* 面板表探针必须在读线程起来之前（它会消费回包行）：用来校验下面注册的区域 id */
+        live.probe = vtouchRegionProbe(conn);
+        threads.start(function () {      /* 读线程常驻：这个 socket 只有它读 */
+            /* 断线探测：被 daemon 踢掉时对端只是 close()，recv() 用 available() 判断会一直返回
+             * null（分不清空闲和断线），所以每 2s 发一条 ping、6s 收不到 pong 即判断开；
+             * ping 写失败（EPIPE）也是断开。不 ping 的话旧实例永远发现不了自己被顶掉。 */
+            for (;;) {
+                var line = null;
+                try { line = conn.recv(); } catch (e) { break; }
+                if (line) {
+                    if (line.indexOf("pong") === 0) live.lastPong = Date.now();
+                    else { var h = rgParseEv(line); if (h) vtouchDispatch(h); }
+                }
+                var now = Date.now();
+                if (now - live.lastPing >= 2000) {
+                    live.lastPing = now;
+                    try { conn.send("ping"); } catch (e2) { break; }
+                    if (now - live.lastPong > 6000) break;
+                }
+                if (!line) sleep(8);
+            }
+            if (!live.closing) {
+                /* 通道断了，两种原因：面板死了（照实报）或我们被新实例顶掉（让位自退）。
+                 * 判据 = 面板进程还在。被顶掉时必须自退，否则旧实例变成「活着但收不到事件」的僵尸，
+                 * 之后用户停它还会把新实例正在用的面板一起收走。 */
+                var alive = false;
+                try { alive = vtouchUiAlive(); } catch (e3) {}
+                if (alive) {
+                    HANDOVER = true;
+                    try { toastLog("vtouch: 已被新的订阅者接管，本实例自退（面板留给新实例）"); } catch (e4) {}
+                    try { vtouchListenStop(); } catch (e5) {}
+                    try { exit(); } catch (e6) {}
+                } else {
+                    try { toastLog("vtouch: 事件通道已断开（面板退出）"); } catch (e7) {}
+                }
+            }
+        });
+        /* 主线程保活：子线程 while(true) 保不住脚本（主结束会被连带掐掉） */
+        live.timer = setInterval(function () {
+            if (LISTEN !== live) {
+                try { clearInterval(live.timer); } catch (e) {}
+                live.timer = null;
+            }
+        }, 1000);
+        vtouchExitHook();    /* 统一钩子：退出即释放 EVIOCGRAB（HANDOVER 时不动面板） */
+    }
+    var reg = { id: id, ev: ev, fn: fn };
+    LISTEN.regs.push(reg);
+    vtouchCheckId(LISTEN, id);           /* id 写错/被禁用/面板没画 → 立刻 toast（B） */
+    return {
+        stop: function () {
+            var live = LISTEN, out = [], i;
+            if (!live) return false;
+            for (i = 0; i < live.regs.length; i++) if (live.regs[i] !== reg) out.push(live.regs[i]);
+            live.regs = out;
+            return out.length ? true : vtouchListenStop();
+        }
+    };
+}
+'''
 
 def write_out(path, text):
     path.write_text(text, encoding="utf-8", newline="\n")
@@ -538,6 +712,45 @@ function rgList(c) {
     } catch (e) {}
     return out;
 }
+/* 面板区域表探针（私有，只在读线程启动前调）：{ok, ids:{id:enabled}}。
+ * 与公开的 rgList 的区别：带回 ok 标志，能区分「面板真的一个区域都没有」和「根本没答复」——
+ * 后者据此不报警，免得把超时误报成「你没有这个区域」。会消费回包行，
+ * 所以只能在读线程起来之前调。 */
+function vtouchRegionProbe(c) {
+    var out = { ok: false, ids: {} }, dl, s, lines, i, p;
+    try {
+        c.drain();
+        c.send("region list");
+        dl = Date.now() + 600;
+        while (Date.now() < dl) {
+            s = c.recv();
+            if (!s) { sleep(10); continue; }
+            lines = ("" + s).split("\n");
+            for (i = 0; i < lines.length; i++) {
+                p = lines[i].replace(/^\s+|\s+$/g, "").split(" ");
+                if (p[0] === "region" && p.length >= 8) out.ids[p[1]] = (p[7] !== "0");
+                else if (p[0] === "end" || (p[0] === "ok" && p[1] === "0")) { out.ok = true; return out; }
+            }
+        }
+    } catch (e) {}
+    return out;   /* ok=false = 面板没答复（超时/断线）：静默跳过校验 */
+}
+/* 启动时校验区域 id：把「id 写错 / 被禁用 / 面板根本没画」这种静默失败变成立刻可见。 */
+function vtouchCheckId(live, id) {
+    var ids, k, names = [], probe = live ? live.probe : null;
+    if (!id || id === "*" || id === "any") return;     /* 不限区域：没什么可校验 */
+    if (!probe || !probe.ok) return;                   /* 没拿到面板表：不误报 */
+    ids = probe.ids;
+    for (k in ids) if (ids.hasOwnProperty(k)) names.push(k);
+    if (!names.length) {
+        toastLog("vtouch: 面板里还没有区域；先在面板上画一个（或脚本用 rgPush 下发）");
+    } else if (ids[id] === undefined) {
+        toastLog('vtouch: 面板里没有区域 "' + id + '"；现有：' + names.join(", ") + "（要跟面板卡片名字一致）");
+    } else if (!ids[id]) {
+        toastLog('vtouch: 区域 "' + id + '" 已被禁用（面板开关关着），不会推事件');
+    }
+}
+
 /* daemon 原生区域事件：region_ev <id> <down|up|enter|exit|move> <slot> <lx> <ly>
  * -> {id, ev, slot, x, y}；不是 region_ev 行返回 null。
  * 用它可以「只按 id 分发」，不必在脚本里再存一份区域表、再算一遍命中。
@@ -619,7 +832,7 @@ def main() -> int:
         + 'var VTOUCH_UI_DEX_MD5 = "%s";\n' % hashlib.md5(dex_raw).hexdigest()
         + 'var VTOUCH_UI_SO_MD5 = "%s";\n' % hashlib.md5(so_raw).hexdigest()
     )
-    if not write_out(OUT, CORE + "\n" + blob + "\n" + uiblob + "\n" + ONE_LIB + "\n" + UI_BOOT + "\n" + DEMO):
+    if not write_out(OUT, CORE + "\n" + blob + "\n" + uiblob + "\n" + ONE_LIB + "\n" + UI_BOOT + "\n" + ON_REGION + "\n" + DEMO):
         return 1
     print("bundle: %s (%d bytes)" % (OUT, OUT.stat().st_size))
     print("panel in bundle: dex=%dB so=%dB(gz %dB) md5 dex=%s so=%s"
