@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtouch-project 实现流程图</title>
+<style>
+  :root{
+    --bg:#020617; --grid:#1e293b; --card:#0f172a;
+    --fg:#e2e8f0; --mut:#94a3b8;
+    --cyan:#22d3ee; --emerald:#34d399; --violet:#a78bfa; --amber:#fbbf24;
+    --rose:#fb7185; --orange:#fb923c; --slate:#94a3b8;
+    --line:#334155;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);
+    background-image:
+      linear-gradient(rgba(30,41,59,.35) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(30,41,59,.35) 1px, transparent 1px);
+    background-size:40px 40px;
+    color:var(--fg);
+    font-family:'JetBrains Mono','Cascadia Mono',Consolas,'Microsoft YaHei',monospace;
+    padding:32px 20px 80px; line-height:1.5;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:8px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--emerald);
+       box-shadow:0 0 12px var(--emerald);animation:pulse 2s infinite;margin-right:10px}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  h1{font-size:22px;font-weight:700;letter-spacing:.5px}
+  .sub{color:var(--mut);font-size:12px;margin-top:6px}
+  .sub b{color:var(--emerald)}
+  nav{position:sticky;top:0;z-index:50;background:rgba(2,6,23,.92);backdrop-filter:blur(6px);
+      border-bottom:1px solid var(--line);padding:10px 0;margin-bottom:28px;display:flex;flex-wrap:wrap;gap:6px}
+  nav a{color:var(--mut);text-decoration:none;font-size:11px;border:1px solid var(--line);
+        border-radius:20px;padding:3px 10px;transition:.15s}
+  nav a:hover{color:var(--fg);border-color:var(--cyan)}
+  section{margin-bottom:52px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+  .sec-num{color:var(--cyan);font-size:13px;font-weight:700}
+  h2{font-size:17px;font-weight:700}
+  .sec-desc{color:var(--mut);font-size:11.5px;margin-bottom:16px}
+  .sec-desc code{color:var(--amber);background:rgba(251,191,36,.08);padding:1px 5px;border-radius:4px;font-size:11px}
+
+  /* ---- flow components ---- */
+  .flow{display:flex;flex-direction:column;align-items:center}
+  .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .node{
+    border:1.5px solid var(--line);border-radius:6px;background:var(--card);
+    padding:9px 14px;font-size:12px;text-align:center;position:relative;max-width:420px;
+  }
+  .node b{font-weight:700}
+  .node .s{display:block;color:var(--mut);font-size:10px;margin-top:3px;text-align:center}
+  .node .k{display:block;color:var(--mut);font-size:9px;margin-top:2px;opacity:.85}
+  .node .n{position:absolute;top:-9px;left:-9px;width:18px;height:18px;border-radius:50%;
+           background:var(--card);border:1.5px solid currentColor;color:inherit;
+           font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .node.wide{min-width:380px}
+  .node.tall{padding:14px 16px}
+  .cyan  {border-color:var(--cyan);  background:rgba(8,51,68,.4)}
+  .cyan .k{color:#67e8f9}
+  .emerald{border-color:var(--emerald);background:rgba(6,78,59,.4)}
+  .emerald .k{color:#6ee7b7}
+  .violet{border-color:var(--violet);background:rgba(76,29,149,.4)}
+  .violet .k{color:#c4b5fd}
+  .amber {border-color:var(--amber); background:rgba(120,53,15,.3)}
+  .amber .k{color:#fcd34d}
+  .rose  {border-color:var(--rose);  background:rgba(136,19,55,.4)}
+  .rose .k{color:#fda4af}
+  .orange{border-color:var(--orange);background:rgba(251,146,60,.3)}
+  .orange .k{color:#fdba74}
+  .slate {border-color:var(--slate); background:rgba(30,41,59,.5)}
+  .slate .k{color:#cbd5e1}
+  .dim{opacity:.85}
+
+  .diamond{
+    border:1.5px solid var(--amber);background:rgba(120,53,15,.25);color:var(--amber);
+    clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);
+    padding:20px 26px;font-size:11px;text-align:center;position:relative;
+  }
+  .diamond b{display:block;margin-top:2px}
+  .diamond.rose{border-color:var(--rose);color:var(--rose);background:rgba(136,19,55,.3)}
+  .diamond.cyan{border-color:var(--cyan);color:var(--cyan);background:rgba(8,51,68,.4)}
+
+  .arrow{position:relative;width:2px;height:26px;background:var(--line);flex:none}
+  .arrow::after{content:'';position:absolute;left:-4.5px;bottom:-1px;
+                border:5px solid transparent;border-top-color:var(--line)}
+  .arrow.short{height:16px}
+  .arrow .lab{position:absolute;left:10px;top:2px;white-space:nowrap;color:var(--mut);
+              font-size:10px;background:var(--bg);padding:0 4px}
+  .arrow .lab.y{color:var(--amber)}
+  .arrow .lab.r{color:var(--rose)}
+  .arrow .lab.c{color:var(--cyan)}
+
+  .branch{display:flex;gap:44px;justify-content:center;align-items:flex-start}
+  .leg{display:flex;flex-direction:column;align-items:center}
+  .leg-tag{font-size:10px;color:var(--mut);margin-bottom:4px}
+  .leg-tag.y{color:var(--amber)}
+  .leg-tag.r{color:var(--rose)}
+  .note{font-size:10px;color:var(--mut);border-left:2px solid var(--line);
+        padding:3px 10px;margin:8px auto 0;max-width:760px;background:rgba(15,23,42,.6)}
+  .note b{color:var(--amber)}
+  .note .ok{color:var(--emerald)}
+
+  /* ---- architecture overview ---- */
+  .arch{display:flex;flex-direction:column;gap:0;align-items:center}
+  .band{border:1.5px dashed var(--line);border-radius:10px;padding:14px 18px;
+        width:100%;margin:8px 0;position:relative}
+  .band .bname{position:absolute;top:-10px;left:14px;background:var(--bg);padding:0 8px;
+               font-size:10px;color:var(--mut);letter-spacing:1px}
+  .band-inner{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;align-items:center}
+  .band.cyan{border-color:rgba(34,211,238,.4)} .band.cyan .bname{color:var(--cyan)}
+  .band.emerald{border-color:rgba(52,211,153,.4)} .band.emerald .bname{color:var(--emerald)}
+  .band.violet{border-color:rgba(167,139,250,.4)} .band.violet .bname{color:var(--violet)}
+  .band.amber{border-color:rgba(251,191,36,.4)} .band.amber .bname{color:var(--amber)}
+  .band.slate{border-color:rgba(148,163,184,.4)} .band.slate .bname{color:var(--slate)}
+  .core-box{border:1.5px solid var(--emerald);border-radius:10px;background:rgba(6,78,59,.25);
+            padding:12px 14px;display:flex;flex-direction:column;gap:8px;min-width:560px}
+  .core-box .ct{font-size:11px;color:#6ee7b7;text-align:center;font-weight:700;letter-spacing:1px}
+  .core-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .mini{border:1px solid rgba(52,211,153,.5);border-radius:6px;background:rgba(6,78,59,.35);
+        font-size:10.5px;padding:6px 8px;text-align:center}
+  .mini b{color:#6ee7b7}
+  .mini .s{display:block;color:var(--mut);font-size:9px;margin-top:2px}
+
+  table{border-collapse:collapse;width:100%;font-size:11px;margin-top:10px}
+  th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:rgba(15,23,42,.8);color:var(--cyan);font-weight:700}
+  td code{color:var(--amber);font-size:10.5px}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 18px;font-size:10.5px;color:var(--mut)}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .sw{width:14px;height:14px;border-radius:4px;display:inline-block}
+  footer{margin-top:40px;border-top:1px solid var(--line);padding-top:14px;
+         color:var(--mut);font-size:10.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:1px 8px;
+        font-size:10px;color:var(--mut);margin-right:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1><span class="dot"></span>vtouch-project 完整实现流程图</h1>
+  <div class="sub">Android 触摸合并系统 · 用户态 <b>EVIOCGRAB</b> + <b>uinput</b> 将真实触摸与虚拟触摸合并为单一触摸设备 · 源码锚点: src/vtouchd.c (988 行) / scripts/build_bundle.py (932 行)</div>
+</header>
+
+<nav>
+  <a href="#overview">① 总体架构</a>
+  <a href="#init">② vtouchd 启动</a>
+  <a href="#poll">③ 主事件循环</a>
+  <a href="#phys">④ 触摸帧流水线</a>
+  <a href="#emit">⑤ 帧发射</a>
+  <a href="#region">⑥ 区域匹配</a>
+  <a href="#ws">⑦ WebSocket 服务</a>
+  <a href="#bundle">⑧ AutoJs6 bundle</a>
+  <a href="#build">⑨ 构建/CI/部署</a>
+  <a href="#sync">⑩ 同步流程</a>
+  <a href="#notes">⑪ 关键设计与陷阱</a>
+</nav>
+
+<!-- ================= ① 总体架构 ================= -->
+<section id="overview">
+  <div class="sec-head"><span class="sec-num">01</span><h2>总体架构与数据流</h2></div>
+  <div class="sec-desc">真实触摸被 vtouchd <code>EVIOCGRAB</code> 独占采集,与虚拟触摸(WS 注入)合并后统一写入 <code>/dev/uinput</code> 虚拟设备,Android 只看到一个触摸屏。区域匹配纯监听、1:1 透传,绝不拦截/代点。</div>
+  <div class="legend">
+    <span><span class="sw" style="background:rgba(8,51,68,.8);border:1px solid var(--cyan)"></span>客户端/前端</span>
+    <span><span class="sw" style="background:rgba(6,78,59,.8);border:1px solid var(--emerald)"></span>核心/后端</span>
+    <span><span class="sw" style="background:rgba(120,53,15,.7);border:1px solid var(--amber)"></span>构建/CI</span>
+    <span><span class="sw" style="background:rgba(30,41,59,.8);border:1px solid var(--slate)"></span>外部/系统</span>
+    <span><span class="sw" style="background:rgba(136,19,55,.8);border:1px solid var(--rose)"></span>安全/异常路径</span>
+  </div>
+
+  <div class="arch">
+    <div class="band slate">
+      <span class="bname">真实硬件层</span>
+      <div class="band-inner">
+        <div class="node slate">物理触摸屏 (真机/AVD)<span class="s">Type-B 多点触摸, slot ≤ 64</span></div>
+        <div class="arrow short"></div>
+        <div class="node slate">/dev/input/event0..63<span class="s">动态发现: 扫描并校验 ABS_MT_SLOT/TRACKING_ID/POSITION_X/Y (vtouchd.c:162 discover)</span></div>
+      </div>
+    </div>
+
+    <div class="arrow"><span class="lab">EVIOCGRAB 独占 (root)</span></div>
+
+    <div class="band emerald">
+      <span class="bname">vtouchd 核心 — 单进程 (src/vtouchd.c)</span>
+      <div class="band-inner">
+        <div class="core-box">
+          <div class="ct">一个 poll 循环驱动全部子系统</div>
+          <div class="core-grid">
+            <div class="mini"><b>EVIOCGRAB 采集</b><span class="s">physical_events() 读 24B input_event, 维护 phys[64] 槽表</span></div>
+            <div class="mini"><b>坐标转换</b><span class="s">logical_to_raw / raw_to_logical, 竖屏物理坐标系 (-w/-h)</span></div>
+            <div class="mini"><b>帧合并发射</b><span class="s">emit_frame() phys+virt 合成一帧, 单次 writev → /dev/uinput</span></div>
+            <div class="mini"><b>区域匹配</b><span class="s">region_match() SYN 后执行, 五事件纯监听, ≤32 区域</span></div>
+            <div class="mini"><b>WS 服务器</b><span class="s">127.0.0.1:27183, 手工握手+解帧, 单客户端踢旧</span></div>
+            <div class="mini"><b>UI 回调</b><span class="s">vtouch_set_callbacks / vtouch_ui_sync, 进程内直通面板</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="band violet">
+      <span class="bname">系统内核层</span>
+      <div class="band-inner">
+        <div class="node violet">/dev/uinput 「vtouch-merged」<span class="s">BUS_VIRTUAL · INPUT_PROP_DIRECT · ABS 范围复制自物理轴 · 槽数 = phys + virt</span></div>
+        <div class="arrow short"></div>
+        <div class="node violet">Android InputReader<span class="s">系统把合并设备视为唯一触摸屏, 真实+虚拟触摸共存互不干扰</span></div>
+      </div>
+    </div>
+
+    <div class="arrow"></div>
+
+    <div class="band cyan">
+      <span class="bname">客户端层</span>
+      <div class="band-inner">
+        <div class="node cyan">AutoJs6 bundle (vtouch_bundle.js)<span class="s">自释放二进制 → 手写 WS 连接 → Finger/区域监听/JS 管理 UI (build_bundle.py 产物)</span></div>
+        <div class="node cyan">外部程序 / 调试<span class="s">ws://127.0.0.1:27183, 文本帧协议 (tests/ws_smoke.py)</span></div>
+        <div class="node cyan">单进程 UI (设计态)<span class="s">vtouchd 编译为 C 库嵌入 app_process → JNI → libtestimgui.so → EGL+Dear ImGui 面板, 内存直连无 socket</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">关键失败语义: <b>坏 WS 客户端只关连接</b>(虚拟触点复位),物理 grab 与 uinput 设备保持存活;只有进程整体崩溃才丢触摸 — 由 AutoJs6 侧重连循环自动拉起恢复。</div>
+</section>
+
+<!-- ================= ② vtouchd 启动 ================= -->
+<section id="init">
+  <div class="sec-head"><span class="sec-num">02</span><h2>vtouchd 启动初始化 (vtouch_init, vtouchd.c:895)</h2></div>
+  <div class="sec-desc">顺序敏感: <code>Socket 先建, EVIOCGRAB 最后</code> — socket 失败绝不留下触摸被 grab 的死状态。库化接口 (vtouch_init/poll_step/cleanup) 与命令行 main 共用同一路径。</div>
+  <div class="flow">
+    <div class="node emerald"><span class="n">1</span><b>apply_args()</b> 解析命令行<span class="s">-w/-h 逻辑屏宽高(必填) · -v 虚拟槽数(默认10, ≤32) · -p 端口(默认27183) · -ui 兼容标志 · -s 兼容忽略</span><span class="k">vtouchd.c:875</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">2</span><b>校验逻辑分辨率</b><span class="s">logical_width/height ≥ 2, 否则返回 -2 (后续坐标换算依赖)</span></div>
+    <div class="arrow"></div>
+    <div class="diamond cyan">找到 Type-B 触摸设备?<b>扫描 event0..63</b></div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">否</span></div>
+        <div class="node rose">失败退出 -2<span class="s">无可用多点触摸设备, 拒绝启动</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab c">是</span></div>
+        <div class="node emerald"><span class="n">3</span><b>validate_device()</b> 校验设备能力<span class="s">EVIOCGBIT 检查 ABS_MT_SLOT/TRACKING_ID/POSITION_X/Y · 槽数 = max-min+1 (≤64) · 读 ABS_X/Y 范围 → axmin/axmax</span><span class="k">vtouchd.c:139</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">4</span><b>setup_uinput()</b> 创建虚拟设备<span class="s">open /dev/uinput → EV_SYN/EV_KEY/EV_ABS + BTN_TOUCH/BTN_TOOL_FINGER + INPUT_PROP_DIRECT → ABS_MT_SLOT/TRACKING_ID/POSITION_X/Y/TOOL_TYPE → 名称「vtouch-merged」, BUS_VIRTUAL → UI_DEV_CREATE</span><span class="k">vtouchd.c:218</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">5</span><b>open 物理设备</b><span class="s">O_RDONLY|O_NONBLOCK|O_CLOEXEC</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">6</span><b>make_listen()</b> 绑定 WS 端口<span class="s">仅 127.0.0.1:27183, SO_REUSEADDR, 拒绝局域网</span><span class="k">vtouchd.c:857</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">7</span><b>EVIOCGRAB 独占物理触摸 (最后一步)</b><span class="s">ioctl(input_fd, EVIOCGRAB, 1) — 物理设备从此只向本进程送事件; 任何前置失败都不触碰 grab</span><span class="k">vtouchd.c:925</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">8</span><b>进入主循环 vtouch_poll_step(-1)</b><span class="s">main(): init → while(poll_step==0); 收到 SIGTERM/SIGINT → stop_flag → cleanup 释放 grab + 销毁 uinput</span><span class="k">vtouchd.c:981</span></div>
+  </div>
+</section>
+
+<!-- ================= ③ 主事件循环 ================= -->
+<section id="poll">
+  <div class="sec-head"><span class="sec-num">03</span><h2>主事件循环 (vtouch_poll_step, vtouchd.c:934)</h2></div>
+  <div class="sec-desc">单 poll 监控三路 fd, 所有子系统(触摸/WS/区域)共用此循环 — 无中间进程、无半死状态。超时 1000ms。</div>
+  <div class="flow">
+    <div class="node emerald"><span class="n">1</span><b>poll 3 个 fd</b><span class="s">p[0]=input_fd(POLLIN) · p[1]=listen_fd(POLLIN) · p[2]=client_fd(POLLIN, 仅在已连接时加入)</span></div>
+    <div class="arrow"></div>
+    <div class="diamond">有就绪事件?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab">p[0] input</span></div>
+        <div class="node emerald"><b>physical_events()</b><span class="s">读物理触摸帧 → 合并注入 uinput → 区域匹配 → UI 回调 (详见 ④)</span><span class="k">vtouchd.c:609</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab">p[1] listen</span></div>
+        <div class="node cyan"><b>accept 新 WS 连接</b><span class="s">已有客户端 → 先踢旧(close + 复位) → websocket_handshake 握手 → 设为 client_fd</span><span class="k">vtouchd.c:948</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab">p[2] client</span></div>
+        <div class="node cyan"><b>client_frame()</b><span class="s">读一帧 → 解 mask → handle_line 执行命令 → 回响应 (详见 ⑦)</span><span class="k">vtouchd.c:822</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="diamond rose">client HUP/ERR 或帧解析失败?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">是</span></div>
+        <div class="node rose"><b>drop_client()</b><span class="s">close(fd) → subscribed=0 → owner_reset() 把全部虚拟触点置 pending_up 并立即发射 — 虚拟手指全部抬起, 物理 grab 不丢</span><span class="k">vtouchd.c:814</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">否</span></div>
+        <div class="node emerald"><b>input fd 报 ENODEV/EIO</b><span class="s">物理设备消失 → stop_flag → 整体退出 (由外部守护拉起)</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= ④ 触摸帧流水线 ================= -->
+<section id="phys">
+  <div class="sec-head"><span class="sec-num">04</span><h2>物理触摸帧流水线 (physical_events, vtouchd.c:609)</h2></div>
+  <div class="sec-desc">逐条消费 <code>struct input_event</code>(24B), 先填 <code>phys[]</code> 槽表, 遇到 <code>SYN_REPORT</code> 才执行注入+匹配 — 帧边界安全, 绝不阻塞触摸路径。</div>
+  <div class="flow">
+    <div class="node emerald"><span class="n">1</span><b>read(input_fd) 24 字节事件</b><span class="s">循环读直到 EAGAIN</span></div>
+    <div class="arrow"></div>
+    <div class="diamond cyan">EV_ABS + ABS_MT_SLOT?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">是</span></div>
+        <div class="node emerald"><b>selected_slot = value</b><span class="s">越界(0..phys_slots-1)则归 0 — 后续 ABS 事件都写入该槽</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab">否</span></div>
+        <div class="node emerald"><b>按 code 写槽表</b><span class="s">TRACKING_ID: &lt;0 → down=0+pending_up=1; ≥0 → 记录 id, down=1<br>POSITION_X/Y (Type-B) · ABS_X/Y (Type-A 兜底, 模拟器 virtio 用)</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="diamond">SYN_REPORT?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">否</span></div>
+        <div class="node slate">继续读下一事件</div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">是 — 帧边界, 依次执行三件事</span></div>
+        <div class="node emerald"><span class="n">a</span><b>emit_frame()</b> 物理+虚拟合并帧一次 writev 注入 uinput (详见 ⑤)</div>
+        <div class="arrow short"></div>
+        <div class="node emerald"><span class="n">b</span><b>region_match()</b> 五事件匹配, 进程内回调 + WS 推送 (详见 ⑥)<span class="s">ps_down 此时仍为上一帧状态 → 正好判定「新按下/刚抬起」</span></div>
+        <div class="arrow short"></div>
+        <div class="node emerald"><span class="n">c</span><b>vtouch_ui_sync()</b> 进程内触摸回调喂 ImGui 面板<span class="s">按下(1)/移动(2, 仅坐标变化)/抬起(0), 逐槽状态迁移</span><span class="k">vtouchd.c:63</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="node cyan"><b>broadcast_phys()</b> 订阅者推送 pev<span class="s">仅在状态变化时推 (down/move/up), 坐标换算回逻辑系; 无订阅者零开销</span><span class="k">vtouchd.c:590</span></div>
+  </div>
+</section>
+
+<!-- ================= ⑤ 帧发射 ================= -->
+<section id="emit">
+  <div class="sec-head"><span class="sec-num">05</span><h2>合并帧发射 (emit_frame, vtouchd.c:272)</h2></div>
+  <div class="sec-desc">槽位布局: <code>0..phys_slots-1</code> 物理槽 + <code>phys_slots..phys_slots+vslots-1</code> 虚拟槽, 同一 uinput 设备, 同一 SYN 提交 — Android 视为同一触摸面。</div>
+  <div class="flow">
+    <div class="node emerald"><span class="n">1</span><b>物理 pending_up 槽</b><span class="s">ev_add(SLOT, i) + ev_add(TRACKING_ID, -1) — 先抬起再移动, 顺序由内核按事件序保证</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">2</span><b>物理 down 槽</b><span class="s">SLOT + TRACKING_ID(原始 id) + POSITION_X/Y(原始 raw 值, 零精度损失) + TOOL_TYPE(FINGER)</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">3</span><b>虚拟 pending_up / down 槽</b><span class="s">SLOT = phys_slots + i; tracking id 由 next_tracking_id 自增分配(溢出回绕 1)</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">4</span><b>BTN_TOUCH / BTN_TOOL_FINGER</b><span class="s">any_down() = 物理或虚拟任一槽按下 → 1, 否则 0</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><span class="n">5</span><b>SYN_REPORT + 单次 writev</b><span class="s">ev_n 累计 ≤483 事件(96 槽×5+3), iovec 上限 512; 整帧一次 writev 零碎片</span><span class="k">vtouchd.c:174,188</span></div>
+    <div class="arrow"></div>
+    <div class="diamond rose">writev 短写?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">是 (uinput 极罕见)</span></div>
+        <div class="node rose">逐块补发剩余字节<span class="s">不丢帧尾; 补发也失败 → 丢弃帧返回 -1</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">否</span></div>
+        <div class="node emerald">清零全部 pending_up<span class="s">帧完成</span></div>
+      </div>
+    </div>
+    <div class="note">坐标转换 (vtouchd.c:108/121): <b>logical_to_raw</b>: raw = axmin + logical×span/(size-1) · <b>raw_to_logical</b>: logical = (raw-axmin)×(size-1)/span。daemon 恒以<b>竖屏物理坐标</b>运行 (bundle 启动时 wm size 归一化 W&lt;H), 客户端旋转换算见 ⑧。</div>
+  </div>
+</section>
+
+<!-- ================= ⑥ 区域匹配 ================= -->
+<section id="region">
+  <div class="sec-head"><span class="sec-num">06</span><h2>区域匹配五事件 (region_match, vtouchd.c:443)</h2></div>
+  <div class="sec-desc">纯监听: 物理触摸始终 1:1 透传, 区域命中<b>只推事件不拦截不代点</b>。静态数组无分配, 纯 int 比较, 开销微秒级。同 id 重复 add = 原地更新属性(面板开关/显隐安全)。</div>
+  <div class="flow">
+    <div class="node violet"><b>区域表 regions[32]</b><span class="s">type 0=矩形(x1,y1,x2,y2) · type 1=圆形(cx,cy,r) · id ≤15 字符 · enabled 开关<br>add 校验: 区域数&gt;32 / 非数字 / type∉{0,1} / a1≥宽 / a2≥高 / a3&gt;100000(圆半径/矩形x2) / a4≥高 → err region, 不影响已有配置</span><span class="k">vtouchd.c:335-393</span></div>
+    <div class="arrow"></div>
+    <div class="node violet"><b>帧状态辅助表</b><span class="s">slot_in[phys][region]: 上一帧槽是否在区域内 · slot_hit: 本次按下是否命中过 · slot_last_x/y: 上次 move 推送基准</span></div>
+    <div class="arrow"></div>
+    <div class="node emerald"><b>对每个物理槽 × 每个启用区域</b><span class="s">raw→logical 换算失败直接跳过 — 只读 phys[], 绝不阻塞注入路径</span></div>
+    <div class="arrow"></div>
+    <div class="diamond cyan">槽当前 down?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">是 (按下状态)</span></div>
+        <div class="node violet"><b>上一帧未按下 = 新按下</b><span class="s">命中 → slot_hit=1 + 推 <b>down</b>; 记录按下位置为 move 基准<br>上一帧已按下 → 状态迁移判定:</span>
+          <span class="s">未命中→命中 = 推 <b>enter</b> · 命中→未命中 = 推 <b>exit</b> · 在内且坐标变化 = 推 <b>move</b> (enter/down 帧不重复推)</span>
+        </div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">否 (刚抬起, ps_down 还是上帧状态)</span></div>
+        <div class="node violet"><b>抬起且按下期间命中过 &amp; 抬起点仍命中</b><span class="s">→ 推 <b>up</b> (纯监听, 不代点)<br>随后 slot_hit 清零 (两帧都未按下时)</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="node orange"><b>region_ev_send(): 双通道通知</b><span class="s">① 先调进程内 vtouch_ev_cb → ImGui 面板闪烁/日志 (无 WS 客户端也通知) · ② 再 WS 推送 region_ev &lt;id&gt; &lt;ev&gt; &lt;slot&gt; &lt;lx&gt; &lt;ly&gt; (需 subscribed)</span><span class="k">vtouchd.c:423</span></div>
+    <div class="note">导出接口 (单进程面板直读写, vtouchd.c:406): <b>vtouch_region_clear / vtouch_region_count / vtouch_region_add / vtouch_get_region</b> — 面板与 WS 客户端共用同一张区域表。</div>
+  </div>
+</section>
+
+<!-- ================= ⑦ WebSocket ================= -->
+<section id="ws">
+  <div class="sec-head"><span class="sec-num">07</span><h2>WebSocket 服务与协议 (vtouchd.c:641-855)</h2></div>
+  <div class="sec-desc">纯 C 手写 WS (SHA-1 握手 + 帧解析), 零依赖。文本帧协议, 一帧 = 一条命令 = 一行响应。只监听回环, 单客户端, 新连接踢旧。</div>
+
+  <div class="flow">
+    <div class="node cyan"><span class="n">1</span><b>accept → websocket_handshake</b><span class="s">逐字节收 HTTP 头(≤8192B, RCVTIMEO 0.5s 防挂死触摸) → 校验 GET / + Sec-WebSocket-Key(24字符) + Upgrade:websocket + Connection:Upgrade + Version:13 → SHA-1(key+GUID) → base64 → 101 响应</span><span class="k">vtouchd.c:770</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">2</span><b>client_frame() 帧解析</b><span class="s">FIN=1 且 masked 必选(否则 1002 关闭) · opcode 仅 1(文本)/8(关闭)/9(ping)/10(pong) · 长度 126/127 扩展 · 负载 ≤4096B, 控制帧 ≤125B</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">3</span><b>解 mask → handle_line()</b><span class="s">payload 内 \n\r 替换为空格, 行内 strtok_r 分词, 非法命令 → err unknown</span><span class="k">vtouchd.c:478</span></div>
+  </div>
+
+  <table>
+    <tr><th>命令</th><th>说明</th><th>响应</th></tr>
+    <tr><td><code>ping</code></td><td>保活探测</td><td><code>pong</code></td></tr>
+    <tr><td><code>res</code></td><td>逻辑分辨率与 raw 轴范围</td><td><code>res &lt;W&gt; &lt;H&gt; raw &lt;xmin&gt; &lt;xmax&gt; &lt;ymin&gt; &lt;ymax&gt;</code></td></tr>
+    <tr><td><code>reset</code></td><td>全部虚拟触点复位</td><td><code>ok</code></td></tr>
+    <tr><td><code>region clear</code></td><td>清空区域表</td><td><code>ok &lt;n&gt;</code></td></tr>
+    <tr><td><code>region add &lt;id&gt; &lt;type&gt; &lt;a1&gt; &lt;a2&gt; &lt;a3&gt; &lt;a4&gt; &lt;en&gt;</code></td><td>添加/更新区域(同 id 原地更新), ≤32</td><td><code>ok &lt;n&gt;</code> / <code>err region</code></td></tr>
+    <tr><td><code>region list</code></td><td>逐行输出配置直到 <code>end &lt;n&gt;</code></td><td><code>region ... \n end &lt;n&gt;</code></td></tr>
+    <tr><td><code>sub</code> / <code>unsub</code></td><td>订阅/退订 pev 物理触摸流</td><td><code>ok</code></td></tr>
+    <tr><td><code>down|move|up &lt;slot&gt; &lt;x&gt; &lt;y&gt;</code></td><td>虚拟触点注入 (逻辑坐标, 立即发射帧)</td><td><code>ok</code> / <code>err point</code></td></tr>
+    <tr><td><code>begin_frame</code></td><td>开启原子多指帧 (staged 副本 + frame_seen 去重)</td><td><code>ok</code></td></tr>
+    <tr><td><code>point &lt;slot&gt; &lt;state&gt; &lt;x&gt; &lt;y&gt;</code></td><td>帧内点 (state: down/move/up, 每槽每帧一次)</td><td><code>ok</code> / <code>err point</code></td></tr>
+    <tr><td><code>end_frame</code></td><td>提交整帧 → 单次 emit_frame (单 SYN_REPORT)</td><td><code>ok</code> / <code>err frame</code></td></tr>
+  </table>
+
+  <div class="note">事件(服务端→客户端): <b>pev &lt;slot&gt; &lt;down|move|up&gt; &lt;lx&gt; &lt;ly&gt;</b> — 订阅后物理流, 状态变化才推, 断连/被踢后订阅清零需重 <code>sub</code> · <b>region_ev &lt;id&gt; &lt;ev&gt; &lt;slot&gt; &lt;lx&gt; &lt;ly&gt;</b> — 五事件。安全: 仅回环、拒绝未完成握手、不执行客户端 shell 字符串、异常关闭复位虚拟触点。</div>
+</section>
+
+<!-- ================= ⑧ AutoJs6 bundle ================= -->
+<section id="bundle">
+  <div class="sec-head"><span class="sec-num">08</span><h2>AutoJs6 客户端 bundle (scripts/build_bundle.py → clients/vtouch_bundle.js)</h2></div>
+  <div class="sec-desc">单文件自包含: 内嵌 vtouchd 二进制(base64) + 手写 WS 客户端 + 区域引擎 + JS 管理 UI。传输层<b>不用 AutoJs6 OkHttp WebSocket</b>(回调派发间歇性卡死), 用 java.net.Socket 手写最小 WS。</div>
+
+  <div class="flow">
+    <div class="node amber"><b>bundle 文件组成 (build_bundle.py main, :905)</b><span class="s">CORE(核心函数) + 内嵌 B64 二进制(76 字符分行 — 绕内网 WAF 403) + VTOUCH_UI_SRC(json 字符串) + ONE_LIB(区域 store/engine) + DEMO(module.exports)</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><b>导出 API</b><span class="s">run · ensure · install · connect · send · finger · Finger · frame · reset · stop · rot · c2p/p2c · loadRegions · rgSave · createEngine · sub/unsub · parseEv · uiSource · BIN/HOST/PORT</span></div>
+  </div>
+
+  <div class="row" style="margin-top:18px">
+    <div class="node cyan wide"><b>vt.run(fn) — 仪式全包</b>
+      <span class="s">device.wakeUpIfNeeded() → threads.start(业务线程) → keepScreenOn(60s) → ensure() → connect() → fn() → close → cancelKeepingAwake → finally vtouchStop() + exit()</span>
+      <span class="k">主线程必须直接返回 (Looper 泵事件), 阻塞只在业务线程</span>
+    </div>
+    <div class="node cyan wide"><b>vtouchEnsure() — 幂等启动</b>
+      <span class="s">pid 存活(kill -0) → 直接返回 · 缺二进制 → vtouchInstall() · 否则: killall 旧进程 → wm size 取物理屏并竖屏归一(W&lt;H) → nohup vtouchd -w W -h H → 写 pid 文件</span>
+      <span class="k">vtouchInstall: Base64 decode → 应用私有目录 stage → su cp 到 /data/local/tmp/vtouchd → chmod 755 → 重跑 ensure</span>
+    </div>
+    <div class="node cyan wide"><b>vtouchConnect() — 手写 WS</b>
+      <span class="s">Socket 连接 127.0.0.1:27183 → 手工握手(校验 101 + Sec-WebSocket-Accept) → masked 文本帧收发; 端口滞后时 300ms 小步重试直到超时(默认 10s)</span>
+      <span class="k">SEND_LOCK(threads.lock) 保护读线程 ping 与业务线程触摸包的并发写; 未订阅时 send 前先 drain() 排掉回包防 TCP 缓冲撑满</span>
+    </div>
+    <div class="node cyan wide"><b>Finger / frame — 触摸注入</b>
+      <span class="s">finger() 自动分配空闲 slot(0-9) 或显式指定; down/move/up/tap/swipe(每 ~16.7ms 插值)/state; frame() = begin_frame + point×N + end_frame 原子多指</span>
+      <span class="k">所有坐标经 vtC2P (竖屏物理系); 回调/绘制经 vtP2C 回当前屏; R1 旋转真机闭环验证, R3 为镜像对称待验证</span>
+    </div>
+  </div>
+
+  <div class="sec-head" style="margin-top:26px"><span class="sec-num">8.1</span><h2>bootWatch — 区域监听仪式全包 (build_bundle.py:797)</h2></div>
+  <div class="flow">
+    <div class="node cyan"><span class="n">1</span><b>单实例互踢 (vt-takeover 广播)</b><span class="s">events.broadcast 发唯一 token; 旧实例收到异 token → ovClose + uiClose + vt.stop + exit</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">2</span><b>ensure + connect + loadRegions + ovShow</b><span class="s">加载 storages「vtouch_regions」区域配置, 显示 overlay 描边</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">3</span><b>pushRegions() 配置下发</b><span class="s">region clear → 逐条 region add (circle: id 1 cx cy r 0 en; rect: id 0 x1 y1 x2 y2 en) — 匹配在 daemon native 层 (B 方案)</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">4</span><b>vt.sub(c) 订阅 + 读线程死循环</b><span class="s">c.recv() 无数据则 3s 一次 ping + sleep(10); 收到行 → dispatch():<br>region_ev → P2C 换算 → 分发五事件到 handlers + down/enter 时 ovFlash · pev → FINGERS 表更新 → overlay 画蓝点手指</span></div>
+    <div class="arrow"></div>
+    <div class="diamond rose">读线程异常?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">是 — 断线重连</span></div>
+        <div class="node cyan"><b>重连循环</b><span class="s">close → ensure → connect → <b>重新 sub + pushRegions</b> (必须更新闭包引用的全局 c, 否则配置下发到旧连接被吞); 失败 sleep 2s 再试</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">否</span></div>
+        <div class="node cyan"><b>5s 兜底轮询</b><span class="s">rotSync 防旋转监听漏事件 · loadRegions 与内存 regions 做 JSON 比对, 变化则重新下发 + 刷新 overlay — 支持运行中热改配置</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="node slate">events.on("exit") → rotUnwatch + vt.stop + ovClose + uiClose</div>
+  </div>
+
+  <div class="sec-head" style="margin-top:26px"><span class="sec-num">8.2</span><h2>JS 管理 UI (eval(vt.uiSource) → 调用侧主上下文)</h2></div>
+  <div class="flow">
+    <div class="node cyan"><b>ovShow overlay 预览层</b><span class="s">floaty.rawWindow 全屏 canvas, setTouchable(false) 纯显示 · 区域红描边 3px + 名称 · 命中后 400ms 内亮绿 6px 闪烁 (ovFlash) · 物理手指蓝圆 + 槽号 · 竖屏坐标 P2C 绘制 · 绘制线程池与更新并发 → 快照全局引用防 null</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><b>ui() 管理面板 (深色卡片)</b><span class="s">标题栏拖动 · 8 槽静态 XML 行(API36 ColorOS 程序化 Button 会毒崩绘制 — 写死行) · 每行: 开关●○ / 显隐 / 删除 · ＋矩形 / ＋圆形框选 · 预览总开关 · 最小化小悬浮球(可拖, 点恢复)</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><b>capStart() 框选采集</b><span class="s">全屏 rawWindow 可触摸 canvas · 按下起点, 拖动画绿框/圆, 抬手距离&gt;50px 才保存 · view 相对坐标 + 窗体偏移 → C2P 存竖屏物理坐标 → rgSave + 刷新 overlay</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><b>rotSync() 旋转自适应</b><span class="s">DisplayManager 监听(零轮询) + 5s 兜底 + 900ms 复核 · 一致性门: 方向奇偶与宽高对调必须一致否则 500ms 后重试 · overlay 重建回顶 + 管理窗改尺寸拉回屏内 + 框选中断</span></div>
+  </div>
+  <div class="note">区域持久化: <b>storages.create("vtouch_regions")</b> (AutoJs6 侧, 竖屏物理坐标); 默认兜底区域「btn」按钮区 (400,1000,1040,1400)。ONE_LIB 还导出 JS 侧引擎 <b>rgCreateEngine</b>(feed pev 推五事件) — 与 daemon native 匹配为平行实现, bundle 现走 native B 方案。</div>
+</section>
+
+<!-- ================= ⑨ 构建/CI/部署 ================= -->
+<section id="build">
+  <div class="sec-head"><span class="sec-num">09</span><h2>构建 / CI / 部署 (build.yml + build_bundle.py)</h2></div>
+  <div class="sec-desc">二进制与 bundle <b>永不入库</b> — GitHub Actions 构建, artifact 分发。工作流名 <code>Build vtouch (Android NDK)</code>。</div>
+  <div class="flow">
+    <div class="node amber"><span class="n">1</span><b>push 源码</b><span class="s">sync_auto.py 或 git → 触发 master/main 分支 push / PR / workflow_dispatch</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">2</span><b>安装 NDK r27d (带缓存)</b><span class="s">runner.tool_cache 命中跳过下载; actions/cache key = android-ndk-r27d-linux</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">3</span><b>交叉编译 arm64</b><span class="s">aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c → build/vtouchd</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">4</span><b>生成 arm64 bundle</b><span class="s">python3 scripts/build_bundle.py (内嵌二进制 + node --check 语法校验) → 复制为 build/vtouch_bundle-arm64.js</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">5</span><b>交叉编译 x86_64 (AVD) + 生成 x86_64 bundle</b><span class="s">x86_64-linux-android24-clang 同参数 → build/vtouch_bundle-x86_64.js; 换 ABI 时 mv 二进制再跑 build_bundle.py</span></div>
+    <div class="arrow"></div>
+    <div class="node amber"><span class="n">6</span><b>验证 + 上传 artifact</b><span class="s">file 检查 ELF · 产物: vtouchd + 双 ABI bundle · tag 触发时同时创建 GitHub Release (softprops/action-gh-release)</span></div>
+    <div class="arrow"></div>
+    <div class="node cyan"><span class="n">7</span><b>部署到设备</b><span class="s">下载 vtouch_bundle-arm64.js → adb push /sdcard/vtouch_bundle.js → AutoJs6 运行示例脚本 → 首次运行自释放 vtouchd 到 /data/local/tmp 并拉起 → 连接 WS</span></div>
+    <div class="note">本地手动编译 (NDK 30.0.15729638): <code>"$NDK/aarch64-linux-android24-clang" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd</code> · 冒烟测试: <code>python tests/ws_smoke.py</code> (握手 + ping/pong + tap→ok, 需 vtouchd 运行在 127.0.0.1:27183) · <code>tests/ws_kick.js</code> 验证单客户端踢除。</div>
+  </div>
+</section>
+
+<!-- ================= ⑩ 同步 ================= -->
+<section id="sync">
+  <div class="sec-head"><span class="sec-num">10</span><h2>本地 → GitHub 同步 (scripts/sync_auto.py, 零 git push)</h2></div>
+  <div class="sec-desc">sha256 增量同步: 内容未变不提交, 幂等安全。git 仅用于对齐仓库现状 (<code>git fetch + reset --hard origin/master</code>), 从不 push。</div>
+  <div class="flow">
+    <div class="node slate"><span class="n">1</span><b>扫描受管文件</b><span class="s">MANAGED_DIRS: scripts/extension/src/docs/clients/tests/sdcard + README/PROJECT_STRUCTURE/AGENTS + workflows · 文本扩展名白名单 · 排除 .git/build/__pycache__/node_modules · ≤512KB</span></div>
+    <div class="arrow"></div>
+    <div class="node slate"><span class="n">2</span><b>sha256 对比 sync-state.json 缓存</b><span class="s">仅收集变化的文件; 删除/二进制天然不处理</span></div>
+    <div class="arrow"></div>
+    <div class="diamond cyan">有 GitHub fine-grained PAT?</div>
+    <div class="branch">
+      <div class="leg">
+        <div class="arrow short"><span class="lab y">是 (D:\MYP\sync-config.json 或 VT_SYNC_TOKEN)</span></div>
+        <div class="node slate"><b>API 通道</b><span class="s">GitHub REST Contents API (Contents: Read and write, 仅 vtouch-project) → PUT 每个变化文件 → 409 冲突跳过 (以远程为主) · 秒级静默</span></div>
+      </div>
+      <div class="leg">
+        <div class="arrow short"><span class="lab r">否 — Chrome 扩展回退通道</span></div>
+        <div class="node slate"><b>扩展通道</b><span class="s">Python WS 服务器 0.0.0.0:9336 → 扩展 offscreen 文档常驻 WS (SW 休眠免疫) → runtime.sendMessage 转发 SW → executeScript(MAIN world) 注入 GitHub 编辑页 → CodeMirror 填内容 → Commit → 验证跳转</span><span class="k">登录态天然可用 (用户已登录 Chrome); 127.0.0.1 会被系统代理 CONNECT 拦截 → 连本机局域网 IP (10.164.120.30, 换机器需改 offscreen.js/manifest.json)</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+    <div class="node slate"><span class="n">3</span><b>守护模式</b><span class="s">sync_auto_install.py install --watch 300 注册开机自启, 每 N 秒自动同步; 日志 D:\MYP\sync-auto.log</span></div>
+    <div class="note">CI 触发闭环: 同步 → GitHub push → build.yml 自动构建 → 下载 artifact → 部署设备 (见 ⑨)。</div>
+  </div>
+</section>
+
+<!-- ================= ⑪ 关键设计 ================= -->
+<section id="notes">
+  <div class="sec-head"><span class="sec-num">11</span><h2>关键设计决策与已知陷阱</h2></div>
+  <table>
+    <tr><th>主题</th><th>结论 (源码证据)</th></tr>
+    <tr><td>单进程合并</td><td>vtouchmerge(EVIOCGRAB+uinput) 与 vtouchws(WS) 合并为一个 poll 循环 (vtouchd.c 头注释) — 消除 UDS 跳转与半死状态 (merge 活 bridge 死)。</td></tr>
+    <tr><td>UI 单进程整合 (定案)</td><td>vtouchd 编译为 C 库 (<code>vtouch_init/poll_step/cleanup</code> + <code>region_*</code> + <code>set_callbacks</code>) 嵌入 app_process 渲染进程 → JNI → libtestimgui.so (EGL GLES2 + Dear ImGui) → SurfaceControl 图层。触摸/匹配/WS/面板同进程内存直连, 无 socket 转发; 脏检查渲染省 CPU; 透明合成 glClearColor(0,0,0,0) + RGBA8888; CJK 用 NotoSansCJK; AVD 需 -gpu host。</td></tr>
+    <tr><td>UI 方案调研结论 (docs/ui_approaches_research.md)</td><td>AutoJs6 floaty <b>无 webview 元素</b> (web.md 检索 0 命中, issue #467/#273/#437) → floaty 内 WebView 出局; 独立 WebView 壳 APK (方案 B) 为主候选; 前置条件: vtouchd 多客户端改造 (现单连接踢旧)。</td></tr>
+    <tr><td>/sdcard noexec</td><td>共享存储禁止执行 ELF → bundle 自释放必须 cp 到 /data/local/tmp/vtouchd (AGENTS.md 陷阱)。</td></tr>
+    <tr><td>SELinux</td><td>AutoJs6 应用上下文可能被拒访问 /data/local/tmp → 自释放路径需 <code>setenforce 0</code>; 真机 su 走 v8 包装器 (su_wrap.sh + sud.sh daemon + sudq 文件队列, 因 Runtime.exec("su") 是交互式 stdin)。</td></tr>
+    <tr><td>EVIOCGRAB 恢复</td><td>崩溃后物理触摸被 grab 到 fd 关闭为止 → AutoJs6 bootWatch 重连循环 (ensure + connect + sub + pushRegions) 秒级盲窗自动恢复。</td></tr>
+    <tr><td>动态设备发现</td><td>永不硬编码 /dev/input/eventX; 扫描 event0..63 取第一个 Type-B 多点触摸设备 (validate_device 校验 4 项 ABS_MT 能力 + 轴范围)。</td></tr>
+    <tr><td>sleep 阻塞事件循环</td><td>AutoJs6 主线程 sleep() 会卡 WS 回调 → 所有阻塞动作 (swipe 内插值 sleep / 回触) 必须 threads.start; 读线程只负责 recv/dispatch。</td></tr>
+    <tr><td>虚拟触摸不自激</td><td>daemon 只对物理槽做 region 匹配, 虚拟注入不产生 region_ev → 回触连击不会自我触发 (vtouch_touchback.js 注释)。</td></tr>
+    <tr><td>Type-A 兜底</td><td>AVD virtio 触屏发 ABS_X/Y 无 ABS_MT_POSITION → physical_events 增加 ABS_X/Y 分支; 但模拟器 console "event mouse" down 无坐标、move-under-down 不更新位置 → 物理 move 需真机验证。</td></tr>
+    <tr><td>WAF 规避</td><td>内网 HIS WAF 拦长 base64 → bundle 内嵌二进制 76 字符分行拼接 (build_bundle.py:913)。</td></tr>
+    <tr><td>WS 可靠性</td><td>仅回环 127.0.0.1; 坏客户端只关连接 (owner_reset 复位虚拟触点), grab 不丢; 只接受 masked 文本帧; 4096B 上限; 不执行 shell; 订阅状态随连接生命周期清零。</td></tr>
+    <tr><td>区域监听边界</td><td>region_match 在 SYN 帧注入完成<b>之后</b>执行 (ps_down 滞后一帧用于判定新按下/刚抬起) — 匹配绝不阻塞/修改触摸路径; onUp 条件为「抬起且按下期间命中过且抬起点仍命中」。</td></tr>
+  </table>
+</section>
+
+<footer>
+  <div><span class="pill">源码依据: src/vtouchd.c v988行</span><span class="pill">scripts/build_bundle.py v932行</span><span class="pill">docs/VTOUCH_PROTOCOL.md</span><span class="pill">.github/workflows/build.yml</span><span class="pill">scripts/sync_auto.py</span></div>
+  <div>生成于项目根目录分析 · 行号锚点对应当前 master (6d9270e)</div>
+</footer>
+
+</div>
+</body>
+</html>
