@@ -37,6 +37,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -101,6 +103,8 @@ static int g_emit_fail;
 
 static int write_full(int fd, const void *buf, size_t len);
 static void drop_client(void);
+static void sendq_clear(void);   /* 定义在下方出站队列处 */
+static int sendq_push(const unsigned char *p, size_t n);
 static int alloc_oslot(void);
 static int alloc_oid(void);
 
@@ -318,12 +322,18 @@ fail:
     ioctl(u_fd, UI_DEV_DESTROY); close(u_fd); u_fd = -1; return -1;
 }
 
-/* 收尾顺序固定：client → listen → 放 grab → 销毁 uinput。只跑一次。 */
+/* region 线程句柄（定义在下方转发区；cleanup 在前，先声明） */
+static pthread_t region_th;
+static int region_started;
+
+/* 收尾顺序固定：region 线程 → client → listen → 放 grab → 销毁 uinput。只跑一次。 */
 static void cleanup(void)
 {
     static int cleaned;
     if (cleaned) return;
     cleaned = 1;
+    stop_flag = 1;   /* 先停 region 线程（init 失败路径下 poll 循环没跑过，也要保证它能退出） */
+    if (region_started) { region_started = 0; pthread_join(region_th, NULL); }
     if (client_fd >= 0) { close(client_fd); client_fd = -1; }
     if (listen_fd >= 0) { close(listen_fd); listen_fd = -1; }
     if (input_fd >= 0) {
@@ -478,6 +488,297 @@ static void owner_reset(void)
     if (emit_frame() < 0) g_reemit = 1;
 }
 
+/* raw -> logical：供事件上报把物理坐标转回逻辑坐标（与 logical_to_raw 互逆的取整方向）。 */
+static int raw_to_logical(int raw, int axis, int *logical)
+{
+    int size = axis ? logical_height : logical_width;
+    long span = (long)axmax[axis] - axmin[axis];
+    long v;
+    if (size < 2 || span <= 0) return -1;
+    if (raw < axmin[axis]) raw = axmin[axis];
+    if (raw > axmax[axis]) raw = axmax[axis];
+    v = ((long)(raw - axmin[axis]) * (size - 1) + span / 2) / span;
+    if (v < 0) v = 0;
+    if (v > size - 1) v = size - 1;
+    *logical = (int)v;
+    return 0;
+}
+
+static uint64_t now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);   /* 单调时钟：系统时间调整不影响手势间隔 */
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
+/* ---- 事件队列（方案 §4.3）：订阅者独立 SPSC，本分支唯一消费者是 region 线程。
+ * 单生产者（poll 线程）+ 单消费者（region 线程）：tail 只由生产者写，head 正常只由
+ * 消费者 CAS 推进；生产者只在满队丢最旧时 fetch_add head（与消费者 CAS 线性化，
+ * 消费者可能 benign 地多处理一条已被跳过的边沿，状态机对此幂等）。
+ * 容量 64，主线程 push 永不阻塞（纯内存操作，微秒级）。
+ * 溢出：① 队尾同 slot move 就地覆盖合并；② 仍满则丢最旧（down/up 不丢——正常 1ms
+ * 消费下到不了丢弃分支，事件流是增量状态，丢旧 move 不影响最终语义）。 */
+#define VTQ_CAP 64
+struct vt_ev {
+    int slot;       /* 物理槽号（virt=0）或虚拟槽号（virt=1） */
+    int action;     /* 0=up 1=down 2=move */
+    int x, y;       /* 逻辑坐标 */
+    uint64_t ts;    /* down=按下时刻，move/up=帧到达时刻（手势识别预留） */
+    int virt;       /* 0=物理 1=虚拟（区域线程过滤 virt=1，不自激） */
+};
+static struct vt_ev vtq_buf[VTQ_CAP];
+static atomic_uint vtq_h, vtq_t;
+
+static void vtq_push(struct vt_ev ev)
+{
+    unsigned h = atomic_load_explicit(&vtq_h, memory_order_acquire);
+    unsigned t = atomic_load_explicit(&vtq_t, memory_order_relaxed);
+    unsigned i;
+    if (t - h < VTQ_CAP) {
+        vtq_buf[t % VTQ_CAP] = ev;
+        atomic_store_explicit(&vtq_t, t + 1, memory_order_release);
+        return;
+    }
+    if (ev.action == 2) {
+        for (i = t; i > h; i--) {   /* 新 move：队尾同 slot move 直接覆盖 */
+            struct vt_ev *q = &vtq_buf[(i - 1) % VTQ_CAP];
+            if (q->slot == ev.slot && q->virt == ev.virt && q->action == 2) { *q = ev; return; }
+        }
+        if (vtq_buf[h % VTQ_CAP].action == 2) {   /* 丢最旧（是个 move 才丢） */
+            atomic_fetch_add_explicit(&vtq_h, 1, memory_order_acq_rel);
+            t = atomic_load_explicit(&vtq_t, memory_order_relaxed);
+            vtq_buf[t % VTQ_CAP] = ev;
+            atomic_store_explicit(&vtq_t, t + 1, memory_order_release);
+            return;
+        }
+        fprintf(stderr, "vtouchd: 事件队列满且无 move 可合并，丢新 move slot%d\n", ev.slot);
+        return;
+    }
+    fprintf(stderr, "vtouchd: 事件队列满，丢最旧（action=%d）\n", vtq_buf[h % VTQ_CAP].action);
+    atomic_fetch_add_explicit(&vtq_h, 1, memory_order_acq_rel);
+    t = atomic_load_explicit(&vtq_t, memory_order_relaxed);
+    vtq_buf[t % VTQ_CAP] = ev;
+    atomic_store_explicit(&vtq_t, t + 1, memory_order_release);
+}
+
+static int vtq_pop(struct vt_ev *out)
+{
+    unsigned h, t;
+    for (;;) {
+        h = atomic_load_explicit(&vtq_h, memory_order_relaxed);
+        t = atomic_load_explicit(&vtq_t, memory_order_acquire);
+        if (h >= t) return 0;
+        if (atomic_compare_exchange_weak_explicit(&vtq_h, &h, h + 1,
+                memory_order_acq_rel, memory_order_relaxed)) break;
+    }
+    *out = vtq_buf[h % VTQ_CAP];
+    return 1;
+}
+
+/* ---- 区域表（方案语义零变化：结构与判定照搬完整版，读写加锁）。
+ * 写者：poll 线程（region clear/add 命令）。读者：region 线程（每事件拷贝快照）。
+ * 状态表（slot_in/slot_hit/slot_last）从主线程移入 region 线程私有，外加 r_down
+ * 做边沿（完整版用主线程 ps_down 判定新按/刚抬起，增量驱动改用本线程私有 r_down）。 */
+#define MAX_REGIONS 32
+#define REGION_ID_MAX 15
+struct region {
+    char id[REGION_ID_MAX + 1];
+    int type;              /* 0=rect 1=circle */
+    int enabled;
+    int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r（a4 占位） */
+};
+static struct region regions[MAX_REGIONS];
+static int region_count;
+static pthread_mutex_t region_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned char slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一事件该槽是否在区域内（region 线程私有） */
+static unsigned char slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下是否命中（up 依据，region 线程私有） */
+static int slot_last_x[MAX_PHYS], slot_last_y[MAX_PHYS]; /* 上次推送位置（region 线程私有） */
+static unsigned char r_down[MAX_PHYS];                   /* region 线程视角的槽按下边沿 */
+
+static void regions_clear(void)
+{
+    pthread_mutex_lock(&region_mu);
+    region_count = 0;
+    memset(regions, 0, sizeof regions);
+    pthread_mutex_unlock(&region_mu);
+    memset(slot_in, 0, sizeof slot_in);
+    memset(slot_hit, 0, sizeof slot_hit);
+    memset(slot_last_x, 0, sizeof slot_last_x);
+    memset(slot_last_y, 0, sizeof slot_last_y);
+    memset(r_down, 0, sizeof r_down);
+}
+
+static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
+{
+    struct region *rg;
+    size_t n;
+    int i, rc = -1;
+    if (!id) return -1;
+    n = strlen(id);
+    if (n == 0 || n > REGION_ID_MAX) return -1;
+    if (type != 0 && type != 1) return -1;
+    if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
+    if (a1 >= logical_width || a2 >= logical_height) return -1;
+    pthread_mutex_lock(&region_mu);
+    for (i = 0; i < region_count; i++) {   /* 同 id 原地更新（开关/显隐只改属性） */
+        if (strcmp(regions[i].id, id) == 0) {
+            rg = &regions[i];
+            rg->type = type;
+            rg->enabled = enabled ? 1 : 0;
+            rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+            fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
+                rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+            rc = 0;
+            break;
+        }
+    }
+    if (rc != 0 && region_count < MAX_REGIONS) {
+        rg = &regions[region_count++];
+        memset(rg, 0, sizeof *rg);
+        memcpy(rg->id, id, n);
+        rg->type = type;
+        rg->enabled = enabled ? 1 : 0;
+        rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+        fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
+            rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&region_mu);
+    return rc;
+}
+
+static int region_hit(const struct region *rg, int lx, int ly)
+{
+    if (!rg->enabled) return 0;
+    if (rg->type == 1) {
+        int dx = lx - rg->a1, dy = ly - rg->a2;
+        return dx * dx + dy * dy <= rg->a3 * rg->a3;
+    }
+    return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
+}
+
+/* 订阅通道位掩码（0 = 未订阅）：裸 sub 两个通道都订，sub region 只订区域事件、
+ * sub phys 只订原始轨迹——纯区域脚本不必再白收 pev。 */
+#define SUB_REGION 1
+#define SUB_PHYS   2
+static int sub_mask;   /* 只由 poll 线程写；region 线程读（最坏少推/多推一条，见 region_ev_send） */
+
+/* pev 边沿跟踪（主线程私有）：每 SYN 必走，与订阅无关——无订阅时也不能冻住，
+ * 否则按住的手指每帧重报 down，enter/move/up 全丢。 */
+static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
+
+/* 区域事件上报（region 线程上下文）：只进出站队列，绝不直写 socket。
+ * client_fd/sub_mask 是 poll 线程写的，读到过渡值最多导致一条事件走/留，
+ * 下一条即恢复——不为此加锁（锁会把 WS 抖动传回判断线程）。 */
+static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
+{
+    char msg[96];
+    int n;
+    n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    if (n <= 0 || (size_t)n >= sizeof msg) return;
+    if (client_fd < 0 || !(sub_mask & SUB_REGION)) {
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (NO-CLIENT/UNSUB)\n",
+            id, ev, slot, lx, ly);
+        return;
+    }
+    sendq_push((const unsigned char *)msg, (size_t)n);
+    fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
+}
+
+/* 五事件判定（方案 §4.4：完整版 region_match 逻辑原样搬入，驱动从“每 SYN 扫全表”
+ * 改为“逐 vt_ev 增量处理”；重复 down 按 move 走、空闲 slot 的 up/move 忽略，
+ * 使队列溢出时的 benign 重复不产生错误事件）。 */
+static void region_on_ev(const struct vt_ev *ev)
+{
+    struct region tbl[MAX_REGIONS];
+    int n, rid, hit, s;
+    s = ev->slot;
+    if (s < 0 || s >= MAX_PHYS) return;
+    pthread_mutex_lock(&region_mu);
+    n = region_count;
+    if (n > MAX_REGIONS) n = MAX_REGIONS;
+    if (n > 0) memcpy(tbl, regions, (size_t)n * sizeof tbl[0]);
+    pthread_mutex_unlock(&region_mu);
+    if (n <= 0) return;
+    if (ev->action == 1) memset(slot_hit[s], 0, sizeof slot_hit[s]);   /* 新按下一轮：命中从零算 */
+    for (rid = 0; rid < n; rid++) {
+        if (!tbl[rid].enabled) { slot_in[s][rid] = 0; continue; }
+        hit = region_hit(&tbl[rid], ev->x, ev->y);
+        if (ev->action == 1) {
+            if (!r_down[s]) {
+                r_down[s] = 1;
+                if (hit) { slot_hit[s][rid] = 1; region_ev_send(tbl[rid].id, "down", s, ev->x, ev->y); }
+                slot_last_x[s] = ev->x; slot_last_y[s] = ev->y;   /* 按下位置即 move 基准 */
+            } else goto do_move;   /* 重复 down：当 move 处理 */
+        } else if (ev->action == 2) {
+            if (!r_down[s]) continue;
+do_move:
+            if (hit && !slot_in[s][rid]) region_ev_send(tbl[rid].id, "enter", s, ev->x, ev->y);
+            else if (!hit && slot_in[s][rid]) region_ev_send(tbl[rid].id, "exit", s, ev->x, ev->y);
+            /* move：仅在已在区域内时按位置变化推（enter/down 帧不重复推） */
+            if (hit && slot_in[s][rid] && (slot_last_x[s] != ev->x || slot_last_y[s] != ev->y)) {
+                slot_last_x[s] = ev->x; slot_last_y[s] = ev->y;
+                region_ev_send(tbl[rid].id, "move", s, ev->x, ev->y);
+            }
+        } else {
+            if (r_down[s] && slot_hit[s][rid] && hit)
+                region_ev_send(tbl[rid].id, "up", s, ev->x, ev->y);   /* 纯监听：只推事件，不代点 */
+            r_down[s] = 0;
+        }
+        slot_in[s][rid] = (r_down[s] && hit) ? 1 : 0;
+    }
+}
+
+static void *region_thread(void *arg)
+{
+    struct vt_ev ev;
+    struct timespec idle = { 0, 1000000 };   /* 队空 1ms 轮询（方案 §4.4 草图）：无事件零消耗 */
+    (void)arg;
+    pthread_setname_np(pthread_self(), "vt-region");   /* 线程命名：top -H 归因用 */
+    while (!stop_flag) {
+        if (!vtq_pop(&ev)) { nanosleep(&idle, NULL); continue; }
+        if (ev.virt) continue;                    // 虚拟触摸不匹配（不自激）
+        region_on_ev(&ev);
+    }
+    return NULL;
+}
+
+/* 每 SYN 必走（方案 §4.1）：emit 之后广播，消费者看到的是完整帧快照。
+ * 只推状态变化（down/up/move），静止不刷屏；pev 进出站队列（订阅才推），
+ * ps_* 边沿跟踪无条件更新。纯内存操作，不碰 socket，不阻塞注入。 */
+static void broadcast_phys(void)
+{
+    int i, lx, ly;
+    uint64_t ts = now_ns();
+    for (i = 0; i < phys_slots; i++) {
+        const char *st;
+        int action;
+        if (phys[i].down && !ps_down[i]) { st = "down"; action = 1; }
+        else if (!phys[i].down && ps_down[i]) { st = "up"; action = 0; }
+        else if (phys[i].down && (phys[i].x != ps_x[i] || phys[i].y != ps_y[i])) { st = "move"; action = 2; }
+        else continue;
+        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
+        if (phys[i].down) { ps_down[i] = 1; ps_x[i] = phys[i].x; ps_y[i] = phys[i].y; }
+        else ps_down[i] = 0;
+        vtq_push((struct vt_ev){ .slot = i, .action = action, .x = lx, .y = ly, .ts = ts, .virt = 0 });
+        if (client_fd >= 0 && (sub_mask & SUB_PHYS)) {
+            char msg[64];
+            int n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i, st, lx, ly);
+            if (n > 0 && (size_t)n < sizeof msg)
+                sendq_push((const unsigned char *)msg, (size_t)n);
+        }
+    }
+}
+
+/* 虚拟触摸进事件队列（virt=1，区域线程过滤不自激）：单条命令在 emit 成功后推，
+ * end_frame 在提交成功后按差分推。 */
+static void push_virt_ev(int slot, int action, int lx, int ly)
+{
+    vtq_push((struct vt_ev){ .slot = slot, .action = action, .x = lx, .y = ly,
+        .ts = now_ns(), .virt = 1 });
+}
+
 /* 一行命令 -> 一行回包 */
 static int handle_line(char *line, char *resp, size_t cap)
 {
@@ -496,13 +797,85 @@ static int handle_line(char *line, char *resp, size_t cap)
         if (frame_open) { snprintf(resp, cap, "err frame"); return -1; }
         owner_reset(); snprintf(resp, cap, "ok"); return 0;
     }
+    if (!strcmp(t, "region")) {
+        char *op = strtok_r(NULL, " \t", &st);
+        if (!op) { snprintf(resp, cap, "err region"); return -1; }
+        if (!strcmp(op, "clear")) {
+            regions_clear(); snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        if (!strcmp(op, "list")) {
+            /* 查询当前配置：每行 region <id> <type> <a1..a4> <en>，末行 end <总数> */
+            size_t used = 0;
+            int i;
+            struct region tbl[MAX_REGIONS];
+            int n;
+            pthread_mutex_lock(&region_mu);
+            n = region_count;
+            if (n > MAX_REGIONS) n = MAX_REGIONS;
+            if (n > 0) memcpy(tbl, regions, (size_t)n * sizeof tbl[0]);
+            pthread_mutex_unlock(&region_mu);
+            for (i = 0; i < n && used + 64 < cap; i++) {
+                used += (size_t)snprintf(resp + used, cap - used, "region %s %d %d %d %d %d %d\n",
+                                         tbl[i].id, tbl[i].type,
+                                         tbl[i].a1, tbl[i].a2,
+                                         tbl[i].a3, tbl[i].a4,
+                                         tbl[i].enabled);
+            }
+            if (used == 0) { snprintf(resp, cap, "ok 0"); return 0; }
+            snprintf(resp + used, cap - used, "end %d", n);
+            return 0;
+        }
+        if (!strcmp(op, "add")) {
+            char *sid = strtok_r(NULL, " \t", &st), *stype = strtok_r(NULL, " \t", &st);
+            char *sa1 = strtok_r(NULL, " \t", &st), *sa2 = strtok_r(NULL, " \t", &st);
+            char *sa3 = strtok_r(NULL, " \t", &st), *sa4 = strtok_r(NULL, " \t", &st);
+            char *sen = strtok_r(NULL, " \t", &st);
+            int type, a1, a2, a3, a4, en;
+            if (!sid || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
+                strtok_r(NULL, " \t", &st) ||
+                parse_long(stype, 0, 1, &type) ||
+                parse_long(sa1, 0, logical_width - 1, &a1) ||
+                parse_long(sa2, 0, logical_height - 1, &a2) ||
+                parse_long(sa3, 0, 100000, &a3) ||
+                parse_long(sa4, 0, logical_height - 1, &a4) ||
+                parse_long(sen, 0, 1, &en) ||
+                region_add(sid, type, a1, a2, a3, a4, en) < 0) {
+                snprintf(resp, cap, "err region"); return -1;
+            }
+            snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        snprintf(resp, cap, "err region"); return -1;
+    }
+    if (!strcmp(t, "sub")) {
+        /* sub [region|phys|all]...：不带参数 = 两个通道都订（向后兼容） */
+        char *sm = strtok_r(NULL, " \t", &st);
+        int mask = SUB_REGION | SUB_PHYS;
+        if (sm) {
+            mask = 0;
+            do {
+                if (!strcmp(sm, "region")) mask |= SUB_REGION;
+                else if (!strcmp(sm, "phys")) mask |= SUB_PHYS;
+                else if (!strcmp(sm, "all") || !strcmp(sm, "both")) mask = SUB_REGION | SUB_PHYS;
+                else { snprintf(resp, cap, "err sub"); return -1; }
+            } while ((sm = strtok_r(NULL, " \t", &st)));
+        }
+        if (!mask) { snprintf(resp, cap, "err sub"); return -1; }
+        sub_mask = mask;
+        snprintf(resp, cap, "ok"); return 0;
+    }
+    if (!strcmp(t, "unsub")) {
+        sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
+    }
     if (!strcmp(t, "up")) {
         char *ss = strtok_r(NULL, " \t", &st);
+        int lx, ly;
         if (frame_open || !ss || strtok_r(NULL, " \t", &st) ||
             parse_long(ss, 0, vslots - 1, &slot) ||
             set_virtual(virt, slot, t, virt[slot].x, virt[slot].y) || emit_frame() < 0) {
             snprintf(resp, cap, "err point"); return -1;
         }
+        if (raw_to_logical(virt[slot].x, 0, &lx) == 0 && raw_to_logical(virt[slot].y, 1, &ly) == 0)
+            push_virt_ev(slot, 0, lx, ly);
         snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "down") || !strcmp(t, "move")) {
@@ -515,6 +888,7 @@ static int handle_line(char *line, char *resp, size_t cap)
             set_virtual(virt, slot, t, x, y) || emit_frame() < 0) {
             snprintf(resp, cap, "err point"); return -1;
         }
+        push_virt_ev(slot, !strcmp(t, "down") ? 1 : 2, lx, ly);
         snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "begin_frame")) {
@@ -537,9 +911,22 @@ static int handle_line(char *line, char *resp, size_t cap)
         frame_seen[slot] = 1; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "end_frame")) {
+        unsigned char was_down[MAX_VIRT];
+        int i;
         if (!frame_open || strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err frame"); return -1; }
+        for (i = 0; i < vslots; i++) was_down[i] = frame_seen[i] ? virt[i].down : 0;
         memcpy(virt, staged, sizeof virt);
         if (emit_frame() < 0) { frame_open = 0; snprintf(resp, cap, "err frame"); return -1; }
+        for (i = 0; i < vslots; i++) {   /* 提交成功才推：暂存帧中断不产生事件 */
+            int lx, ly, act;
+            if (!frame_seen[i]) continue;
+            if (!was_down[i] && virt[i].down) act = 1;
+            else if (was_down[i] && !virt[i].down) act = 0;
+            else if (was_down[i] && virt[i].down) act = 2;
+            else continue;
+            if (raw_to_logical(virt[i].x, 0, &lx) < 0 || raw_to_logical(virt[i].y, 1, &ly) < 0) continue;
+            push_virt_ev(i, act, lx, ly);
+        }
         frame_open = 0; snprintf(resp, cap, "ok"); return 0;
     }
     snprintf(resp, cap, "err unknown"); return -1;
@@ -574,6 +961,7 @@ static void physical_events(void)
         if (e.type == EV_SYN && e.code == SYN_REPORT) {
             if (emit_frame() < 0) g_emit_fail++;
             else g_emit_fail = 0;
+            broadcast_phys();   /* 注入完成后广播：消费者看到的是完整帧快照（方案 §4.1） */
         }
     }
     if (n < 0 && (errno == ENODEV || errno == EIO)) {
@@ -757,7 +1145,6 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 }
 
 /* 丢掉当前客户端：关连接 + 清出站队列 + 抬掉它的虚拟触点（只 close 会把虚拟手指永久粘在设备上） */
-static void sendq_clear(void);   /* 定义在下方出站队列处 */
 static void drop_client(void)
 {
     if (client_fd >= 0) {
@@ -767,6 +1154,7 @@ static void drop_client(void)
     }
     ws_in_len = 0;
     sendq_clear();
+    sub_mask = 0;   /* 断连即退订：下个客户端从干净状态开始 */
     owner_reset();
 }
 
@@ -1009,6 +1397,9 @@ static int vtouch_init(int argc, char **argv)
     /* 先起监听、最后 grab：任何失败路径都不会留下「抓了却没人能控制」的状态 */
     listen_fd = make_listen();
     if (listen_fd < 0) { cleanup(); return -6; }
+    /* 先起监听与 region 线程、最后 grab：任何失败路径都不会留下「抓了却没人能控制」的状态 */
+    if (pthread_create(&region_th, NULL, region_thread, NULL) != 0) { cleanup(); return -7; }
+    region_started = 1;
     if (ioctl(input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return -5; }
     fprintf(stderr, "vtouchd: dev=%s pool=%d virt_max=%d pressure=%s ws=127.0.0.1:%d size=%dx%d\n",
             dev, total_slots, vslots, has_pressure ? "on" : "off", ws_port, logical_width, logical_height);
