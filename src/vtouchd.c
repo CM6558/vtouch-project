@@ -294,6 +294,23 @@ static void outq_push(const char *p, size_t n)
     pthread_mutex_unlock(&outq_lock);
 }
 
+/* 服务端 → 客户端：**文本帧**（未加掩码）。成帧必须发生在入队这里 ——
+ * 队列里存的就是「完整的 WS 帧」，刷出端只负责把字节写出去（它支持半包续写）。
+ * 少了这一步的症状：客户端收到裸文本，一帧都解不出来（响应 / pev / region_ev 全哑），
+ * 而注入本身照常生效 —— 所以很容易漏掉（§4.5 改队列时就是这么漏的）。 */
+static void outq_push_text(const char *s, size_t n)
+{
+    char buf[OUTQ_MSG];
+    size_t hl;
+    if (!s || n == 0) return;
+    buf[0] = (char)0x81;                       /* FIN + opcode=1（text） */
+    if (n < 126) { buf[1] = (char)n; hl = 2; }
+    else { buf[1] = 126; buf[2] = (char)((n >> 8) & 0xff); buf[3] = (char)(n & 0xff); hl = 4; }
+    if (hl + n >= sizeof buf) { fprintf(stderr, "vtouchd: 出站帧过长 %zu 字节 → 丢弃\n", n); return; }
+    memcpy(buf + hl, s, n);
+    outq_push(buf, hl + n);
+}
+
 /* 主循环专用：socket 可写才写（客户端 socket 握手后设为非阻塞，所以这里绝不阻塞主线程）。
  * 写不完留着，下一次 POLLOUT 继续；真错（EPIPE/ECONNRESET）才踢客户端。 */
 static void outq_flush(void)
@@ -406,7 +423,7 @@ static void region_ev_send(const char *id, const char *ev, int slot, int lx, int
     char msg[96];
     int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
     if (sub_mask & SUB_REGION) {
-        if (n > 0 && (size_t)n < sizeof msg) outq_push(msg, (size_t)n);
+        if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
     } else {
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (UNSUB)\n", id, ev, slot, lx, ly);
@@ -499,7 +516,7 @@ static void broadcast_phys(void)
             char msg[64];
             int n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i,
                              action == VT_DOWN ? "down" : (action == VT_UP ? "up" : "move"), lx, ly);
-            if (n > 0 && (size_t)n < sizeof msg) outq_push(msg, (size_t)n);
+            if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
         }
     }
 }
@@ -1322,7 +1339,7 @@ static int client_frame(void)
         memcpy(line, payload, len); line[len] = 0;
         handle_line(line, resp, sizeof resp);
         /* §4.5：响应进发送队列，主线程只在主循环里刷 —— socket 慢不再卡住注入热路径 */
-        outq_push(resp, strlen(resp));
+        outq_push_text(resp, strlen(resp));
     }
     return 0;
 }
