@@ -13,7 +13,8 @@
  *   区域线程  region_apply()：五事件判定，slot_in/slot_hit/slot_last 线程私有（§4.4）
  *   出站队列  outq       容量 64 帧，生产者 = 主线程(响应/pev) + 区域线程(region_ev)，
  *                        消费者 = 主线程 POLLOUT 刷出（§4.5）
- *   身份池    oslot/oid 统一分配，虚拟 id 永远避开活跃物理 id（§5，见 alloc_oid）
+ *   身份分段  静态两段、不做避让：物理触点 oslot = oid = 物理槽号（0..phys_slots-1，虚拟跳过这一段）；
+ *             虚拟触点 oslot = oid = phys_slots + 客户端槽号（§5 改，见 README「身份两段」）
  *
  * 有意不做（别在这里找）：面板(ImGui) / 区域持久化 / UI 回调 / 旋转换算 / 落盘 —— 完整版在 build/_backup_full_*。
  *
@@ -75,12 +76,11 @@ static int input_fd = -1, u_fd = -1, listen_fd = -1, client_fd = -1;
 static int ws_port = 27183;
 static int vslots = 10;                 /* 客户端可用槽号 0..vslots-1 */
 static int phys_slots;                  /* 物理屏声明的槽数 = 我们声明给系统的槽数 */
-static int total_slots;                 /* = phys_slots（物理/虚拟共用同一个池） */
+static int total_slots;                 /* = phys_slots + vslots（两段身份的并集 = 要声明的槽数） */
 static int axmin[2], axmax[2];
 static int selected_slot;               /* 当前正被解析的物理槽（-1 = 忽略） */
 static int logical_width, logical_height;
 static int has_pressure, pressure_max;
-static int g_seq;                        /* 触点分配序号（池满时顶掉最新虚拟用） */
 
 /* ---- 物理屏能力镜像：validate_device() 抄进来，setup_uinput() 原样搬过去 ----
  * 上层按设备的声明做分类与滤波（触摸大小/压力/掌拒），收窄声明会让注入的触点行为与真手指不一致。 */
@@ -92,14 +92,17 @@ static unsigned long cap_prop[CAP_LONGS(INPUT_PROP_MAX)];
 static struct input_absinfo cap_ai[ABS_MAX + 1];
 static unsigned char cap_ai_ok[ABS_MAX + 1];
 static char cap_name[UINPUT_MAX_NAME_SIZE];
-static int oid_mod = 32;                 /* tracking id 池大小（与物理 id 量程取小） */
+static int oid_mod = 32;                 /* 物理屏声明的 tracking id 量程（与 32 取小） */
+static int id_max = 31;                  /* 要给系统声明的 tracking id 上限 = max(两段最大 id, oid_mod-1) */
 
-/* 一根触点。oslot/oid 是**我们发给系统的身份**，由统一池分配：
- * 透传客户端槽号/面板 id 会撞号（Android 里 tracking id 就是 pointer id），
- * 而且「物理槽 + 偏移虚拟槽」会让设备声明出 phys+virt 个触点。 */
+/* 一根触点。oslot/oid 是**我们发给系统的身份**，静态分两段（§5 改）：
+ *   物理段 0..phys_slots-1：物理触点的 oslot/oid 就取它所在的物理槽号，原样透传；
+ *   虚拟段 phys_slots..：虚拟触点的 oslot/oid = phys_slots + 客户端槽号。
+ * 两段重合不可能，所以不需要「查表避让活跃 id」；代价是合并设备要声明 phys+virt 个槽
+ * （Android 侧 pointer id 只有 0..31，见 README「身份两段」的取舍）。 */
 struct contact {
     int id, x, y, down, pending_up;      /* 来源状态：内核 id 与原始坐标 */
-    int oslot, oid, seq;                 /* 下游身份：槽位 / tracking id / 分配序号 */
+    int oslot, oid;                      /* 下游身份：槽位 / tracking id（静态，不查表） */
 };
 static struct contact phys[MAX_PHYS], virt[MAX_VIRT];
 
@@ -109,7 +112,6 @@ static size_t ws_in_len;
 static int frame_open;                   /* begin_frame..end_frame 之间 */
 static int frame_seen[MAX_VIRT];
 static struct contact staged[MAX_VIRT];  /* 帧内暂存（提交前不碰 virt[]） */
-static int next_tracking_id;
 /* 整帧写失败时置位：抬手那帧丢了就再没有下一帧去补（phys[i].down 已变 0），
  * 系统里那根手指会永久按着 —— 所以必须重发同一帧，直到写成功或判定 uinput 真死。 */
 static volatile int g_reemit;
@@ -130,8 +132,6 @@ static int region_started;
 
 static int write_full(int fd, const void *buf, size_t len);
 static void drop_client(void);
-static int alloc_oslot(void);
-static int alloc_oid(void);
 
 static int parse_long(const char *s, long lo, long hi, int *out)
 {
@@ -697,8 +697,8 @@ static int setup_uinput(void)
         if (c == ABS_MT_TOOL_TYPE && a.absinfo.maximum < MT_TOOL_PALM) a.absinfo.maximum = MT_TOOL_PALM;
         /* 冲突② 槽数上限不能小于我们真正要用的池 */
         if (c == ABS_MT_SLOT && a.absinfo.maximum < total_slots - 1) a.absinfo.maximum = total_slots - 1;
-        /* 冲突③ tracking id 量程至少要装下 id 池 */
-        if (c == ABS_MT_TRACKING_ID && a.absinfo.maximum < oid_mod - 1) a.absinfo.maximum = oid_mod - 1;
+        /* 冲突③ tracking id 量程至少要装下两段身份（物理段 + 虚拟段） */
+        if (c == ABS_MT_TRACKING_ID && a.absinfo.maximum < id_max) a.absinfo.maximum = id_max;
         if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
     }
     /* 物理屏万一没声明这四根轴也要补齐，否则合并设备发不出 MT 事件 */
@@ -712,7 +712,7 @@ static int setup_uinput(void)
             if (code == ABS_MT_POSITION_X) { a.absinfo.minimum = axmin[0]; a.absinfo.maximum = axmax[0]; }
             else if (code == ABS_MT_POSITION_Y) { a.absinfo.minimum = axmin[1]; a.absinfo.maximum = axmax[1]; }
             else if (code == ABS_MT_SLOT) a.absinfo.maximum = total_slots - 1;
-            else a.absinfo.maximum = oid_mod - 1;
+            else a.absinfo.maximum = id_max;
             if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
         }
     }
@@ -754,28 +754,16 @@ static int any_emitted(void)
     return 0;
 }
 
-/* 池满且来的是物理手指：顶掉「最新分配的那个虚拟触点」，把身份让给真人 */
-static int evict_newest_virtual(void)
-{
-    int i, best = -1;
-    for (i = 0; i < vslots; i++)
-        if (virt[i].down && (best < 0 || virt[i].seq > virt[best].seq)) best = i;
-    if (best < 0) return 0;
-    virt[best].down = 0; virt[best].pending_up = 1;
-    fprintf(stderr, "vtouchd: 身份池满 → 顶掉虚拟槽 %d\n", best);
-    return 1;
-}
-
 /* 一帧的固定顺序（每一步都有理由）：
- *   ① 待抬的触点先发 ABS_MT_TRACKING_ID=-1（用当前身份，身份要到这一帧写成功才释放）
- *   ② 物理触点（在这里才分配下游身份 —— 中途池满就下一轮补发）
+ *   ① 待抬的触点先发 ABS_MT_TRACKING_ID=-1（身份静态，帧写失败也不用「保住」它）
+ *   ② 物理触点（身份 = 它所在的物理槽号，直接发）
  *   ③ 虚拟触点（身份在 WS 命令里就分好了）
  *   ④ BTN_TOUCH / BTN_TOOL_FINGER（只有真的发了触点才置 1）
  *   ⑤ SYN_REPORT，整个帧一次 writev 提交
  * 写失败：绝不清 pending_up、绝不释放身份，置 g_reemit 由 poll 循环重发。 */
 static int emit_frame(void)
 {
-    int i, s2, nid;
+    int i;
     if (u_fd < 0) return -1;
     ev_n = 0;
     for (i = 0; i < phys_slots; i++) if (phys[i].pending_up && phys[i].oslot >= 0) {
@@ -788,13 +776,6 @@ static int emit_frame(void)
     }
     for (i = 0; i < phys_slots; i++) {
         if (!phys[i].down) continue;
-        if (phys[i].oslot < 0) {
-            s2 = alloc_oslot();
-            if (s2 < 0) { if (evict_newest_virtual()) g_reemit = 1; continue; }
-            nid = alloc_oid();
-            if (nid < 0) { g_reemit = 1; continue; }
-            phys[i].oslot = s2; phys[i].oid = nid; phys[i].seq = ++g_seq;
-        }
         ev_add(EV_ABS, ABS_MT_SLOT, phys[i].oslot);
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys[i].oid);
         ev_add(EV_ABS, ABS_MT_POSITION_X, phys[i].x);
@@ -817,60 +798,24 @@ static int emit_frame(void)
     if (emit_iov_writev() < 0) { g_reemit = 1; return -1; }
     for (i = 0; i < phys_slots; i++) phys[i].pending_up = 0;
     for (i = 0; i < vslots; i++) virt[i].pending_up = 0;
-    for (i = 0; i < phys_slots; i++) if (!phys[i].down) { phys[i].oslot = -1; phys[i].oid = -1; }
-    for (i = 0; i < vslots; i++) if (!virt[i].down) { virt[i].oslot = -1; virt[i].oid = -1; }
+    /* 身份不再在帧末释放（静态两段，§5 改）——上面两行清 pending_up 就够了。 */
     /* §4.1：虚拟状态变化也入队（消费者按 virt 位自己过滤）——这样「注入不会自激」是可断言的，
      * 而不是靠「反正没把虚拟触点喂回去」的口头保证。 */
     broadcast_virt();
     return 0;
 }
 
-/* 身份池（物理 + 虚拟共用）：槽池 = 物理槽数，id 池 = oid_mod。
- * 分配时机：虚拟触点在 WS 命令里（池满能如实回 err point）；物理触点在发帧时。
- * 释放时机：那一帧写成功之后。 */
-static int slot_taken(int s)
-{
-    int i;
-    for (i = 0; i < phys_slots; i++) if (phys[i].oslot == s) return 1;
-    for (i = 0; i < vslots; i++) if (virt[i].oslot == s || staged[i].oslot == s) return 1;
-    return 0;
-}
-static int id_taken(int id)
-{
-    int i;
-    for (i = 0; i < phys_slots; i++) if (phys[i].oid == id) return 1;
-    for (i = 0; i < vslots; i++) if (virt[i].oid == id || staged[i].oid == id) return 1;
-    return 0;
-}
-static int alloc_oslot(void)
-{
-    int s;
-    for (s = 0; s < phys_slots; s++) if (!slot_taken(s)) return s;
-    return -1;
-}
-static int alloc_oid(void)
-{
-    int k, id;
-    for (k = 0; k < oid_mod; k++) {
-        id = (next_tracking_id + k) % oid_mod;
-        if (!id_taken(id)) { next_tracking_id = (id + 1) % oid_mod; return id; }
-    }
-    return -1;
-}
+/* 身份避让整套删掉（§5 改）：物理段只被物理触点用、虚拟段只被虚拟触点用，
+ * 「扫描活跃 id 找一个不撞的」这一层从设计上就不存在，也没有分配失败这条路径。 */
 
 /* 单点命令与帧内命令共用这一段：state 只认 down/move/up */
 static int set_virtual(struct contact *state, int slot, const char *name, int x, int y)
 {
     if (!strcmp(name, "down")) {
-        int s2, nid;
         if (state[slot].down || state[slot].pending_up) return -1;
-        s2 = alloc_oslot();
-        if (s2 < 0) return -1;
-        nid = alloc_oid();
-        if (nid < 0) return -1;
-        state[slot].oslot = s2; state[slot].oid = nid; state[slot].seq = ++g_seq;
-        /* 不再写 .id：虚拟触点的下游身份只来自统一池（alloc_oid 已避开活跃物理 id，见 §5）。
-         * 完整版那行 state[slot].id = next_tracking_id 是个没人读的遗留写法，还误导「id 由游标决定」。 */
+        /* §5 改：虚拟身份 = phys_slots + 客户端槽号 —— 直接算出来，不查表、不可能撞物理段。
+         * 物理段永远空着给物理手指，所以「池满顶掉虚拟」那条路也一起没了。 */
+        state[slot].oslot = phys_slots + slot; state[slot].oid = phys_slots + slot;
         state[slot].down = 1;
     } else if (!strcmp(name, "move")) {
         if (!state[slot].down) return -1;
@@ -1405,8 +1350,16 @@ static int vtouch_init(int argc, char **argv)
         fprintf(stderr, "vtouchd: 没找到 Type-B 触摸屏（扫了 /dev/input/event0..63）\n");
         return -2;
     }
-    total_slots = phys_slots;
-    if (total_slots > MAX_PHYS) total_slots = MAX_PHYS;
+    /* §5 改：身份静态两段 —— 物理段 0..phys_slots-1（原样透传，虚拟跳过这一段），
+     * 虚拟段 phys_slots..phys_slots+vslots-1（= phys_slots + 客户端槽号）。
+     * 声明给系统的槽数与 tracking id 量程都要盖住两段之和。 */
+    total_slots = phys_slots + vslots;
+    id_max = (total_slots - 1 > oid_mod - 1) ? total_slots - 1 : oid_mod - 1;
+    for (z = 0; z < phys_slots; z++) { phys[z].oslot = z; phys[z].oid = z; }
+    for (z = 0; z < vslots; z++) {
+        virt[z].oslot = phys_slots + z; virt[z].oid = phys_slots + z;
+        staged[z].oslot = phys_slots + z; staged[z].oid = phys_slots + z;
+    }
     if (setup_uinput() < 0) {
         fprintf(stderr, "vtouchd: uinput 建设备失败: %s\n", strerror(errno));
         return -3;
