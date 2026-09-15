@@ -13,7 +13,7 @@ DOCS = {
 "logical_to_raw": dict(brief="逻辑坐标（设备像素）→ 触摸屏 raw 坐标。",
     params=[("logical", "逻辑值"), ("axis", "0=X 1=Y"), ("raw", "输出 raw 值")],
     ret="0 成功；-1 轴非法或该轴量程为 0。"),
-"raw_to_logical": dict(brief="raw 坐标 → 逻辑坐标（转发 pev / 区域事件时用）。",
+"raw_to_logical": dict(brief="raw 坐标 → 逻辑坐标（转发区域事件时用）。",
     params=[("raw", "raw 值"), ("axis", "0=X 1=Y"), ("logical", "输出逻辑值")], ret="0 成功；-1 轴非法或量程非法。"),
 "now_ns": dict(brief="单调时钟（纳秒），事件时间戳用。", ret="单调递增的纳秒数（CLOCK_MONOTONIC）。"),
 
@@ -87,11 +87,10 @@ DOCS = {
     note="只改来源状态，不写身份字段（身份发射时按下标算）。"),
 "owner_reset": dict(brief="客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。",
     note="少了这段，客户端在 begin_frame..end_frame 中间断开会把虚拟手指永久粘在设备上。"),
-"broadcast_phys": dict(brief="物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q（喂区域线程），"
-                             "并在订了 phys 时推 pev。",
+"broadcast_phys": dict(brief="物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。",
     note="推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。"),
 "broadcast_virt": dict(brief="虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。",
-    note="「回触不自激」可断言的那一半：区域线程遇到 virt=1 直接跳过；虚拟轨迹不进 pev（不回灌客户端自己的轨迹）。"),
+    note="「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。"),
 
 # ---------------- §10 WebSocket ----------------
 "rol32": dict(brief="32 位循环左移（SHA-1 内部用）。", params=[("x", "值"), ("n", "位数")], ret="左移结果。"),

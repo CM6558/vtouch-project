@@ -149,8 +149,9 @@ def main():
     r = ws.cmd("bogus")
     ok("未知命令 → %r" % r) if (r or "").startswith("err") else bad("未知命令应答异常: %r" % r)
 
-    for line, want in [("sub", "ok"), ("sub phys", "ok"), ("sub region", "ok"), ("sub all", "ok"),
-                       ("sub bogus", "err"), ("sub phys extra", "err"), ("unsub", "ok")]:
+    for line, want in [("sub", "ok"), ("sub region", "ok"), ("unsub", "ok"),
+                       ("sub phys", "err"), ("sub all", "err"), ("sub bogus", "err"),
+                       ("sub phys extra", "err"), ("unsub extra", "err")]:
         r = ws.cmd(line)
         got = "ok" if (r or "").startswith("ok") else "err"
         (ok if got == want else bad)("%s → %r（期望 %s）" % (line, r, want))

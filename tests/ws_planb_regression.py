@@ -4,9 +4,9 @@
 
 对应 VTOUCH_ARCH_PLAN.md §8 步骤4 的四件：
   T1 命令面（含 region/sub/unsub 的错路径）      ← ws_smoke.py 的超集
-  T2 订阅语义（不 sub 不推；sub phys/region/all 分道）
+  T2 订阅语义（不 sub 不推；只认 region，phys/all 是错路径）
   T3 五事件示例（物理手指进出区域 → down/enter/move/exit/up）
-  T4 回触示例（注入虚拟触点 → **不产生** pev/region_ev，不自激）
+  T4 回触示例（注入虚拟触点 → **不产生** region_ev，不自激）
   T5 ws_kick（新连接踢旧连接，被踢方订阅清零）
 
 前置：
@@ -105,15 +105,13 @@ def is_closed(ws, timeout=1.5):
 
 
 def evs(lines, kind):
-    """从推送行里挑出 pev / region_ev 并结构化。"""
+    """从推送行里挑出 region_ev（唯一的推送通道）并结构化。"""
     out = []
     for l in lines:
         parts = l.split()
         if not parts or parts[0] != kind:
             continue
-        if kind == "pev" and len(parts) >= 5:
-            out.append({"slot": int(parts[1]), "ev": parts[2], "x": int(parts[3]), "y": int(parts[4])})
-        elif kind == "region_ev" and len(parts) >= 6:
+        if kind == "region_ev" and len(parts) >= 6:
             out.append({"id": parts[1], "ev": parts[2], "slot": int(parts[3]),
                         "x": int(parts[4]), "y": int(parts[5])})
     return out
@@ -130,8 +128,12 @@ class Phys:
         rc, out = sh("test -f %s && echo yes" % self.remote)
         if "yes" in out:
             return True
+        # /data/local/tmp 在 SELinux Enforcing 下 shell 写不进去（dentry 坏）：
+        # 一律先落 /sdcard，再用 su 拷过去（和 scripts/deploy.sh 同一套做法）。
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_touch.sh")
-        p = subprocess.run(["adb", "push", path, self.remote], capture_output=True)
+        stage = "/sdcard/fake_touch.sh"
+        subprocess.run(["adb", "push", path, stage], capture_output=True)
+        sh("cp %s %s && chmod 755 %s" % (stage, self.remote, self.remote))
         rc, out = sh("test -f %s && echo yes" % self.remote)
         return "yes" in out
 
@@ -221,7 +223,7 @@ def main():
     x1, y1, x2, y2 = ws_lw // 4, ws_lh // 4, ws_lw * 3 // 4, ws_lh * 3 // 4
     r = ws.cmd("region add s3 0 %d %d %d %d 1" % (x1, y1, x2, y2))
     check((r or "").startswith("ok 1"), "region add（矩形）→ ok 1", r)
-    r = ws.cmd("region add c1 1 %d %d %d 0 0 1" % (ws_lw // 2, ws_lh // 2, ws_lh // 8))
+    r = ws.cmd("region add c1 1 %d %d %d 0 1" % (ws_lw // 2, ws_lh // 2, ws_lh // 8))
     check((r or "").startswith("ok 2"), "region add（圆形）→ ok 2", r)
     r = ws.cmd("region add s3 0 0 0 10 10 1")
     check((r or "").startswith("ok 2"), "同 id 重加 = 原地更新（总数不变）", r)
@@ -231,7 +233,7 @@ def main():
     check((r or "").startswith("ok 0"), "region clear → ok 0", r)
     ws.cmd("region add s3 0 %d %d %d %d 1" % (x1, y1, x2, y2))   # 后面 T3/T4 用
 
-    for line, want in [("sub", "ok"), ("sub phys", "ok"), ("sub region", "ok"), ("sub all", "ok")]:
+    for line, want in [("sub", "ok"), ("sub region", "ok"), ("sub phys", "err"), ("sub all", "err")]:
         r = ws.cmd(line)
         check((r or "").startswith(want), "%s → %s" % (line, want), r)
     r = ws.cmd("unsub")
@@ -244,16 +246,15 @@ def main():
     ws.cmd("down 0 %d %d" % (cx, cy))
     ws.cmd("up 0")
     got = drain(ws, 0.3, keep=True)
-    check(evs(got, "pev") == [] and evs(got, "region_ev") == [],
-          "未订阅：注入不产生任何推送", got[:4])
+    check(evs(got, "region_ev") == [], "未订阅：注入不产生任何推送", got[:4])
 
     ws.cmd("sub region")
     ws.cmd("down 0 %d %d" % (cx, cy))
     ws.cmd("up 0")
     got = drain(ws, 0.3, keep=True)
-    check(evs(got, "pev") == [], "sub region：虚拟触点不给 pev（pev 只报真手指）", got[:4])
+    check(evs(got, "region_ev") == [], "sub region：虚拟触点不产生 region_ev（只报物理手指）", got[:4])
 
-    ws.cmd("sub all")
+    ws.cmd("sub")
     ws.cmd("down 1 %d %d" % (cx, cy))
     ws.cmd("up 1")
     got = drain(ws, 0.3, keep=True)
@@ -275,13 +276,10 @@ def main():
         phys = Phys(dev, scale)
         section("T3 五事件：物理手指进出区域（dev=%s scale=%s）" % (dev, scale))
         ws.cmd("unsub")
-        ws.cmd("sub all")
+        ws.cmd("sub region")
         drain(ws, 0.3)
         slot = 0
         phys.down(slot, cx, cy)
-        line, seen = wait_for(ws, lambda l: l.startswith("pev "))
-        check(line is not None, "物理按下 → pev down", seen)
-        check(line is not None and line.split()[2] == "down", "pev 事件是 down", line)
         rline, seen2 = wait_for(ws, lambda l: l.startswith("region_ev "))
         check(rline is not None and rline.split()[2] == "down",
               "区域内按下 → region_ev down（带上 id/slot/逻辑坐标）", rline or seen2)
@@ -306,18 +304,17 @@ def main():
         rline, seen6 = wait_for(ws, lambda l: l.startswith("region_ev ") and l.split()[2] == "up")
         check(rline is not None, "抬起 → region_ev up", seen6)
 
-        # 区域外按下不应该有 down（但要看到 pev 轨迹：广播与判定是两条路）
+        # 区域外按下：广播照跑（喂区域线程），但不该产生任何推送
         phys.down(slot, 5, 5)
         got = drain(ws, 0.4, keep=True)
         phys.up(slot)
         drain(ws, 0.3)
-        check(len(evs(got, "pev")) >= 1, "区域外按下仍有 pev 轨迹（广播不依赖区域）", evs(got, "pev"))
-        check(evs(got, "region_ev") == [], "区域外按下没有 region_ev down", evs(got, "region_ev"))
+        check(evs(got, "region_ev") == [], "区域外按下没有 region_ev（判定按区域来）", evs(got, "region_ev"))
 
         # ------------------------------------------------------------ T4 回触
         section("T4 回触示例：注入虚拟触点回触区域，不产生任何事件（不自激）")
         ws.cmd("unsub")
-        ws.cmd("sub all")
+        ws.cmd("sub region")
         drain(ws, 0.3)
         phys.down(slot, cx, cy)
         wait_for(ws, lambda l: l.startswith("region_ev ") and l.split()[2] == "down")
@@ -327,7 +324,6 @@ def main():
         ws.cmd("move 5 %d %d" % (cx + 10, cy + 10))
         ws.cmd("up 5")
         got = drain(ws, 0.5, keep=True)
-        check(evs(got, "pev") == [], "回触注入不回流 pev", evs(got, "pev"))
         check(evs(got, "region_ev") == [], "回触注入不产生 region_ev（不会连击）", evs(got, "region_ev"))
     ws.cmd("unsub")
 
@@ -335,14 +331,14 @@ def main():
     section("T5 ws_kick：新连接踢旧连接")
     a1 = WS(a.host, a.port)
     check(a1.cmd("ping") == "pong", "旧连接可用", None)
-    a1.cmd("sub all")
+    a1.cmd("sub region")
     a2 = WS(a.host, a.port)
     check(a2.cmd("ping") == "pong", "新连接可用", None)
     check(is_closed(a1), "新连接上来后旧连接被关闭（EOF 或 close 帧）")
     a2.cmd("down 2 10 10")
     a2.cmd("up 2")
     got = drain(a2, 0.3, keep=True)
-    check(evs(got, "pev") == [], "被踢方订阅清零：新连接不订阅就没推送", evs(got, "pev"))
+    check(evs(got, "region_ev") == [], "被踢方订阅清零：新连接不订阅就没推送", evs(got, "region_ev"))
     a2.close()
 
     ws.close()

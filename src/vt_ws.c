@@ -620,13 +620,8 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
 {
     if (!strcmp(t, "sub")) {
         char *ch = strtok_r(NULL, " \t", stp);
-        int want = SUB_PHYS | SUB_REGION;
-        if (ch) {
-            if (!strcmp(ch, "phys")) want = SUB_PHYS;
-            else if (!strcmp(ch, "region")) want = SUB_REGION;
-            else if (!strcmp(ch, "all")) want = SUB_PHYS | SUB_REGION;
-            else { snprintf(resp, cap, "err sub"); return -1; }
-        }
+        int want = SUB_REGION;                       /* 只有区域通道；裸 sub 与 sub region 等价 */
+        if (ch && strcmp(ch, "region")) { snprintf(resp, cap, "err sub"); return -1; }
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
         g.sub_mask = want; snprintf(resp, cap, "ok"); return 0;
     }

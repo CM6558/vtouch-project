@@ -102,7 +102,7 @@ int region_hit(const struct region *rg, int lx, int ly)
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
- *   只订了 g.phys 通道就不白推 region_ev（和 pev 的开关对称）。
+ *   没订区域通道就不白推 region_ev（判定的账照记，只打日志）。
  */
 void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {

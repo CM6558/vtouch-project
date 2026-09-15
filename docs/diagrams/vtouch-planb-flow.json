@@ -66,7 +66,7 @@
       "width": 660,
       "height": 56,
       "label": "main：装信号 → init → 主循环",
-      "sublabel": "vtouchd.c:206 退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup",
+      "sublabel": "退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -79,7 +79,7 @@
       "width": 660,
       "height": 56,
       "label": "vtouch_init：尺寸门 + 清表置 -1",
-      "sublabel": "vtouchd.c:85 尺寸<2 → 2；身份显式置 -1（0 是合法槽）",
+      "sublabel": "尺寸<2 → 2；身份显式置 -1（0 是合法槽）",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -92,7 +92,7 @@
       "width": 660,
       "height": 56,
       "label": "discover：扫 event0..63 找 Type-B",
-      "sublabel": "vt_input.c:7 validate_device 四轴/槽/量程关卡",
+      "sublabel": "validate_device 四轴/槽/量程关卡",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -105,7 +105,7 @@
       "width": 660,
       "height": 56,
       "label": "setup_uinput：能力镜像 + 4 处冲突",
-      "sublabel": "vt_input.c:55 tool/槽数/tracking id 量程/名字与 bus；量程只向上抬 vt_input.c:79",
+      "sublabel": "tool/槽数/tracking id 量程/名字与 bus；量程只向上抬",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -118,7 +118,7 @@
       "width": 660,
       "height": 56,
       "label": "EVIOCGRAB(1)：抓屏（失败 → 5）",
-      "sublabel": "vtouchd.c:111 抓屏放最后；make_listen 已先起（失败 → 6）",
+      "sublabel": "抓屏放最后；make_listen 已先起（失败 → 6）",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -131,7 +131,7 @@
       "width": 660,
       "height": 56,
       "label": "起区域线程：最后一步",
-      "sublabel": "vtouchd.c:113 失败 → 7；此前从不 grab，无「抓着没人管」",
+      "sublabel": "失败 → 7；此前从不 grab，无「抓着没人管」",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -144,7 +144,7 @@
       "width": 660,
       "height": 56,
       "label": "poll 一轮：4 个 fd",
-      "sublabel": "vtouchd.c:125 物理/监听/客户端/出站；待重发时超时压到 5ms",
+      "sublabel": "物理/监听/客户端/出站；待重发时超时压到 5ms",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -157,7 +157,7 @@
       "width": 660,
       "height": 56,
       "label": "物理可读 → physical_events()",
-      "sublabel": "vt_input.c:112 选槽 → 写 phys[]；按下时记 ps_press_ns",
+      "sublabel": "选槽 → 写 phys[]；按下时记 ps_press_ns",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -170,7 +170,7 @@
       "width": 660,
       "height": 56,
       "label": "SYN_REPORT 帧边界（攒表到帧尾）",
-      "sublabel": "vt_input.c:128 只改 phys[]，不转发：半帧期间消费者看不到",
+      "sublabel": "只改 phys[]，不转发：半帧期间消费者看不到",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -183,7 +183,7 @@
       "width": 660,
       "height": 56,
       "label": "emit_frame()：物理+虚拟同帧一次 writev",
-      "sublabel": "vt_frame.c:96 顺序：待抬→物理→虚拟→BTN→SYN",
+      "sublabel": "顺序：待抬→物理→虚拟→BTN→SYN",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -196,7 +196,7 @@
       "width": 660,
       "height": 56,
       "label": "broadcast_phys()：更新 ps_* 快照并入队",
-      "sublabel": "vt_frame.c:172 快照 = 完整帧状态；pev 只报物理（门①）",
+      "sublabel": "快照 = 完整帧状态；只喂区域线程（§4.1）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -209,7 +209,7 @@
       "width": 660,
       "height": 56,
       "label": "region_q：每订阅者一条独立队列",
-      "sublabel": "vt_frame.c:186 主线程只做非阻塞 push（§4.3）",
+      "sublabel": "主线程只做非阻塞 push（§4.3）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -222,7 +222,7 @@
       "width": 660,
       "height": 56,
       "label": "客户端可读 → client_frame()",
-      "sublabel": "vt_ws.c:262 单轮 ≤32 帧；半包留缓冲",
+      "sublabel": "单轮 ≤32 帧；半包留缓冲",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -235,7 +235,7 @@
       "width": 660,
       "height": 56,
       "label": "down/move/up → set_virtual()",
-      "sublabel": "vt_ws.c:349 · vt_frame.c:141 逻辑→raw 换算 vt_util.c:31",
+      "sublabel": "逻辑→raw 换算",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -248,7 +248,7 @@
       "width": 660,
       "height": 56,
       "label": "立即 emit_frame()（不等队列）",
-      "sublabel": "vt_ws.c:355 注入响应即时：不经过区域判定与出站队列",
+      "sublabel": "注入响应即时：不经过区域判定与出站队列",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -261,7 +261,7 @@
       "width": 660,
       "height": 56,
       "label": "broadcast_virt()：虚拟状态也入队",
-      "sublabel": "vt_frame.c:197/209 virt=1 → 区域线程直接跳过（门②）",
+      "sublabel": "virt=1 → 区域线程直接跳过（§4.4）",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -274,7 +274,7 @@
       "width": 660,
       "height": 56,
       "label": "区域线程：五事件判定",
-      "sublabel": "vt_region.c:133/95 读 region_q；slot_in/hit/last 线程私有",
+      "sublabel": "读 region_q；slot_in/hit/last 线程私有",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -287,7 +287,7 @@
       "width": 660,
       "height": 56,
       "label": "region_ev_send：订阅位决定推不推",
-      "sublabel": "vt_region.c:74 命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志",
+      "sublabel": "命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -299,8 +299,8 @@
       "y": 1788,
       "width": 660,
       "height": 56,
-      "label": "响应 / pev / region_ev → outq_push()",
-      "sublabel": "vt_queue.c:72 容量 64；满了丢最旧（§4.5）",
+      "label": "响应 / region_ev → outq_push()",
+      "sublabel": "容量 64；满了丢最旧（§4.5）",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -313,7 +313,7 @@
       "width": 660,
       "height": 56,
       "label": "poll POLLOUT → outq_flush()",
-      "sublabel": "vtouchd.c:184 队列非空才挂 POLLOUT；socket 已 O_NONBLOCK",
+      "sublabel": "队列非空才挂 POLLOUT；socket 已 O_NONBLOCK",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -326,7 +326,7 @@
       "width": 660,
       "height": 56,
       "label": "写不完留到下次（真错才踢）",
-      "sublabel": "vt_queue.c:104 EPIPE/ECONNRESET 才 drop_client",
+      "sublabel": "EPIPE/ECONNRESET 才 drop_client",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -339,7 +339,7 @@
       "width": 660,
       "height": 56,
       "label": "断连/被踢 → drop_client()",
-      "sublabel": "vt_ws.c:188 清 sub_mask + outq_reset（残包不串下一个客户端）",
+      "sublabel": "清 sub_mask + outq_reset（残包不串下一个客户端）",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -352,7 +352,7 @@
       "width": 660,
       "height": 56,
       "label": "停止 → stop_flag → join 区域线程",
-      "sublabel": "vtouchd.c:221 区域线程收尾后才 cleanup",
+      "sublabel": "区域线程收尾后才 cleanup",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -365,7 +365,7 @@
       "width": 660,
       "height": 56,
       "label": "cleanup()：先放 grab 再拆设备",
-      "sublabel": "vtouchd.c:189 client→listen→grab→uinput 逆序",
+      "sublabel": "client→listen→grab→uinput 逆序",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -378,7 +378,7 @@
       "width": 660,
       "height": 56,
       "label": "② broadcast_phys()：快照是「帧状态」而不是活数组",
-      "sublabel": "vt_internal.h:111 · vt_frame.c:172 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 vtouchd.c:100",
+      "sublabel": "消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -391,7 +391,7 @@
       "width": 660,
       "height": 56,
       "label": "③ 立即 emit_frame()：注入不进队列",
-      "sublabel": "vt_ws.c:355 与最小版逐字相同；Plan B 没把这步挪进任何线程",
+      "sublabel": "与最小版逐字相同；Plan B 没把这步挪进任何线程",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -404,166 +404,13 @@
       "width": 660,
       "height": 56,
       "label": "④ outq_push()：三条来源一个出口",
-      "sublabel": "vt_queue.c:72 响应/pev/region_ev 同队列同顺序，因果序与主循环一致",
+      "sublabel": "响应/region_ev 同队列同顺序，因果序与主循环一致",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
     }
   ],
-  "arrows": [
-    {
-      "id": "ar2",
-      "source": "a1",
-      "target": "a2",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar3",
-      "source": "a2",
-      "target": "a3",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar4",
-      "source": "a3",
-      "target": "a4",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar5",
-      "source": "a4",
-      "target": "a5",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar6",
-      "source": "a5",
-      "target": "a6",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar8",
-      "source": "b1",
-      "target": "b2",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar9",
-      "source": "b2",
-      "target": "b3",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar10",
-      "source": "b3",
-      "target": "b4",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar11",
-      "source": "b4",
-      "target": "b5",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar12",
-      "source": "b5",
-      "target": "b6",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar14",
-      "source": "c1",
-      "target": "c2",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar15",
-      "source": "c2",
-      "target": "c3",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar16",
-      "source": "c3",
-      "target": "c4",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar18",
-      "source": "d1",
-      "target": "d2",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar19",
-      "source": "d2",
-      "target": "d3",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar20",
-      "source": "d3",
-      "target": "d4",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar21",
-      "source": "d4",
-      "target": "d5",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar23",
-      "source": "e1",
-      "target": "e2",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar24",
-      "source": "e2",
-      "target": "e3",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    }
-  ],
+  "arrows": [],
   "legend_orientation": "horizontal",
   "legend_x": 70,
   "legend_y": 2668,

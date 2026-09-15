@@ -76,159 +76,140 @@
   <text x="78.0" y="2400.0" class="section">注记（不是流程步骤，指向上面的节点）</text>
     <rect id="boxnote-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="2382" width="264" height="30" fill="none" stroke="none"/>
   </g>
-  <path id="ar2" data-graph-role="edge" data-edge-id="ar2" data-source="a1" data-target="a2" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,200 L 560,222" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar3" data-graph-role="edge" data-edge-id="ar3" data-source="a2" data-target="a3" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,278 L 560,300" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar4" data-graph-role="edge" data-edge-id="ar4" data-source="a3" data-target="a4" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,356 L 560,378" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar5" data-graph-role="edge" data-edge-id="ar5" data-source="a4" data-target="a5" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,434 L 560,456" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar6" data-graph-role="edge" data-edge-id="ar6" data-source="a5" data-target="a6" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,512 L 560,534" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar8" data-graph-role="edge" data-edge-id="ar8" data-source="b1" data-target="b2" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,748 L 560,770" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
-  <path id="ar9" data-graph-role="edge" data-edge-id="ar9" data-source="b2" data-target="b3" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,826 L 560,848" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
-  <path id="ar10" data-graph-role="edge" data-edge-id="ar10" data-source="b3" data-target="b4" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,904 L 560,926" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
-  <path id="ar11" data-graph-role="edge" data-edge-id="ar11" data-source="b4" data-target="b5" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,982 L 560,1004" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
-  <path id="ar12" data-graph-role="edge" data-edge-id="ar12" data-source="b5" data-target="b6" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1060 L 560,1082" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
-  <path id="ar14" data-graph-role="edge" data-edge-id="ar14" data-source="c1" data-target="c2" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1296 L 560,1318" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
-  <path id="ar15" data-graph-role="edge" data-edge-id="ar15" data-source="c2" data-target="c3" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1374 L 560,1396" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
-  <path id="ar16" data-graph-role="edge" data-edge-id="ar16" data-source="c3" data-target="c4" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1452 L 560,1474" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
-  <path id="ar18" data-graph-role="edge" data-edge-id="ar18" data-source="d1" data-target="d2" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1688 L 560,1710" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
-  <path id="ar19" data-graph-role="edge" data-edge-id="ar19" data-source="d2" data-target="d3" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1766 L 560,1788" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
-  <path id="ar20" data-graph-role="edge" data-edge-id="ar20" data-source="d3" data-target="d4" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1844 L 560,1866" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
-  <path id="ar21" data-graph-role="edge" data-edge-id="ar21" data-source="d4" data-target="d5" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1922 L 560,1944" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
-  <path id="ar23" data-graph-role="edge" data-edge-id="ar23" data-source="e1" data-target="e2" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,2158 L 560,2180" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
-  <path id="ar24" data-graph-role="edge" data-edge-id="ar24" data-source="e2" data-target="e3" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,2236 L 560,2258" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
   <g id="node-a1" data-graph-role="node" data-node-id="a1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,144,890,200">
   <rect x="230.0" y="144.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="172.0" text-anchor="middle" class="node-title" font-size="18.0">main：装信号 → init → 主循环</text>
-  <text x="560.0" y="194.0" text-anchor="middle" class="node-sub">vtouchd.c:206 退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup</text>
+  <text x="560.0" y="194.0" text-anchor="middle" class="node-sub">退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup</text>
   </g>
   <g id="node-a2" data-graph-role="node" data-node-id="a2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,222,890,278">
   <rect x="230.0" y="222.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="250.0" text-anchor="middle" class="node-title" font-size="18.0">vtouch_init：尺寸门 + 清表置 -1</text>
-  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">vtouchd.c:85 尺寸&lt;2 → 2；身份显式置 -1（0 是合法槽）</text>
+  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">尺寸&lt;2 → 2；身份显式置 -1（0 是合法槽）</text>
   </g>
   <g id="node-a3" data-graph-role="node" data-node-id="a3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,300,890,356">
   <rect x="230.0" y="300.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="328.0" text-anchor="middle" class="node-title" font-size="18.0">discover：扫 event0..63 找 Type-B</text>
-  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">vt_input.c:7 validate_device 四轴/槽/量程关卡</text>
+  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">validate_device 四轴/槽/量程关卡</text>
   </g>
   <g id="node-a4" data-graph-role="node" data-node-id="a4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,378,890,434">
   <rect x="230.0" y="378.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="406.0" text-anchor="middle" class="node-title" font-size="18.0">setup_uinput：能力镜像 + 4 处冲突</text>
-  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">vt_input.c:55 tool/槽数/tracking id 量程/名字与 bus；量程只向上抬 vt_input.c:79</text>
+  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">tool/槽数/tracking id 量程/名字与 bus；量程只向上抬</text>
   </g>
   <g id="node-a5" data-graph-role="node" data-node-id="a5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,456,890,512">
   <rect x="230.0" y="456.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="484.0" text-anchor="middle" class="node-title" font-size="18.0">EVIOCGRAB(1)：抓屏（失败 → 5）</text>
-  <text x="560.0" y="506.0" text-anchor="middle" class="node-sub">vtouchd.c:111 抓屏放最后；make_listen 已先起（失败 → 6）</text>
+  <text x="560.0" y="506.0" text-anchor="middle" class="node-sub">抓屏放最后；make_listen 已先起（失败 → 6）</text>
   </g>
   <g id="node-a6" data-graph-role="node" data-node-id="a6" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,534,890,590">
   <rect x="230.0" y="534.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="562.0" text-anchor="middle" class="node-title" font-size="18.0">起区域线程：最后一步</text>
-  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">vtouchd.c:113 失败 → 7；此前从不 grab，无「抓着没人管」</text>
+  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">失败 → 7；此前从不 grab，无「抓着没人管」</text>
   </g>
   <g id="node-b1" data-graph-role="node" data-node-id="b1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,692,890,748">
   <rect x="230.0" y="692.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="720.0" text-anchor="middle" class="node-title" font-size="18.0">poll 一轮：4 个 fd</text>
-  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">vtouchd.c:125 物理/监听/客户端/出站；待重发时超时压到 5ms</text>
+  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">物理/监听/客户端/出站；待重发时超时压到 5ms</text>
   </g>
   <g id="node-b2" data-graph-role="node" data-node-id="b2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,770,890,826">
   <rect x="230.0" y="770.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="798.0" text-anchor="middle" class="node-title" font-size="18.0">物理可读 → physical_events()</text>
-  <text x="560.0" y="820.0" text-anchor="middle" class="node-sub">vt_input.c:112 选槽 → 写 phys[]；按下时记 ps_press_ns</text>
+  <text x="560.0" y="820.0" text-anchor="middle" class="node-sub">选槽 → 写 phys[]；按下时记 ps_press_ns</text>
   </g>
   <g id="node-b3" data-graph-role="node" data-node-id="b3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,848,890,904">
   <rect x="230.0" y="848.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">SYN_REPORT 帧边界（攒表到帧尾）</text>
-  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">vt_input.c:128 只改 phys[]，不转发：半帧期间消费者看不到</text>
+  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">只改 phys[]，不转发：半帧期间消费者看不到</text>
   </g>
   <g id="node-b4" data-graph-role="node" data-node-id="b4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,926,890,982">
   <rect x="230.0" y="926.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="954.0" text-anchor="middle" class="node-title" font-size="18.0">emit_frame()：物理+虚拟同帧一次 writev</text>
-  <text x="560.0" y="976.0" text-anchor="middle" class="node-sub">vt_frame.c:96 顺序：待抬→物理→虚拟→BTN→SYN</text>
+  <text x="560.0" y="976.0" text-anchor="middle" class="node-sub">顺序：待抬→物理→虚拟→BTN→SYN</text>
   </g>
   <g id="node-b5" data-graph-role="node" data-node-id="b5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1004,890,1060">
   <rect x="230.0" y="1004.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1032.0" text-anchor="middle" class="node-title" font-size="18.0">broadcast_phys()：更新 ps_* 快照并入队</text>
-  <text x="560.0" y="1054.0" text-anchor="middle" class="node-sub">vt_frame.c:172 快照 = 完整帧状态；pev 只报物理（门①）</text>
+  <text x="560.0" y="1054.0" text-anchor="middle" class="node-sub">快照 = 完整帧状态；只喂区域线程（§4.1）</text>
   </g>
   <g id="node-b6" data-graph-role="node" data-node-id="b6" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1082,890,1138">
   <rect x="230.0" y="1082.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1110.0" text-anchor="middle" class="node-title" font-size="18.0">region_q：每订阅者一条独立队列</text>
-  <text x="560.0" y="1132.0" text-anchor="middle" class="node-sub">vt_frame.c:186 主线程只做非阻塞 push（§4.3）</text>
+  <text x="560.0" y="1132.0" text-anchor="middle" class="node-sub">主线程只做非阻塞 push（§4.3）</text>
   </g>
   <g id="node-c1" data-graph-role="node" data-node-id="c1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1240,890,1296">
   <rect x="230.0" y="1240.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="1268.0" text-anchor="middle" class="node-title" font-size="18.0">客户端可读 → client_frame()</text>
-  <text x="560.0" y="1290.0" text-anchor="middle" class="node-sub">vt_ws.c:262 单轮 ≤32 帧；半包留缓冲</text>
+  <text x="560.0" y="1290.0" text-anchor="middle" class="node-sub">单轮 ≤32 帧；半包留缓冲</text>
   </g>
   <g id="node-c2" data-graph-role="node" data-node-id="c2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1318,890,1374">
   <rect x="230.0" y="1318.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="1346.0" text-anchor="middle" class="node-title" font-size="18.0">down/move/up → set_virtual()</text>
-  <text x="560.0" y="1368.0" text-anchor="middle" class="node-sub">vt_ws.c:349 · vt_frame.c:141 逻辑→raw 换算 vt_util.c:31</text>
+  <text x="560.0" y="1368.0" text-anchor="middle" class="node-sub">逻辑→raw 换算</text>
   </g>
   <g id="node-c3" data-graph-role="node" data-node-id="c3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1396,890,1452">
   <rect x="230.0" y="1396.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="1424.0" text-anchor="middle" class="node-title" font-size="18.0">立即 emit_frame()（不等队列）</text>
-  <text x="560.0" y="1446.0" text-anchor="middle" class="node-sub">vt_ws.c:355 注入响应即时：不经过区域判定与出站队列</text>
+  <text x="560.0" y="1446.0" text-anchor="middle" class="node-sub">注入响应即时：不经过区域判定与出站队列</text>
   </g>
   <g id="node-c4" data-graph-role="node" data-node-id="c4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1474,890,1530">
   <rect x="230.0" y="1474.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="1502.0" text-anchor="middle" class="node-title" font-size="18.0">broadcast_virt()：虚拟状态也入队</text>
-  <text x="560.0" y="1524.0" text-anchor="middle" class="node-sub">vt_frame.c:197/209 virt=1 → 区域线程直接跳过（门②）</text>
+  <text x="560.0" y="1524.0" text-anchor="middle" class="node-sub">virt=1 → 区域线程直接跳过（§4.4）</text>
   </g>
   <g id="node-d1" data-graph-role="node" data-node-id="d1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1632,890,1688">
   <rect x="230.0" y="1632.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="1660.0" text-anchor="middle" class="node-title" font-size="18.0">区域线程：五事件判定</text>
-  <text x="560.0" y="1682.0" text-anchor="middle" class="node-sub">vt_region.c:133/95 读 region_q；slot_in/hit/last 线程私有</text>
+  <text x="560.0" y="1682.0" text-anchor="middle" class="node-sub">读 region_q；slot_in/hit/last 线程私有</text>
   </g>
   <g id="node-d2" data-graph-role="node" data-node-id="d2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1710,890,1766">
   <rect x="230.0" y="1710.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="1738.0" text-anchor="middle" class="node-title" font-size="18.0">region_ev_send：订阅位决定推不推</text>
-  <text x="560.0" y="1760.0" text-anchor="middle" class="node-sub">vt_region.c:74 命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志</text>
+  <text x="560.0" y="1760.0" text-anchor="middle" class="node-sub">命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志</text>
   </g>
   <g id="node-d3" data-graph-role="node" data-node-id="d3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1788,890,1844">
   <rect x="230.0" y="1788.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
-  <text x="560.0" y="1816.0" text-anchor="middle" class="node-title" font-size="18.0">响应 / pev / region_ev → outq_push()</text>
-  <text x="560.0" y="1838.0" text-anchor="middle" class="node-sub">vt_queue.c:72 容量 64；满了丢最旧（§4.5）</text>
+  <text x="560.0" y="1816.0" text-anchor="middle" class="node-title" font-size="18.0">响应 / region_ev → outq_push()</text>
+  <text x="560.0" y="1838.0" text-anchor="middle" class="node-sub">容量 64；满了丢最旧（§4.5）</text>
   </g>
   <g id="node-d4" data-graph-role="node" data-node-id="d4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1866,890,1922">
   <rect x="230.0" y="1866.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="1894.0" text-anchor="middle" class="node-title" font-size="18.0">poll POLLOUT → outq_flush()</text>
-  <text x="560.0" y="1916.0" text-anchor="middle" class="node-sub">vtouchd.c:184 队列非空才挂 POLLOUT；socket 已 O_NONBLOCK</text>
+  <text x="560.0" y="1916.0" text-anchor="middle" class="node-sub">队列非空才挂 POLLOUT；socket 已 O_NONBLOCK</text>
   </g>
   <g id="node-d5" data-graph-role="node" data-node-id="d5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1944,890,2000">
   <rect x="230.0" y="1944.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="1972.0" text-anchor="middle" class="node-title" font-size="18.0">写不完留到下次（真错才踢）</text>
-  <text x="560.0" y="1994.0" text-anchor="middle" class="node-sub">vt_queue.c:104 EPIPE/ECONNRESET 才 drop_client</text>
+  <text x="560.0" y="1994.0" text-anchor="middle" class="node-sub">EPIPE/ECONNRESET 才 drop_client</text>
   </g>
   <g id="node-e1" data-graph-role="node" data-node-id="e1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2102,890,2158">
   <rect x="230.0" y="2102.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="2130.0" text-anchor="middle" class="node-title" font-size="18.0">断连/被踢 → drop_client()</text>
-  <text x="560.0" y="2152.0" text-anchor="middle" class="node-sub">vt_ws.c:188 清 sub_mask + outq_reset（残包不串下一个客户端）</text>
+  <text x="560.0" y="2152.0" text-anchor="middle" class="node-sub">清 sub_mask + outq_reset（残包不串下一个客户端）</text>
   </g>
   <g id="node-e2" data-graph-role="node" data-node-id="e2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2180,890,2236">
   <rect x="230.0" y="2180.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="2208.0" text-anchor="middle" class="node-title" font-size="18.0">停止 → stop_flag → join 区域线程</text>
-  <text x="560.0" y="2230.0" text-anchor="middle" class="node-sub">vtouchd.c:221 区域线程收尾后才 cleanup</text>
+  <text x="560.0" y="2230.0" text-anchor="middle" class="node-sub">区域线程收尾后才 cleanup</text>
   </g>
   <g id="node-e3" data-graph-role="node" data-node-id="e3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2258,890,2314">
   <rect x="230.0" y="2258.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="2286.0" text-anchor="middle" class="node-title" font-size="18.0">cleanup()：先放 grab 再拆设备</text>
-  <text x="560.0" y="2308.0" text-anchor="middle" class="node-sub">vtouchd.c:189 client→listen→grab→uinput 逆序</text>
+  <text x="560.0" y="2308.0" text-anchor="middle" class="node-sub">client→listen→grab→uinput 逆序</text>
   </g>
   <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2416,890,2472">
   <rect x="230.0" y="2416.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="2444.0" text-anchor="middle" class="node-title" font-size="18.0">② broadcast_phys()：快照是「帧状态」而不是活数组</text>
-  <text x="560.0" y="2466.0" text-anchor="middle" class="node-sub">vt_internal.h:111 · vt_frame.c:172 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 vtouchd.c:100</text>
+  <text x="560.0" y="2466.0" text-anchor="middle" class="node-sub">消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段</text>
   </g>
   <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2494,890,2550">
   <rect x="230.0" y="2494.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="2522.0" text-anchor="middle" class="node-title" font-size="18.0">③ 立即 emit_frame()：注入不进队列</text>
-  <text x="560.0" y="2544.0" text-anchor="middle" class="node-sub">vt_ws.c:355 与最小版逐字相同；Plan B 没把这步挪进任何线程</text>
+  <text x="560.0" y="2544.0" text-anchor="middle" class="node-sub">与最小版逐字相同；Plan B 没把这步挪进任何线程</text>
   </g>
   <g id="node-z3" data-graph-role="node" data-node-id="z3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2572,890,2628">
   <rect x="230.0" y="2572.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="2600.0" text-anchor="middle" class="node-title" font-size="18.0">④ outq_push()：三条来源一个出口</text>
-  <text x="560.0" y="2622.0" text-anchor="middle" class="node-sub">vt_queue.c:72 响应/pev/region_ev 同队列同顺序，因果序与主循环一致</text>
+  <text x="560.0" y="2622.0" text-anchor="middle" class="node-sub">响应/region_ev 同队列同顺序，因果序与主循环一致</text>
   </g>
   <g id="legend" data-graph-role="legend">
     <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="60" y="2654" width="676" height="46" rx="10" fill="none" stroke="none"/>

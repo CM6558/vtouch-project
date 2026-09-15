@@ -1,12 +1,11 @@
 /**
  * touchback_demo.js —— 「回触示例」（AutoJs6，最小版 SDK）
  *
- * 链路：物理手指 → daemon 抓取 → pev/region_ev 推给本脚本 → 命中区域 → **回触**（注入一路虚拟槽）
+ * 链路：物理手指 → daemon 抓取 → region_ev 推给本脚本 → 命中区域 → **回触**（注入一路虚拟槽）
  *
- * 为什么不会自己触发自己（Plan B 的两道门）：
- *   1) pev 只报物理手指 —— 客户端自己注入的轨迹不会被回灌（§4.1）；
- *   2) region_ev 的判定只在区域线程里跑，且 `if (ev.virt) continue`（§4.4）——
- *      虚拟触点进得了转发队列、进不了判定。
+ * 为什么不会自己触发自己（Plan B 的门）：
+ *   region_ev 的判定只在区域线程里跑，且 `if (ev.virt) continue`（§4.4）——
+ *   虚拟触点进得了转发队列、进不了判定，也不会推给客户端。
  *   本脚本里的 SELFTEST 把这条做成可断言的：回触后 300ms 内收到的 region_ev 都算自激。
  *
  * 与旧架构的差别（值得注意）：旧版回调读线程里带 sleep 的动作会把事件读堵住；现在 daemon 的出站
@@ -20,7 +19,6 @@ var vt = require("/sdcard/vtouch.js");
 
 var REGION_ID = "tapR";             // 右半屏中央那块（下面自动建）
 var SELFTEST = true;
-var PEDBG = false;                  // true = 连物理轨迹 pev 一起打日志
 
 vt.start();
 var c = vt.connect();
@@ -33,7 +31,7 @@ c.cmd("region clear");
 c.cmd("region add " + REGION_ID + " 0 "
     + Math.round(LW / 2) + " " + Math.round(LH / 3) + " "
     + Math.round(LW - LW / 8) + " " + Math.round(LH * 2 / 3) + " 1");
-c.cmd("sub all");                    // 物理轨迹 + 区域事件都要（回触靠 region_ev 触发）
+c.cmd("sub region");                 // 只需要区域事件（回触靠 region_ev 触发）
 
 var injecting = 0;
 function busy(fn) {                  // 回触丢子线程：读循环只负责收事件
@@ -46,10 +44,6 @@ for (;;) {
     if (!line) { sleep(5); continue; }
 
     var p = String(line).split(/\s+/);
-    if (p[0] === "pev") {
-        if (PEDBG) log("pev " + line);
-        continue;
-    }
     if (p[0] !== "region_ev" || p.length < 6) continue;
 
     var id = p[1], ev = p[2], slot = parseInt(p[3], 10), x = parseInt(p[4], 10), y = parseInt(p[5], 10);

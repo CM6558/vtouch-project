@@ -16,7 +16,7 @@
  * 引擎部件（方案 §4/§5）：
  *   事件队列  region_q   SPSC 无锁环，容量 64，主线程 push / 区域线程 pop（§4.3）
  *   区域线程  region_apply()：五事件判定，slot_in/slot_hit/slot_last 线程私有（§4.4）
- *   出站队列  outq       容量 64 帧，生产者 = 主线程(响应/pev) + 区域线程(region_ev)，
+ *   出站队列  outq       容量 64 帧，生产者 = 主线程(响应) + 区域线程(region_ev)，
  *                        消费者 = 主线程 POLLOUT 刷出（§4.5）
  *   身份分段  静态两段、不做避让，而且**不落字段**：发给系统的槽位与 tracking id 都是下标的纯函数 ——
  *             物理触点 = 物理槽号（0..phys_slots-1，虚拟跳过这一段），虚拟触点 = phys_slots + 客户端槽号。
@@ -38,11 +38,10 @@
  *   region clear             -> ok <n>
  *   region list              -> region <id> <type> <a1> <a2> <a3> <a4> <en>… / end <n>
  *   region add <id> <type> <a1> <a2> <a3> <a4> <en> -> ok <n> | err region
- *   sub [phys|region|all]    -> ok（不带参数 = 两个通道都订；只订 region 就不白收高频 pev）
+ *   sub [region]             -> ok（不带参数 = 订阅区域通道；只有这一条推送通道）
  *   unsub                    -> ok
  *
- * 出站事件（订阅后推给客户端，走发送队列）：
- *   pev <slot> <down|up|move> <lx> <ly>                          物理触摸轨迹
+ * 出站事件（sub 之后推给客户端，走发送队列）：
  *   region_ev <id> <down|up|enter|exit|move> <slot> <lx> <ly>     区域五事件（只报物理手指）
  *
  * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点 + 清它的出站队列）；grab 与 uinput 不受影响。
@@ -202,7 +201,7 @@ int vtouch_poll_step(void)
     if (g.client_fd >= 0 && ((p[2].revents & POLLIN) || ws_has_pending())) {
         if (client_frame() < 0) drop_client();
     }
-    /* §4.5：唯一的刷出点 —— 队列里可能是刚入队的响应、区域线程的 region_ev，或本帧的 pev */
+    /* §4.5：唯一的刷出点 —— 队列里是刚入队的响应，或区域线程塞进来的 region_ev */
     if (g.client_fd >= 0 && ((p[3].revents & POLLOUT) || outq_pending())) outq_flush();
     return 0;
 }

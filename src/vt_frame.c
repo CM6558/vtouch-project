@@ -219,14 +219,12 @@ void owner_reset(void)
 }
 /**
  * (vtouch-doc: broadcast_phys)
- * @brief 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q（喂区域线程），并在订了 phys 时推 pev。
+ * @brief 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。
  * @note    推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
- *   只推状态变化（down/up/move），静止不刷屏。
- *   注意：完整版只在 subscribed 时才广播（广播只服务客户端）；现在广播还负责喂区域线程，
- *   所以每帧都跑，订阅与否只决定 pev 那一路（纯内存比较，不进热路径的写）。
+ *   只推状态变化（down/up/move），静止不刷屏（纯内存比较，不进热路径的写）。
  */
 void broadcast_phys(void)
 {
@@ -243,18 +241,12 @@ void broadcast_phys(void)
         ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly; ev.virt = 0;
         ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i] : now_ns();
         vtq_push(&g.region_q, &ev);                              /* 区域线程（队列唯一消费者） */
-        if (g.sub_mask & SUB_PHYS) {                             /* 外部客户端（走出站队列） */
-            char msg[64];
-            int n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i,
-                             action == VT_DOWN ? "down" : (action == VT_UP ? "up" : "move"), lx, ly);
-            if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
-        }
     }
 }
 /**
  * (vtouch-doc: broadcast_virt)
  * @brief 虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。
- * @note    「回触不自激」可断言的那一半：区域线程遇到 virt=1 直接跳过；虚拟轨迹不进 pev（不回灌客户端自己的轨迹）。
+ * @note    「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。
  */
 void broadcast_virt(void)
 {
@@ -271,6 +263,6 @@ void broadcast_virt(void)
         ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
         ev.ts = now_ns(); ev.virt = 1;
         vtq_push(&g.region_q, &ev);
-        /* 虚拟轨迹不进 pev：pev 只报真手指（客户端自己注入的轨迹不该被回灌） */
+        /* 虚拟事件只喂区域线程；区域线程按 virt 位跳过，不产生任何推送 */
     }
 }

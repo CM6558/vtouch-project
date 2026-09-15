@@ -4,8 +4,8 @@
   "template_type": "data-flow",
   "style": 1,
   "width": 1120,
-  "height": 2138,
-  "title": "Plan B 核心机制：队列 · 快照时机 · 防自激两道门 · 线程与锁",
+  "height": 2060,
+  "title": "Plan B 核心机制：队列 · 快照时机 · 防自激那道门 · 线程与锁",
   "subtitle": "四块各自独立可验：每个消费者一条 SPSC 环（容量 64）· 转发只在 SYN 之后 · 虚拟事件被判据线程整体跳过 · 区域状态线程私有",
   "containers": [
     {
@@ -27,15 +27,15 @@
     {
       "id": "box3",
       "x": 60,
-      "y": 1044,
+      "y": 966,
       "width": 1000,
-      "height": 286,
-      "label": "③ 防自激两道门（§4.4）"
+      "height": 208,
+      "label": "③ 防自激那道门（§4.4）"
     },
     {
       "id": "box4",
       "x": 60,
-      "y": 1358,
+      "y": 1280,
       "width": 1000,
       "height": 364,
       "label": "④ 线程与锁（谁碰谁）"
@@ -43,7 +43,7 @@
     {
       "id": "boxnote",
       "x": 60,
-      "y": 1750,
+      "y": 1672,
       "width": 1000,
       "height": 286,
       "label": "注记（不是流程步骤，指向上面的节点）"
@@ -58,7 +58,7 @@
       "width": 660,
       "height": 56,
       "label": "region_q：主线程 push / 区域线程 pop",
-      "sublabel": "vt_internal.h:53 · vt_queue.c:22 SPSC 无锁环；消费者只写 head、生产者只写 tail",
+      "sublabel": "SPSC 无锁环；消费者只写 head、生产者只写 tail",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -71,7 +71,7 @@
       "width": 660,
       "height": 56,
       "label": "溢出①：队尾同槽同类 move 原地合并",
-      "sublabel": "vt_queue.c:31 丢旧位置不影响增量语义（§4.3）",
+      "sublabel": "丢旧位置不影响增量语义（§4.3）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -84,7 +84,7 @@
       "width": 660,
       "height": 56,
       "label": "溢出②：仍满 → 丢最旧（CAS 推 head）",
-      "sublabel": "vt_queue.c:35 慢消费者只丢自己的事件，注入照常",
+      "sublabel": "慢消费者只丢自己的事件，注入照常",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -97,7 +97,7 @@
       "width": 660,
       "height": 56,
       "label": "outq：两个生产者（主线程/区域线程）",
-      "sublabel": "vt_internal.h:54 · vt_queue.c:72 一把短锁只包住一次 memcpy",
+      "sublabel": "一把短锁只包住一次 memcpy",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -110,7 +110,7 @@
       "width": 660,
       "height": 56,
       "label": "outq 溢出：丢最旧（只可能是响应/事件）",
-      "sublabel": "vt_queue.c:77 客户端慢 → 只在这里堆（§4.5）",
+      "sublabel": "客户端慢 → 只在这里堆（§4.5）",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -122,8 +122,8 @@
       "y": 534,
       "width": 660,
       "height": 56,
-      "label": "sub_mask：决定推哪一路（phys/region）",
-      "sublabel": "vt_internal.h:113 · vt_ws.c:197 断连即清零（§4.6）",
+      "label": "sub_mask：订阅位（只有区域这一路）",
+      "sublabel": "断连即清零（§4.6）",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -136,7 +136,7 @@
       "width": 660,
       "height": 56,
       "label": "物理帧到来：只改 phys[]，不转发",
-      "sublabel": "vt_input.c:128 半帧期间消费者不会看到半更新",
+      "sublabel": "半帧期间消费者不会看到半更新",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -149,7 +149,7 @@
       "width": 660,
       "height": 56,
       "label": "SYN_REPORT → emit_frame() 提交",
-      "sublabel": "vt_frame.c:96 注入路径的最后一件事",
+      "sublabel": "注入路径的最后一件事",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -162,7 +162,7 @@
       "width": 660,
       "height": 56,
       "label": "紧接着 broadcast_phys()：快照 + 入队",
-      "sublabel": "vt_frame.c:172/186 ps_* 与 vt_ev 都是整帧后的值",
+      "sublabel": "ps_* 与 vt_ev 都是整帧后的值",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -175,22 +175,9 @@
       "width": 660,
       "height": 56,
       "label": "消费者读「帧快照」，不读活数组",
-      "sublabel": "vt_internal.h:111 这是与共享数组直读的本质区别",
+      "sublabel": "这是与共享数组直读的本质区别",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
-      "flat": true
-    },
-    {
-      "id": "g1",
-      "kind": "rect",
-      "x": 230,
-      "y": 1084,
-      "width": 660,
-      "height": 56,
-      "label": "门①：pev 只报物理触点",
-      "sublabel": "vt_frame.c:172 broadcast_phys 只遍历 phys[]",
-      "fill": "#fef2f2",
-      "stroke": "#ef4444",
       "flat": true
     },
     {
@@ -200,8 +187,8 @@
       "y": 1162,
       "width": 660,
       "height": 56,
-      "label": "门②：区域线程跳过 virt=1 的事件",
-      "sublabel": "vt_region.c:142 判定前先看 ev->virt",
+      "label": "门：区域线程跳过 virt=1 的事件",
+      "sublabel": "判定前先看 ev->virt",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -214,7 +201,7 @@
       "width": 660,
       "height": 56,
       "label": "回触（注入）既不会回灌、也不会命中区域",
-      "sublabel": "vt_frame.c:197/209 客户端画的路径不会触发自己的回调",
+      "sublabel": "客户端画的路径不会触发自己的回调",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -223,11 +210,11 @@
       "id": "t1",
       "kind": "rect",
       "x": 230,
-      "y": 1398,
+      "y": 1320,
       "width": 660,
       "height": 56,
       "label": "主线程：合成帧 + 非阻塞 push",
-      "sublabel": "vtouchd.c:125 热路径上只有这两件事（§2）",
+      "sublabel": "热路径上只有这两件事（§2）",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -236,11 +223,11 @@
       "id": "t2",
       "kind": "rect",
       "x": 230,
-      "y": 1476,
+      "y": 1398,
       "width": 660,
       "height": 56,
       "label": "区域线程：区域状态的唯一持有者",
-      "sublabel": "vt_region.c:133 slot_in/slot_hit/slot_last 线程私有",
+      "sublabel": "slot_in/slot_hit/slot_last 线程私有",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -249,11 +236,11 @@
       "id": "t3",
       "kind": "rect",
       "x": 230,
-      "y": 1554,
+      "y": 1476,
       "width": 660,
       "height": 56,
       "label": "region_lock：只包住区域表读写（短锁）",
-      "sublabel": "vt_region.c:98 这把锁不在注入路径上",
+      "sublabel": "这把锁不在注入路径上",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -262,11 +249,11 @@
       "id": "t4",
       "kind": "rect",
       "x": 230,
-      "y": 1632,
+      "y": 1554,
       "width": 660,
       "height": 56,
       "label": "退出序：stop_flag → join → cleanup",
-      "sublabel": "vtouchd.c:221 区域线程先收尾",
+      "sublabel": "区域线程先收尾",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -275,11 +262,11 @@
       "id": "z1",
       "kind": "rect",
       "x": 230,
-      "y": 1790,
+      "y": 1712,
       "width": 660,
       "height": 56,
       "label": "① region_q：为什么可以无锁（单生产者单消费者）",
-      "sublabel": "vt_queue.c:22 生产者只写 tail、消费者只写 head，环形下标取模即够（§4.3）",
+      "sublabel": "生产者只写 tail、消费者只写 head，环形下标取模即够（§4.3）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -288,11 +275,11 @@
       "id": "z2",
       "kind": "rect",
       "x": 230,
-      "y": 1868,
+      "y": 1790,
       "width": 660,
       "height": 56,
-      "label": "③ 门②：是「不产生事件」而不是「事后过滤事件」",
-      "sublabel": "vt_region.c:142 判定线程连状态表都不更新，回触不会污染 slot_in/hit",
+      "label": "③ 门：是「不产生事件」而不是「事后过滤事件」",
+      "sublabel": "判定线程连状态表都不更新，回触不会污染 slot_in/hit",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -301,125 +288,20 @@
       "id": "z3",
       "kind": "rect",
       "x": 230,
-      "y": 1946,
+      "y": 1868,
       "width": 660,
       "height": 56,
       "label": "④ 区域线程：状态私有化是 §4.4 的关键收益",
-      "sublabel": "vt_region.c:98 主线程不再持有区域状态 → 判据可独立演进",
+      "sublabel": "主线程不再持有区域状态 → 判据可独立演进",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
     }
   ],
-  "arrows": [
-    {
-      "id": "ar2",
-      "source": "q1",
-      "target": "q2",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar3",
-      "source": "q2",
-      "target": "q3",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar4",
-      "source": "q3",
-      "target": "q4",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar5",
-      "source": "q4",
-      "target": "q5",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar6",
-      "source": "q5",
-      "target": "q6",
-      "flow": "data",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar8",
-      "source": "s1",
-      "target": "s2",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar9",
-      "source": "s2",
-      "target": "s3",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar10",
-      "source": "s3",
-      "target": "s4",
-      "flow": "read",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar12",
-      "source": "g1",
-      "target": "g2",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar13",
-      "source": "g2",
-      "target": "g3",
-      "flow": "neutral",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar15",
-      "source": "t1",
-      "target": "t2",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar16",
-      "source": "t2",
-      "target": "t3",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    },
-    {
-      "id": "ar17",
-      "source": "t3",
-      "target": "t4",
-      "flow": "control",
-      "source_port": "bottom",
-      "target_port": "top"
-    }
-  ],
+  "arrows": [],
   "legend_orientation": "horizontal",
   "legend_x": 70,
-  "legend_y": 2042,
+  "legend_y": 1964,
   "legend_locked": true,
   "legend": [
     {
@@ -441,5 +323,5 @@
   ],
   "footer": "行号：src/ 下各模块（见 vt_internal.h）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4/§8）",
   "footer_x": 70,
-  "footer_y": 2098
+  "footer_y": 2020
 }

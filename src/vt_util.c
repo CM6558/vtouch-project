@@ -53,14 +53,14 @@ int logical_to_raw(int logical, int axis, int *raw)
 }
 /**
  * (vtouch-doc: raw_to_logical)
- * @brief raw 坐标 → 逻辑坐标（转发 pev / 区域事件时用）。
+ * @brief raw 坐标 → 逻辑坐标（转发区域事件时用）。
  * @param   raw      raw 值
  * @param   axis     0=X 1=Y
  * @param   logical  输出逻辑值
  * @return  0 成功；-1 轴非法或量程非法。
  *
  * 为什么这么写（原有注释，逐字保留）：
- *   raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（pev / 区域判定用）。
+ *   raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（区域判定用）。
  */
 int raw_to_logical(int raw, int axis, int *logical)
 {

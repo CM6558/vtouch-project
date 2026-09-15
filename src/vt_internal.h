@@ -45,8 +45,7 @@
 #define HTTP_MAX 4096
 #define CAP_LONGS(n) (((n) + 1 + 8 * (int)sizeof(unsigned long) - 1) / (8 * (int)sizeof(unsigned long)))
 #define WS_IN_MAX (MAX_PAYLOAD + 14)     /* 单帧上限 + 头（2 + 8 扩展长 + 4 掩码） */
-#define SUB_PHYS   1
-#define SUB_REGION 2
+#define SUB_REGION 2      /* 订阅位：只有区域通道 */
 #define VT_UP   0
 #define VT_DOWN 1
 #define VT_MOVE 2
@@ -110,7 +109,7 @@ struct vt_state {
     int g_emit_fail;
     int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];   /* 物理槽上一帧快照（转发判 down/up/move）*/
     uint64_t ps_press_ns[MAX_PHYS];
-    int sub_mask;                                      /* SUB_PHYS | SUB_REGION */
+    int sub_mask;                                      /* 订阅位：SUB_REGION / 0 = 未订阅 */
     struct vtq region_q;                               /* 主线程 push / 区域线程 pop */
     struct region regions[MAX_REGIONS];
     int region_count;
@@ -127,7 +126,7 @@ int parse_long(const char *s, long lo, long hi, int *out);
 int bit(const unsigned long *b, int n);
 /* 逻辑坐标（设备像素）→ 触摸屏 raw 坐标。 (vtouch-doc: logical_to_raw) */
 int logical_to_raw(int logical, int axis, int *raw);
-/* raw 坐标 → 逻辑坐标（转发 pev / 区域事件时用）。 (vtouch-doc: raw_to_logical) */
+/* raw 坐标 → 逻辑坐标（转发区域事件时用）。 (vtouch-doc: raw_to_logical) */
 int raw_to_logical(int raw, int axis, int *logical);
 /* 单调时钟（纳秒），事件时间戳用。 (vtouch-doc: now_ns) */
 uint64_t now_ns(void);
@@ -189,7 +188,7 @@ int emit_frame(void);
 int set_virtual(struct contact *state, int slot, const char *name, int x, int y);
 /* 客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。 (vtouch-doc: owner_reset) */
 void owner_reset(void);
-/* 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q（喂区域线程），并在订了 phys 时推 pev。 (vtouch-doc: broadcast_phys) */
+/* 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。 (vtouch-doc: broadcast_phys) */
 void broadcast_phys(void);
 /* 虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。 (vtouch-doc: broadcast_virt) */
 void broadcast_virt(void);

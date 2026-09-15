@@ -14,7 +14,7 @@
       "y": 206,
       "width": 2,
       "height": 898,
-      "label": " "
+      "label": ""
     },
     {
       "id": "lifeline1",
@@ -22,7 +22,7 @@
       "y": 206,
       "width": 2,
       "height": 898,
-      "label": " "
+      "label": ""
     },
     {
       "id": "lifeline2",
@@ -30,7 +30,7 @@
       "y": 206,
       "width": 2,
       "height": 898,
-      "label": " "
+      "label": ""
     },
     {
       "id": "lifeline3",
@@ -38,7 +38,7 @@
       "y": 206,
       "width": 2,
       "height": 898,
-      "label": " "
+      "label": ""
     },
     {
       "id": "boxnote",
@@ -136,196 +136,13 @@
       "width": 660,
       "height": 56,
       "label": "⑪⑫ 这就是「不自激」",
-      "sublabel": "回触的轨迹会被判据线程整条跳过，既不回灌 pev 也不产生 region_ev（§4.4）",
+      "sublabel": "回触的轨迹会被判据线程整条跳过：不产生 region_ev，也不推给客户端（§4.4）",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
     }
   ],
-  "arrows": [
-    {
-      "id": "m1",
-      "flow": "read",
-      "label": "① 手指按下：Type-B 帧（vt_input.c:112）",
-      "x1": 200,
-      "y1": 236,
-      "x2": 410,
-      "y2": 236
-    },
-    {
-      "id": "m2",
-      "flow": "data",
-      "label": "② emit_frame：物理+虚拟同帧一次 writev（vt_frame.c:96）",
-      "x1": 410,
-      "y1": 298,
-      "x2": 200,
-      "y2": 298
-    },
-    {
-      "id": "m3",
-      "flow": "neutral",
-      "label": "③ 更新 ps_* 快照（帧后状态，vt_frame.c:172）",
-      "x1": 436.0,
-      "y1": 334,
-      "x2": 436.0,
-      "y2": 334,
-      "route_points": [
-        [
-          510.0,
-          334
-        ],
-        [
-          510.0,
-          386
-        ],
-        [
-          456.0,
-          386
-        ]
-      ]
-    },
-    {
-      "id": "m4",
-      "flow": "read",
-      "label": "④ region_q：帧快照入队（vt_frame.c:186）",
-      "x1": 450,
-      "y1": 422,
-      "x2": 660,
-      "y2": 422
-    },
-    {
-      "id": "m5",
-      "flow": "neutral",
-      "label": "⑤ 五事件判定（状态表线程私有，vt_region.c:98）",
-      "x1": 686.0,
-      "y1": 458,
-      "x2": 686.0,
-      "y2": 458,
-      "route_points": [
-        [
-          760.0,
-          458
-        ],
-        [
-          760.0,
-          510
-        ],
-        [
-          706.0,
-          510
-        ]
-      ]
-    },
-    {
-      "id": "m6",
-      "flow": "data",
-      "label": "⑥ region_ev down → outq（不直写 socket，vt_region.c:74）",
-      "x1": 660,
-      "y1": 546,
-      "x2": 450,
-      "y2": 546
-    },
-    {
-      "id": "m7",
-      "flow": "data",
-      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（vtouchd.c:184）",
-      "x1": 450,
-      "y1": 608,
-      "x2": 910,
-      "y2": 608
-    },
-    {
-      "id": "m8",
-      "flow": "control",
-      "label": "⑧ 脚本回触：down/move/up 注入槽（vt_ws.c:349）",
-      "x1": 910,
-      "y1": 670,
-      "x2": 450,
-      "y2": 670
-    },
-    {
-      "id": "m9",
-      "flow": "neutral",
-      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，vt_frame.c:141）",
-      "x1": 436.0,
-      "y1": 706,
-      "x2": 436.0,
-      "y2": 706,
-      "route_points": [
-        [
-          510.0,
-          706
-        ],
-        [
-          510.0,
-          758
-        ],
-        [
-          456.0,
-          758
-        ]
-      ]
-    },
-    {
-      "id": "m10",
-      "flow": "data",
-      "label": "⑩ 回触帧 writev → 合并设备（注入落地）",
-      "x1": 410,
-      "y1": 794,
-      "x2": 200,
-      "y2": 794
-    },
-    {
-      "id": "m11",
-      "flow": "read",
-      "label": "⑪ broadcast_virt：virt=1 也入队（vt_frame.c:209）",
-      "x1": 450,
-      "y1": 856,
-      "x2": 660,
-      "y2": 856
-    },
-    {
-      "id": "m12",
-      "flow": "neutral",
-      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（vt_region.c:142）",
-      "x1": 686.0,
-      "y1": 892,
-      "x2": 686.0,
-      "y2": 892,
-      "route_points": [
-        [
-          760.0,
-          892
-        ],
-        [
-          760.0,
-          944
-        ],
-        [
-          706.0,
-          944
-        ]
-      ]
-    },
-    {
-      "id": "m13",
-      "flow": "control",
-      "label": "⑬ up / close → 清订阅 + 丢残包（vt_ws.c:188）",
-      "x1": 910,
-      "y1": 980,
-      "x2": 450,
-      "y2": 980
-    },
-    {
-      "id": "m14",
-      "flow": "neutral",
-      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（vtouchd.c:189）",
-      "x1": 410,
-      "y1": 1042,
-      "x2": 200,
-      "y2": 1042
-    }
-  ],
+  "arrows": [],
   "legend_orientation": "horizontal",
   "legend_x": 70,
   "legend_y": 1436,

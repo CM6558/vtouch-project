@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ws_inject_hold.py —— 保持一根虚拟触点（做「身份两段」对照测试用），同时打印服务端推来的 pev/region_ev。
+"""ws_inject_hold.py —— 保持一根虚拟触点（做「身份两段」对照测试用），同时打印服务端推来的 region_ev。
 
 和 ws_smoke.py 的分工：smoke 验协议面（每条命令的回包），这个脚本负责「持续按住」——
 因为它按住的时候你在屏幕上按物理手指，合并设备流里才会同时出现虚拟 id 与物理 id，
@@ -113,7 +113,7 @@ def main():
 
     print("[inject] 连接 ws://%s:%d" % (args.host, args.port), flush=True)
     w = WS(args.host, args.port)
-    for cmd in ("res", "sub all"):
+    for cmd in ("res", "sub region"):
         w.send(cmd)
         print("[inject] > %-10s < %r" % (cmd, w.recv(1.0)), flush=True)
 
@@ -133,9 +133,9 @@ def main():
         py = int(args.y + args.radius * math.sin(ang))
         w.send("move %d %d %d" % (args.slot, px, py))
         r = w.recv(0.3)
-        if isinstance(r, str) and r and r != "ok" and not r.startswith("pev") and not r.startswith("region_ev"):
+        if isinstance(r, str) and r and r != "ok" and not r.startswith("region_ev"):
             print("[inject] > move < %r（异常）" % r, flush=True)
-        # 把服务端推来的事件读出来（pev 会暴露物理槽号）
+        # 把服务端推来的事件读出来（region_ev 是唯一的推送）
         while True:
             m = w.recv(0.05)
             if not m:
