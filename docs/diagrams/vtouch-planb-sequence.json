@@ -1,0 +1,354 @@
+{
+  "schema_version": 1,
+  "mode": "sequence",
+  "template_type": "sequence",
+  "style": 1,
+  "width": 1120,
+  "height": 1532,
+  "title": "Plan B 时序：物理帧 → 区域线程 → 出站队列 → 脚本回触（回触不自激）",
+  "subtitle": "自上而下是时间；竖直虚线是生命线，横向箭头是消息/数据流（行号对 src/vtouchd.c 1492 行，planb/impl）",
+  "containers": [
+    {
+      "id": "lifeline0",
+      "x": 179,
+      "y": 206,
+      "width": 2,
+      "height": 898,
+      "label": " "
+    },
+    {
+      "id": "lifeline1",
+      "x": 429,
+      "y": 206,
+      "width": 2,
+      "height": 898,
+      "label": " "
+    },
+    {
+      "id": "lifeline2",
+      "x": 679,
+      "y": 206,
+      "width": 2,
+      "height": 898,
+      "label": " "
+    },
+    {
+      "id": "lifeline3",
+      "x": 929,
+      "y": 206,
+      "width": 2,
+      "height": 898,
+      "label": " "
+    },
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1144,
+      "width": 1000,
+      "height": 286,
+      "label": "注记（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "p0",
+      "kind": "rect",
+      "x": 80,
+      "y": 140,
+      "width": 200,
+      "height": 56,
+      "label": "内核 / uinput",
+      "sublabel": "物理屏 + vtouch-merged 合并设备",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "p1",
+      "kind": "rect",
+      "x": 330,
+      "y": 140,
+      "width": 200,
+      "height": 56,
+      "label": "poll 主线程",
+      "sublabel": "vtouchd 唯一事件泵（§4.1）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "p2",
+      "kind": "rect",
+      "x": 580,
+      "y": 140,
+      "width": 200,
+      "height": 56,
+      "label": "区域线程",
+      "sublabel": "region_q 唯一消费者（§4.3/§4.4）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "p3",
+      "kind": "rect",
+      "x": 830,
+      "y": 140,
+      "width": 200,
+      "height": 56,
+      "label": "AutoJs6 脚本",
+      "sublabel": "clients/vtouch.js（WS 客户端）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1184,
+      "width": 660,
+      "height": 56,
+      "label": "③④ 快照 = 整帧状态",
+      "sublabel": "转发发生在 SYN 之后：消费者永远看不到半更新的 phys[]（§4.1）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1262,
+      "width": 660,
+      "height": 56,
+      "label": "⑧⑨⑩ 注入不进队列",
+      "sublabel": "回触命令到达即合成帧，延迟只有一次 writev —— 排队的是「出站事件」不是「注入」",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "z3",
+      "kind": "rect",
+      "x": 230,
+      "y": 1340,
+      "width": 660,
+      "height": 56,
+      "label": "⑪⑫ 这就是「不自激」",
+      "sublabel": "回触的轨迹会被判据线程整条跳过，既不回灌 pev 也不产生 region_ev（§4.4）",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "m1",
+      "flow": "read",
+      "label": "① 手指按下：Type-B 帧（src:1006）",
+      "x1": 200,
+      "y1": 236,
+      "x2": 410,
+      "y2": 236
+    },
+    {
+      "id": "m2",
+      "flow": "data",
+      "label": "② emit_frame：物理+虚拟同帧一次 writev（src:759）",
+      "x1": 410,
+      "y1": 298,
+      "x2": 200,
+      "y2": 298
+    },
+    {
+      "id": "m3",
+      "flow": "neutral",
+      "label": "③ 更新 ps_* 快照（帧后状态，src:483）",
+      "x1": 436.0,
+      "y1": 334,
+      "x2": 436.0,
+      "y2": 334,
+      "route_points": [
+        [
+          510.0,
+          334
+        ],
+        [
+          510.0,
+          386
+        ],
+        [
+          456.0,
+          386
+        ]
+      ]
+    },
+    {
+      "id": "m4",
+      "flow": "read",
+      "label": "④ region_q：帧快照入队（src:497）",
+      "x1": 450,
+      "y1": 422,
+      "x2": 660,
+      "y2": 422
+    },
+    {
+      "id": "m5",
+      "flow": "neutral",
+      "label": "⑤ 五事件判定（状态表线程私有，src:430）",
+      "x1": 686.0,
+      "y1": 458,
+      "x2": 686.0,
+      "y2": 458,
+      "route_points": [
+        [
+          760.0,
+          458
+        ],
+        [
+          760.0,
+          510
+        ],
+        [
+          706.0,
+          510
+        ]
+      ]
+    },
+    {
+      "id": "m6",
+      "flow": "data",
+      "label": "⑥ region_ev down → outq（不直写 socket，src:404）",
+      "x1": 660,
+      "y1": 546,
+      "x2": 450,
+      "y2": 546
+    },
+    {
+      "id": "m7",
+      "flow": "data",
+      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（src:1467）",
+      "x1": 450,
+      "y1": 608,
+      "x2": 910,
+      "y2": 608
+    },
+    {
+      "id": "m8",
+      "flow": "control",
+      "label": "⑧ 脚本回触：down/move/up 注入槽（src:907）",
+      "x1": 910,
+      "y1": 670,
+      "x2": 450,
+      "y2": 670
+    },
+    {
+      "id": "m9",
+      "flow": "neutral",
+      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，src:845）",
+      "x1": 436.0,
+      "y1": 706,
+      "x2": 436.0,
+      "y2": 706,
+      "route_points": [
+        [
+          510.0,
+          706
+        ],
+        [
+          510.0,
+          758
+        ],
+        [
+          456.0,
+          758
+        ]
+      ]
+    },
+    {
+      "id": "m10",
+      "flow": "data",
+      "label": "⑩ 回触帧 writev → 合并设备（注入落地）",
+      "x1": 410,
+      "y1": 794,
+      "x2": 200,
+      "y2": 794
+    },
+    {
+      "id": "m11",
+      "flow": "read",
+      "label": "⑪ broadcast_virt：virt=1 也入队（src:524）",
+      "x1": 450,
+      "y1": 856,
+      "x2": 660,
+      "y2": 856
+    },
+    {
+      "id": "m12",
+      "flow": "neutral",
+      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（src:434）",
+      "x1": 686.0,
+      "y1": 892,
+      "x2": 686.0,
+      "y2": 892,
+      "route_points": [
+        [
+          760.0,
+          892
+        ],
+        [
+          760.0,
+          944
+        ],
+        [
+          706.0,
+          944
+        ]
+      ]
+    },
+    {
+      "id": "m13",
+      "flow": "control",
+      "label": "⑬ up / close → 清订阅 + 丢残包（src:1222）",
+      "x1": 910,
+      "y1": 980,
+      "x2": 450,
+      "y2": 980
+    },
+    {
+      "id": "m14",
+      "flow": "neutral",
+      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（src:717）",
+      "x1": 410,
+      "y1": 1042,
+      "x2": 200,
+      "y2": 1042
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1436,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸 / 入队"
+    },
+    {
+      "flow": "control",
+      "label": "注入命令 / 订阅"
+    },
+    {
+      "flow": "data",
+      "label": "提交 / 出站刷出"
+    },
+    {
+      "flow": "neutral",
+      "label": "线程内部 / 收尾"
+    }
+  ],
+  "footer": "行号：src/vtouchd.c（1492 行，planb/impl）· clients/vtouch.js；与 docs/diagrams/vtouch-planb-flow、vtouch-planb-engine、vtouch-planb-protocol 同源",
+  "footer_x": 70,
+  "footer_y": 1492
+}

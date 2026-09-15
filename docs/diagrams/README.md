@@ -1,8 +1,26 @@
 # docs/diagrams —— 工程图索引
 
-## 先看：最小版（现况 = 虚拟触摸 + 合并物理触摸）
+## 先看：Plan B（本分支 `planb/impl` 的现况 = 合并/转发 与 判断/推送 分离）
 
-仓库现在是**最小版**：`src/vtouchd.c`（1015 行）+ `clients/vtouch.js`。对应的三张图（行号对着最小版源码）：
+`src/vtouchd.c` 在 `planb/impl` 上是 **1492 行** = 基线 `83ded02` 最小版（1015 行）+ `docs/VTOUCH_ARCH_PLAN.md` §8 四步。
+下面四张图的 `文件:行` 行号对着**本分支**源码（与最小版那一代**不同代**，两套行号不能混用）：
+
+| 图 | 讲什么 | 源 |
+|---|---|---|
+| `vtouch-planb-flow` | 全流程五段：启动定序（只多一条区域线程）→ 物理帧（SYN 之后才转发）→ 注入（立即成帧，不进队列）→ 出站（poll 第 4 路唯一刷出点）→ 收尾 | 草稿生成器 `build/_gen_planb_diagrams.py` |
+| `vtouch-planb-engine` | **核心机制**：队列三件套（SPSC 环 / 两条溢出策略 / outq 短锁）· 快照时机（§4.1）· 防自激两道门（§4.4）· 线程与锁 | 同上 |
+| `vtouch-planb-protocol` | 协议分支：命令-响应 / `err` 词表 / 两条推送（`pev`、`region_ev`）/ 连接生命周期（`ws_kick`） | 同上 |
+| `vtouch-planb-sequence` | **时序图**：内核 ↔ poll 主线程 ↔ 区域线程 ↔ 脚本，14 条消息，看懂「回触为什么不自激」 | 草稿生成器 `build/_gen_planb_sequence.py` |
+
+重渲（四张一起，含渲染 + 五道校验 + 版面自检 + 2× PNG）：`sh build/_render_planb.sh`
+单张：`sh build/_render_planb.sh vtouch-planb-engine`
+
+Plan B 这批图的交付自检（本次全过）：五道机检全 `ok`、composition score = 100；版面自检三项 PASS（节点两两重叠 = 无 / 文字无溢出 / PNG 无贴边裁切）；
+逐张读回 PNG 复核，并据此修掉两处只有人看图才会发现的毛病——注记曾写「（第 N 步）」而节点上没有可见步号、`vtouch-planb-engine` 副标题量词误写「每条消费者」。
+
+## 上一代：最小版（= 本分支的基线 `83ded02`，行号对 1015 行版）
+
+在 `83ded02` 上仓库是**最小版**：`src/vtouchd.c`（1015 行）+ `clients/vtouch.js`。对应的三张图（行号对着最小版源码）：
 
 | 图 | 讲什么 | 源 |
 |---|---|---|
@@ -60,6 +78,7 @@ python "C:/Users/21102/AppData/Local/hermes/skills/creative/technical-diagram-ge
 - [x] 视觉复核：逐张读回 PNG（读图工具）确认无裁切/遮挡/压线/穿箱
 - [x] 图内 `文件:行` 与 `docs/CODE_WALKTHROUGH.md` 一致（同源，改动一起改）
 - [x] PNG 用 2× 导出（`--force-device-scale-factor=2`），尺寸 = 画布 ×2
+- [x] Plan B 四张（`vtouch-planb-*`）：上列五项同样全过；读图复核修掉「不可见步号」与副标题量词两处
 
 ## 与旧图的关系（重要）
 
