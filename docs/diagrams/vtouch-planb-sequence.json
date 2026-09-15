@@ -146,7 +146,7 @@
     {
       "id": "m1",
       "flow": "read",
-      "label": "① 手指按下：Type-B 帧（src:1006）",
+      "label": "① 手指按下：Type-B 帧（src:962）",
       "x1": 200,
       "y1": 236,
       "x2": 410,
@@ -164,7 +164,7 @@
     {
       "id": "m3",
       "flow": "neutral",
-      "label": "③ 更新 ps_* 快照（帧后状态，src:483）",
+      "label": "③ 更新 ps_* 快照（帧后状态，src:500）",
       "x1": 436.0,
       "y1": 334,
       "x2": 436.0,
@@ -187,7 +187,7 @@
     {
       "id": "m4",
       "flow": "read",
-      "label": "④ region_q：帧快照入队（src:497）",
+      "label": "④ region_q：帧快照入队（src:514）",
       "x1": 450,
       "y1": 422,
       "x2": 660,
@@ -196,7 +196,7 @@
     {
       "id": "m5",
       "flow": "neutral",
-      "label": "⑤ 五事件判定（状态表线程私有，src:430）",
+      "label": "⑤ 五事件判定（状态表线程私有，src:446）",
       "x1": 686.0,
       "y1": 458,
       "x2": 686.0,
@@ -219,7 +219,7 @@
     {
       "id": "m6",
       "flow": "data",
-      "label": "⑥ region_ev down → outq（不直写 socket，src:404）",
+      "label": "⑥ region_ev down → outq（不直写 socket，src:421）",
       "x1": 660,
       "y1": 546,
       "x2": 450,
@@ -228,7 +228,7 @@
     {
       "id": "m7",
       "flow": "data",
-      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（src:1467）",
+      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（src:1425）",
       "x1": 450,
       "y1": 608,
       "x2": 910,
@@ -237,7 +237,7 @@
     {
       "id": "m8",
       "flow": "control",
-      "label": "⑧ 脚本回触：down/move/up 注入槽（src:907）",
+      "label": "⑧ 脚本回触：down/move/up 注入槽（src:862）",
       "x1": 910,
       "y1": 670,
       "x2": 450,
@@ -246,7 +246,7 @@
     {
       "id": "m9",
       "flow": "neutral",
-      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，src:845）",
+      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，src:807）",
       "x1": 436.0,
       "y1": 706,
       "x2": 436.0,
@@ -278,7 +278,7 @@
     {
       "id": "m11",
       "flow": "read",
-      "label": "⑪ broadcast_virt：virt=1 也入队（src:524）",
+      "label": "⑪ broadcast_virt：virt=1 也入队（src:540）",
       "x1": 450,
       "y1": 856,
       "x2": 660,
@@ -287,7 +287,7 @@
     {
       "id": "m12",
       "flow": "neutral",
-      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（src:434）",
+      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（src:490）",
       "x1": 686.0,
       "y1": 892,
       "x2": 686.0,
@@ -310,7 +310,7 @@
     {
       "id": "m13",
       "flow": "control",
-      "label": "⑬ up / close → 清订阅 + 丢残包（src:1222）",
+      "label": "⑬ up / close → 清订阅 + 丢残包（src:1176）",
       "x1": 910,
       "y1": 980,
       "x2": 450,
@@ -319,7 +319,7 @@
     {
       "id": "m14",
       "flow": "neutral",
-      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（src:717）",
+      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（src:729）",
       "x1": 410,
       "y1": 1042,
       "x2": 200,

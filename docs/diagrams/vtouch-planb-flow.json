@@ -66,7 +66,7 @@
       "width": 660,
       "height": 56,
       "label": "main：装信号 → init → 主循环",
-      "sublabel": "src:1481 退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup",
+      "sublabel": "src:1431 退出码 = -rc；stop_flag 置位后先 join 区域线程再 cleanup",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -79,7 +79,7 @@
       "width": 660,
       "height": 56,
       "label": "vtouch_init：尺寸门 + 清表置 -1",
-      "sublabel": "src:1371 尺寸<2 → 2；身份显式置 -1（0 是合法槽）",
+      "sublabel": "src:1325 尺寸<2 → 2；身份显式置 -1（0 是合法槽）",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -92,7 +92,7 @@
       "width": 660,
       "height": 56,
       "label": "discover：扫 event0..63 找 Type-B",
-      "sublabel": "src:175 validate_device 四轴/槽/量程关卡",
+      "sublabel": "src:548 validate_device 四轴/槽/量程关卡",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -105,7 +105,7 @@
       "width": 660,
       "height": 56,
       "label": "setup_uinput：能力镜像 + 4 处冲突",
-      "sublabel": "src:262 tool/槽数/tracking id 量程/名字与 bus；量程下限 src:565",
+      "sublabel": "src:672 tool/槽数/tracking id 量程/名字与 bus；量程只向上抬 src:696",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -118,7 +118,7 @@
       "width": 660,
       "height": 56,
       "label": "EVIOCGRAB(1)：抓屏（失败 → 5）",
-      "sublabel": "src:1398 抓屏放最后；make_listen 已先起（失败 → 6）",
+      "sublabel": "src:1352 抓屏放最后；make_listen 已先起（失败 → 6）",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -131,7 +131,7 @@
       "width": 660,
       "height": 56,
       "label": "起区域线程：最后一步",
-      "sublabel": "src:1404 失败 → 7；此前从不 grab，无「抓着没人管」",
+      "sublabel": "src:1354 失败 → 7；此前从不 grab，无「抓着没人管」",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -144,7 +144,7 @@
       "width": 660,
       "height": 56,
       "label": "poll 一轮：4 个 fd",
-      "sublabel": "src:1416 物理/监听/客户端/出站；待重发时超时压到 5ms",
+      "sublabel": "src:1366 物理/监听/客户端/出站；待重发时超时压到 5ms",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -157,7 +157,7 @@
       "width": 660,
       "height": 56,
       "label": "物理可读 → physical_events()",
-      "sublabel": "src:1006 选槽 → 写 phys[]；按下时记 ps_press_ns",
+      "sublabel": "src:962 选槽 → 写 phys[]；按下时记 ps_press_ns",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -170,7 +170,7 @@
       "width": 660,
       "height": 56,
       "label": "SYN_REPORT 帧边界（攒表到帧尾）",
-      "sublabel": "src:492 只改 phys[]，不转发：半帧期间消费者看不到",
+      "sublabel": "src:987 只改 phys[]，不转发：半帧期间消费者看不到",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -196,7 +196,7 @@
       "width": 660,
       "height": 56,
       "label": "broadcast_phys()：更新 ps_* 快照并入队",
-      "sublabel": "src:483 快照 = 完整帧状态；pev 只报物理（门①）",
+      "sublabel": "src:500 快照 = 完整帧状态；pev 只报物理（门①）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -209,7 +209,7 @@
       "width": 660,
       "height": 56,
       "label": "region_q：每订阅者一条独立队列",
-      "sublabel": "src:497 主线程只做非阻塞 push（§4.3）",
+      "sublabel": "src:514 主线程只做非阻塞 push（§4.3）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -222,7 +222,7 @@
       "width": 660,
       "height": 56,
       "label": "客户端可读 → client_frame()",
-      "sublabel": "src:1296 单轮 ≤32 帧；半包留缓冲",
+      "sublabel": "src:1250 单轮 ≤32 帧；半包留缓冲",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -235,7 +235,7 @@
       "width": 660,
       "height": 56,
       "label": "down/move/up → set_virtual()",
-      "sublabel": "src:907/845 逻辑→raw 换算 src:151",
+      "sublabel": "src:862/807 逻辑→raw 换算 src:164",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -248,7 +248,7 @@
       "width": 660,
       "height": 56,
       "label": "立即 emit_frame()（不等队列）",
-      "sublabel": "src:388 注入响应即时：不经过区域判定与出站队列",
+      "sublabel": "src:869 注入响应即时：不经过区域判定与出站队列",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -261,7 +261,7 @@
       "width": 660,
       "height": 56,
       "label": "broadcast_virt()：虚拟状态也入队",
-      "sublabel": "src:510/524 virt=1 → 区域线程直接跳过（门②）",
+      "sublabel": "src:527/540 virt=1 → 区域线程直接跳过（门②）",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -274,7 +274,7 @@
       "width": 660,
       "height": 56,
       "label": "区域线程：五事件判定",
-      "sublabel": "src:463/425 读 region_q；slot_in/hit/last 线程私有",
+      "sublabel": "src:480/442 读 region_q；slot_in/hit/last 线程私有",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -287,7 +287,7 @@
       "width": 660,
       "height": 56,
       "label": "region_ev_send：订阅位决定推不推",
-      "sublabel": "src:404 命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志",
+      "sublabel": "src:421 命中 SUB_REGION 才入队，否则只打 (UNSUB) 日志",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -313,7 +313,7 @@
       "width": 660,
       "height": 56,
       "label": "poll POLLOUT → outq_flush()",
-      "sublabel": "src:1467 队列非空才挂 POLLOUT；socket 已 O_NONBLOCK",
+      "sublabel": "src:1425 队列非空才挂 POLLOUT；socket 已 O_NONBLOCK",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -326,7 +326,7 @@
       "width": 660,
       "height": 56,
       "label": "写不完留到下次（真错才踢）",
-      "sublabel": "src:299 EPIPE/ECONNRESET 才 drop_client",
+      "sublabel": "src:316 EPIPE/ECONNRESET 才 drop_client",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -339,7 +339,7 @@
       "width": 660,
       "height": 56,
       "label": "断连/被踢 → drop_client()",
-      "sublabel": "src:1222 清 sub_mask + outq_reset（残包不串下一个客户端）",
+      "sublabel": "src:1176 清 sub_mask + outq_reset（残包不串下一个客户端）",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -352,7 +352,7 @@
       "width": 660,
       "height": 56,
       "label": "停止 → stop_flag → join 区域线程",
-      "sublabel": "src:1486 区域线程收尾后才 cleanup",
+      "sublabel": "src:1447 区域线程收尾后才 cleanup",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -365,7 +365,7 @@
       "width": 660,
       "height": 56,
       "label": "cleanup()：先放 grab 再拆设备",
-      "sublabel": "src:717 client→listen→grab→uinput 逆序",
+      "sublabel": "src:729 client→listen→grab→uinput 逆序",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -378,7 +378,7 @@
       "width": 660,
       "height": 56,
       "label": "② broadcast_phys()：快照是「帧状态」而不是活数组",
-      "sublabel": "src:120/483 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 src:1352",
+      "sublabel": "src:122/500 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 src:1341",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -391,7 +391,7 @@
       "width": 660,
       "height": 56,
       "label": "③ 立即 emit_frame()：注入不进队列",
-      "sublabel": "src:388 与最小版逐字相同；Plan B 没把这步挪进任何线程",
+      "sublabel": "src:869 与最小版逐字相同；Plan B 没把这步挪进任何线程",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true

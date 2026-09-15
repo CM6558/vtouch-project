@@ -71,7 +71,7 @@
       "width": 660,
       "height": 56,
       "label": "溢出①：队尾同槽同类 move 原地合并",
-      "sublabel": "src:230 丢旧位置不影响增量语义（§4.3）",
+      "sublabel": "src:231 丢旧位置不影响增量语义（§4.3）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -84,7 +84,7 @@
       "width": 660,
       "height": 56,
       "label": "溢出②：仍满 → 丢最旧（CAS 推 head）",
-      "sublabel": "src:234 慢消费者只丢自己的事件，注入照常",
+      "sublabel": "src:235 慢消费者只丢自己的事件，注入照常",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -123,7 +123,7 @@
       "width": 660,
       "height": 56,
       "label": "sub_mask：决定推哪一路（phys/region）",
-      "sublabel": "src:124/498 断连即清零（§4.6）",
+      "sublabel": "src:126/956 断连即清零（§4.6）",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -136,7 +136,7 @@
       "width": 660,
       "height": 56,
       "label": "物理帧到来：只改 phys[]，不转发",
-      "sublabel": "src:492 半帧期间消费者不会看到半更新",
+      "sublabel": "src:987 半帧期间消费者不会看到半更新",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -162,7 +162,7 @@
       "width": 660,
       "height": 56,
       "label": "紧接着 broadcast_phys()：快照 + 入队",
-      "sublabel": "src:483/497 ps_* 与 vt_ev 都是整帧后的值",
+      "sublabel": "src:500/514 ps_* 与 vt_ev 都是整帧后的值",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -175,7 +175,7 @@
       "width": 660,
       "height": 56,
       "label": "消费者读「帧快照」，不读活数组",
-      "sublabel": "src:120 这是与共享数组直读的本质区别",
+      "sublabel": "src:122 这是与共享数组直读的本质区别",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -188,7 +188,7 @@
       "width": 660,
       "height": 56,
       "label": "门①：pev 只报物理触点",
-      "sublabel": "src:483 broadcast_phys 只遍历 phys[]",
+      "sublabel": "src:500 broadcast_phys 只遍历 phys[]",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -201,7 +201,7 @@
       "width": 660,
       "height": 56,
       "label": "门②：区域线程跳过 virt=1 的事件",
-      "sublabel": "src:434 判定前先看 ev->virt",
+      "sublabel": "src:490 判定前先看 ev->virt",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -214,7 +214,7 @@
       "width": 660,
       "height": 56,
       "label": "回触（注入）既不会回灌、也不会命中区域",
-      "sublabel": "src:510/524 客户端画的路径不会触发自己的回调",
+      "sublabel": "src:527/540 客户端画的路径不会触发自己的回调",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -227,7 +227,7 @@
       "width": 660,
       "height": 56,
       "label": "主线程：合成帧 + 非阻塞 push",
-      "sublabel": "src:1416 热路径上只有这两件事（§2）",
+      "sublabel": "src:1366 热路径上只有这两件事（§2）",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -240,7 +240,7 @@
       "width": 660,
       "height": 56,
       "label": "区域线程：区域状态的唯一持有者",
-      "sublabel": "src:463 slot_in/slot_hit/slot_last 线程私有",
+      "sublabel": "src:480 slot_in/slot_hit/slot_last 线程私有",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -253,7 +253,7 @@
       "width": 660,
       "height": 56,
       "label": "region_lock：只包住区域表读写（短锁）",
-      "sublabel": "src:430 这把锁不在注入路径上",
+      "sublabel": "src:446 这把锁不在注入路径上",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -266,7 +266,7 @@
       "width": 660,
       "height": 56,
       "label": "退出序：stop_flag → join → cleanup",
-      "sublabel": "src:1486 区域线程先收尾",
+      "sublabel": "src:1447 区域线程先收尾",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -292,7 +292,7 @@
       "width": 660,
       "height": 56,
       "label": "③ 门②：是「不产生事件」而不是「事后过滤事件」",
-      "sublabel": "src:434 判定线程连状态表都不更新，回触不会污染 slot_in/hit",
+      "sublabel": "src:490 判定线程连状态表都不更新，回触不会污染 slot_in/hit",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -305,7 +305,7 @@
       "width": 660,
       "height": 56,
       "label": "④ 区域线程：状态私有化是 §4.4 的关键收益",
-      "sublabel": "src:430 主线程不再持有区域状态 → 判据可独立演进",
+      "sublabel": "src:446 主线程不再持有区域状态 → 判据可独立演进",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true

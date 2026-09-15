@@ -92,12 +92,12 @@
   <g id="node-q2" data-graph-role="node" data-node-id="q2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,222,890,278">
   <rect x="230.0" y="222.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="250.0" text-anchor="middle" class="node-title" font-size="18.0">溢出①：队尾同槽同类 move 原地合并</text>
-  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:230 丢旧位置不影响增量语义（§4.3）</text>
+  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:231 丢旧位置不影响增量语义（§4.3）</text>
   </g>
   <g id="node-q3" data-graph-role="node" data-node-id="q3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,300,890,356">
   <rect x="230.0" y="300.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="328.0" text-anchor="middle" class="node-title" font-size="18.0">溢出②：仍满 → 丢最旧（CAS 推 head）</text>
-  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">src:234 慢消费者只丢自己的事件，注入照常</text>
+  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">src:235 慢消费者只丢自己的事件，注入照常</text>
   </g>
   <g id="node-q4" data-graph-role="node" data-node-id="q4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,378,890,434">
   <rect x="230.0" y="378.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
@@ -112,12 +112,12 @@
   <g id="node-q6" data-graph-role="node" data-node-id="q6" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,534,890,590">
   <rect x="230.0" y="534.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="562.0" text-anchor="middle" class="node-title" font-size="18.0">sub_mask：决定推哪一路（phys/region）</text>
-  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">src:124/498 断连即清零（§4.6）</text>
+  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">src:126/956 断连即清零（§4.6）</text>
   </g>
   <g id="node-s1" data-graph-role="node" data-node-id="s1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,692,890,748">
   <rect x="230.0" y="692.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="720.0" text-anchor="middle" class="node-title" font-size="18.0">物理帧到来：只改 phys[]，不转发</text>
-  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">src:492 半帧期间消费者不会看到半更新</text>
+  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">src:987 半帧期间消费者不会看到半更新</text>
   </g>
   <g id="node-s2" data-graph-role="node" data-node-id="s2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,770,890,826">
   <rect x="230.0" y="770.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
@@ -127,47 +127,47 @@
   <g id="node-s3" data-graph-role="node" data-node-id="s3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,848,890,904">
   <rect x="230.0" y="848.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">紧接着 broadcast_phys()：快照 + 入队</text>
-  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:483/497 ps_* 与 vt_ev 都是整帧后的值</text>
+  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:500/514 ps_* 与 vt_ev 都是整帧后的值</text>
   </g>
   <g id="node-s4" data-graph-role="node" data-node-id="s4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,926,890,982">
   <rect x="230.0" y="926.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="954.0" text-anchor="middle" class="node-title" font-size="18.0">消费者读「帧快照」，不读活数组</text>
-  <text x="560.0" y="976.0" text-anchor="middle" class="node-sub">src:120 这是与共享数组直读的本质区别</text>
+  <text x="560.0" y="976.0" text-anchor="middle" class="node-sub">src:122 这是与共享数组直读的本质区别</text>
   </g>
   <g id="node-g1" data-graph-role="node" data-node-id="g1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1084,890,1140">
   <rect x="230.0" y="1084.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="1112.0" text-anchor="middle" class="node-title" font-size="18.0">门①：pev 只报物理触点</text>
-  <text x="560.0" y="1134.0" text-anchor="middle" class="node-sub">src:483 broadcast_phys 只遍历 phys[]</text>
+  <text x="560.0" y="1134.0" text-anchor="middle" class="node-sub">src:500 broadcast_phys 只遍历 phys[]</text>
   </g>
   <g id="node-g2" data-graph-role="node" data-node-id="g2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1162,890,1218">
   <rect x="230.0" y="1162.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="1190.0" text-anchor="middle" class="node-title" font-size="18.0">门②：区域线程跳过 virt=1 的事件</text>
-  <text x="560.0" y="1212.0" text-anchor="middle" class="node-sub">src:434 判定前先看 ev-&gt;virt</text>
+  <text x="560.0" y="1212.0" text-anchor="middle" class="node-sub">src:490 判定前先看 ev-&gt;virt</text>
   </g>
   <g id="node-g3" data-graph-role="node" data-node-id="g3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1240,890,1296">
   <rect x="230.0" y="1240.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="1268.0" text-anchor="middle" class="node-title" font-size="18.0">回触（注入）既不会回灌、也不会命中区域</text>
-  <text x="560.0" y="1290.0" text-anchor="middle" class="node-sub">src:510/524 客户端画的路径不会触发自己的回调</text>
+  <text x="560.0" y="1290.0" text-anchor="middle" class="node-sub">src:527/540 客户端画的路径不会触发自己的回调</text>
   </g>
   <g id="node-t1" data-graph-role="node" data-node-id="t1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1398,890,1454">
   <rect x="230.0" y="1398.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="1426.0" text-anchor="middle" class="node-title" font-size="18.0">主线程：合成帧 + 非阻塞 push</text>
-  <text x="560.0" y="1448.0" text-anchor="middle" class="node-sub">src:1416 热路径上只有这两件事（§2）</text>
+  <text x="560.0" y="1448.0" text-anchor="middle" class="node-sub">src:1366 热路径上只有这两件事（§2）</text>
   </g>
   <g id="node-t2" data-graph-role="node" data-node-id="t2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1476,890,1532">
   <rect x="230.0" y="1476.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="1504.0" text-anchor="middle" class="node-title" font-size="18.0">区域线程：区域状态的唯一持有者</text>
-  <text x="560.0" y="1526.0" text-anchor="middle" class="node-sub">src:463 slot_in/slot_hit/slot_last 线程私有</text>
+  <text x="560.0" y="1526.0" text-anchor="middle" class="node-sub">src:480 slot_in/slot_hit/slot_last 线程私有</text>
   </g>
   <g id="node-t3" data-graph-role="node" data-node-id="t3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1554,890,1610">
   <rect x="230.0" y="1554.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="1582.0" text-anchor="middle" class="node-title" font-size="18.0">region_lock：只包住区域表读写（短锁）</text>
-  <text x="560.0" y="1604.0" text-anchor="middle" class="node-sub">src:430 这把锁不在注入路径上</text>
+  <text x="560.0" y="1604.0" text-anchor="middle" class="node-sub">src:446 这把锁不在注入路径上</text>
   </g>
   <g id="node-t4" data-graph-role="node" data-node-id="t4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1632,890,1688">
   <rect x="230.0" y="1632.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="1660.0" text-anchor="middle" class="node-title" font-size="18.0">退出序：stop_flag → join → cleanup</text>
-  <text x="560.0" y="1682.0" text-anchor="middle" class="node-sub">src:1486 区域线程先收尾</text>
+  <text x="560.0" y="1682.0" text-anchor="middle" class="node-sub">src:1447 区域线程先收尾</text>
   </g>
   <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1790,890,1846">
   <rect x="230.0" y="1790.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
@@ -177,12 +177,12 @@
   <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1868,890,1924">
   <rect x="230.0" y="1868.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="1896.0" text-anchor="middle" class="node-title" font-size="18.0">③ 门②：是「不产生事件」而不是「事后过滤事件」</text>
-  <text x="560.0" y="1918.0" text-anchor="middle" class="node-sub">src:434 判定线程连状态表都不更新，回触不会污染 slot_in/hit</text>
+  <text x="560.0" y="1918.0" text-anchor="middle" class="node-sub">src:490 判定线程连状态表都不更新，回触不会污染 slot_in/hit</text>
   </g>
   <g id="node-z3" data-graph-role="node" data-node-id="z3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1946,890,2002">
   <rect x="230.0" y="1946.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="1974.0" text-anchor="middle" class="node-title" font-size="18.0">④ 区域线程：状态私有化是 §4.4 的关键收益</text>
-  <text x="560.0" y="1996.0" text-anchor="middle" class="node-sub">src:430 主线程不再持有区域状态 → 判据可独立演进</text>
+  <text x="560.0" y="1996.0" text-anchor="middle" class="node-sub">src:446 主线程不再持有区域状态 → 判据可独立演进</text>
   </g>
   <g id="legend" data-graph-role="legend">
     <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="60" y="2028" width="676" height="46" rx="10" fill="none" stroke="none"/>
