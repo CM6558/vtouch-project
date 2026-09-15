@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vtouch 新方案流程图（分支 redev/min-core @ c7acfc2，唯一来源 src/vtouchd.c 1492 行）</title>
+<style>
+  body { color: var(--foreground); font-family: system-ui, "Noto Sans SC", sans-serif; line-height: 1.6; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; border-left: 4px solid var(--accent); padding-left: 8px; }
+  svg { width: 100%; max-width: 820px; height: auto; display: block; }
+  .box { fill: none; stroke: var(--accent); stroke-width: 1.5; rx: 6; }
+  rect.box { rx: 6; }
+  .dia { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .q { fill: none; stroke: var(--muted-foreground); stroke-width: 1.5; stroke-dasharray: 5 3; }
+  text { fill: var(--foreground); font-size: 12.5px; }
+  .ref { fill: var(--muted-foreground); font-size: 10.5px; font-family: monospace; }
+  .cap { color: var(--muted-foreground); font-size: 12px; }
+  line, path.arr { stroke: var(--muted-foreground); stroke-width: 1.5; fill: none; }
+  table { border-collapse: collapse; font-size: 12.5px; margin: 8px 0; }
+  td, th { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>vtouch 新方案流程（Plan B 落地后）</h1>
+<p class="cap">分支 <code>redev/min-core</code> @ <code>c7acfc2</code>；每个节点后标注 <code>src/vtouchd.c:行号</code>，均已对盘上代码复核。核心一句话：<b>主线程只做合成帧写 uinput + 非阻塞入队</b>，判断与推送全部移出热路径。</p>
+
+<h2>图 1 · 总览：双线程 + 双队列</h2>
+<svg viewBox="0 0 800 400">
+  <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <text x="10" y="18">【合并·进】主线程 poll</text>
+  <rect class="box" x="10" y="28" width="120" height="52"/><text x="20" y="50">物理驱动</text><text x="20" y="66">eventX</text>
+  <rect class="box" x="150" y="28" width="130" height="52"/><text x="160" y="50">physical_events</text><text class="ref" x="160" y="66">:934 攒表</text>
+  <rect class="box" x="300" y="28" width="130" height="52"/><text x="310" y="50">emit_frame</text><text class="ref" x="310" y="66">:960 合并写</text>
+  <rect class="box" x="450" y="28" width="120" height="52"/><text x="460" y="50">uinput</text><text x="460" y="66">合并设备</text>
+  <rect class="box" x="590" y="28" width="130" height="52"/><text x="600" y="50">Android 应用</text><text x="600" y="66">同槽数合并屏</text>
+  <path class="arr" d="M130,54 H150 M280,54 H300 M430,54 H450 M570,54 H590" marker-end="url(#a1)"/>
+  <text x="10" y="118">【控制·进】WS 命令 → 虚拟触点（每条 down/move/up 立即 emit；begin 暂存→end 一次 emit）</text>
+  <rect class="box" x="10" y="128" width="120" height="52"/><text x="20" y="150">WS 客户端</text><text x="20" y="166">127.0.0.1:27183</text>
+  <rect class="box" x="150" y="128" width="130" height="52"/><text x="160" y="150">client_frame</text><text class="ref" x="160" y="166">:1294</text>
+  <rect class="box" x="300" y="128" width="130" height="52"/><text x="310" y="150">handle_line</text><text class="ref" x="310" y="166">:781</text>
+  <rect class="box" x="450" y="128" width="120" height="52"/><text x="460" y="150">virt[] + emit</text><text class="ref" x="460" y="166">:881-931</text>
+  <rect class="q" x="590" y="128" width="130" height="52"/><text x="600" y="150">应答 → sendq</text><text class="ref" x="600" y="166">:1323</text>
+  <path class="arr" d="M130,154 H150 M280,154 H300 M430,154 H450 M570,154 H590" marker-end="url(#a1)"/>
+  <path class="arr" d="M460,128 V104 H395 V80" marker-end="url(#a1)"/>
+  <text x="10" y="218">【转发·出】SYN 后广播快照，判断与推送在 region 线程 + 出站队列</text>
+  <rect class="box" x="10" y="228" width="120" height="52"/><text x="20" y="250">broadcast_phys</text><text class="ref" x="20" y="266">:750</text>
+  <rect class="q" x="150" y="228" width="120" height="52"/><text x="160" y="250">vtq SPSC×64</text><text class="ref" x="160" y="266">:527</text>
+  <rect class="box" x="290" y="228" width="130" height="52"/><text x="300" y="250">region 线程</text><text class="ref" x="300" y="266">:733 vt-region</text>
+  <rect class="box" x="440" y="228" width="130" height="52"/><text x="450" y="250">region_on_ev</text><text class="ref" x="450" y="266">:692 五事件</text>
+  <rect class="q" x="590" y="228" width="130" height="52"/><text x="600" y="250">sendq MPSC×64</text><text class="ref" x="600" y="266">:1165</text>
+  <path class="arr" d="M130,254 H150 M270,254 H290 M420,254 H440 M570,254 H590" marker-end="url(#a1)"/>
+  <rect class="box" x="590" y="300" width="130" height="52"/><text x="600" y="322">flush POLLOUT</text><text class="ref" x="600" y="338">:1464 写出</text>
+  <path class="arr" d="M655,280 V300" marker-end="url(#a1)"/>
+  <path class="arr" d="M365,80 V100 H145 V254 H130" marker-end="url(#a1)"/>
+  <text class="ref" x="230" y="96">emit 后广播:962</text>
+  <path class="arr" d="M70,280 V292 H655 V280" marker-end="url(#a1)"/>
+  <text class="ref" x="300" y="306">pev→sendq（SUB_PHYS 且有客户端时）:765</text>
+</svg>
+<p class="cap">断言：注入路径（图上行）无任何 socket 写与区域判定；region_ev/pev/应答统一经 sendq 由 POLLOUT 驱动（:1463-1469）。单客户端，新连接踢旧（:1443，drop_client 清队列+退订+抬虚拟触点）。</p>
+
+<h2>图 2 · 启动与退出（vtouch_init :1369 / cleanup :327 / main :1475）</h2>
+<svg viewBox="0 0 800 330">
+  <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <rect class="box" x="10" y="10" width="220" height="40"/><text x="20" y="35">参数校验 -w/-h（缺→-2 :1377）</text>
+  <rect class="box" x="10" y="60" width="220" height="40"/><text x="20" y="85">discover 扫 event0..63（无→-2 :1387）</text>
+  <rect class="box" x="10" y="110" width="220" height="40"/><text x="20" y="135">setup_uinput 镜像声明（败→-3 :1393）</text>
+  <rect class="box" x="10" y="160" width="220" height="40"/><text x="20" y="185">open 输入设备（败→-4 :1396）</text>
+  <rect class="box" x="10" y="210" width="220" height="40"/><text x="20" y="235">make_listen 回环（败→-6 :1399）</text>
+  <rect class="box" x="10" y="260" width="220" height="40"/><text x="20" y="285">pthread_create（败→-7 :1401）</text>
+  <rect class="box" x="260" y="260" width="220" height="40"/><text x="270" y="285">EVIOCGRAB 最后抓（败→-5 :1403）</text>
+  <rect class="box" x="510" y="260" width="200" height="40"/><text x="520" y="285">就绪 → poll 循环 :1488</text>
+  <path class="arr" d="M120,50 V60 M120,100 V110 M120,150 V160 M120,200 V210 M120,250 V260 M230,280 H260 M480,280 H510" marker-end="url(#a2)"/>
+  <text x="260" y="30">cleanup :327（只跑一次）</text>
+  <rect class="box" x="260" y="40" width="220" height="40"/><text x="270" y="65">stop_flag=1 → join region 线程 :334</text>
+  <rect class="box" x="260" y="90" width="220" height="40"/><text x="270" y="115">关 client / listen</text>
+  <rect class="box" x="260" y="140" width="220" height="40"/><text x="270" y="165">EVIOCGRAB(0) 放抓</text>
+  <rect class="box" x="260" y="190" width="220" height="40"/><text x="270" y="215">UI_DEV_DESTROY 销毁 uinput</text>
+  <path class="arr" d="M370,80 V90 M370,130 V140 M370,180 V190" marker-end="url(#a2)"/>
+</svg>
+<p class="cap">顺序铁律：监听与线程先起、grab 最后（:1397-1403）；退出码即 return -rc（:1487），2=尺寸/无屏、3=uinput、4=打开、5=grab、6=端口、7=线程。</p>
+
+<h2>图 3 · 主线程单轮 poll（vtouch_poll_step :1410）</h2>
+<svg viewBox="0 0 800 430">
+  <defs><marker id="a3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <rect class="box" x="10" y="10" width="300" height="40"/><text x="20" y="35">poll 3fd：超时=重发中5ms / 否则1000 :1413</text>
+  <rect class="box" x="10" y="60" width="300" height="40"/><text x="20" y="85">POLLIN(输入)→ physical_events :1425</text>
+  <rect class="box" x="10" y="110" width="300" height="40"/><text x="20" y="135">g_reemit→重发整帧；连败200次→停 :1426</text>
+  <rect class="box" x="10" y="160" width="300" height="40"/><text x="20" y="185">输入 HUP/ERR → 停（触摸回系统） :1433</text>
+  <rect class="box" x="10" y="210" width="300" height="56"/><text x="20" y="232">accept：踢旧(drop_client) :1443</text><text x="20" y="250">握手(300ms上限)→设 NONBLOCK :1447</text>
+  <rect class="box" x="10" y="276" width="300" height="40"/><text x="20" y="301">客户端 HUP/ERR → drop_client :1458</text>
+  <rect class="box" x="10" y="326" width="300" height="40"/><text x="20" y="351">POLLIN/半包 → client_frame :1460</text>
+  <rect class="box" x="350" y="326" width="300" height="40"/><text x="360" y="351">sendq 非空+POLLOUT → flush :1464</text>
+  <rect class="box" x="350" y="376" width="300" height="40"/><text x="360" y="401">flush -1 → drop_client :1467</text>
+  <path class="arr" d="M160,50 V60 M160,100 V110 M160,150 V160 M160,200 V210 M160,266 V276 M160,316 V326 M310,346 H350 M500,366 V376" marker-end="url(#a3)"/>
+  <text class="ref" x="350" y="30">drop_client = 关连接 + sendq_clear + sub_mask=0 + owner_reset（抬虚拟触点） :1149</text>
+  <text class="ref" x="350" y="55">client_frame 单轮≤32 帧；回包只入队不直写 :1294/:1323</text>
+</svg>
+
+<h2>图 4 · 物理 SYN 帧：emit → broadcast（:934-963 / :361-408 / :750-772）</h2>
+<svg viewBox="0 0 800 470">
+  <defs><marker id="a4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <text x="10" y="18">读 24B input_event（一次 read 循环到 EAGAIN）：SLOT 选槽（越界忽略）→ TRACKING_ID(&lt;0 抬起 / ≥0 按下记 id）→ X/Y 写槽；SYN_DROPPED → 全槽当抬起</text>
+  <rect class="box" x="10" y="28" width="360" height="40"/><text x="20" y="53">SYN_REPORT 到 → emit_frame :960（抬起帧→物理分身份→虚拟→BTN→SYN，一次 writev）</text>
+  <rect class="box" x="10" y="78" width="360" height="40"/><text x="20" y="103">写失败 → g_reemit=1（绝不丢抬手帧，不释身份）</text>
+  <rect class="box" x="10" y="128" width="360" height="40"/><text x="20" y="153">emit 后 → broadcast_phys :962（快照完整才广播）</text>
+  <path class="arr" d="M190,68 V78 M190,118 V128" marker-end="url(#a4)"/>
+  <text x="410" y="140">broadcast_phys 逐槽（ps_* 无条件更新，与订阅无关）：</text>
+  <rect class="box" x="410" y="150" width="360" height="40"/><text x="420" y="175">down 且 !ps_down → action=down(1) :757</text>
+  <rect class="box" x="410" y="200" width="360" height="40"/><text x="420" y="225">!down 且 ps_down → action=up(0) :758</text>
+  <rect class="box" x="410" y="250" width="360" height="40"/><text x="420" y="275">down 且坐标变 → action=move(2)，否则跳过 :759</text>
+  <rect class="box" x="410" y="300" width="360" height="40"/><text x="420" y="325">raw→logical（逆换算 :761）→ 更新 ps_* :762</text>
+  <rect class="box" x="410" y="350" width="360" height="40"/><text x="420" y="375">vtq_push{slot,action,lx,ly,ts,virt=0} :764</text>
+  <rect class="box" x="410" y="400" width="360" height="40"/><text x="420" y="425">SUB_PHYS 且有客户端 → pev 进 sendq :765</text>
+  <path class="arr" d="M590,190 V200 M590,240 V250 M590,290 V300 M590,340 V350 M590,390 V400" marker-end="url(#a4)"/>
+  <path class="arr" d="M370,148 H410" marker-end="url(#a4)"/>
+</svg>
+<p class="cap">虚拟侧对照：单条 down/move/up 成功即 emit + push_virt_ev（:876/:891）；end_frame 提交成功后按 staged 差分推（:913-929）；begin/point 只暂存不推。</p>
+
+<h2>图 5 · region 线程与五事件判定（:733-745 / :692-731）</h2>
+<svg viewBox="0 0 800 560">
+  <defs><marker id="a5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <rect class="box" x="10" y="10" width="340" height="40"/><text x="20" y="35">vtq_pop：空 → nanosleep 1ms 再取 :740</text>
+  <rect class="box" x="10" y="60" width="340" height="40"/><text x="20" y="85">virt=1 → 丢弃（不自激） :741</text>
+  <rect class="box" x="10" y="110" width="340" height="40"/><text x="20" y="135">region_on_ev：槽越界返；加锁拷贝表 :697-702</text>
+  <rect class="box" x="10" y="160" width="340" height="40"/><text x="20" y="185">表空返；action=down 先清 slot_hit 行 :703-704</text>
+  <path class="arr" d="M180,50 V60 M180,100 V110 M180,150 V160" marker-end="url(#a5)"/>
+  <text x="400" y="30">逐区域（禁用→slot_in=0；hit=矩形含边/圆半径平方 :706-707）：</text>
+  <rect class="box" x="400" y="40" width="370" height="44"/><text x="410" y="60">down 首按：r_down=1；命中→slot_hit=1+推 down；记 last :709-712</text>
+  <rect class="box" x="400" y="94" width="370" height="40"/><text x="410" y="119">down 重复：当 move 处理（goto do_move） :713</text>
+  <rect class="box" x="400" y="144" width="370" height="40"/><text x="410" y="169">move 未按→跳过 :715</text>
+  <rect class="box" x="400" y="194" width="370" height="44"/><text x="410" y="212">hit&&!in→enter；!hit&&in→exit :717-718</text>
+  <rect class="box" x="400" y="248" width="370" height="44"/><text x="410" y="266">hit&&in&&变位→记 last+推 move :720-723</text>
+  <rect class="box" x="400" y="302" width="370" height="44"/><text x="410" y="320">up：r_down&&slot_hit&&hit→推 up；r_down=0 :724-727</text>
+  <rect class="box" x="400" y="356" width="370" height="40"/><text x="410" y="381">尾：slot_in = r_down&&hit :729</text>
+  <path class="arr" d="M585,84 V94 M585,134 V144 M585,184 V194 M585,238 V248 M585,292 V302 M585,342 V356" marker-end="url(#a5)"/>
+  <text class="ref" x="400" y="412">region_ev_send :672 — SUB_REGION 未订/无客户端只记日志；否则进 sendq。up 纯监听，不代点。</text>
+  <text class="ref" x="400" y="432">线程状态全私有：slot_in/slot_hit/slot_last/r_down，主线程不再持有区域状态。</text>
+</svg>
+
+<h2>图 6 · 协议分支（handle_line :781 / 推送格式 :678/:767）</h2>
+<table>
+<tr><th>命令</th><th>应答</th><th>行号</th></tr>
+<tr><td><code>ping</code></td><td><code>pong</code></td><td>:790</td></tr>
+<tr><td><code>res</code></td><td><code>res 宽 高 raw xmin xmax ymin ymax</code></td><td>:791</td></tr>
+<tr><td><code>reset</code>（帧中拒绝）</td><td><code>ok / err frame</code></td><td>:796</td></tr>
+<tr><td><code>region clear</code> / <code>list</code> / <code>add id type a1..a4 en</code></td><td><code>ok N / 多行region…+end N / ok N / err region</code></td><td>:800-845</td></tr>
+<tr><td><code>sub [region|phys|all]</code>（裸=全订）/ <code>unsub</code></td><td><code>ok / err sub</code>，断连自动退订</td><td>:847-867，:1156</td></tr>
+<tr><td><code>up slot</code> / <code>down/move slot x y</code></td><td><code>ok / err point</code>（各自成一帧+虚拟事件入队）</td><td>:868-893</td></tr>
+<tr><td><code>begin_frame / point / end_frame</code></td><td><code>ok / err frame·point</code>（提交成功才推虚拟事件）</td><td>:894-930</td></tr>
+</table>
+<p>推送（全是 WS 文本帧，经 sendq，:1206）：<code>pev &lt;slot&gt; &lt;down|move|up&gt; &lt;lx&gt; &lt;ly&gt;</code>（:767，SUB_PHYS 门）；<code>region_ev &lt;id&gt; &lt;down|up|enter|exit|move&gt; &lt;slot&gt; &lt;lx&gt; &lt;ly&gt;</code>（:678，SUB_REGION 门）。</p>
+
+<h2>图 7 · 队列规则（vtq :530-576 / sendq :1188-1231）</h2>
+<svg viewBox="0 0 800 360">
+  <defs><marker id="a7" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="gray" stroke-width="1.5"/></marker></defs>
+  <text x="10" y="18">vtq：SPSC，生产 poll 线程 / 消费 region 线程，head-CAS + tail，release/acquire，容量 64</text>
+  <rect class="box" x="10" y="28" width="360" height="40"/><text x="20" y="53">未满 → 写入发布（微秒级，永不阻塞）</text>
+  <rect class="box" x="10" y="78" width="360" height="40"/><text x="20" y="103">满+新 move → 队尾同 slot move 覆盖合并</text>
+  <rect class="box" x="10" y="128" width="360" height="40"/><text x="20" y="153">满+队头是 move → 丢头再写；无 move→丢新 move</text>
+  <rect class="box" x="10" y="178" width="360" height="40"/><text x="20" y="203">满+新 down/up → 丢最旧（正常到不了）+ 日志</text>
+  <path class="arr" d="M190,68 V78 M190,118 V128 M190,168 V178" marker-end="url(#a7)"/>
+  <text x="410" y="18">sendq：MPSC（mutex），64 条 × 1024B，消费仅 poll 线程</text>
+  <rect class="box" x="410" y="28" width="360" height="40"/><text x="420" y="53">push：超长/空拒绝；满 → 丢最旧 + 日志 :1188</text>
+  <rect class="box" x="410" y="78" width="360" height="40"/><text x="420" y="103">flush：整帧一次 writev；EAGAIN 留下轮 :1206</text>
+  <rect class="box" x="410" y="128" width="360" height="40"/><text x="420" y="153">短写/错 → 整连接不可信 → drop_client</text>
+  <rect class="box" x="410" y="178" width="360" height="40"/><text x="420" y="203">帧头 0x81：n&lt;126 占 2B，否则 126+16bit :1217</text>
+  <path class="arr" d="M590,68 V78 M590,118 V128 M590,168 V178" marker-end="url(#a7)"/>
+</svg>
+<p class="cap">复核记录：7 张图节点数 12+8+9+10+12+表9行+8 = 68 个断言点，箭头因果（emit→广播→入队→判定→推送；poll→读→发→收→刷）与代码调用链一致；构建 <code>sh scripts/build.sh</code>（-Wall -Wextra -Werror）已过，二进制 41624B。</p>
+</body>
+</html>

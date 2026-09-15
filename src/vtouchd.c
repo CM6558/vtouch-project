@@ -1484,7 +1484,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     rc = vtouch_init(argc, argv);
-    if (rc != 0) return -rc;            /* 退出码 = 2/3/4/5/6（见 README 的失败出口表） */
+    if (rc != 0) return -rc;            /* 退出码 = 2/3/4/5/6/7（见 README 的失败出口表） */
     while (vtouch_poll_step() == 0)
         ;
     cleanup();
