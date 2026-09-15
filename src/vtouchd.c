@@ -10,7 +10,9 @@
  *   出站队列线程 / UI 钩子 / 旋转坐标换算 / 落盘。这些都在 build/_backup_full_* 里的完整版。
  *
  * 用法: vtouchd -w <竖屏宽> -h <竖屏高> [-p 端口] [-v 虚拟槽数]
- * 协议: 一行一条命令，回一行（loopback WS，单客户端，新连接踢旧连接）
+ * 协议: 一行一条命令（loopback WS，单客户端，新连接踢旧连接）。
+ *   所有出站（应答/事件）都是 WS 文本帧，经出站队列由 POLLOUT 事件驱动写出，
+ *   慢客户端只排队，永不阻塞触摸热路径。
  *   ping                     -> pong
  *   res                      -> res <lw> <lh> raw <xmin> <xmax> <ymin> <ymax>
  *   reset                    -> ok | err frame
@@ -33,6 +35,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -753,7 +756,8 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
     return write_full(fd, h, hn) || write_full(fd, p, n);
 }
 
-/* 丢掉当前客户端：关连接 + 抬掉它的虚拟触点（只 close 会把虚拟手指永久粘在设备上） */
+/* 丢掉当前客户端：关连接 + 清出站队列 + 抬掉它的虚拟触点（只 close 会把虚拟手指永久粘在设备上） */
+static void sendq_clear(void);   /* 定义在下方出站队列处 */
 static void drop_client(void)
 {
     if (client_fd >= 0) {
@@ -762,7 +766,80 @@ static void drop_client(void)
         fprintf(stderr, "vtouchd: ws client dropped\n");
     }
     ws_in_len = 0;
+    sendq_clear();
     owner_reset();
+}
+
+/* ---- 出站发送队列（方案 §4.5）：所有出站 WS 文本统一进队列，主循环 POLLOUT 事件驱动写出。
+ * 慢客户端只会让队列积压（满则丢最旧并计数），永不阻塞触摸热路径。
+ * MPSC：poll 线程与 region 线程生产，poll 线程消费。 */
+#define SENDQ_CAP 64
+#define SENDQ_MSG 1024
+static char sendq_buf[SENDQ_CAP][SENDQ_MSG];
+static size_t sendq_len[SENDQ_CAP];
+static unsigned sendq_h, sendq_t;
+static pthread_mutex_t sendq_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void sendq_clear(void)
+{
+    pthread_mutex_lock(&sendq_mu);
+    sendq_h = sendq_t;
+    pthread_mutex_unlock(&sendq_mu);
+}
+
+static int sendq_empty(void)
+{
+    int e;
+    pthread_mutex_lock(&sendq_mu);
+    e = (sendq_h == sendq_t);
+    pthread_mutex_unlock(&sendq_mu);
+    return e;
+}
+
+/* n 为文本长度（不含 NUL）；超长拒绝（调用方回 err），满队丢最旧 */
+static int sendq_push(const unsigned char *p, size_t n)
+{
+    if (!p || n == 0 || n > SENDQ_MSG) return -1;
+    pthread_mutex_lock(&sendq_mu);
+    if (sendq_t - sendq_h >= SENDQ_CAP) {
+        sendq_h++;
+        fprintf(stderr, "vtouchd: sendq 满，丢最旧一条\n");
+    }
+    memcpy(sendq_buf[sendq_t % SENDQ_CAP], p, n);
+    sendq_len[sendq_t % SENDQ_CAP] = n;
+    sendq_t++;
+    pthread_mutex_unlock(&sendq_mu);
+    return 0;
+}
+
+/* POLLOUT 就绪时由 poll 线程调用：一帧一次 writev，要么整帧走完，要么 EAGAIN 留到下轮。
+ * 返回 0 = 排空或对端暂时不可写，-1 = 连接已坏（调用方 drop_client）。短写按坏连接处理：
+ * WS 帧写一半已破损，重试只会让客户端解析错位。 */
+static int flush_send_queue(void)
+{
+    int rc = 0;
+    pthread_mutex_lock(&sendq_mu);
+    while (sendq_h != sendq_t) {
+        char *m = sendq_buf[sendq_h % SENDQ_CAP];
+        size_t n = sendq_len[sendq_h % SENDQ_CAP];
+        unsigned char h[4];
+        size_t hn;
+        struct iovec iv[2];
+        ssize_t k;
+        h[0] = 0x81;   /* FIN + text */
+        if (n < 126) { h[1] = (unsigned char)n; hn = 2; }
+        else { h[1] = 126; h[2] = (unsigned char)(n >> 8); h[3] = (unsigned char)n; hn = 4; }
+        iv[0].iov_base = h; iv[0].iov_len = hn;
+        iv[1].iov_base = m; iv[1].iov_len = n;
+        do { k = writev(client_fd, iv, 2); } while (k < 0 && errno == EINTR);
+        if (k == (ssize_t)(hn + n)) { sendq_h++; continue; }
+        if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        fprintf(stderr, "vtouchd: 出站写坏 fd=%d k=%zd errno=%d → 断开\n", client_fd, k, errno);
+        rc = -1;
+        break;
+    }
+    pthread_mutex_unlock(&sendq_mu);
+    return rc;
 }
 
 /* 输入缓冲：半包不消费，留到下一轮 poll 继续拼（以前逐字段 recv，跨 TCP 段就误判断线） */
@@ -854,7 +931,8 @@ static int client_frame(void)
         if (len >= sizeof line) return -1;
         memcpy(line, payload, len); line[len] = 0;
         handle_line(line, resp, sizeof resp);
-        if (write_full(client_fd, resp, strlen(resp)) < 0) return -1;
+        /* 回包走出站队列（WS 文本帧，见 flush_send_queue）：慢客户端只排队，不拖触摸线程 */
+        if (sendq_push((const unsigned char *)resp, strlen(resp)) < 0) return -1;
     }
     return 0;
 }
@@ -975,6 +1053,7 @@ static int vtouch_poll_step(void)
             setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof rtv);
             setsockopt(ncf, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof stv);
             setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            fcntl(ncf, F_SETFL, O_NONBLOCK);   /* 出站只看 POLLOUT 就绪写，从不等慢客户端 */
             if (websocket_handshake(ncf) != 0) {
                 fprintf(stderr, "vtouchd: ws 握手失败\n");
                 close(ncf);
@@ -989,6 +1068,13 @@ static int vtouch_poll_step(void)
     /* ws_in_len > 0 也要进来：已经读进缓冲、还没处理完的帧不能让 POLLIN 决定生死 */
     if (client_fd >= 0 && ((p[2].revents & POLLIN) || ws_in_len > 0)) {
         if (client_frame() < 0) drop_client();
+    }
+    /* 出站刷盘（方案 §4.5）：socket 可写才写；写坏则断开，不影响抓与 uinput */
+    if (client_fd >= 0 && !sendq_empty()) {
+        struct pollfd pw = { client_fd, POLLOUT, 0 };
+        if (poll(&pw, 1, 0) > 0 && (pw.revents & POLLOUT)) {
+            if (flush_send_queue() < 0) drop_client();
+        }
     }
     return 0;
 }
