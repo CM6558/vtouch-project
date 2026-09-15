@@ -1,0 +1,404 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1820,
+  "title": "core 控制面：连接、解帧、命令表、踢人与收尾",
+  "subtitle": "左列=连接与协议层（poll 线程）；右列语义=命令分发与失败出口；每条都标「谁在做 + 判据」",
+  "containers": [
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1432,
+      "width": 1000,
+      "height": 286,
+      "label": "注记：并发原语与边界（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "e1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "accept4：换代次/清队列 → 踢旧客户端",
+      "sublabel": "core:1720-1730 旧虚拟触点被抬起（drop_client）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "e2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "socket 选项：RCV 500ms / SND 20ms / NODELAY",
+      "sublabel": "core:1731-1737 超时即踢人，不拖触摸",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "e3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "websocket_handshake：1s 预算 + 5 头校验",
+      "sublabel": "core:1404 CRLFCRLF 用数值比较（:1416）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "e4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "client_frame：单轮最多 32 帧",
+      "sublabel": "core:1544 半包返回 1，缓冲留下轮（:1553）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "e5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "ws_next_frame / ws_peek_frame",
+      "sublabel": "core:1504/:1473 只看不消费；关闭码 1002/1009 :1556",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "e6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "handle_line：命令分发唯一入口",
+      "sublabel": "core:1011 空行 → err empty",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e7",
+      "kind": "rect",
+      "x": 230,
+      "y": 612,
+      "width": 660,
+      "height": 56,
+      "label": "注入：down / move（各自成帧）",
+      "sublabel": "core:1132 逻辑→raw :1138 → set_virtual :693",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e8",
+      "kind": "rect",
+      "x": 230,
+      "y": 690,
+      "width": 660,
+      "height": 56,
+      "label": "注入：up（各自成帧）",
+      "sublabel": "core:1123 帧内被拒 → err point（:1125）",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e9",
+      "kind": "rect",
+      "x": 230,
+      "y": 768,
+      "width": 660,
+      "height": 56,
+      "label": "多指帧：begin/point/end_frame",
+      "sublabel": "core:1144-1168 同一帧；frame_seen 去重 :1158",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e10",
+      "kind": "rect",
+      "x": 230,
+      "y": 846,
+      "width": 660,
+      "height": 56,
+      "label": "reset：帧内被拒",
+      "sublabel": "core:1023 → err frame（:1026）",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "e11",
+      "kind": "rect",
+      "x": 230,
+      "y": 924,
+      "width": 660,
+      "height": 56,
+      "label": "sub / unsub → sub_mask",
+      "sublabel": "core:1103 SUB_REGION=1 / SUB_PHYS=2（:125）",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e12",
+      "kind": "rect",
+      "x": 230,
+      "y": 1002,
+      "width": 660,
+      "height": 56,
+      "label": "region clear/list/del/rename/add",
+      "sublabel": "core:1029 单条操作；list 每行 + end N :1049",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "e13",
+      "kind": "rect",
+      "x": 230,
+      "y": 1080,
+      "width": 660,
+      "height": 56,
+      "label": "ui show/hide/toggle → hooks.ui",
+      "sublabel": "core:1090 无钩子 → err no-ui（:1094）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e14",
+      "kind": "rect",
+      "x": 230,
+      "y": 1158,
+      "width": 660,
+      "height": 56,
+      "label": "回包 outq_push_block（按整行切块）",
+      "sublabel": "core:1575/:185 防长回包被静默截断",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e15",
+      "kind": "rect",
+      "x": 230,
+      "y": 1236,
+      "width": 660,
+      "height": 56,
+      "label": "g_client_wedged → poll 线程统一踢人",
+      "sublabel": "core:1704 触摸路径未受影响",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "e16",
+      "kind": "rect",
+      "x": 230,
+      "y": 1314,
+      "width": 660,
+      "height": 56,
+      "label": "POLLHUP / 读错误 → stop_flag",
+      "sublabel": "core:1716/1276 → cleanup + 退出",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1472,
+      "width": 660,
+      "height": 56,
+      "label": "踢人做了什么（第 1 步）",
+      "sublabel": "core:1454 代次+队列+sub+半包+owner_reset",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1550,
+      "width": 660,
+      "height": 56,
+      "label": "err 码全集（第 6 步）",
+      "sublabel": "err empty/frame/point/region/sub/ui/unknown",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z3",
+      "kind": "rect",
+      "x": 230,
+      "y": 1628,
+      "width": 660,
+      "height": 56,
+      "label": "半包不能消费（第 4 步）",
+      "sublabel": "core:1470 已收字节留缓冲，下一轮再拼",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "e1",
+      "target": "e2",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "e2",
+      "target": "e3",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "e3",
+      "target": "e4",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "e4",
+      "target": "e5",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "e5",
+      "target": "e6",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "e6",
+      "target": "e7",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "e7",
+      "target": "e8",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "e8",
+      "target": "e9",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar10",
+      "source": "e9",
+      "target": "e10",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar11",
+      "source": "e10",
+      "target": "e11",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar12",
+      "source": "e11",
+      "target": "e12",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar13",
+      "source": "e12",
+      "target": "e13",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar14",
+      "source": "e13",
+      "target": "e14",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar15",
+      "source": "e14",
+      "target": "e15",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar16",
+      "source": "e15",
+      "target": "e16",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1724,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "control",
+      "label": "区域事件 / 控制面"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）；与 docs/CODE_WALKTHROUGH.md 同源",
+  "footer_x": 70,
+  "footer_y": 1780
+}

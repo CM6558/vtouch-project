@@ -1,17 +1,28 @@
-/* vtouchd: single-binary merged touchscreen merger + loopback WebSocket bridge.
+/* vtouchd —— 最小版：物理触摸合并 + 虚拟触摸注入（单文件、无 UI、无区域）。
  *
- * Combines vtouchmerge (EVIOCGRAB + uinput Type-B merge, logical->raw via -w/-h)
- * and vtouchws (127.0.0.1:27183, one WS text frame = one command line) into one
- * process and one poll loop, so there is no UDS hop and no half-alive state
- * (merge alive but bridge dead, or vice versa).
+ * 它做什么（只有两件事）：
+ *   1) 抓取物理触摸屏（EVIOCGRAB），把内核的 Type-B 触点解析进 phys[]；
+ *   2) 在同一帧里把「物理触点 + 虚拟触点（来自 WS 命令的注入）」一起写进一个 uinput 设备，
+ *      对外表现为一块统一的触摸屏：应用看到的手指既可能是真手，也可能是注入的。
  *
- * Failure semantics: a bad WS client only closes that client (owner_reset +
- * close), the physical grab and uinput device stay alive. Only a full process
- * crash loses the grab; run under service.sh (restart on exit) for recovery.
+ * 它有意不做什么（从完整版删掉的功能，别在这里找）：
+ *   区域匹配 / 事件推送 / 订阅(sub) / 面板(ImGui) / 区域持久化 / pev 上报 /
+ *   出站队列线程 / UI 钩子 / 旋转坐标换算 / 落盘。这些都在 build/_backup_full_* 里的完整版。
  *
- * Protocol (unchanged): ping/res/reset/down/move/up/begin_frame/point/end_frame
- * Events (subscribe with "sub", stop with "unsub"): pev <slot> <down|move|up> <lx> <ly>
- * Build: same NDK line as vtouchmerge (no new dependencies).
+ * 用法: vtouchd -w <竖屏宽> -h <竖屏高> [-p 端口] [-v 虚拟槽数]
+ * 协议: 一行一条命令，回一行（loopback WS，单客户端，新连接踢旧连接）
+ *   ping                     -> pong
+ *   res                      -> res <lw> <lh> raw <xmin> <xmax> <ymin> <ymax>
+ *   reset                    -> ok | err frame
+ *   down <slot> <lx> <ly>    -> ok | err point      （各自成一帧）
+ *   move <slot> <lx> <ly>    -> ok | err point      （各自成一帧）
+ *   up   <slot>              -> ok | err point      （各自成一帧）
+ *   begin_frame              -> ok | err frame
+ *   point <slot> <down|move|up> <lx> <ly> -> ok | err point   （多指合并进同一帧）
+ *   end_frame                -> ok | err frame
+ *
+ * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点）；grab 与 uinput 不受影响。
+ * 构建: sh scripts/build.sh
  */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -23,8 +34,8 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,42 +47,59 @@
 
 #define MAX_PHYS 64
 #define MAX_VIRT 32
-#define MAX_LINE 2048
-#define MAX_PAYLOAD 4096
-#define HTTP_MAX 8192
+#define MAX_LINE 1024
+#define MAX_PAYLOAD 1024
+#define HTTP_MAX 4096
 
 static volatile sig_atomic_t stop_flag;
 static int input_fd = -1, u_fd = -1, listen_fd = -1, client_fd = -1;
 static int ws_port = 27183;
-static int vslots = 10, phys_slots, total_slots, axmin[2], axmax[2], selected_slot;
+static int vslots = 10;                 /* 客户端可用槽号 0..vslots-1 */
+static int phys_slots;                  /* 物理屏声明的槽数 = 我们声明给系统的槽数 */
+static int total_slots;                 /* = phys_slots（物理/虚拟共用同一个池） */
+static int axmin[2], axmax[2];
+static int selected_slot;               /* 当前正被解析的物理槽（-1 = 忽略） */
 static int logical_width, logical_height;
-struct contact { int id, x, y, down, pending_up; };
+static int has_pressure, pressure_max;
+static int g_seq;                        /* 触点分配序号（池满时顶掉最新虚拟用） */
+
+/* ---- 物理屏能力镜像：validate_device() 抄进来，setup_uinput() 原样搬过去 ----
+ * 上层按设备的声明做分类与滤波（触摸大小/压力/掌拒），收窄声明会让注入的触点行为与真手指不一致。 */
+#define CAP_LONGS(n) (((n) + 1 + 8 * (int)sizeof(unsigned long) - 1) / (8 * (int)sizeof(unsigned long)))
+static unsigned long cap_ev[CAP_LONGS(EV_MAX)];
+static unsigned long cap_key[CAP_LONGS(KEY_MAX)];
+static unsigned long cap_abs[CAP_LONGS(ABS_MAX)];
+static unsigned long cap_prop[CAP_LONGS(INPUT_PROP_MAX)];
+static struct input_absinfo cap_ai[ABS_MAX + 1];
+static unsigned char cap_ai_ok[ABS_MAX + 1];
+static char cap_name[UINPUT_MAX_NAME_SIZE];
+static int oid_mod = 32;                 /* tracking id 池大小（与物理 id 量程取小） */
+
+/* 一根触点。oslot/oid 是**我们发给系统的身份**，由统一池分配：
+ * 透传客户端槽号/面板 id 会撞号（Android 里 tracking id 就是 pointer id），
+ * 而且「物理槽 + 偏移虚拟槽」会让设备声明出 phys+virt 个触点。 */
+struct contact {
+    int id, x, y, down, pending_up;      /* 来源状态：内核 id 与原始坐标 */
+    int oslot, oid, seq;                 /* 下游身份：槽位 / tracking id / 分配序号 */
+};
 static struct contact phys[MAX_PHYS], virt[MAX_VIRT];
-static int raw_to_logical(int raw, int axis, int *logical);   /* 前向声明（定义在下方） */
 
-/* ---- UI 回调（单进程整合：面板只收 edge 事件；level 状态由渲染线程直读） ---- */
-static void (*vtouch_ev_cb)(const char *line);
-void vtouch_set_event_cb(void (*ev_cb)(const char *))
-{
-    vtouch_ev_cb = ev_cb;
-    fprintf(stderr, "vtouchd: event callback set ec=%p\n", (void *)ev_cb);
-}
-static int next_tracking_id = 1;
-/* single-client frame staging */
-static int frame_open;
+#define WS_IN_MAX (MAX_PAYLOAD + 14)     /* 单帧上限 + 头（2 + 8 扩展长 + 4 掩码） */
+static unsigned char ws_in[WS_IN_MAX];
+static size_t ws_in_len;
+static int frame_open;                   /* begin_frame..end_frame 之间 */
 static int frame_seen[MAX_VIRT];
-static struct contact staged[MAX_VIRT];
-static int staged_id;
-/* 订阅通道位掩码（0 = 未订阅）：裸 sub 两个通道都订（老客户端语义不变），
- * sub region 只订区域事件、sub phys 只订原始轨迹 —— 纯区域脚本不必再白收 pev。 */
-#define SUB_REGION 1
-#define SUB_PHYS   2
-static int sub_mask;
-static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
-static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n);
-static void drop_client(void);
+static struct contact staged[MAX_VIRT];  /* 帧内暂存（提交前不碰 virt[]） */
+static int next_tracking_id;
+/* 整帧写失败时置位：抬手那帧丢了就再没有下一帧去补（phys[i].down 已变 0），
+ * 系统里那根手指会永久按着 —— 所以必须重发同一帧，直到写成功或判定 uinput 真死。 */
+static volatile int g_reemit;
+static int g_emit_fail;
 
-static void on_signal(int s) { (void)s; stop_flag = 1; }
+static int write_full(int fd, const void *buf, size_t len);
+static void drop_client(void);
+static int alloc_oslot(void);
+static int alloc_oid(void);
 
 static int parse_long(const char *s, long lo, long hi, int *out)
 {
@@ -82,6 +110,12 @@ static int parse_long(const char *s, long lo, long hi, int *out)
     *out = (int)v; return 0;
 }
 
+static int bit(const unsigned long *b, int n)
+{
+    return (int)((b[(unsigned)n / (8 * sizeof(unsigned long))] >> ((unsigned)n % (8 * sizeof(unsigned long)))) & 1UL);
+}
+
+/* 逻辑坐标（竖屏，脚本用的那一套）→ 内核 raw 轴值 */
 static int logical_to_raw(int logical, int axis, int *raw)
 {
     int size = axis ? logical_height : logical_width;
@@ -94,31 +128,15 @@ static int logical_to_raw(int logical, int axis, int *raw)
     *raw = (int)value; return 0;
 }
 
-/* raw -> logical：供 pev 事件上报把物理坐标转回逻辑坐标。 */
-static int raw_to_logical(int raw, int axis, int *logical)
-{
-    int size = axis ? logical_height : logical_width;
-    long span = (long)axmax[axis] - axmin[axis];
-    long v;
-    if (size < 2 || span <= 0) return -1;
-    if (raw < axmin[axis]) raw = axmin[axis];
-    if (raw > axmax[axis]) raw = axmax[axis];
-    v = ((long)(raw - axmin[axis]) * (size - 1) + span / 2) / span;
-    if (v < 0) v = 0; if (v > size - 1) v = size - 1;
-    *logical = (int)v; return 0;
-}
-
-static int bit(const unsigned long *b, int n)
-{
-    return (int)((b[(unsigned)n / (8 * sizeof(unsigned long))] >> ((unsigned)n % (8 * sizeof(unsigned long)))) & 1UL);
-}
-
+/* 认一块设备是不是 Type-B 触摸屏：EV_ABS 里必须有槽/tracking id/XY 四轴，槽数合规，
+ * X/Y 量程有效；并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。 */
 static int validate_device(const char *p, int *slots, int *xmin, int *xmax, int *ymin, int *ymax)
 {
-    unsigned long ev[(EV_MAX + 8) / (8 * sizeof(unsigned long))];
-    unsigned long abs[(ABS_MAX + 8) / (8 * sizeof(unsigned long))];
-    unsigned long prop[(INPUT_PROP_MAX + 8) / (8 * sizeof(unsigned long))];
-    struct input_absinfo a; int f;
+    unsigned long ev[CAP_LONGS(EV_MAX)];
+    unsigned long abs[CAP_LONGS(ABS_MAX)];
+    unsigned long prop[CAP_LONGS(INPUT_PROP_MAX)];
+    struct input_absinfo a;
+    int f, c;
     memset(ev, 0, sizeof ev); memset(abs, 0, sizeof abs); memset(prop, 0, sizeof prop);
     f = open(p, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (f < 0) return -1;
@@ -133,9 +151,27 @@ static int validate_device(const char *p, int *slots, int *xmin, int *xmax, int 
     *xmin = a.minimum; *xmax = a.maximum;
     if (ioctl(f, EVIOCGABS(ABS_MT_POSITION_Y), &a) < 0 || a.maximum <= a.minimum) { close(f); return -1; }
     *ymin = a.minimum; *ymax = a.maximum;
-    close(f); return 0;
+    has_pressure = 0; pressure_max = 0;
+    if (bit(abs, ABS_MT_PRESSURE) && ioctl(f, EVIOCGABS(ABS_MT_PRESSURE), &a) == 0 && a.maximum > 0) {
+        has_pressure = 1; pressure_max = a.maximum;
+    }
+    memcpy(cap_ev, ev, sizeof ev); memcpy(cap_abs, abs, sizeof abs); memcpy(cap_prop, prop, sizeof prop);
+    memset(cap_key, 0, sizeof cap_key); memset(cap_ai_ok, 0, sizeof cap_ai_ok);
+    if (ioctl(f, EVIOCGBIT(EV_KEY, sizeof cap_key), cap_key) < 0) { close(f); return -1; }
+    for (c = 0; c <= ABS_MAX; c++)
+        if (bit(cap_abs, c) && ioctl(f, EVIOCGABS(c), &cap_ai[c]) == 0) cap_ai_ok[c] = 1;
+    memset(cap_name, 0, sizeof cap_name);
+    if (ioctl(f, EVIOCGNAME(sizeof cap_name - 1), cap_name) < 0) cap_name[0] = 0;
+    if (cap_ai_ok[ABS_MT_TRACKING_ID]) {
+        int mx = cap_ai[ABS_MT_TRACKING_ID].maximum;
+        oid_mod = (mx >= 31) ? 32 : mx + 1;
+        if (oid_mod < 2) oid_mod = 2;
+    }
+    close(f);
+    return 0;
 }
 
+/* 动态发现：扫 event0..63 找第一块 Type-B 触摸屏，不写死节点号 */
 static int discover(char *out, size_t n)
 {
     int k;
@@ -146,8 +182,7 @@ static int discover(char *out, size_t n)
     return -1;
 }
 
-/* 组装帧事件：先填充 ev_buf，emit_frame 末尾一次 writev 提交。
- * 帧完整性由内核按 event 顺序消费保证；iovec 上限 512（96 槽×5+3=483 < 512）。 */
+/* ---- uinput 写帧：先组 iovec，末尾一次 writev ---- */
 #define MAX_IOV 512
 static struct input_event ev_buf[MAX_IOV];
 static struct iovec ev_iov[MAX_IOV];
@@ -155,13 +190,33 @@ static int ev_n;
 
 static void ev_add(int t, int c, int v)
 {
-    if (ev_n >= MAX_IOV) return;   /* 上限保护：宁可丢帧尾也不越界（正常不会触发） */
+    if (ev_n >= MAX_IOV) return;
     ev_buf[ev_n] = (struct input_event){ .type = (unsigned short)t, .code = (unsigned short)c, .value = v };
     ev_iov[ev_n].iov_base = &ev_buf[ev_n];
     ev_iov[ev_n].iov_len = sizeof(struct input_event);
     ev_n++;
 }
 
+/* uinput 是 O_NONBLOCK 打开的：队列满会 EAGAIN，短暂等一等（3×20ms），
+ * 只有一直不可写才算真错（调用方据此重发/收摊）。 */
+static ssize_t uinput_writev_retry(void)
+{
+    int k;
+    ssize_t n;
+    do { n = writev(u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
+    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return n;
+    for (k = 0; k < 3; k++) {
+        struct pollfd p = { u_fd, POLLOUT, 0 };
+        if (poll(&p, 1, 20) > 0 && (p.revents & POLLOUT)) {
+            do { n = writev(u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
+            if (n >= 0) return n;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) return n;
+        }
+    }
+    return -1;
+}
+
+/* 提交这一帧；短写要把剩下的 iovec 全补完（只补一个会丢帧尾 SYN_REPORT）。 */
 static int emit_iov_writev(void)
 {
     ssize_t n, need = 0;
@@ -169,10 +224,9 @@ static int emit_iov_writev(void)
     int i;
     if (u_fd < 0) return -1;
     for (i = 0; i < ev_n; i++) need += ev_iov[i].iov_len;
-    do { n = writev(u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
+    n = uinput_writev_retry();
     if (n < 0) { ev_n = 0; return -1; }
     if ((size_t)n < (size_t)need) {
-        /* 短写（uinput 上极罕见）：从已写偏移逐块补发，不丢帧尾 */
         off = (size_t)n;
         for (i = 0; i < ev_n && off > 0; i++) {
             if (off < ev_iov[i].iov_len) {
@@ -184,369 +238,260 @@ static int emit_iov_writev(void)
                     if (k <= 0) { ev_n = 0; return -1; }
                     p += k; left -= (size_t)k;
                 }
-                off = 0;
-            } else off -= ev_iov[i].iov_len;
+                i++;
+                break;
+            }
+            off -= ev_iov[i].iov_len;
+        }
+        for (; i < ev_n; i++) {
+            const unsigned char *p = (const unsigned char *)ev_iov[i].iov_base;
+            size_t left = ev_iov[i].iov_len;
+            while (left) {
+                ssize_t k;
+                do { k = write(u_fd, p, left); } while (k < 0 && errno == EINTR);
+                if (k <= 0) { ev_n = 0; return -1; }
+                p += k; left -= (size_t)k;
+            }
         }
     }
     ev_n = 0;
     return 0;
 }
 
+/* 合并设备的能力声明 = 照抄物理屏；只有 4 处真冲突取相似值。 */
 static int setup_uinput(void)
 {
     struct uinput_setup s; struct uinput_abs_setup a;
+    int t, c, p;
     u_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (u_fd < 0) return -1;
+    for (t = 0; t <= EV_MAX; t++) if (bit(cap_ev, t) && ioctl(u_fd, UI_SET_EVBIT, t) < 0) goto fail;
     if (ioctl(u_fd, UI_SET_EVBIT, EV_SYN) < 0 || ioctl(u_fd, UI_SET_EVBIT, EV_KEY) < 0 ||
-        ioctl(u_fd, UI_SET_EVBIT, EV_ABS) < 0 || ioctl(u_fd, UI_SET_KEYBIT, BTN_TOUCH) < 0 ||
-        ioctl(u_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER) < 0 ||
-        ioctl(u_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT) < 0) goto fail;
-    if (ioctl(u_fd, UI_SET_ABSBIT, ABS_MT_SLOT) < 0) goto fail;
-    if (ioctl(u_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID) < 0 ||
-        ioctl(u_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X) < 0 ||
-        ioctl(u_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y) < 0 ||
-        ioctl(u_fd, UI_SET_ABSBIT, ABS_MT_TOOL_TYPE) < 0) goto fail;
+        ioctl(u_fd, UI_SET_EVBIT, EV_ABS) < 0) goto fail;
+    for (c = 0; c <= KEY_MAX; c++) if (bit(cap_key, c) && ioctl(u_fd, UI_SET_KEYBIT, c) < 0) goto fail;
+    if (ioctl(u_fd, UI_SET_KEYBIT, BTN_TOUCH) < 0 ||
+        ioctl(u_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER) < 0) goto fail;
+    for (c = 0; c <= ABS_MAX; c++) {
+        if (!bit(cap_abs, c)) continue;
+        if (ioctl(u_fd, UI_SET_ABSBIT, c) < 0) goto fail;
+        memset(&a, 0, sizeof a); a.code = (unsigned short)c;
+        if (cap_ai_ok[c]) a.absinfo = cap_ai[c];               /* fuzz/flat/resolution 一起抄 */
+        if (c == ABS_MT_POSITION_X) { a.absinfo.minimum = axmin[0]; a.absinfo.maximum = axmax[0]; }
+        if (c == ABS_MT_POSITION_Y) { a.absinfo.minimum = axmin[1]; a.absinfo.maximum = axmax[1]; }
+        /* 冲突① 真机 ABS_MT_TOOL_TYPE 量程常是 0..0，装不下 tool 值 → 抬到能装 PALM */
+        if (c == ABS_MT_TOOL_TYPE && a.absinfo.maximum < MT_TOOL_PALM) a.absinfo.maximum = MT_TOOL_PALM;
+        /* 冲突② 槽数上限不能小于我们真正要用的池 */
+        if (c == ABS_MT_SLOT && a.absinfo.maximum < total_slots - 1) a.absinfo.maximum = total_slots - 1;
+        /* 冲突③ tracking id 量程至少要装下 id 池 */
+        if (c == ABS_MT_TRACKING_ID && a.absinfo.maximum < oid_mod - 1) a.absinfo.maximum = oid_mod - 1;
+        if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
+    }
+    /* 物理屏万一没声明这四根轴也要补齐，否则合并设备发不出 MT 事件 */
+    {
+        static const int need[4] = { ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_MT_POSITION_X, ABS_MT_POSITION_Y };
+        for (t = 0; t < 4; t++) {
+            int code = need[t];
+            if (bit(cap_abs, code)) continue;
+            if (ioctl(u_fd, UI_SET_ABSBIT, code) < 0) goto fail;
+            memset(&a, 0, sizeof a); a.code = (unsigned short)code;
+            if (code == ABS_MT_POSITION_X) { a.absinfo.minimum = axmin[0]; a.absinfo.maximum = axmax[0]; }
+            else if (code == ABS_MT_POSITION_Y) { a.absinfo.minimum = axmin[1]; a.absinfo.maximum = axmax[1]; }
+            else if (code == ABS_MT_SLOT) a.absinfo.maximum = total_slots - 1;
+            else a.absinfo.maximum = oid_mod - 1;
+            if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
+        }
+    }
+    for (p = 0; p <= INPUT_PROP_MAX; p++) if (bit(cap_prop, p) && ioctl(u_fd, UI_SET_PROPBIT, p) < 0) goto fail;
+    /* 冲突④（名字/ID）：什么都不声明时系统会把设备当触控板画出鼠标指针 → INPUT_PROP_DIRECT 必须有；
+     * 名字加后缀、bus 用 BUS_VIRTUAL，避免被当成与物理屏同一设备而忽略。 */
+    if (!bit(cap_prop, INPUT_PROP_DIRECT) && ioctl(u_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT) < 0) goto fail;
     memset(&s, 0, sizeof s); s.id.bustype = BUS_VIRTUAL;
-    strncpy((char *)s.name, "vtouch-merged", UINPUT_MAX_NAME_SIZE - 1);
+    if (cap_name[0]) snprintf((char *)s.name, UINPUT_MAX_NAME_SIZE, "%s_vtouch", cap_name);
+    else strncpy((char *)s.name, "vtouch-merged", UINPUT_MAX_NAME_SIZE - 1);
     if (ioctl(u_fd, UI_DEV_SETUP, &s) < 0) goto fail;
-    memset(&a, 0, sizeof a); a.code = ABS_MT_SLOT; a.absinfo.maximum = total_slots - 1;
-    if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
-    a.code = ABS_MT_TRACKING_ID; a.absinfo.maximum = 65535;
-    if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
-    a.code = ABS_MT_POSITION_X; a.absinfo.minimum = axmin[0]; a.absinfo.maximum = axmax[0];
-    if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
-    a.code = ABS_MT_POSITION_Y; a.absinfo.minimum = axmin[1]; a.absinfo.maximum = axmax[1];
-    if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
-    a.code = ABS_MT_TOOL_TYPE; a.absinfo.maximum = MT_TOOL_PALM;
-    if (ioctl(u_fd, UI_ABS_SETUP, &a) < 0) goto fail;
     if (ioctl(u_fd, UI_DEV_CREATE) < 0) goto fail;
     return 0;
 fail:
     ioctl(u_fd, UI_DEV_DESTROY); close(u_fd); u_fd = -1; return -1;
 }
 
+/* 收尾顺序固定：client → listen → 放 grab → 销毁 uinput。只跑一次。 */
 static void cleanup(void)
 {
+    static int cleaned;
+    if (cleaned) return;
+    cleaned = 1;
     if (client_fd >= 0) { close(client_fd); client_fd = -1; }
     if (listen_fd >= 0) { close(listen_fd); listen_fd = -1; }
     if (input_fd >= 0) {
-#ifndef VT_MERGE_TEST
         ioctl(input_fd, EVIOCGRAB, 0);
-#endif
         close(input_fd); input_fd = -1;
     }
     if (u_fd >= 0) { ioctl(u_fd, UI_DEV_DESTROY); close(u_fd); u_fd = -1; }
 }
 
-static int any_down(void)
+/* BTN_TOUCH 只认真的进了帧的触点（有下游身份） */
+static int any_emitted(void)
 {
     int i;
-    for (i = 0; i < phys_slots; i++) if (phys[i].down) return 1;
-    for (i = 0; i < vslots; i++) if (virt[i].down) return 1;
+    for (i = 0; i < phys_slots; i++) if (phys[i].down && phys[i].oslot >= 0) return 1;
+    for (i = 0; i < vslots; i++) if (virt[i].down && virt[i].oslot >= 0) return 1;
     return 0;
 }
 
+/* 池满且来的是物理手指：顶掉「最新分配的那个虚拟触点」，把身份让给真人 */
+static int evict_newest_virtual(void)
+{
+    int i, best = -1;
+    for (i = 0; i < vslots; i++)
+        if (virt[i].down && (best < 0 || virt[i].seq > virt[best].seq)) best = i;
+    if (best < 0) return 0;
+    virt[best].down = 0; virt[best].pending_up = 1;
+    fprintf(stderr, "vtouchd: 身份池满 → 顶掉虚拟槽 %d\n", best);
+    return 1;
+}
+
+/* 一帧的固定顺序（每一步都有理由）：
+ *   ① 待抬的触点先发 ABS_MT_TRACKING_ID=-1（用当前身份，身份要到这一帧写成功才释放）
+ *   ② 物理触点（在这里才分配下游身份 —— 中途池满就下一轮补发）
+ *   ③ 虚拟触点（身份在 WS 命令里就分好了）
+ *   ④ BTN_TOUCH / BTN_TOOL_FINGER（只有真的发了触点才置 1）
+ *   ⑤ SYN_REPORT，整个帧一次 writev 提交
+ * 写失败：绝不清 pending_up、绝不释放身份，置 g_reemit 由 poll 循环重发。 */
 static int emit_frame(void)
 {
-    int i;
+    int i, s2, nid;
     if (u_fd < 0) return -1;
     ev_n = 0;
-    for (i = 0; i < phys_slots; i++) if (phys[i].pending_up) {
-        ev_add(EV_ABS, ABS_MT_SLOT, i);
+    for (i = 0; i < phys_slots; i++) if (phys[i].pending_up && phys[i].oslot >= 0) {
+        ev_add(EV_ABS, ABS_MT_SLOT, phys[i].oslot);
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
-    for (i = 0; i < phys_slots; i++) if (phys[i].down) {
-        ev_add(EV_ABS, ABS_MT_SLOT, i);
-        ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys[i].id);
+    for (i = 0; i < vslots; i++) if (virt[i].pending_up && virt[i].oslot >= 0) {
+        ev_add(EV_ABS, ABS_MT_SLOT, virt[i].oslot);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
+    }
+    for (i = 0; i < phys_slots; i++) {
+        if (!phys[i].down) continue;
+        if (phys[i].oslot < 0) {
+            s2 = alloc_oslot();
+            if (s2 < 0) { if (evict_newest_virtual()) g_reemit = 1; continue; }
+            nid = alloc_oid();
+            if (nid < 0) { g_reemit = 1; continue; }
+            phys[i].oslot = s2; phys[i].oid = nid; phys[i].seq = ++g_seq;
+        }
+        ev_add(EV_ABS, ABS_MT_SLOT, phys[i].oslot);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys[i].oid);
         ev_add(EV_ABS, ABS_MT_POSITION_X, phys[i].x);
         ev_add(EV_ABS, ABS_MT_POSITION_Y, phys[i].y);
         ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
+        if (has_pressure) ev_add(EV_ABS, ABS_MT_PRESSURE, pressure_max);
     }
     for (i = 0; i < vslots; i++) {
-        if (virt[i].pending_up) {
-            ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);
-            ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
-        } else if (virt[i].down) {
-            ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);
-            ev_add(EV_ABS, ABS_MT_TRACKING_ID, virt[i].id);
-            ev_add(EV_ABS, ABS_MT_POSITION_X, virt[i].x);
-            ev_add(EV_ABS, ABS_MT_POSITION_Y, virt[i].y);
-            ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
-        }
+        if (!virt[i].down || virt[i].oslot < 0) continue;
+        ev_add(EV_ABS, ABS_MT_SLOT, virt[i].oslot);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, virt[i].oid);
+        ev_add(EV_ABS, ABS_MT_POSITION_X, virt[i].x);
+        ev_add(EV_ABS, ABS_MT_POSITION_Y, virt[i].y);
+        ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
+        if (has_pressure) ev_add(EV_ABS, ABS_MT_PRESSURE, pressure_max);
     }
-    ev_add(EV_KEY, BTN_TOUCH, any_down());
-    ev_add(EV_KEY, BTN_TOOL_FINGER, any_down());
+    ev_add(EV_KEY, BTN_TOUCH, any_emitted());
+    ev_add(EV_KEY, BTN_TOOL_FINGER, any_emitted());
     ev_add(EV_SYN, SYN_REPORT, 0);
-    if (emit_iov_writev() < 0) return -1;
+    if (emit_iov_writev() < 0) { g_reemit = 1; return -1; }
     for (i = 0; i < phys_slots; i++) phys[i].pending_up = 0;
     for (i = 0; i < vslots; i++) virt[i].pending_up = 0;
+    for (i = 0; i < phys_slots; i++) if (!phys[i].down) { phys[i].oslot = -1; phys[i].oid = -1; }
+    for (i = 0; i < vslots; i++) if (!virt[i].down) { virt[i].oslot = -1; virt[i].oid = -1; }
     return 0;
 }
 
-static void owner_reset(void)
+/* 身份池（物理 + 虚拟共用）：槽池 = 物理槽数，id 池 = oid_mod。
+ * 分配时机：虚拟触点在 WS 命令里（池满能如实回 err point）；物理触点在发帧时。
+ * 释放时机：那一帧写成功之后。 */
+static int slot_taken(int s)
 {
     int i;
-    for (i = 0; i < vslots; i++) if (virt[i].down) { virt[i].down = 0; virt[i].pending_up = 1; }
-    frame_open = 0;
-    if (emit_frame() < 0) stop_flag = 1;
+    for (i = 0; i < phys_slots; i++) if (phys[i].oslot == s) return 1;
+    for (i = 0; i < vslots; i++) if (virt[i].oslot == s || staged[i].oslot == s) return 1;
+    return 0;
+}
+static int id_taken(int id)
+{
+    int i;
+    for (i = 0; i < phys_slots; i++) if (phys[i].oid == id) return 1;
+    for (i = 0; i < vslots; i++) if (virt[i].oid == id || staged[i].oid == id) return 1;
+    return 0;
+}
+static int alloc_oslot(void)
+{
+    int s;
+    for (s = 0; s < phys_slots; s++) if (!slot_taken(s)) return s;
+    return -1;
+}
+static int alloc_oid(void)
+{
+    int k, id;
+    for (k = 0; k < oid_mod; k++) {
+        id = (next_tracking_id + k) % oid_mod;
+        if (!id_taken(id)) { next_tracking_id = (id + 1) % oid_mod; return id; }
+    }
+    return -1;
 }
 
+/* 单点命令与帧内命令共用这一段：state 只认 down/move/up */
 static int set_virtual(struct contact *state, int slot, const char *name, int x, int y)
 {
     if (!strcmp(name, "down")) {
+        int s2, nid;
         if (state[slot].down || state[slot].pending_up) return -1;
-        state[slot].id = next_tracking_id++;
-        if (next_tracking_id > 65535) next_tracking_id = 1;
+        s2 = alloc_oslot();
+        if (s2 < 0) return -1;
+        nid = alloc_oid();
+        if (nid < 0) return -1;
+        state[slot].oslot = s2; state[slot].oid = nid; state[slot].seq = ++g_seq;
+        state[slot].id = next_tracking_id;
         state[slot].down = 1;
     } else if (!strcmp(name, "move")) {
         if (!state[slot].down) return -1;
     } else if (!strcmp(name, "up")) {
         if (!state[slot].down) return -1;
         state[slot].down = 0; state[slot].pending_up = 1;
-    } else {
-        return -1;
-    }
-    state[slot].x = x; state[slot].y = y; return 0;
+    } else return -1;
+    state[slot].x = x; state[slot].y = y;
+    return 0;
 }
 
-/* ---- region 匹配（native，B 方案）：固定数组、无分配、纯只读匹配 ---- */
-#define MAX_REGIONS 32
-#define REGION_ID_MAX 15
-struct region {
-    char id[REGION_ID_MAX + 1];
-    int type;              /* 0=rect 1=circle */
-    int enabled;
-    int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
-};
-static struct region regions[MAX_REGIONS];
-static int region_count;
-static unsigned char slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一帧该槽是否在区域内 */
-static unsigned char slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下时是否命中（onUp 代点依据） */
-static int slot_last_x[MAX_PHYS], slot_last_y[MAX_PHYS]; /* 上次 move 推送位置（位置变化才推） */
-
-static void region_changed(void);   /* 定义在导出接口处（region_add 上方需先声明） */
-static void regions_clear(void)
+/* 客户端断开/被踢：抬掉它的虚拟触点并归还「帧内已分配但没提交」的身份。
+ * 少了这段，客户端在 begin_frame..end_frame 中断开会永久占住池里的身份（之后注入全回 err point）。 */
+static void owner_reset(void)
 {
-    region_count = 0;
-    memset(regions, 0, sizeof regions);
-    memset(slot_in, 0, sizeof slot_in);
-    memset(slot_hit, 0, sizeof slot_hit);
-    memset(slot_last_x, 0, sizeof slot_last_x);
-    memset(slot_last_y, 0, sizeof slot_last_y);
-}
-
-static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
-{
-    struct region *rg;
-    size_t n;
     int i;
-    if (!id) return -1;
-    n = strlen(id);
-    if (n == 0 || n > REGION_ID_MAX) return -1;
-    if (type != 0 && type != 1) return -1;
-    if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
-    if (a1 >= logical_width || a2 >= logical_height) return -1;
-    /* 同 id 查重：存在则原地更新（面板开关/显隐只改属性，不新增） */
-    for (i = 0; i < region_count; i++) {
-        if (strcmp(regions[i].id, id) == 0) {
-            rg = &regions[i];
-            rg->type = type;
-            rg->enabled = enabled ? 1 : 0;
-            rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
-            fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
-                rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
-            region_changed();
-            return 0;
-        }
-    }
-    if (region_count >= MAX_REGIONS) return -1;
-    rg = &regions[region_count++];
-    memset(rg, 0, sizeof *rg);
-    memcpy(rg->id, id, n);
-    rg->type = type;
-    rg->enabled = enabled ? 1 : 0;
-    rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
-    fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
-        rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
-    region_changed();
-    return 0;
+    for (i = 0; i < vslots; i++) if (virt[i].down) { virt[i].down = 0; virt[i].pending_up = 1; }
+    memcpy(staged, virt, sizeof staged);
+    memset(frame_seen, 0, sizeof frame_seen);
+    frame_open = 0;
+    if (emit_frame() < 0) g_reemit = 1;
 }
 
-static int region_hit(const struct region *rg, int lx, int ly)
-{
-    if (!rg->enabled) return 0;
-    if (rg->type == 1) {
-        int dx = lx - rg->a1, dy = ly - rg->a2;
-        return dx * dx + dy * dy <= rg->a3 * rg->a3;
-    }
-    return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
-}
-
-/* region 表变化通知（面板重绘用，默认 NULL）。WS/面板任何一方改表都触发。 */
-static void (*vtouch_region_cb)(void);
-void vtouch_set_region_cb(void (*cb)(void)) { vtouch_region_cb = cb; }
-static void region_changed(void) { if (vtouch_region_cb) vtouch_region_cb(); }
-/* ---- 导出接口（单进程整合：ImGui 面板直接读写 region 表） ---- */
-void vtouch_region_clear(void) { regions_clear(); }
-int vtouch_region_count(void) { return region_count; }
-int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
-{
-    return region_add(id, type, a1, a2, a3, a4, enabled);
-}
-int vtouch_get_region(int i, char *id, int idn, int *type, int *a1, int *a2, int *a3, int *a4, int *enabled)
-{
-    struct region *rg;
-    if (i < 0 || i >= region_count) return -1;
-    rg = &regions[i];
-    snprintf(id, idn, "%s", rg->id);
-    *type = rg->type; *a1 = rg->a1; *a2 = rg->a2; *a3 = rg->a3; *a4 = rg->a4;
-    *enabled = rg->enabled;
-    return 0;
-}
-/* 同进程 UI 直读物理触摸（代替 touch_cb 全量镜像）：level 状态轮询，带 slot 下标。
- * arm64 对齐字读写原子，最坏单帧 1px 撕裂；定界数组，无内存不安全。 */
-int vtouch_phys_slots(void) { return phys_slots; }
-int vtouch_phys_get(int i, int *down, int *lx, int *ly)
-{
-    int x, y;
-    if (i < 0 || i >= phys_slots || !down || !lx || !ly) return -1;
-    x = phys[i].x; y = phys[i].y;
-    *down = phys[i].down;
-    if (raw_to_logical(x, 0, lx) < 0 || raw_to_logical(y, 1, ly) < 0) return -1;
-    return 0;
-}
-/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 SUB_REGION 订阅位 */
-static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
-{
-    char msg[96];
-    int n;
-    n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
-    if (vtouch_ev_cb) vtouch_ev_cb(msg);   /* 面板优先：无 WS 客户端也通知（闪烁/日志） */
-    if (client_fd < 0 || !(sub_mask & SUB_REGION)) {
-        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (NO-CLIENT/UNSUB)\n",
-            id, ev, slot, lx, ly);
-        return;
-    }
-    if (n > 0 && (size_t)n < sizeof msg &&
-        ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0)
-        drop_client();
-    fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
-}
-
-/* SYN 后、物理帧注入完成后调用：五事件匹配（down/up/enter/exit/move，纯监听无代点）。
- * ps_down 此时还是上一帧状态（broadcast_phys 之后才更新），正好用于新按下/刚抬起判定。
- * 全部只读 phys[]，失败即跳过，绝不阻塞注入路径。 */
-static void region_match(void)
-{
-    int i, rid, lx, ly, hit;
-    struct region *rg;
-    if (region_count <= 0) return;
-    for (i = 0; i < phys_slots; i++) {
-        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
-        for (rid = 0; rid < region_count; rid++) {
-            rg = &regions[rid];
-            if (!rg->enabled) { slot_in[i][rid] = 0; continue; }
-            hit = region_hit(rg, lx, ly);
-            if (phys[i].down) {
-                if (!ps_down[i]) {
-                    if (hit) { slot_hit[i][rid] = 1; region_ev_send(rg->id, "down", i, lx, ly); }
-                    slot_last_x[i] = lx; slot_last_y[i] = ly;   /* 按下位置即 move 基准 */
-                } else {
-                    if (hit && !slot_in[i][rid]) region_ev_send(rg->id, "enter", i, lx, ly);
-                    else if (!hit && slot_in[i][rid]) region_ev_send(rg->id, "exit", i, lx, ly);
-                    /* move：仅在已在区域内时按位置变化推（enter/down 帧不重复推） */
-                    if (hit && slot_in[i][rid] && (slot_last_x[i] != lx || slot_last_y[i] != ly)) {
-                        slot_last_x[i] = lx; slot_last_y[i] = ly;
-                        region_ev_send(rg->id, "move", i, lx, ly);
-                    }
-                }
-            } else if (ps_down[i] && slot_hit[i][rid] && hit) {
-                /* 纯监听：onUp 只推事件，不代点（用户明确不需要补充点击） */
-                region_ev_send(rg->id, "up", i, lx, ly);
-            }
-            slot_in[i][rid] = (phys[i].down && hit) ? 1 : 0;
-            if (!phys[i].down && !ps_down[i]) slot_hit[i][rid] = 0;
-        }
-    }
-}
-
-/* One command line -> one response line. Returns 0 on ok (resp filled). */
+/* 一行命令 -> 一行回包 */
 static int handle_line(char *line, char *resp, size_t cap)
 {
-    char *t, *st; int slot, x, y;
+    char *t, *st;
+    int slot, x, y;
     line[strcspn(line, "\r\n")] = 0;
     t = strtok_r(line, " \t", &st);
     if (!t) { snprintf(resp, cap, "err empty"); return -1; }
     if (!strcmp(t, "ping")) { snprintf(resp, cap, "pong"); return 0; }
     if (!strcmp(t, "res")) {
-        snprintf(resp, cap, "res %d %d raw %d %d %d %d",
-            logical_width, logical_height, axmin[0], axmax[0], axmin[1], axmax[1]);
+        snprintf(resp, cap, "res %d %d raw %d %d %d %d", logical_width, logical_height,
+                 axmin[0], axmax[0], axmin[1], axmax[1]);
         return 0;
     }
     if (!strcmp(t, "reset")) {
+        if (frame_open) { snprintf(resp, cap, "err frame"); return -1; }
         owner_reset(); snprintf(resp, cap, "ok"); return 0;
-    }
-    if (!strcmp(t, "region")) {
-        char *op = strtok_r(NULL, " \t", &st);
-        if (!op) { snprintf(resp, cap, "err region"); return -1; }
-        if (!strcmp(op, "clear")) {
-            regions_clear(); snprintf(resp, cap, "ok %d", region_count); return 0;
-        }
-        if (!strcmp(op, "list")) {
-            /* 查询当前配置（面板需要）：每行 region <id> <type> <a1..a4> <en> */
-            size_t used = 0;
-            int i;
-            for (i = 0; i < region_count && used + 64 < cap; i++) {
-                used += (size_t)snprintf(resp + used, cap - used, "region %s %d %d %d %d %d %d\n",
-                                         regions[i].id, regions[i].type,
-                                         regions[i].a1, regions[i].a2,
-                                         regions[i].a3, regions[i].a4,
-                                         regions[i].enabled);
-            }
-            if (used == 0) { snprintf(resp, cap, "ok 0"); return 0; }
-            snprintf(resp + used, cap - used, "end %d", region_count);
-            return 0;
-        }
-        if (!strcmp(op, "add")) {
-            char *sid = strtok_r(NULL, " \t", &st), *stype = strtok_r(NULL, " \t", &st);
-            char *sa1 = strtok_r(NULL, " \t", &st), *sa2 = strtok_r(NULL, " \t", &st);
-            char *sa3 = strtok_r(NULL, " \t", &st), *sa4 = strtok_r(NULL, " \t", &st);
-            char *sen = strtok_r(NULL, " \t", &st);
-            int type, a1, a2, a3, a4, en;
-            if (!sid || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
-                strtok_r(NULL, " \t", &st) ||
-                parse_long(stype, 0, 1, &type) ||
-                parse_long(sa1, 0, logical_width - 1, &a1) ||
-                parse_long(sa2, 0, logical_height - 1, &a2) ||
-                parse_long(sa3, 0, 100000, &a3) ||
-                parse_long(sa4, 0, logical_height - 1, &a4) ||
-                parse_long(sen, 0, 1, &en) ||
-                region_add(sid, type, a1, a2, a3, a4, en) < 0) {
-                snprintf(resp, cap, "err region"); return -1;
-            }
-            snprintf(resp, cap, "ok %d", region_count); return 0;
-        }
-        snprintf(resp, cap, "err region"); return -1;
-    }
-    if (!strcmp(t, "sub")) {
-        /* sub [region|phys|all]...：不带参数 = 两个通道都订（向后兼容） */
-        char *sm = strtok_r(NULL, " \t", &st);
-        int mask = SUB_REGION | SUB_PHYS;
-        if (sm) {
-            mask = 0;
-            do {
-                if (!strcmp(sm, "region")) mask |= SUB_REGION;
-                else if (!strcmp(sm, "phys")) mask |= SUB_PHYS;
-                else if (!strcmp(sm, "all") || !strcmp(sm, "both")) mask = SUB_REGION | SUB_PHYS;
-                else { snprintf(resp, cap, "err sub"); return -1; }
-            } while ((sm = strtok_r(NULL, " \t", &st)));
-        }
-        if (!mask) { snprintf(resp, cap, "err sub"); return -1; }
-        sub_mask = mask;
-        snprintf(resp, cap, "ok"); return 0;
-    }
-    if (!strcmp(t, "unsub")) {
-        sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "up")) {
         char *ss = strtok_r(NULL, " \t", &st);
@@ -571,7 +516,7 @@ static int handle_line(char *line, char *resp, size_t cap)
     }
     if (!strcmp(t, "begin_frame")) {
         if (frame_open || strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err frame"); return -1; }
-        memcpy(staged, virt, sizeof staged); staged_id = next_tracking_id;
+        memcpy(staged, virt, sizeof staged);
         frame_open = 1; memset(frame_seen, 0, sizeof frame_seen);
         snprintf(resp, cap, "ok"); return 0;
     }
@@ -590,68 +535,51 @@ static int handle_line(char *line, char *resp, size_t cap)
     }
     if (!strcmp(t, "end_frame")) {
         if (!frame_open || strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err frame"); return -1; }
-        memcpy(virt, staged, sizeof virt); next_tracking_id = staged_id;
+        memcpy(virt, staged, sizeof virt);
         if (emit_frame() < 0) { frame_open = 0; snprintf(resp, cap, "err frame"); return -1; }
         frame_open = 0; snprintf(resp, cap, "ok"); return 0;
     }
     snprintf(resp, cap, "err unknown"); return -1;
 }
 
-/* pev 状态跟踪每 SYN 必走（region_match 的新按/抬起判定依赖它）；
- * WS 发送只在订阅时走。之前两者绑在一起，无订阅客户端时 ps_down 冻住，
- * 按住的手指每帧重报 down，enter/move/up 全丢。 */
-static void broadcast_phys(int send)
-{
-    int i, lx, ly, n; char msg[64]; const char *st;
-    for (i = 0; i < phys_slots; i++) {
-        if (phys[i].down && !ps_down[i]) st = "down";
-        else if (!phys[i].down && ps_down[i]) st = "up";
-        else if (phys[i].down && (phys[i].x != ps_x[i] || phys[i].y != ps_y[i])) st = "move";
-        else continue;
-        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
-        if (phys[i].down) { ps_down[i] = 1; ps_x[i] = phys[i].x; ps_y[i] = phys[i].y; }
-        else ps_down[i] = 0;
-        if (!send) continue;
-        n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i, st, lx, ly);
-        if (n <= 0 || (size_t)n >= sizeof msg ||
-            ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0) {
-            drop_client(); return;
-        }
-    }
-}
-
+/* 物理流：一次 read() 可能攒好几帧，所以边沿（按下/抬起）在每一帧处理完就清。 */
 static void physical_events(void)
 {
-    struct input_event e; ssize_t n; int syn_seen = 0;
+    struct input_event e;
+    ssize_t n;
     while ((n = read(input_fd, &e, sizeof e)) == (ssize_t)sizeof e) {
         if (e.type == EV_ABS && e.code == ABS_MT_SLOT) {
             selected_slot = e.value;
-            if (selected_slot < 0 || selected_slot >= phys_slots) selected_slot = 0;
-        } else if (e.type == EV_ABS && selected_slot < phys_slots) {
+            if (selected_slot < 0 || selected_slot >= phys_slots) selected_slot = -1;   /* 越界 = 忽略后续槽事件 */
+        } else if (e.type == EV_ABS && selected_slot >= 0 && selected_slot < phys_slots) {
             if (e.code == ABS_MT_TRACKING_ID) {
-                if (e.value < 0) { phys[selected_slot].down = 0; phys[selected_slot].pending_up = 1; }
-                else { phys[selected_slot].id = e.value; phys[selected_slot].down = 1; }
-            } else if (e.code == ABS_MT_POSITION_X) {
-                phys[selected_slot].x = e.value;
-            } else if (e.code == ABS_MT_POSITION_Y) {
-                phys[selected_slot].y = e.value;
-            } else if (e.code == ABS_X) {        /* type-A 兜底：部分模拟器 virtio 发 ABS_X/Y */
-                phys[selected_slot].x = e.value;
-            } else if (e.code == ABS_Y) {
-                phys[selected_slot].y = e.value;
-            }
+                if (e.value < 0) {                       /* 抬手 */
+                    phys[selected_slot].down = 0; phys[selected_slot].pending_up = 1;
+                } else {                                 /* 按下 */
+                    phys[selected_slot].id = e.value;
+                    phys[selected_slot].down = 1;
+                }
+            } else if (e.code == ABS_MT_POSITION_X) phys[selected_slot].x = e.value;
+            else if (e.code == ABS_MT_POSITION_Y) phys[selected_slot].y = e.value;
+        }
+        if (e.type == EV_SYN && e.code == SYN_DROPPED) {
+            /* 内核环形缓冲溢出：后续事件有空洞，保守地把所有槽当抬起，等下一帧重建 */
+            int k;
+            for (k = 0; k < phys_slots; k++) if (phys[k].down) { phys[k].down = 0; phys[k].pending_up = 1; }
+            continue;
         }
         if (e.type == EV_SYN && e.code == SYN_REPORT) {
-            syn_seen = 1;
-            if (emit_frame() < 0) { stop_flag = 1; return; }
-            region_match();   /* 物理帧注入完成后才匹配+代点：帧边界安全，不阻塞注入 */
+            if (emit_frame() < 0) g_emit_fail++;
+            else g_emit_fail = 0;
         }
     }
-    if (syn_seen) broadcast_phys(client_fd >= 0 && (sub_mask & SUB_PHYS));
-    if (n < 0 && (errno == ENODEV || errno == EIO)) stop_flag = 1;
+    if (n < 0 && (errno == ENODEV || errno == EIO)) {
+        fprintf(stderr, "vtouchd: 输入设备消失/出错 errno=%d (%s) → 停止\n", errno, strerror(errno));
+        stop_flag = 1;
+    }
 }
 
-/* ---- WebSocket framing (loopback only) ---- */
+/* ---- WebSocket（只绑回环；自带 SHA-1/Base64，不引依赖）---- */
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
@@ -664,7 +592,8 @@ static uint32_t be32(const unsigned char *p)
 }
 static void sha1_block(struct sha1 *s, const unsigned char *p)
 {
-    uint32_t w[80], a, b, c, d, e, f, k, t; int i;
+    uint32_t w[80], a, b, c, d, e, f, k, t;
+    int i;
     for (i = 0; i < 16; ++i) w[i] = be32(p + i * 4);
     for (i = 16; i < 80; ++i) w[i] = rol32(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
     a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3]; e = s->h[4];
@@ -694,7 +623,9 @@ static void sha1_update(struct sha1 *s, const unsigned char *p, size_t n)
 }
 static void sha1_final(struct sha1 *s, unsigned char out[20])
 {
-    unsigned char pad[128]; size_t n, i; uint64_t bits = s->bits;
+    unsigned char pad[128];
+    size_t n, i;
+    uint64_t bits = s->bits;
     memset(pad, 0, sizeof pad); pad[0] = 0x80;
     n = (s->used < 56) ? (56 - s->used) : (120 - s->used);
     sha1_update(s, pad, n);
@@ -708,7 +639,8 @@ static void sha1_final(struct sha1 *s, unsigned char out[20])
 static int base64(const unsigned char *in, size_t n, char *out, size_t cap)
 {
     static const char tab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t i = 0, o = 0; unsigned v;
+    size_t i = 0, o = 0;
+    unsigned v;
     if (cap < ((n + 2) / 3) * 4 + 1) return -1;
     while (i < n) {
         unsigned char b0 = in[i++], b1 = 0, b2 = 0;
@@ -720,12 +652,13 @@ static int base64(const unsigned char *in, size_t n, char *out, size_t cap)
         out[o++] = (nb > 1) ? tab[(v >> 6) & 63] : '=';
         out[o++] = (nb > 2) ? tab[v & 63] : '=';
     }
-    out[o] = 0; return (int)o;
+    out[o] = 0;
+    return (int)o;
 }
-
 static int header_value(const char *req, const char *name, char *out, size_t cap)
 {
-    const char *p = req, *e, *c; size_t nl = strlen(name), n;
+    const char *p = req, *e, *c;
+    size_t nl = strlen(name), n;
     while (*p) {
         e = strstr(p, "\r\n"); if (!e) break;
         c = memchr(p, ':', (size_t)(e - p));
@@ -739,10 +672,10 @@ static int header_value(const char *req, const char *name, char *out, size_t cap
     }
     return -1;
 }
-
 static int has_token(const char *s, const char *token)
 {
-    size_t n = strlen(token); const char *p = s;
+    size_t n = strlen(token);
+    const char *p = s;
     while (*p) {
         while (*p == ',' || *p == ' ' || *p == '\t') ++p;
         if (strncasecmp(p, token, n) == 0 && (p[n] == 0 || p[n] == ',' || p[n] == ' ' || p[n] == '\t')) return 1;
@@ -751,26 +684,16 @@ static int has_token(const char *s, const char *token)
     return 0;
 }
 
-static int read_full(int fd, void *buf, size_t len)
-{
-    size_t off = 0;
-    while (off < len) {
-        ssize_t n = recv(fd, (char *)buf + off, len - off, 0);
-        if (n == 0) return -1;
-        if (n < 0) {
-            if (errno == EINTR) { if (stop_flag) return -1; continue; }
-            return -1;
-        }
-        off += (size_t)n;
-    }
-    return 0;
-}
-
+/* 立刻可写才发：socket 当刻不可写就失败，由调用方踢掉这个客户端。
+ * 为什么不等（哪怕 20ms）：这条路径跑在触摸线程上，等客户端 = 用户感到「点一下先顿一下」。 */
 static int write_full(int fd, const void *buf, size_t len)
 {
     size_t off = 0;
     while (off < len) {
-        ssize_t n = send(fd, (const char *)buf + off, len - off, MSG_NOSIGNAL);
+        struct pollfd pw = { fd, POLLOUT, 0 };
+        ssize_t n;
+        if (!(poll(&pw, 1, 0) > 0 && (pw.revents & POLLOUT))) { errno = EAGAIN; return -1; }
+        n = send(fd, (const char *)buf + off, len - off, MSG_NOSIGNAL);
         if (n <= 0) {
             if (n < 0 && errno == EINTR) continue;
             return -1;
@@ -780,17 +703,22 @@ static int write_full(int fd, const void *buf, size_t len)
     return 0;
 }
 
+/* 握手：socket 上已设 SO_RCVTIMEO（300ms），所以慢客户端最多拖这么久；
+ * 校验 5 个头 + 回 101 + Sec-WebSocket-Accept。 */
 static int websocket_handshake(int fd)
 {
     char req[HTTP_MAX], key[128], upgrade[64], connection[128], version[32], accept[64];
-    unsigned char digest[20]; struct sha1 s; size_t used = 0; ssize_t n;
+    unsigned char digest[20];
+    struct sha1 s;
+    size_t used = 0;
+    ssize_t n;
     const char *guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    /* bounded by the socket RCVTIMEO set at accept; no infinite stall of touch */
     while (used + 1 < sizeof req) {
         n = recv(fd, req + used, 1, 0);
-        if (n <= 0) return -1;
+        if (n <= 0) return -1;                       /* 超时/断开都算失败 */
         used += (size_t)n; req[used] = 0;
-        if (used >= 4 && memcmp(req + used - 4, "\r\n\r\n", 4) == 0) break;
+        if (used >= 4 && req[used - 4] == 13 && req[used - 3] == 10 &&
+            req[used - 2] == 13 && req[used - 1] == 10) break;   /* CRLFCRLF（用数值避开转义） */
     }
     if (used + 1 >= sizeof req || strncmp(req, "GET ", 4) != 0 ||
         header_value(req, "Sec-WebSocket-Key", key, sizeof key) < 0 ||
@@ -805,18 +733,19 @@ static int websocket_handshake(int fd)
     sha1_final(&s, digest);
     if (base64(digest, 20, accept, sizeof accept) < 0) return -1;
     {
-        char response[2048];
+        char response[512];
         int len = snprintf(response, sizeof response,
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
             "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept);
         return (len > 0 && (size_t)len < sizeof response &&
-            write_full(fd, response, (size_t)len) == 0) ? 0 : -1;
+                write_full(fd, response, (size_t)len) == 0) ? 0 : -1;
     }
 }
 
 static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 {
-    unsigned char h[10]; size_t hn;
+    unsigned char h[10];
+    size_t hn;
     if (n > MAX_PAYLOAD || (opcode >= 8 && n > 125)) return -1;
     h[0] = (unsigned char)(0x80 | (opcode & 15));
     if (n < 126) { h[1] = (unsigned char)n; hn = 2; }
@@ -824,61 +753,124 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
     return write_full(fd, h, hn) || write_full(fd, p, n);
 }
 
+/* 丢掉当前客户端：关连接 + 抬掉它的虚拟触点（只 close 会把虚拟手指永久粘在设备上） */
 static void drop_client(void)
 {
-    if (client_fd >= 0) { close(client_fd); client_fd = -1; }
-    sub_mask = 0;
+    if (client_fd >= 0) {
+        close(client_fd);
+        client_fd = -1;
+        fprintf(stderr, "vtouchd: ws client dropped\n");
+    }
+    ws_in_len = 0;
     owner_reset();
 }
 
-/* Handle exactly one WS frame on client_fd. Returns 0 to keep, -1 to drop. */
-static int client_frame(void)
+/* 输入缓冲：半包不消费，留到下一轮 poll 继续拼（以前逐字段 recv，跨 TCP 段就误判断线） */
+static int ws_peek_frame(size_t *frame_len, unsigned *opcode, size_t *payload_off)
 {
-    unsigned char hdr[2], ext[8], mask[4], payload[MAX_PAYLOAD];
-    unsigned opcode, len7, fin, masked; uint64_t len = 0;
-    size_t i;
-    char line[MAX_LINE], resp[MAX_LINE];
-    if (read_full(client_fd, hdr, 2) < 0) return -1;
-    fin = hdr[0] >> 7; opcode = hdr[0] & 15; masked = hdr[1] >> 7; len7 = hdr[1] & 127;
-    if (!masked || !fin || (opcode != 1 && opcode != 8 && opcode != 9 && opcode != 10)) {
-        ws_send(client_fd, 8, (const unsigned char *)"\x03\xea", 2); return -1;
-    }
+    unsigned len7, fin, masked, op;
+    size_t off = 2, i;
+    uint64_t len;
+    if (ws_in_len < 2) return 0;
+    fin = ws_in[0] >> 7; op = ws_in[0] & 15;
+    masked = ws_in[1] >> 7; len7 = ws_in[1] & 127;
+    if (!masked || !fin || (op != 1 && op != 8 && op != 9 && op != 10)) return -1;
     len = len7;
     if (len7 == 126) {
-        if (read_full(client_fd, ext, 2) < 0) return -1;
-        len = ((uint64_t)ext[0] << 8) | ext[1];
+        if (ws_in_len < 4) return 0;
+        len = ((uint64_t)ws_in[2] << 8) | ws_in[3];
+        off = 4;
     } else if (len7 == 127) {
-        if (read_full(client_fd, ext, 8) < 0) return -1;
-        len = 0; for (i = 0; i < 8; i++) len = (len << 8) | ext[i];
+        if (ws_in_len < 10) return 0;
+        len = 0;
+        for (i = 0; i < 8; i++) len = (len << 8) | ws_in[2 + i];
+        off = 10;
     }
-    if (len > MAX_PAYLOAD || (opcode >= 8 && len > 125)) {
-        ws_send(client_fd, 8, (const unsigned char *)"\x03\xef", 2); return -1;
+    if (len > MAX_PAYLOAD) return -2;
+    if (op >= 8 && len > 125) return -2;
+    *opcode = op;
+    *payload_off = off + 4;
+    *frame_len = off + 4 + (size_t)len;
+    return (ws_in_len < *frame_len) ? 0 : 1;
+}
+
+static int ws_next_frame(unsigned char *payload, size_t *plen, unsigned *opcode)
+{
+    for (;;) {
+        size_t frame_len = 0, poff = 0, i, len;
+        unsigned op = 0;
+        int r = ws_peek_frame(&frame_len, &op, &poff);
+        if (r < 0) return r;
+        if (r == 0) {
+            ssize_t n;
+            if (ws_in_len >= sizeof ws_in) { ws_in_len = 0; return -1; }
+            do { n = recv(client_fd, ws_in + ws_in_len, sizeof ws_in - ws_in_len, 0); }
+            while (n < 0 && errno == EINTR && !stop_flag);
+            if (n > 0) { ws_in_len += (size_t)n; continue; }
+            if (n == 0) return -1;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+            return -1;
+        }
+        len = frame_len - poff;
+        {
+            const unsigned char *mask = ws_in + poff - 4;
+            for (i = 0; i < len; i++) payload[i] = (unsigned char)(ws_in[poff + i] ^ mask[i & 3]);
+        }
+        memmove(ws_in, ws_in + frame_len, ws_in_len - frame_len);
+        ws_in_len -= frame_len;
+        *plen = len;
+        *opcode = op;
+        return 0;
     }
-    if (read_full(client_fd, mask, 4) < 0 || read_full(client_fd, payload, (size_t)len) < 0) return -1;
-    for (i = 0; i < (size_t)len; i++) payload[i] ^= mask[i & 3];
-    if (opcode == 8) { ws_send(client_fd, 8, payload, (size_t)len); return -1; }
-    if (opcode == 9) { if (ws_send(client_fd, 10, payload, (size_t)len) < 0) return -1; return 0; }
-    if (opcode == 10) return 0;
-    for (i = 0; i < (size_t)len; i++) if (payload[i] == '\n' || payload[i] == '\r') payload[i] = ' ';
-    if ((size_t)len >= sizeof line) { ws_send(client_fd, 1, (const unsigned char *)"err line too long", 15); return 0; }
-    memcpy(line, payload, (size_t)len); line[len] = 0;
-    handle_line(line, resp, sizeof resp);
-    if (ws_send(client_fd, 1, (const unsigned char *)resp, strlen(resp)) < 0) return -1;
+}
+
+/* 单轮最多处理 32 帧：一个 TCP 段里挤多条命令不会被「下一轮 poll」饿死，
+ * 也不会让一整批命令长时间占住 poll 循环。返回 0 = 保持连接，-1 = 断开。 */
+static int client_frame(void)
+{
+    unsigned char payload[MAX_PAYLOAD];
+    char line[MAX_LINE], resp[MAX_LINE];
+    int k;
+    for (k = 0; k < 32; k++) {
+        size_t len = 0, i;
+        unsigned opcode = 0;
+        int r = ws_next_frame(payload, &len, &opcode);
+        if (r == 1) return 0;
+        if (r < 0) {
+            static const unsigned char c_proto[2] = { 0x03, 0xea };   /* 1002 */
+            static const unsigned char c_big[2]   = { 0x03, 0xf1 };   /* 1009 */
+            ws_send(client_fd, 8, r == -2 ? c_big : c_proto, 2);
+            ws_in_len = 0;
+            return -1;
+        }
+        if (opcode == 8) { ws_send(client_fd, 8, payload, len); return -1; }
+        if (opcode == 9) {   /* ping → pong，可写才发 */
+            struct pollfd pw = { client_fd, POLLOUT, 0 };
+            if (poll(&pw, 1, 0) > 0 && (pw.revents & POLLOUT) && ws_send(client_fd, 10, payload, len) < 0) return -1;
+            continue;
+        }
+        if (opcode == 10) continue;
+        for (i = 0; i < len; i++) if (payload[i] == 10 || payload[i] == 13) payload[i] = ' ';
+        if (len >= sizeof line) return -1;
+        memcpy(line, payload, len); line[len] = 0;
+        handle_line(line, resp, sizeof resp);
+        if (write_full(client_fd, resp, strlen(resp)) < 0) return -1;
+    }
     return 0;
 }
 
 static int make_listen(void)
 {
-    int fd, opt = 1; struct sockaddr_in a;
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
-    (void)tv;
+    int fd, opt = 1;
+    struct sockaddr_in a;
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt);
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_CLOEXEC);
-    memset(&a, 0, sizeof a); a.sin_family = AF_INET;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
     a.sin_port = htons((unsigned short)ws_port);
-    if (inet_pton(AF_INET, "127.0.0.1", &a.sin_addr) != 1 ||
+    if (inet_pton(AF_INET, "127.0.0.1", &a.sin_addr) != 1 ||      /* 只绑回环 */
         bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, 8) < 0) {
         close(fd); return -1;
     }
@@ -889,124 +881,135 @@ static void apply_args(int argc, char **argv)
 {
     int i, n;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-v") && i + 1 < argc && parse_long(argv[++i], 1, MAX_VIRT, &n) == 0) {
-            vslots = n;
-        } else if (!strcmp(argv[i], "-w") && i + 1 < argc && parse_long(argv[++i], 2, 100000, &logical_width) == 0) {
-        } else if (!strcmp(argv[i], "-h") && i + 1 < argc && parse_long(argv[++i], 2, 100000, &logical_height) == 0) {
-        } else if (!strcmp(argv[i], "-p") && i + 1 < argc && parse_long(argv[++i], 1, 65535, &ws_port) == 0) {
-        } else if (!strcmp(argv[i], "-ui")) {
-            /* 兼容旧启动行：单进程直读后无用，忽略 */
-        } else if (!strcmp(argv[i], "-s") && i + 1 < argc) {
-            ++i; /* accepted for compatibility with vtouchmerge start lines; unused */
-        } else if (strcmp(argv[i], "-v") && strcmp(argv[i], "-w") && strcmp(argv[i], "-h") &&
-                   strcmp(argv[i], "-p") && strcmp(argv[i], "-s")) {
-            fprintf(stderr, "usage: %s -w width -h height [-v slots] [-p port]\n", argv[0]);
+        if (!strcmp(argv[i], "-w")) {
+            if (i + 1 >= argc || parse_long(argv[++i], 2, 100000, &logical_width) != 0)
+                fprintf(stderr, "vtouchd: -w 取值无效，保留默认 %d\n", logical_width);
+        } else if (!strcmp(argv[i], "-h")) {
+            if (i + 1 >= argc || parse_long(argv[++i], 2, 100000, &logical_height) != 0)
+                fprintf(stderr, "vtouchd: -h 取值无效，保留默认 %d\n", logical_height);
+        } else if (!strcmp(argv[i], "-v")) {
+            if (i + 1 >= argc || parse_long(argv[++i], 1, MAX_VIRT, &n) != 0)
+                fprintf(stderr, "vtouchd: -v 取值无效（1~%d），保留默认 %d\n", MAX_VIRT, vslots);
+            else vslots = n;
+        } else if (!strcmp(argv[i], "-p")) {
+            if (i + 1 >= argc || parse_long(argv[++i], 1, 65535, &ws_port) != 0)
+                fprintf(stderr, "vtouchd: -p 取值无效，保留默认 %d\n", ws_port);
+        } else if (strcmp(argv[i], "-w") && strcmp(argv[i], "-h") && strcmp(argv[i], "-v") && strcmp(argv[i], "-p")) {
+            fprintf(stderr, "用法: %s -w 宽 -h 高 [-v 虚拟槽数] [-p 端口]\n", argv[0]);
         }
     }
 }
 
-int vtouch_init(int argc, char **argv)
+static int vtouch_init(int argc, char **argv)
 {
     char dev[PATH_MAX];
-    struct sigaction sa;
-    int one = 1;
-    memset(&sa, 0, sizeof sa); sa.sa_handler = on_signal; sigemptyset(&sa.sa_mask);
-    sigaction(SIGTERM, &sa, 0); sigaction(SIGINT, &sa, 0); signal(SIGPIPE, SIG_IGN);
-    setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，避免全缓冲掩盖诊断 */
+    int z;
+    setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，别被全缓冲吞掉 */
     apply_args(argc, argv);
     if (logical_width < 2 || logical_height < 2) {
-        fprintf(stderr, "vtouchd: logical display size required (-w width -h height)\n");
+        fprintf(stderr, "vtouchd: 需要逻辑尺寸（-w 宽 -h 高）\n");
         return -2;
     }
     memset(phys, 0, sizeof phys); memset(virt, 0, sizeof virt);
+    for (z = 0; z < MAX_PHYS; z++) { phys[z].oslot = -1; phys[z].oid = -1; }
+    for (z = 0; z < MAX_VIRT; z++) {
+        virt[z].oslot = -1; virt[z].oid = -1;
+        staged[z].oslot = -1; staged[z].oid = -1;
+    }
     if (discover(dev, sizeof dev) < 0) {
-        fprintf(stderr, "vtouchd: no Type-B touchscreen found\n");
+        fprintf(stderr, "vtouchd: 没找到 Type-B 触摸屏（扫了 /dev/input/event0..63）\n");
         return -2;
     }
-    total_slots = phys_slots + vslots;
-    if (total_slots > MAX_PHYS + MAX_VIRT) total_slots = MAX_PHYS + MAX_VIRT;
+    total_slots = phys_slots;
+    if (total_slots > MAX_PHYS) total_slots = MAX_PHYS;
     if (setup_uinput() < 0) {
-        fprintf(stderr, "vtouchd: uinput setup failed: %s\n", strerror(errno));
+        fprintf(stderr, "vtouchd: uinput 建设备失败: %s\n", strerror(errno));
         return -3;
     }
     input_fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (input_fd < 0) { cleanup(); return -4; }
-    /* Socket first, grab last: a socket failure must never leave touch grabbed. */
+    /* 先起监听、最后 grab：任何失败路径都不会留下「抓了却没人能控制」的状态 */
     listen_fd = make_listen();
     if (listen_fd < 0) { cleanup(); return -6; }
-#ifndef VT_MERGE_TEST
     if (ioctl(input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return -5; }
-#endif
-    setsockopt(listen_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    fprintf(stderr, "vtouchd: dev=%s phys=%d virt=%d ws=127.0.0.1:%d size=%dx%d\n",
-        dev, phys_slots, vslots, ws_port, logical_width, logical_height);
+    fprintf(stderr, "vtouchd: dev=%s pool=%d virt_max=%d pressure=%s ws=127.0.0.1:%d size=%dx%d\n",
+            dev, total_slots, vslots, has_pressure ? "on" : "off", ws_port, logical_width, logical_height);
     return 0;
 }
 
-/* 单次 poll 迭代：触摸/WS 数据。timeout_ms<0 用默认 1000。返回 0=继续 -1=停止 */
-int vtouch_poll_step(int timeout_ms)
+/* 单轮 poll：返回 0 = 继续，-1 = 停止 */
+static int vtouch_poll_step(void)
 {
     struct pollfd p[3];
-    int one = 1;
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
+    int to = g_reemit ? 5 : 1000;      /* 有待重发的整帧：5ms 一轮，尽快把手抬起来 */
+    int r;
     if (stop_flag) return -1;
     p[0] = (struct pollfd){ input_fd, POLLIN | POLLHUP | POLLERR, 0 };
     p[1] = (struct pollfd){ listen_fd, POLLIN, 0 };
-    p[2] = (struct pollfd){ client_fd, -1, 0 };
-    if (client_fd >= 0) p[2].events = POLLIN | POLLHUP | POLLERR;
-    int r = poll(p, client_fd >= 0 ? 3 : 2, timeout_ms < 0 ? 1000 : timeout_ms);
-    if (r < 0) { if (errno == EINTR) return 0; return -1; }
+    p[2] = (struct pollfd){ client_fd, client_fd >= 0 ? (POLLIN | POLLHUP | POLLERR) : 0, 0 };
+    r = poll(p, client_fd >= 0 ? 3 : 2, to);
+    if (r < 0) {
+        if (errno == EINTR) return 0;
+        fprintf(stderr, "vtouchd: poll 失败 errno=%d (%s) → 停止\n", errno, strerror(errno));
+        return -1;
+    }
     if (p[0].revents & POLLIN) physical_events();
-    if (p[0].revents & (POLLHUP | POLLERR)) return -1;
+    if (g_reemit && u_fd >= 0) {
+        if (emit_frame() == 0) { g_reemit = 0; g_emit_fail = 0; }
+        else if (++g_emit_fail >= 200) {
+            fprintf(stderr, "vtouchd: uinput 连续 %d 次写失败 → 停止（物理触摸回系统）\n", g_emit_fail);
+            return -1;
+        }
+    }
+    if (p[0].revents & (POLLHUP | POLLERR)) {
+        fprintf(stderr, "vtouchd: 输入设备挂断 (revents=0x%x) → 停止\n", p[0].revents);
+        return -1;
+    }
     if (p[1].revents & POLLIN) {
         int ncf = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
         if (ncf >= 0) {
-            if (client_fd >= 0) {
-                fprintf(stderr, "vtouchd: kicking old ws client\n");
-                close(client_fd); client_fd = -1; frame_open = 0; sub_mask = 0;
-            }
-            setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            struct timeval rtv = { .tv_sec = 0, .tv_usec = 300000 };   /* 握手最多被拖 300ms */
+            struct timeval stv = { .tv_sec = 0, .tv_usec = 20000 };    /* 写超时（第二道保险） */
+            int one = 1;
+            if (client_fd >= 0) { fprintf(stderr, "vtouchd: 新连接，踢掉旧客户端\n"); drop_client(); }
+            setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof rtv);
+            setsockopt(ncf, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof stv);
             setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
             if (websocket_handshake(ncf) != 0) {
-                fprintf(stderr, "vtouchd: ws handshake failed\n");
+                fprintf(stderr, "vtouchd: ws 握手失败\n");
                 close(ncf);
             } else {
                 client_fd = ncf;
+                ws_in_len = 0;
                 fprintf(stderr, "vtouchd: ws client connected\n");
             }
         }
     }
-    if (client_fd >= 0 && (p[2].revents & (POLLHUP | POLLERR))) {
-        fprintf(stderr, "vtouchd: ws client hung up\n");
-        drop_client(); return 0;
-    }
-    if (client_fd >= 0 && (p[2].revents & POLLIN)) {
-        if (client_frame() < 0) {
-            fprintf(stderr, "vtouchd: ws client dropped\n");
-            drop_client();
-        }
+    if (client_fd >= 0 && (p[2].revents & (POLLHUP | POLLERR))) drop_client();
+    /* ws_in_len > 0 也要进来：已经读进缓冲、还没处理完的帧不能让 POLLIN 决定生死 */
+    if (client_fd >= 0 && ((p[2].revents & POLLIN) || ws_in_len > 0)) {
+        if (client_frame() < 0) drop_client();
     }
     return 0;
 }
 
-void vtouch_cleanup(void) { cleanup(); }
-
-/* UI-only 初始化（渲染进程首阶段）：只定逻辑尺寸+清表，不碰设备/grab/socket。
- * 物理触摸由 JNI 合成 touch_cb 注入验证；全量联调再走 vtouch_init。 */
-int vtouch_init_ui(int w, int h)
-{
-    if (w < 2 || h < 2) return -1;
-    setvbuf(stderr, NULL, _IONBF, 0);
-    logical_width = w; logical_height = h;
-    regions_clear();
-    return 0;
-}
+static void on_signal(int s) { (void)s; stop_flag = 1; }
 
 int main(int argc, char **argv)
 {
-    if (vtouch_init(argc, argv) != 0) return 2;
-    while (vtouch_poll_step(-1) == 0)
+    struct sigaction sa;
+    int rc;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, 0);
+    sigaction(SIGINT, &sa, 0);
+    signal(SIGPIPE, SIG_IGN);
+
+    rc = vtouch_init(argc, argv);
+    if (rc != 0) return -rc;            /* 退出码 = 2/3/4/5/6（见 README 的失败出口表） */
+    while (vtouch_poll_step() == 0)
         ;
-    vtouch_cleanup();
+    cleanup();
     return 0;
 }

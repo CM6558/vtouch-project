@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1512,
+  "title": "合并一帧：物理手指与注入手指走同一个 emit_frame（这是「合并」的全部机制）",
+  "subtitle": "两个来源各自更新状态，真正的合并点只有一个：每个 SYN_REPORT 调一次 emit_frame，物理在前、虚拟在后，整帧一次 writev",
+  "containers": [
+    {
+      "id": "box1",
+      "x": 60,
+      "y": 104,
+      "width": 1000,
+      "height": 208,
+      "label": "两条来源（并列，不是先后）"
+    },
+    {
+      "id": "box2",
+      "x": 60,
+      "y": 340,
+      "width": 1000,
+      "height": 598,
+      "label": "唯一合并点"
+    },
+    {
+      "id": "box3",
+      "x": 60,
+      "y": 966,
+      "width": 1000,
+      "height": 208,
+      "label": "下游看到什么"
+    },
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1202,
+      "width": 1000,
+      "height": 208,
+      "label": "注记（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "b1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "物理手指：内核 Type-B 帧",
+      "sublabel": "src:546-559 解析进 phys[]（down / pending_up / x,y 原始值）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "b2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "注入手指：WS 命令",
+      "sublabel": "src:479/505 → set_virtual :444 在这里就分配下游身份",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "c1",
+      "kind": "rect",
+      "x": 230,
+      "y": 380,
+      "width": 660,
+      "height": 56,
+      "label": "触发：SYN_REPORT（物理帧边界）",
+      "sublabel": "src:571 一次 read 可能攒 N 帧 → 每帧各调一次",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c2",
+      "kind": "rect",
+      "x": 230,
+      "y": 458,
+      "width": 660,
+      "height": 56,
+      "label": "① 待抬触点先发 TRACKING_ID=-1",
+      "sublabel": "src:361-372 用当前身份；身份要到写成功才释放",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c3",
+      "kind": "rect",
+      "x": 230,
+      "y": 536,
+      "width": 660,
+      "height": 56,
+      "label": "② 物理触点：帧内补下游身份",
+      "sublabel": "src:373-381 池满 → 顶掉最新虚拟并重发（:378）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c4",
+      "kind": "rect",
+      "x": 230,
+      "y": 614,
+      "width": 660,
+      "height": 56,
+      "label": "③ 虚拟触点：身份已就绪，直接发",
+      "sublabel": "src:388-397 （身份在 WS 命令里分的）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c5",
+      "kind": "rect",
+      "x": 230,
+      "y": 692,
+      "width": 660,
+      "height": 56,
+      "label": "④ BTN_TOUCH / BTN_TOOL_FINGER",
+      "sublabel": "src:399-400/334 只认真的进了帧的触点（any_emitted）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c6",
+      "kind": "rect",
+      "x": 230,
+      "y": 770,
+      "width": 660,
+      "height": 56,
+      "label": "⑤ SYN_REPORT → 一次 writev 提交",
+      "sublabel": "src:401/220 整帧原子性由此保证",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "c7",
+      "kind": "rect",
+      "x": 230,
+      "y": 848,
+      "width": 660,
+      "height": 56,
+      "label": "写成功才：清 pending_up + 还身份",
+      "sublabel": "src:403-406 写失败保留全部状态并重发（:402）",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "d1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1006,
+      "width": 660,
+      "height": 56,
+      "label": "系统：InputReader 收到一条流",
+      "sublabel": "同一 uinput 设备（能力镜像），物理与虚拟同帧序",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "d2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1084,
+      "width": 660,
+      "height": 56,
+      "label": "应用：一次真实点击 / 多指手势",
+      "sublabel": "不区分来源；池分配保证不撞号（:413-441）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1242,
+      "width": 660,
+      "height": 56,
+      "label": "为什么透传编号不行（第 4 步）",
+      "sublabel": "clients/vtouch.js:193 客户端 slot 0~9 与系统 pointer id 不是一回事",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1320,
+      "width": 660,
+      "height": 56,
+      "label": "同帧最大事件数（第 7 步）",
+      "sublabel": "src:186 MAX_IOV=512；ev_add 超限就丢帧尾（:193 保护）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar4",
+      "source": "c1",
+      "target": "c2",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "c2",
+      "target": "c3",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "c3",
+      "target": "c4",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "c4",
+      "target": "c5",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "c5",
+      "target": "c6",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "c6",
+      "target": "c7",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar11",
+      "source": "d1",
+      "target": "d2",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "x1",
+      "source": "b1",
+      "target": "c1",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "x2",
+      "source": "b2",
+      "target": "c4",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "x3",
+      "source": "c7",
+      "target": "d1",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1416,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸"
+    },
+    {
+      "flow": "control",
+      "label": "注入命令 / 回包"
+    },
+    {
+      "flow": "data",
+      "label": "合并提交 / 收尾"
+    },
+    {
+      "flow": "neutral",
+      "label": "启动 / 库内"
+    }
+  ],
+  "footer": "行号：src/vtouchd.c（1015 行，最小版）· clients/vtouch.js · scripts/deploy.sh；与 README 的协议表同源",
+  "footer_x": 70,
+  "footer_y": 1472
+}

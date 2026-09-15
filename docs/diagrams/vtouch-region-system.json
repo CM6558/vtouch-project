@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1430,
+  "title": "区域系统：表在 core、存储归面板、脚本只读/下发",
+  "subtitle": "区域是「纯检测标识」：永不吞物理手指、永不阻塞；副标题给行号与边界语义",
+  "containers": [
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1120,
+      "width": 1000,
+      "height": 208,
+      "label": "注记：并发原语与边界（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "r1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "core 表 regions[32] + 一把锁",
+      "sublabel": "core:719/731 固定数组、无分配",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "r2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "region_add：同 id 原地 upsert",
+      "sublabel": "core:766 只改属性（:779）；新建清槽状态 :797",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "r3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "id 字符集下沉到 core",
+      "sublabel": "core:754 拒非 [A-Za-z0-9_-] → err region",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "r4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "region_hit：rect / circle",
+      "sublabel": "core:818 圆用 long 防溢出（:822）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "r5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "region_match：五事件判定",
+      "sublabel": "core:961 down/up/enter/exit/move（:979-998）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "r6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "边沿标志每帧清",
+      "sublabel": "core:1270 fresh_*；抬手清 slot_hit :1005",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "r7",
+      "kind": "rect",
+      "x": 230,
+      "y": 612,
+      "width": 660,
+      "height": 56,
+      "label": "region_ev_send：面板优先 + 订阅门",
+      "sublabel": "core:919 无客户端只打日志（:928）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "r8",
+      "kind": "rect",
+      "x": 230,
+      "y": 690,
+      "width": 660,
+      "height": 56,
+      "label": "面板落盘 regions.conf（v2 版本门）",
+      "sublabel": "cpp:283/337 不符整份丢弃并写回空表",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "r9",
+      "kind": "rect",
+      "x": 230,
+      "y": 768,
+      "width": 660,
+      "height": 56,
+      "label": "面板交互：框选/改名/启停/隐藏",
+      "sublabel": "cpp:459/1151/1325 每次改动即落盘",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "r10",
+      "kind": "rect",
+      "x": 230,
+      "y": 846,
+      "width": 660,
+      "height": 56,
+      "label": "脚本侧：rgPush 下发 / rgList 回读",
+      "sublabel": "bundle:692/:708 唯一归属是面板（无第二份状态）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "r11",
+      "kind": "rect",
+      "x": 230,
+      "y": 924,
+      "width": 660,
+      "height": 56,
+      "label": "脚本侧：rgParseEv 只按 id 分发",
+      "sublabel": "bundle:776 id 永远是 daemon 的当前值",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "r12",
+      "kind": "rect",
+      "x": 230,
+      "y": 1002,
+      "width": 660,
+      "height": 56,
+      "label": "边界：虚拟触摸不产生区域事件",
+      "sublabel": "core:973 只扫 phys[]；enabled=0 直接跳过 :820",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1160,
+      "width": 660,
+      "height": 56,
+      "label": "吞触摸是另一件事（第 5 步）",
+      "sublabel": "core:574 谓词只在按下时问一次（面板矩形）",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1238,
+      "width": 660,
+      "height": 56,
+      "label": "旧路径迁移（第 8 步）",
+      "sublabel": "cpp:332 /data/local/tmp/vtouch-runtime 一次性搬",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "r1",
+      "target": "r2",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "r2",
+      "target": "r3",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "r3",
+      "target": "r4",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "r4",
+      "target": "r5",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "r5",
+      "target": "r6",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "r6",
+      "target": "r7",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "r7",
+      "target": "r8",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "r8",
+      "target": "r9",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar10",
+      "source": "r9",
+      "target": "r10",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar11",
+      "source": "r10",
+      "target": "r11",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar12",
+      "source": "r11",
+      "target": "r12",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1334,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸采集/转发"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）；与 docs/CODE_WALKTHROUGH.md 同源",
+  "footer_x": 70,
+  "footer_y": 1390
+}

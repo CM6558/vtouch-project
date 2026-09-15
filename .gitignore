@@ -1,17 +1,3 @@
-# 二进制与构建产物：仓库只存源码，build/ 由本地三步或 CI 重新产出
 build/
-*.zip
-
-# Python 缓存
-__pycache__/
-*.pyc
-
-# 第三方源码（自拉，不入库）：Dear ImGui 上游
 thirdparty/
-
-# 常见本地文件
 *.log
-.DS_Store
-
-# 单文件 bundle：生成物，由 scripts/build_bundle.py 产出（只存源码）
-clients/vtouch_bundle.js

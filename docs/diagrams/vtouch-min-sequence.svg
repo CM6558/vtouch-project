@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1428" width="1120" height="1428" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="1" data-visual-theme="Flat Icon" data-diagram-type="sequence" data-motion-scene="" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="standard" data-max-bends-per-edge="12" data-max-total-bends="100" data-max-route-stretch="5.0" data-max-bridged-crossings="8" data-min-node-gap="0.0" data-min-container-gutter="0.0" data-min-label-clearance="2.0" data-min-segment-length="0.0">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #94a3b8; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #111827; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="1120.0" height="1428.0" fill="#ffffff"/>
+  <text x="560.0" y="56" text-anchor="middle" class="title">最小版时序：物理手指与注入手指在同一帧序里（合并发生在 poll 线程的 emit_frame）</text>
+  <text x="560.0" y="82" text-anchor="middle" class="subtitle">自上而下是时间；竖直虚线是生命线，横向箭头是消息/数据流（行号对 src/vtouchd.c 1015 行与 clients/vtouch.js）</text>
+  <g id="lifeline0" data-graph-role="container" data-container-id="lifeline0" data-semantic-role="boundary" data-graph-bounds="179,206,181,1000">
+  <rect data-graph-role="container" x="179.0" y="206.0" width="2.0" height="794.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="197.0" y="230.0" class="section"> </text>
+  </g>
+  <g id="lifeline1" data-graph-role="container" data-container-id="lifeline1" data-semantic-role="boundary" data-graph-bounds="429,206,431,1000">
+  <rect data-graph-role="container" x="429.0" y="206.0" width="2.0" height="794.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="447.0" y="230.0" class="section"> </text>
+  </g>
+  <g id="lifeline2" data-graph-role="container" data-container-id="lifeline2" data-semantic-role="boundary" data-graph-bounds="689,206,691,1000">
+  <rect data-graph-role="container" x="689.0" y="206.0" width="2.0" height="794.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="707.0" y="230.0" class="section"> </text>
+  </g>
+  <g id="lifeline3" data-graph-role="container" data-container-id="lifeline3" data-semantic-role="boundary" data-graph-bounds="929,206,931,1000">
+  <rect data-graph-role="container" x="929.0" y="206.0" width="2.0" height="794.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="947.0" y="230.0" class="section"> </text>
+  </g>
+  <g id="boxnote" data-graph-role="container" data-container-id="boxnote" data-semantic-role="boundary" data-graph-bounds="60,1040,1060,1326">
+  <rect data-graph-role="container" x="60.0" y="1040.0" width="1000.0" height="286.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="78.0" y="1064.0" class="section">注记（不是流程步骤）</text>
+    <rect id="boxnote-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="1046" width="160" height="30" fill="none" stroke="none"/>
+  </g>
+  <path id="m11" data-graph-role="edge" data-edge-id="m11" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="3" data-route-stretch="1.0" data-bridges="" d="M 436,830 L 510,830 L 510,882 L 456,882 L 436,882 L 436,830" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
+  <path id="m1" data-graph-role="edge" data-edge-id="m1" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 910,236 L 450,236" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="m2" data-graph-role="edge" data-edge-id="m2" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 200,298 L 410,298" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
+  <path id="m3" data-graph-role="edge" data-edge-id="m3" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 450,360 L 670,360" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="m4" data-graph-role="edge" data-edge-id="m4" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 910,422 L 450,422" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="m5" data-graph-role="edge" data-edge-id="m5" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 450,484 L 670,484" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="m6" data-graph-role="edge" data-edge-id="m6" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 910,546 L 450,546" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="m7" data-graph-role="edge" data-edge-id="m7" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 450,608 L 670,608" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="m8" data-graph-role="edge" data-edge-id="m8" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 200,670 L 410,670" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
+  <path id="m9" data-graph-role="edge" data-edge-id="m9" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 450,732 L 670,732" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="m10" data-graph-role="edge" data-edge-id="m10" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 910,794 L 450,794" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="m12" data-graph-role="edge" data-edge-id="m12" data-source="" data-target="" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 450,918 L 670,918" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
+  <g id="node-p0" data-graph-role="node" data-node-id="p0" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="80,140,280,196">
+  <rect x="80.0" y="140.0" width="200.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="180.0" y="168.0" text-anchor="middle" class="node-title" font-size="18.0">物理屏 / 内核</text>
+  <text x="180.0" y="190.0" text-anchor="middle" class="node-sub">/dev/input/eventN（Type-B）</text>
+  </g>
+  <g id="node-p1" data-graph-role="node" data-node-id="p1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="330,140,530,196">
+  <rect x="330.0" y="140.0" width="200.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="430.0" y="168.0" text-anchor="middle" class="node-title" font-size="18.0">poll 线程</text>
+  <text x="430.0" y="190.0" text-anchor="middle" class="node-sub">vtouchd 主循环（唯一事件泵）</text>
+  </g>
+  <g id="node-p2" data-graph-role="node" data-node-id="p2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="580,140,800,196">
+  <rect x="580.0" y="140.0" width="220.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="690.0" y="168.0" text-anchor="middle" class="node-title" font-size="18.0">系统 / 应用</text>
+  <text x="690.0" y="190.0" text-anchor="middle" class="node-sub">uinput vtouch-merged → InputReader</text>
+  </g>
+  <g id="node-p3" data-graph-role="node" data-node-id="p3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="830,140,1030,196">
+  <rect x="830.0" y="140.0" width="200.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="930.0" y="168.0" text-anchor="middle" class="node-title" font-size="18.0">AutoJs6 脚本</text>
+  <text x="930.0" y="190.0" text-anchor="middle" class="node-sub">clients/vtouch.js（WS 客户端）</text>
+  </g>
+  <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1080,890,1136">
+  <rect x="230.0" y="1080.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="1108.0" text-anchor="middle" class="node-title" font-size="18.0">③⑤⑦⑨⑫ 都是同一个 emit_frame 家族</text>
+  <text x="560.0" y="1130.0" text-anchor="middle" class="node-sub">物理在前、虚拟在后，整帧一次 writev ⇒ 系统看到的是「又多一根手指」，不是第二条流</text>
+  </g>
+  <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1158,890,1214">
+  <rect x="230.0" y="1158.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="560.0" y="1186.0" text-anchor="middle" class="node-title" font-size="18.0">④ 与 ② 之间没有任何同步点</text>
+  <text x="560.0" y="1208.0" text-anchor="middle" class="node-sub">注入命令可以在真手指按着的任意时刻到达；谁先到谁先成帧，帧序由 poll 循环决定</text>
+  </g>
+  <g id="node-z3" data-graph-role="node" data-node-id="z3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1236,890,1292">
+  <rect x="230.0" y="1236.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
+  <text x="560.0" y="1264.0" text-anchor="middle" class="node-title" font-size="18.0">⑪ 是防身份池泄漏的关键一步</text>
+  <text x="560.0" y="1286.0" text-anchor="middle" class="node-sub">客户端在 begin_frame..end_frame 中间断开会永久占住池里的身份 ⇒ owner_reset 抬触点 + 还身份</text>
+  </g>
+  <g id="m1-label" data-graph-role="label" data-owner="m1" data-graph-bounds="559.36,205,800.64,225">
+  <rect x="559.36" y="205.0" width="241.27999999999992" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="680.0" y="219.0" text-anchor="middle" class="arrow-label">① connect：握手 GET + 101（src:708）</text>
+  </g>
+  <g id="m2-label" data-graph-role="label" data-owner="m2" data-graph-bounds="198.52,267,411.48,287">
+  <rect x="198.52" y="267.0" width="212.95999999999998" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="305.0" y="281.0" text-anchor="middle" class="arrow-label">② 手指按下：Type-B 帧（src:546）</text>
+  </g>
+  <g id="m3-label" data-graph-role="label" data-owner="m3" data-graph-bounds="420.4,329,699.6,349">
+  <rect x="420.4" y="329.0" width="279.1999999999999" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="560.0" y="343.0" text-anchor="middle" class="arrow-label">③ emit_frame ②物理 → 一次 writev（src:361）</text>
+  </g>
+  <g id="m4-label" data-graph-role="label" data-owner="m4" data-graph-bounds="541.36,391,818.64,411">
+  <rect x="541.36" y="391.0" width="277.27999999999986" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="680.0" y="405.0" text-anchor="middle" class="arrow-label">④ down 0 720 1584 → set_virtual（src:505）</text>
+  </g>
+  <g id="m5-label" data-graph-role="label" data-owner="m5" data-graph-bounds="414.4,453,705.6,473">
+  <rect x="414.4" y="453.0" width="291.1999999999998" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="560.0" y="467.0" text-anchor="middle" class="arrow-label">⑤ emit_frame ③虚拟 → 同一次 writev（src:388）</text>
+  </g>
+  <g id="m6-label" data-graph-role="label" data-owner="m6" data-graph-bounds="619.96,515,740.04,535">
+  <rect x="619.96" y="515.0" width="120.08" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="680.0" y="529.0" text-anchor="middle" class="arrow-label">⑥ up 0（src:496）</text>
+  </g>
+  <g id="m7-label" data-graph-role="label" data-owner="m7" data-graph-bounds="413.56,577,706.44,597">
+  <rect x="413.56" y="577.0" width="292.8799999999999" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="560.0" y="591.0" text-anchor="middle" class="arrow-label">⑦ emit_frame：虚拟 TRACKING_ID=-1（src:361）</text>
+  </g>
+  <g id="m8-label" data-graph-role="label" data-owner="m8" data-graph-bounds="181.96,639,428.04,659">
+  <rect x="181.96" y="639.0" width="246.07999999999996" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="305.0" y="653.0" text-anchor="middle" class="arrow-label">⑧ 物理抬起：TRACKING_ID=-1（src:552）</text>
+  </g>
+  <g id="m9-label" data-graph-role="label" data-owner="m9" data-graph-bounds="413.56,701,706.44,721">
+  <rect x="413.56" y="701.0" width="292.8799999999999" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="560.0" y="715.0" text-anchor="middle" class="arrow-label">⑨ emit_frame：物理 TRACKING_ID=-1（src:401）</text>
+  </g>
+  <g id="m10-label" data-graph-role="label" data-owner="m10" data-graph-bounds="568.72,763,791.28,783">
+  <rect x="568.72" y="763.0" width="222.55999999999995" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="680.0" y="777.0" text-anchor="middle" class="arrow-label">⑩ close（或被新客户端踢掉）src:757</text>
+  </g>
+  <g id="m11-label" data-graph-role="label" data-owner="m11" data-graph-bounds="337.48,799,608.52,819">
+  <rect x="337.48" y="799.0" width="271.03999999999985" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="473.0" y="813.0" text-anchor="middle" class="arrow-label">⑪ owner_reset：抬触点 + 还身份（src:468）</text>
+  </g>
+  <g id="m12-label" data-graph-role="label" data-owner="m12" data-graph-bounds="443.56,887,676.44,907">
+  <rect x="443.56" y="887.0" width="232.88" height="20" rx="6" fill="#ffffff" opacity="0.94"/>
+  <text x="560.0" y="901.0" text-anchor="middle" class="arrow-label">⑫ cleanup：EVIOCGRAB(0)（src:327）</text>
+  </g>
+  <g id="legend" data-graph-role="legend">
+    <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="60" y="1318" width="705.04" height="46" rx="10" fill="none" stroke="none"/>
+    <line data-graph-role="decoration" x1="70.0" y1="1332.0" x2="100.0" y2="1332.0" stroke="#2563eb" stroke-width="2.4" marker-end="url(#arrowC)"/>
+    <text data-graph-role="decoration" x="110.0" y="1336.0" class="legend">物理触摸（内核 → poll）</text>
+    <line data-graph-role="decoration" x1="271.20000000000005" y1="1332.0" x2="301.20000000000005" y2="1332.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+    <text data-graph-role="decoration" x="311.20000000000005" y="1336.0" class="legend">注入命令 / 握手</text>
+    <line data-graph-role="decoration" x1="426.80000000000007" y1="1332.0" x2="456.80000000000007" y2="1332.0" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
+    <text data-graph-role="decoration" x="466.80000000000007" y="1336.0" class="legend">提交到系统（uinput）</text>
+    <line data-graph-role="decoration" x1="617.44" y1="1332.0" x2="647.44" y2="1332.0" stroke="#6b7280" stroke-width="2.4" marker-end="url(#arrowH)"/>
+    <text data-graph-role="decoration" x="657.44" y="1336.0" class="legend">收尾 / 内部处理</text>
+  </g>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="70,1376,721,1392">
+  <text x="70.0" y="1388.0" class="footnote">行号：src/vtouchd.c（最小版 1015 行）· clients/vtouch.js；与 README 协议表、docs/diagrams/vtouch-min-flow 同源</text>
+  </g>
+</svg>

@@ -1,0 +1,570 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1902,
+  "title": "一次「区域触发」的完整旅程（当前盘上代码 · 现读行号）",
+  "subtitle": "每个节点标了「谁在做」（脚本线程 / 面板 Java / 面板 native / core poll 线程）与文件:行；两侧走廊是锁、出站队列与身份池",
+  "containers": [],
+  "nodes": [
+    {
+      "id": "s1",
+      "kind": "rect",
+      "x": 330,
+      "y": 150,
+      "width": 460,
+      "height": 56,
+      "label": "① 脚本 require 单文件包",
+      "sublabel": "bundle:868 装配 · 加载只定义函数（DEMO:380）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s2",
+      "kind": "rect",
+      "x": 330,
+      "y": 228,
+      "width": 460,
+      "height": 56,
+      "label": "② vt.onRegion(id, ev, fn)",
+      "sublabel": "bundle:594 签名三态 → 事件集 :540",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s3",
+      "kind": "rect",
+      "x": 330,
+      "y": 306,
+      "width": 460,
+      "height": 56,
+      "label": "③ uiStart：pidof + md5 门",
+      "sublabel": "bundle:496 在跑即复用 · :458 幂等释放",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s4",
+      "kind": "rect",
+      "x": 330,
+      "y": 384,
+      "width": 460,
+      "height": 56,
+      "label": "④ 面板进程起来（app_process）",
+      "sublabel": "java:139 System.load → nativeInit :150",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "s5",
+      "kind": "rect",
+      "x": 330,
+      "y": 462,
+      "width": 460,
+      "height": 56,
+      "label": "⑤ nativeInit：挂钩子 + init",
+      "sublabel": "cpp:1924 四回调 · :1932 vtouch_init",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "s6",
+      "kind": "rect",
+      "x": 330,
+      "y": 540,
+      "width": 460,
+      "height": 56,
+      "label": "⑥ 抓物理屏（最后一步）",
+      "sublabel": "core:1666 socket first, grab last",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s7",
+      "kind": "rect",
+      "x": 330,
+      "y": 618,
+      "width": 460,
+      "height": 56,
+      "label": "⑦ Java 建 composer 图层",
+      "sublabel": "java:120 反射建层 · :133 trustedOverlay",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "s8",
+      "kind": "rect",
+      "x": 330,
+      "y": 696,
+      "width": 460,
+      "height": 56,
+      "label": "⑧ connect + sub region + ui show",
+      "sublabel": "bundle:603 握手 → :604 只订区域通道",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s9",
+      "kind": "rect",
+      "x": 330,
+      "y": 774,
+      "width": 460,
+      "height": 56,
+      "label": "⑨ 探针校验区域 id",
+      "sublabel": "bundle:737 读线程之前 · 写错当场 toast",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s10",
+      "kind": "rect",
+      "x": 330,
+      "y": 852,
+      "width": 460,
+      "height": 56,
+      "label": "⑩ 读线程 recv → rgParseEv",
+      "sublabel": "bundle:617 轮询 · :623 2s ping 看门狗",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s11",
+      "kind": "rect",
+      "x": 330,
+      "y": 930,
+      "width": 460,
+      "height": 56,
+      "label": "⑪ 手指落下：内核 Type-B 帧",
+      "sublabel": "core:1199 选槽 :1211 → 按下边沿 :1230",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s12",
+      "kind": "rect",
+      "x": 330,
+      "y": 1008,
+      "width": 460,
+      "height": 56,
+      "label": "⑫ SYN_REPORT → emit_frame",
+      "sublabel": "core:1259 一次 SYN · :559 吞触摸 latch",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s13",
+      "kind": "rect",
+      "x": 330,
+      "y": 1086,
+      "width": 460,
+      "height": 56,
+      "label": "⑬ 一次 writev 写 uinput（合并点）",
+      "sublabel": "core:389 组 iovec · :627 失败不清 pending_up",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s14",
+      "kind": "rect",
+      "x": 330,
+      "y": 1164,
+      "width": 460,
+      "height": 56,
+      "label": "⑭ 同一 tick：region_match 命中",
+      "sublabel": "core:961 锁内拷快照 → 锁外 region_hit :818",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s15",
+      "kind": "rect",
+      "x": 330,
+      "y": 1242,
+      "width": 460,
+      "height": 56,
+      "label": "⑮ region_ev_send → 出站队列",
+      "sublabel": "core:919 触摸线程只入队 · :945",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s16",
+      "kind": "rect",
+      "x": 330,
+      "y": 1320,
+      "width": 460,
+      "height": 56,
+      "label": "⑯ outq 线程 → ws_send",
+      "sublabel": "core:221 出队 · :1441 唯一允许阻塞处",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s17",
+      "kind": "rect",
+      "x": 330,
+      "y": 1398,
+      "width": 460,
+      "height": 56,
+      "label": "⑰ dispatch → 回调线程 fn(h)",
+      "sublabel": "bundle:554 过滤 :550 → :562 threads.start",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s18",
+      "kind": "rect",
+      "x": 330,
+      "y": 1476,
+      "width": 460,
+      "height": 56,
+      "label": "⑱ 回调里 finger().tap",
+      "sublabel": "bundle:353 扫空闲 slot · :340 down/sleep/up",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "s19",
+      "kind": "rect",
+      "x": 330,
+      "y": 1554,
+      "width": 460,
+      "height": 56,
+      "label": "⑲ 命令回核心：set_virtual",
+      "sublabel": "core:1132 handle_line → :693 → :1139 成帧",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "s20",
+      "kind": "rect",
+      "x": 330,
+      "y": 1632,
+      "width": 460,
+      "height": 56,
+      "label": "⑳ 系统看到物理 + 虚拟共存",
+      "sublabel": "同一 vtouch-merged 设备、同帧序（先物理后虚拟）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "s21",
+      "kind": "rect",
+      "x": 330,
+      "y": 1710,
+      "width": 460,
+      "height": 56,
+      "label": "㉑ 脚本结束 → exit 钩子收尾",
+      "sublabel": "bundle:237 → :249 · core:510 解 grab :526",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "l1",
+      "kind": "rect",
+      "x": 70,
+      "y": 1164,
+      "width": 210,
+      "height": 56,
+      "label": "锁 region_mu",
+      "sublabel": "core:731 锁内拷 32 条快照",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "l2",
+      "kind": "rect",
+      "x": 70,
+      "y": 1476,
+      "width": 210,
+      "height": 56,
+      "label": "锁 SEND_LOCK",
+      "sublabel": "bundle:101 并发写同一 socket",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "r1",
+      "kind": "rect",
+      "x": 830,
+      "y": 1242,
+      "width": 200,
+      "height": 56,
+      "label": "出站 FIFO 512×192",
+      "sublabel": "core:150 满则丢 / 标记踢人",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "r2",
+      "kind": "rect",
+      "x": 830,
+      "y": 1554,
+      "width": 200,
+      "height": 56,
+      "label": "身份池 oslot/oid",
+      "sublabel": "core:677 物理优先，顶掉最新虚拟",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "e1",
+      "source": "s1",
+      "target": "s2",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e2",
+      "source": "s2",
+      "target": "s3",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e3",
+      "source": "s3",
+      "target": "s4",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e4",
+      "source": "s4",
+      "target": "s5",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e5",
+      "source": "s5",
+      "target": "s6",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e6",
+      "source": "s6",
+      "target": "s7",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e7",
+      "source": "s7",
+      "target": "s8",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e8",
+      "source": "s8",
+      "target": "s9",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e9",
+      "source": "s9",
+      "target": "s10",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e10",
+      "source": "s10",
+      "target": "s11",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e11",
+      "source": "s11",
+      "target": "s12",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e12",
+      "source": "s12",
+      "target": "s13",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e13",
+      "source": "s13",
+      "target": "s14",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e14",
+      "source": "s14",
+      "target": "s15",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e15",
+      "source": "s15",
+      "target": "s16",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e16",
+      "source": "s16",
+      "target": "s17",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e17",
+      "source": "s17",
+      "target": "s18",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e18",
+      "source": "s18",
+      "target": "s19",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e19",
+      "source": "s19",
+      "target": "s20",
+      "flow": "data",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "e20",
+      "source": "s20",
+      "target": "s21",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "x1",
+      "source": "l1",
+      "target": "s14",
+      "flow": "neutral",
+      "source_port": "right",
+      "target_port": "left",
+      "dashed": true
+    },
+    {
+      "id": "x2",
+      "source": "l2",
+      "target": "s18",
+      "flow": "neutral",
+      "source_port": "right",
+      "target_port": "left",
+      "dashed": true
+    },
+    {
+      "id": "x3",
+      "source": "s15",
+      "target": "r1",
+      "flow": "neutral",
+      "source_port": "right",
+      "target_port": "left",
+      "dashed": true
+    },
+    {
+      "id": "x4",
+      "source": "s19",
+      "target": "r2",
+      "flow": "neutral",
+      "source_port": "left",
+      "target_port": "right",
+      "dashed": true
+    },
+    {
+      "id": "x5",
+      "source": "s13",
+      "target": "r2",
+      "flow": "neutral",
+      "source_port": "right",
+      "target_port": "left",
+      "dashed": true
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1806,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸采集/转发"
+    },
+    {
+      "flow": "control",
+      "label": "区域事件回传脚本"
+    },
+    {
+      "flow": "data",
+      "label": "虚拟触摸注入"
+    },
+    {
+      "flow": "neutral",
+      "label": "启动/库内/收尾"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）",
+  "footer_x": 70,
+  "footer_y": 1862
+}

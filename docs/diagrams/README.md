@@ -1,41 +1,69 @@
-# 流程图（docs/diagrams）
+# docs/diagrams —— 工程图索引
 
-本项目所有工程图都放在这里。**每张图 = 一个 JSON 源 + 同名 SVG/PNG**：改图只改 `.json`，再跑一次渲染命令，
-不要手改 SVG（校验门会拦下坐标/标注重叠这类问题）。
+## 先看：最小版（现况 = 虚拟触摸 + 合并物理触摸）
+
+仓库现在是**最小版**：`src/vtouchd.c`（1015 行）+ `clients/vtouch.js`。对应的三张图（行号对着最小版源码）：
 
 | 图 | 讲什么 | 源 |
 |---|---|---|
-| `vtouch-full-flow` | **全流程总览（当前实现）**：① 交付（build_bundle.py → /sdcard 单文件 → uiStart 释放）② 面板进程 = daemon（物理采集/合并转发/区域匹配/WS）③ 脚本（`vt.onRegion` + 库内自动 6 件事 + 退出钩子）④ 落地（uinput → 目标 App）；三条数据流：物理穿透 / 区域事件 / 虚拟回注 | `vtouch-full-flow.json` |
-| `vtouch-region-to-task-current-flow` | 「区域命中 → AutoJs6 任务」现状慢路版本：脚本侧 6 步仪式逐步标注「必需 / 机制（该收进库）/ 纯仪式」（优化前的对照底片） | `vtouch-region-to-task-current-flow.json` |
-| `vtouch-region-to-task-optimized` | 同一链路的**现状 vs 优化后**左右对照：左 7 段 → 右 2 行（`vt.onRegion(id, fn)`），并画出被收进库的 6 件事 | `vtouch-region-to-task-optimized.json` |
+| `vtouch-min-flow` | 全流程：启动九步定序 → 每轮 poll 两条输入（物理设备 / WS 客户端）→ 同一个 `emit_frame` 提交 → 收尾 | 草稿生成器 `build/_gen_min_diagrams.py` |
+| `vtouch-min-merge-frame` | **合并机制**：物理手指与注入手指在 `SYN_REPORT` 处合流，物理在前虚拟在后、整帧一次 `writev` | 同上 |
+| `vtouch-min-protocol` | 协议分支：9 条命令各自走哪条路径、什么应答 | 同上 |
+| `vtouch-min-sequence` | **时序图**：四个参与者（物理屏/内核、poll 线程、系统/应用、AutoJS 脚本）+ 竖直虚线生命线 × 12 条消息，看清「物理按下与注入在同一帧序里交错」 | 草稿生成器 `build/_gen_min_sequence.py` |
 
-## 重新渲染
+重渲（四张一起）：`python build/_gen_min_diagrams.py && python build/_gen_min_sequence.py && bash build/_render_min.sh`
 
-用 `fireworks-tech-graph` skill 的渲染器（本机已装）：
+## 完整版归档（面板 / 区域那一代，**不是**现况代码）
+
+下面这些图讲的是**完整版**实现（`src-ui/` 面板 + 1784 行 core + 区域系统），源码已删、只在
+`build/_backup_full_<时间戳>/` 里有。留着是为了将来要恢复那些功能时能照着看——**别当现况用**。
+
+**权威源是每张图的 `.json`**（渲染器读它出 `.svg`/`.png`/`.report.json` 四件套）。
+草稿生成器：`build/_gen_walkthrough_diagrams.py`（数据驱动，可重复运行）；**改图改生成器或 JSON 后重渲，不要手改 SVG**。
+
+这些图的节点副标题里的 `文件:行` 与 `docs/CODE_WALKTHROUGH.md` **同源**（那份文档的行号是逐行现读的）。
+图只描述**当前盘上代码**这一代实现。
+
+## 图（9 张，走读全套）
+
+| 图 | 讲什么 | 对应文档 |
+|---|---|---|
+| `vtouch-map-overview` | 系统地图：四层 / 四个线程 / 三条边界（AutoJs6 进程 · 面板进程 · 内核框架），含坐标三域与线程未命名等注记 | §1、§2 |
+| `vtouch-core-data` | core 数据面：启动定序 → 采集解析 → 合帧 → 一次 writev → 区域匹配 → 出站（含写失败重发） | §3.1–3.5、§3.7 |
+| `vtouch-core-control` | core 控制面：accept/踢旧 → socket 选项 → 握手 → 解帧 → 命令表 → 回包 → 挂断退出 | §3.6、§3.8、§3.9 |
+| `vtouch-failure-exits` | 失败出口与降级：启动码 -2/-3/-4/-5/-6、Java exit(2)/return、脚本 throw、`_exit(0)`、降级与兜底 | §9 |
+| `vtouch-panel-java` | 面板侧四层：Java 建层 → native 启动与桥 → 交互与渲染（含重画门）→ 落盘 | §4、§5 |
+| `vtouch-js-lib` | L1 脚本库：`build_bundle.py` 六段逐函数（CORE / UI_BOOT / ON_REGION / ONE_LIB / DEMO） | §6 |
+| `vtouch-example-29-steps` | 示例贯通：一条 `onRegion` 触发链的 24 个执行步骤（对应 §8 的 29 行明细） | §8 |
+| `vtouch-region-system` | 区域系统：表在 core / 存储归面板 / 脚本只读下发，含五事件与边界语义 | §3.5、§10 |
+| `vtouch-build-chain` | 交付链：源码 → 构建五阶段 → 装配 → 对账 → 打包 → CI 产物 → 设备侧落盘 | §11.2、§11.5、§11.6 |
+
+另有一张早期单图（同样基于现码，保留）：`vtouch-current-journey`（一次区域触发旅程 · 21 步概览版）。
+
+## 重渲命令（本次实际用的）
 
 ```sh
-SKILL_ROOT="C:/Users/21102/AppData/Local/hermes/skills/fireworks-tech-graph"
-# 1) JSON → SVG（带几何/构图校验报告）
-python "$SKILL_ROOT/scripts/fireworks.py" render data-flow docs/diagrams/<图>.json \
-       docs/diagrams/<图>.svg --report docs/diagrams/<图>.report.json
-# 2) 五项校验（XML / marker / 碰撞 / 几何 / 构图）
-for c in xml markers collisions geometry composition; do
-  python "$SKILL_ROOT/scripts/fireworks.py" check docs/diagrams/<图>.svg --check $c
-done
-# 3) SVG → PNG（2x，CJK 字体正常；本机没有 cairosvg，用系统 Chrome headless）
-"/c/Program Files/Google/Chrome/Application/chrome.exe" --headless=new --disable-gpu --hide-scrollbars \
-  --force-device-scale-factor=2 --window-size=<宽>,<高> \
-  --screenshot="docs/diagrams/<图>.png" "file:///<绝对路径>/docs/diagrams/<图>.svg"
+cd /c/Users/21102/vtouch-project
+python build/_gen_walkthrough_diagrams.py          # 生成全套 JSON（权威源）
+bash   build/_render_all.sh                        # 逐张：渲染 + 五道校验 + 版面自检 + PNG
+# 或单张：
+python "C:/Users/21102/AppData/Local/hermes/skills/creative/technical-diagram-generation/scripts/render_check_export.py" \
+       docs/diagrams/<name>.json
+python "C:/Users/21102/AppData/Local/hermes/skills/creative/technical-diagram-generation/scripts/verify_svg_layout.py" \
+       docs/diagrams/<name>.json docs/diagrams/<name>.svg docs/diagrams/<name>.png
 ```
 
-`--window-size` 取该图 JSON 里的 `width`/`height`（2x 缩放 → PNG 是两倍尺寸）。
+## 交付前自检清单（本次全过）
 
-## 交付前自检（本项目踩过的坑，别省）
+- [x] 五道机检：`xml` / `markers` / `collisions` / `geometry` / `composition` 全 ok，composition score = 100
+- [x] 版面自检三项：节点两两重叠 = 无、文字实测宽度无溢出、PNG 文字无贴边/裁切
+- [x] 视觉复核：逐张读回 PNG（读图工具）确认无裁切/遮挡/压线/穿箱
+- [x] 图内 `文件:行` 与 `docs/CODE_WALKTHROUGH.md` 一致（同源，改动一起改）
+- [x] PNG 用 2× 导出（`--force-device-scale-factor=2`），尺寸 = 画布 ×2
 
-1. **五项校验必须全 OK**、`composition.score = 100`；
-2. **节点两两重叠要自己查**：标准档 `min_node_gap = 0`，生成器**不会**报「两个盒子叠在一起」——
-   叠了就变成后画的盒子盖住前一个的副标题，肉眼看像「文字被截断」（本轮就这么误诊过一次）；
-3. **文字是否溢出用实测量，别靠目测**：Chrome 里 `getBBox()` 量 `<text class="node-sub">` 宽度对比盒子宽度
-   （本机曾用 `--dump-dom` + 内联 SVG + 脚本把结果写进 DOM 的方式量，46 行 0 溢出）；
-4. PNG 回来要**看图复核**（本项目用 `vision_analyze` 分区裁剪看），合成校验不覆盖「文字压线 / 遮挡」这类问题；
-   注意**裁剪边界**会造成假的「被截断」结论——先确认裁的是整行、整个盒子。
+## 与旧图的关系（重要）
+
+HEAD 里曾归档 `vtouch-full-flow` / `vtouch-click-journey` / `vtouch-region-to-task-*`，**它们描述的是另一代实现**
+（`recvBlocking`、`LinkedBlockingQueue(256)` + pump 线程、`reserved` 占位、`vtouch_set_consume_cb` 等，
+这些在当前源码里 grep 计数均为 0）。工作区里这些文件已被删除；**不要直接恢复它们当现况用**——
+要恢复得先按现码改 JSON 再重渲。上一代与本代的差异清单见 `docs/CODE_WALKTHROUGH.md` §0.1 / §10。

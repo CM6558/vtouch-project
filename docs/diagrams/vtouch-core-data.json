@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1820,
+  "title": "core 数据面：从 grab 到出站（含重发与区域匹配）",
+  "subtitle": "poll 线程一条主干；副标题是判据与失败出口；两侧走廊是身份池、锁、出站队列",
+  "containers": [
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1354,
+      "width": 1000,
+      "height": 364,
+      "label": "注记：并发原语与边界（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "d1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "vtouch_init：信号 + 尺寸门 + 清表",
+      "sublabel": "core:1629-1647 尺寸<2 → -2（:1640）",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "d2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "discover：扫 event0..63",
+      "sublabel": "core:341；validate_device :288 四轴/槽/量程关卡",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "d3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "setup_uinput：能力镜像 + 四轴兜底",
+      "sublabel": "core:446 INPUT_PROP_DIRECT 无条件（:496）",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "d4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "make_listen → EVIOCGRAB(1)",
+      "sublabel": "core:1663/1666 socket first, grab last",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "d5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "起 outq 线程 + dev=/pool= 汇总行",
+      "sublabel": "core:1669/1674 创建失败只降级（:1671）",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "d6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "poll_step 醒来：p[0] POLLIN",
+      "sublabel": "core:1698 物理路径 ≥3ms 打 [stall]（:1702）",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d7",
+      "kind": "rect",
+      "x": 230,
+      "y": 612,
+      "width": 660,
+      "height": 56,
+      "label": "physical_events 解析一帧",
+      "sublabel": "core:1196 选槽 :1211 → 按下边沿 :1230",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d8",
+      "kind": "rect",
+      "x": 230,
+      "y": 690,
+      "width": 660,
+      "height": 56,
+      "label": "SYN_DROPPED：全槽当抬起",
+      "sublabel": "core:1250 宁可一次假 up，不要粘指",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d9",
+      "kind": "rect",
+      "x": 230,
+      "y": 768,
+      "width": 660,
+      "height": 56,
+      "label": "SYN_REPORT → emit_frame 合并",
+      "sublabel": "core:1259/:559 吞触摸 latch :565",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d10",
+      "kind": "rect",
+      "x": 230,
+      "y": 846,
+      "width": 660,
+      "height": 56,
+      "label": "一次 writev 提交 uinput",
+      "sublabel": "core:389 短写补全 :412；EAGAIN 重试 :377",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "d11",
+      "kind": "rect",
+      "x": 230,
+      "y": 924,
+      "width": 660,
+      "height": 56,
+      "label": "写失败：g_reemit 5ms 重发整帧",
+      "sublabel": "core:627/:1709 连败 200 次收摊（:1711）",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "d12",
+      "kind": "rect",
+      "x": 230,
+      "y": 1002,
+      "width": 660,
+      "height": 56,
+      "label": "region_match：锁内快照→锁外匹配",
+      "sublabel": "core:961/:967 每 SYN 一次；hit :818",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d13",
+      "kind": "rect",
+      "x": 230,
+      "y": 1080,
+      "width": 660,
+      "height": 56,
+      "label": "region_ev_send → outq（move 可丢）",
+      "sublabel": "core:919 订阅门 :928；可写才发 :941",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d14",
+      "kind": "rect",
+      "x": 230,
+      "y": 1158,
+      "width": 660,
+      "height": 56,
+      "label": "outq_thread → ws_send",
+      "sublabel": "core:221/:1441 先 poll(POLLOUT,0)（:1393）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "d15",
+      "kind": "rect",
+      "x": 230,
+      "y": 1236,
+      "width": 660,
+      "height": 56,
+      "label": "broadcast_phys → pev（每 SYN 必走）",
+      "sublabel": "core:1175/:1273 与是否订阅解耦",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1394,
+      "width": 660,
+      "height": 56,
+      "label": "身份池 oslot/oid（第 9 步）",
+      "sublabel": "core:677/683 物理发帧分配，池满顶最新虚拟 :545",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1472,
+      "width": 660,
+      "height": 56,
+      "label": "锁 region_mu（第 12 步）",
+      "sublabel": "core:731 锁内拷 32×40B 快照",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z3",
+      "kind": "rect",
+      "x": 230,
+      "y": 1550,
+      "width": 660,
+      "height": 56,
+      "label": "出站 FIFO 512×192（第 13 步）",
+      "sublabel": "core:150 满即丢 / 标记踢人 :168",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z4",
+      "kind": "rect",
+      "x": 230,
+      "y": 1628,
+      "width": 660,
+      "height": 56,
+      "label": "日志走队列（第 10 步）",
+      "sublabel": "core:209 vt_log；触摸线程不 fprintf",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "d1",
+      "target": "d2",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "d2",
+      "target": "d3",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "d3",
+      "target": "d4",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "d4",
+      "target": "d5",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "d5",
+      "target": "d6",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "d6",
+      "target": "d7",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "d7",
+      "target": "d8",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "d8",
+      "target": "d9",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar10",
+      "source": "d9",
+      "target": "d10",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar11",
+      "source": "d10",
+      "target": "d11",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar12",
+      "source": "d11",
+      "target": "d12",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar13",
+      "source": "d12",
+      "target": "d13",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar14",
+      "source": "d13",
+      "target": "d14",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar15",
+      "source": "d14",
+      "target": "d15",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1724,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸采集/转发"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）；与 docs/CODE_WALKTHROUGH.md 同源",
+  "footer_x": 70,
+  "footer_y": 1780
+}

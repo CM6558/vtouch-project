@@ -1,0 +1,559 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 2366,
+  "title": "示例贯通：一条 onRegion 触发链（24 步）",
+  "subtitle": "对应 CODE_WALKTHROUGH §8 的 29 行明细（此处把同层相邻行合并成 24 个执行步骤）；每步 = 谁在做 / 文件:行 / 判据",
+  "containers": [
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 2056,
+      "width": 1000,
+      "height": 208,
+      "label": "注记：并发原语与边界（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "p1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "① require 单文件包",
+      "sublabel": "bundle:868 装配；DEMO:380 只导出",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "② onRegion 三态签名解析",
+      "sublabel": "bundle:594-600 → 事件集 :540",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "③ uiStart：pidof + md5 门",
+      "sublabel": "bundle:496/497 → 部署门 :458/478",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "④ 面板进程起来（app_process）",
+      "sublabel": "java:139 System.load → nativeInit :150",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "p5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "⑤ nativeInit：挂钩子 + init",
+      "sublabel": "cpp:1924 四回调 → :1932 vtouch_init",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "p6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "⑥ core 定序：grab 放最后",
+      "sublabel": "core:1629 discover→uinput→listen→grab :1666",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p7",
+      "kind": "rect",
+      "x": 230,
+      "y": 612,
+      "width": 660,
+      "height": 56,
+      "label": "⑦ Java 建层（trustedOverlay）",
+      "sublabel": "java:120/133 → nativeOnSurface :158",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "p8",
+      "kind": "rect",
+      "x": 230,
+      "y": 690,
+      "width": 660,
+      "height": 56,
+      "label": "⑧ connect + sub region + ui show",
+      "sublabel": "bundle:603 handshake → :604/:605",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p9",
+      "kind": "rect",
+      "x": 230,
+      "y": 768,
+      "width": 660,
+      "height": 56,
+      "label": "⑨ 探针校验区域 id",
+      "sublabel": "bundle:737 读线程之前；:757 提示",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p10",
+      "kind": "rect",
+      "x": 230,
+      "y": 846,
+      "width": 660,
+      "height": 56,
+      "label": "⑩ 读线程：recv → rgParseEv",
+      "sublabel": "bundle:617/:776 2s ping 看门狗 :623",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p11",
+      "kind": "rect",
+      "x": 230,
+      "y": 924,
+      "width": 660,
+      "height": 56,
+      "label": "⑪ 手指落下：内核 Type-B 帧",
+      "sublabel": "core:1199 选槽 :1211 → 按下 :1230",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p12",
+      "kind": "rect",
+      "x": 230,
+      "y": 1002,
+      "width": 660,
+      "height": 56,
+      "label": "⑫ SYN_REPORT → emit_frame",
+      "sublabel": "core:1259/:559 吞触摸 latch :565",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p13",
+      "kind": "rect",
+      "x": 230,
+      "y": 1080,
+      "width": 660,
+      "height": 56,
+      "label": "⑬ 一次 writev 写 uinput",
+      "sublabel": "core:389 短写补全 :412；失败重发 :627",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p14",
+      "kind": "rect",
+      "x": 230,
+      "y": 1158,
+      "width": 660,
+      "height": 56,
+      "label": "⑭ region_match 命中 s3",
+      "sublabel": "core:961 锁内快照 :967 → hit :978",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p15",
+      "kind": "rect",
+      "x": 230,
+      "y": 1236,
+      "width": 660,
+      "height": 56,
+      "label": "⑮ region_ev_send → outq",
+      "sublabel": "core:919 面板优先 :927；订阅门 :928",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p16",
+      "kind": "rect",
+      "x": 230,
+      "y": 1314,
+      "width": 660,
+      "height": 56,
+      "label": "⑯ outq 线程 → ws_send",
+      "sublabel": "core:221/:1441 唯一允许阻塞处",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p17",
+      "kind": "rect",
+      "x": 230,
+      "y": 1392,
+      "width": 660,
+      "height": 56,
+      "label": "⑰ dispatch → 回调线程 fn(h)",
+      "sublabel": "bundle:554 过滤 :550 → :562 threads.start",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p18",
+      "kind": "rect",
+      "x": 230,
+      "y": 1470,
+      "width": 660,
+      "height": 56,
+      "label": "⑱ 回调里 finger().tap",
+      "sublabel": "bundle:353 挑槽 → :340 down/sleep/up",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "p19",
+      "kind": "rect",
+      "x": 230,
+      "y": 1548,
+      "width": 660,
+      "height": 56,
+      "label": "⑲ 命令回 core：set_virtual",
+      "sublabel": "core:1132 → :693 → :1139 各自成帧",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p20",
+      "kind": "rect",
+      "x": 230,
+      "y": 1626,
+      "width": 660,
+      "height": 56,
+      "label": "⑳ 系统看到物理 + 虚拟共存",
+      "sublabel": "同一 vtouch-merged、同帧序（先物理后虚拟）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "p21",
+      "kind": "rect",
+      "x": 230,
+      "y": 1704,
+      "width": 660,
+      "height": 56,
+      "label": "㉑ tap 的 up：抬手帧 + 归还身份",
+      "sublabel": "core:1219 fresh_up → :993 up → :634 释放",
+      "fill": "#fff7ed",
+      "stroke": "#f97316",
+      "flat": true
+    },
+    {
+      "id": "p22",
+      "kind": "rect",
+      "x": 230,
+      "y": 1782,
+      "width": 660,
+      "height": 56,
+      "label": "㉒ 脚本结束 → exit 钩子",
+      "sublabel": "bundle:237 AUTOSTOP/HANDOVER 分流",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "p23",
+      "kind": "rect",
+      "x": 230,
+      "y": 1860,
+      "width": 660,
+      "height": 56,
+      "label": "㉓ vt.stop()：收面板",
+      "sublabel": "bundle:249 → :514 uiStop（kill -9 pidof）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "p24",
+      "kind": "rect",
+      "x": 230,
+      "y": 1938,
+      "width": 660,
+      "height": 56,
+      "label": "㉔ core cleanup：解 grab",
+      "sublabel": "core:510 顺序 outq→client→listen→grab :526",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 2096,
+      "width": 660,
+      "height": 56,
+      "label": "锁 region_mu（第 14 步）",
+      "sublabel": "core:731 锁内拷快照，锁外匹配",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 2174,
+      "width": 660,
+      "height": 56,
+      "label": "SEND_LOCK（第 18 步）",
+      "sublabel": "bundle:101 读线程与业务并发写 socket",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "p1",
+      "target": "p2",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "p2",
+      "target": "p3",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "p3",
+      "target": "p4",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "p4",
+      "target": "p5",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "p5",
+      "target": "p6",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "p6",
+      "target": "p7",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "p7",
+      "target": "p8",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "p8",
+      "target": "p9",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar10",
+      "source": "p9",
+      "target": "p10",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar11",
+      "source": "p10",
+      "target": "p11",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar12",
+      "source": "p11",
+      "target": "p12",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar13",
+      "source": "p12",
+      "target": "p13",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar14",
+      "source": "p13",
+      "target": "p14",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar15",
+      "source": "p14",
+      "target": "p15",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar16",
+      "source": "p15",
+      "target": "p16",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar17",
+      "source": "p16",
+      "target": "p17",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar18",
+      "source": "p17",
+      "target": "p18",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar19",
+      "source": "p18",
+      "target": "p19",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar20",
+      "source": "p19",
+      "target": "p20",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar21",
+      "source": "p20",
+      "target": "p21",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar22",
+      "source": "p21",
+      "target": "p22",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar23",
+      "source": "p22",
+      "target": "p23",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar24",
+      "source": "p23",
+      "target": "p24",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 2270,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸采集/转发"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）；与 docs/CODE_WALKTHROUGH.md 同源",
+  "footer_x": 70,
+  "footer_y": 2326
+}

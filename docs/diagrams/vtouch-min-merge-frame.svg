@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1512" width="1120" height="1512" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="1" data-visual-theme="Flat Icon" data-diagram-type="data-flow" data-motion-scene="" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="standard" data-max-bends-per-edge="12" data-max-total-bends="100" data-max-route-stretch="5.0" data-max-bridged-crossings="8" data-min-node-gap="0.0" data-min-container-gutter="0.0" data-min-label-clearance="2.0" data-min-segment-length="0.0">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #94a3b8; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #111827; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="1120.0" height="1512.0" fill="#ffffff"/>
+  <text x="560.0" y="56" text-anchor="middle" class="title">合并一帧：物理手指与注入手指走同一个 emit_frame（这是「合并」的全部机制）</text>
+  <text x="560.0" y="82" text-anchor="middle" class="subtitle">两个来源各自更新状态，真正的合并点只有一个：每个 SYN_REPORT 调一次 emit_frame，物理在前、虚拟在后，整帧一次 writev</text>
+  <g id="box1" data-graph-role="container" data-container-id="box1" data-semantic-role="boundary" data-graph-bounds="60,104,1060,312">
+  <rect data-graph-role="container" x="60.0" y="104.0" width="1000.0" height="208.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="78.0" y="128.0" class="section">两条来源（并列，不是先后）</text>
+    <rect id="box1-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="110" width="199" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="box2" data-graph-role="container" data-container-id="box2" data-semantic-role="boundary" data-graph-bounds="60,340,1060,938">
+  <rect data-graph-role="container" x="60.0" y="340.0" width="1000.0" height="598.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="78.0" y="364.0" class="section">唯一合并点</text>
+    <rect id="box2-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="346" width="95" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="box3" data-graph-role="container" data-container-id="box3" data-semantic-role="boundary" data-graph-bounds="60,966,1060,1174">
+  <rect data-graph-role="container" x="60.0" y="966.0" width="1000.0" height="208.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="78.0" y="990.0" class="section">下游看到什么</text>
+    <rect id="box3-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="972" width="108" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="boxnote" data-graph-role="container" data-container-id="boxnote" data-semantic-role="boundary" data-graph-bounds="60,1202,1060,1410">
+  <rect data-graph-role="container" x="60.0" y="1202.0" width="1000.0" height="208.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="78.0" y="1226.0" class="section">注记（不是流程步骤）</text>
+    <rect id="boxnote-header" data-graph-role="reserved" data-reserved-kind="container-header" x="68" y="1208" width="160" height="30" fill="none" stroke="none"/>
+  </g>
+  <path id="ar4" data-graph-role="edge" data-edge-id="ar4" data-source="c1" data-target="c2" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,436 L 560,458" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar5" data-graph-role="edge" data-edge-id="ar5" data-source="c2" data-target="c3" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,514 L 560,536" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar6" data-graph-role="edge" data-edge-id="ar6" data-source="c3" data-target="c4" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="" d="M 560,592 L 560,593.6 L 551,593.6 L 551,614" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar7" data-graph-role="edge" data-edge-id="ar7" data-source="c4" data-target="c5" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,670 L 560,692" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar8" data-graph-role="edge" data-edge-id="ar8" data-source="c5" data-target="c6" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,748 L 560,770" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar9" data-graph-role="edge" data-edge-id="ar9" data-source="c6" data-target="c7" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,826 L 560,848" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="ar11" data-graph-role="edge" data-edge-id="ar11" data-source="d1" data-target="d2" data-edge-kind="flow" data-topic-id="" data-flow="neutral" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,1062 L 560,1084" fill="none" stroke="#6b7280" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowH)"/>
+  <path id="x1" data-graph-role="edge" data-edge-id="x1" data-source="b1" data-target="c1" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="4.667" data-bridges="" d="M 560,200 L 560,220.4 L 230,220.4 L 230,359.6 L 560,359.6 L 560,380" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
+  <path id="x2" data-graph-role="edge" data-edge-id="x2" data-source="b2" data-target="c4" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="3.0" data-bridges="" d="M 560,278 L 560,298.4 L 914,298.4 L 914,593.6 L 569,593.6 L 569,614" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="x3" data-graph-role="edge" data-edge-id="x3" data-source="c7" data-target="d1" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="0" data-route-stretch="1.0" data-bridges="" d="M 560,904 L 560,1006" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <g id="node-b1" data-graph-role="node" data-node-id="b1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,144,890,200">
+  <rect x="230.0" y="144.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="172.0" text-anchor="middle" class="node-title" font-size="18.0">物理手指：内核 Type-B 帧</text>
+  <text x="560.0" y="194.0" text-anchor="middle" class="node-sub">src:546-559 解析进 phys[]（down / pending_up / x,y 原始值）</text>
+  </g>
+  <g id="node-b2" data-graph-role="node" data-node-id="b2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,222,890,278">
+  <rect x="230.0" y="222.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="560.0" y="250.0" text-anchor="middle" class="node-title" font-size="18.0">注入手指：WS 命令</text>
+  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:479/505 → set_virtual :444 在这里就分配下游身份</text>
+  </g>
+  <g id="node-c1" data-graph-role="node" data-node-id="c1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,380,890,436">
+  <rect x="230.0" y="380.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="408.0" text-anchor="middle" class="node-title" font-size="18.0">触发：SYN_REPORT（物理帧边界）</text>
+  <text x="560.0" y="430.0" text-anchor="middle" class="node-sub">src:571 一次 read 可能攒 N 帧 → 每帧各调一次</text>
+  </g>
+  <g id="node-c2" data-graph-role="node" data-node-id="c2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,458,890,514">
+  <rect x="230.0" y="458.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="486.0" text-anchor="middle" class="node-title" font-size="18.0">① 待抬触点先发 TRACKING_ID=-1</text>
+  <text x="560.0" y="508.0" text-anchor="middle" class="node-sub">src:361-372 用当前身份；身份要到写成功才释放</text>
+  </g>
+  <g id="node-c3" data-graph-role="node" data-node-id="c3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,536,890,592">
+  <rect x="230.0" y="536.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="564.0" text-anchor="middle" class="node-title" font-size="18.0">② 物理触点：帧内补下游身份</text>
+  <text x="560.0" y="586.0" text-anchor="middle" class="node-sub">src:373-381 池满 → 顶掉最新虚拟并重发（:378）</text>
+  </g>
+  <g id="node-c4" data-graph-role="node" data-node-id="c4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,614,890,670">
+  <rect x="230.0" y="614.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="642.0" text-anchor="middle" class="node-title" font-size="18.0">③ 虚拟触点：身份已就绪，直接发</text>
+  <text x="560.0" y="664.0" text-anchor="middle" class="node-sub">src:388-397 （身份在 WS 命令里分的）</text>
+  </g>
+  <g id="node-c5" data-graph-role="node" data-node-id="c5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,692,890,748">
+  <rect x="230.0" y="692.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="720.0" text-anchor="middle" class="node-title" font-size="18.0">④ BTN_TOUCH / BTN_TOOL_FINGER</text>
+  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">src:399-400/334 只认真的进了帧的触点（any_emitted）</text>
+  </g>
+  <g id="node-c6" data-graph-role="node" data-node-id="c6" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,770,890,826">
+  <rect x="230.0" y="770.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="560.0" y="798.0" text-anchor="middle" class="node-title" font-size="18.0">⑤ SYN_REPORT → 一次 writev 提交</text>
+  <text x="560.0" y="820.0" text-anchor="middle" class="node-sub">src:401/220 整帧原子性由此保证</text>
+  </g>
+  <g id="node-c7" data-graph-role="node" data-node-id="c7" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,848,890,904">
+  <rect x="230.0" y="848.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
+  <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">写成功才：清 pending_up + 还身份</text>
+  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:403-406 写失败保留全部状态并重发（:402）</text>
+  </g>
+  <g id="node-d1" data-graph-role="node" data-node-id="d1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1006,890,1062">
+  <rect x="230.0" y="1006.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="560.0" y="1034.0" text-anchor="middle" class="node-title" font-size="18.0">系统：InputReader 收到一条流</text>
+  <text x="560.0" y="1056.0" text-anchor="middle" class="node-sub">同一 uinput 设备（能力镜像），物理与虚拟同帧序</text>
+  </g>
+  <g id="node-d2" data-graph-role="node" data-node-id="d2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1084,890,1140">
+  <rect x="230.0" y="1084.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="560.0" y="1112.0" text-anchor="middle" class="node-title" font-size="18.0">应用：一次真实点击 / 多指手势</text>
+  <text x="560.0" y="1134.0" text-anchor="middle" class="node-sub">不区分来源；池分配保证不撞号（:413-441）</text>
+  </g>
+  <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1242,890,1298">
+  <rect x="230.0" y="1242.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
+  <text x="560.0" y="1270.0" text-anchor="middle" class="node-title" font-size="18.0">为什么透传编号不行（第 4 步）</text>
+  <text x="560.0" y="1292.0" text-anchor="middle" class="node-sub">clients/vtouch.js:193 客户端 slot 0~9 与系统 pointer id 不是一回事</text>
+  </g>
+  <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1320,890,1376">
+  <rect x="230.0" y="1320.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
+  <text x="560.0" y="1348.0" text-anchor="middle" class="node-title" font-size="18.0">同帧最大事件数（第 7 步）</text>
+  <text x="560.0" y="1370.0" text-anchor="middle" class="node-sub">src:186 MAX_IOV=512；ev_add 超限就丢帧尾（:193 保护）</text>
+  </g>
+  <g id="legend" data-graph-role="legend">
+    <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="60" y="1402" width="560.8" height="46" rx="10" fill="none" stroke="none"/>
+    <line data-graph-role="decoration" x1="70.0" y1="1416.0" x2="100.0" y2="1416.0" stroke="#2563eb" stroke-width="2.4" marker-end="url(#arrowC)"/>
+    <text data-graph-role="decoration" x="110.0" y="1420.0" class="legend">物理触摸</text>
+    <line data-graph-role="decoration" x1="186.0" y1="1416.0" x2="216.0" y2="1416.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+    <text data-graph-role="decoration" x="226.0" y="1420.0" class="legend">注入命令 / 回包</text>
+    <line data-graph-role="decoration" x1="341.6" y1="1416.0" x2="371.6" y2="1416.0" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
+    <text data-graph-role="decoration" x="381.6" y="1420.0" class="legend">合并提交 / 收尾</text>
+    <line data-graph-role="decoration" x1="497.20000000000005" y1="1416.0" x2="527.2" y2="1416.0" stroke="#6b7280" stroke-width="2.4" marker-end="url(#arrowH)"/>
+    <text data-graph-role="decoration" x="537.2" y="1420.0" class="legend">启动 / 库内</text>
+  </g>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="70,1460,651,1476">
+  <text x="70.0" y="1472.0" class="footnote">行号：src/vtouchd.c（1015 行，最小版）· clients/vtouch.js · scripts/deploy.sh；与 README 的协议表同源</text>
+  </g>
+</svg>

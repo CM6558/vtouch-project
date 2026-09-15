@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1824,
+  "title": "vtouch 系统地图：四层 / 四线程 / 三条边界",
+  "subtitle": "上=AutoJs6 脚本进程，中=面板进程（它本身就是 daemon），下=内核与框架；副标题给「谁在做 + 文件:行」",
+  "containers": [
+    {
+      "id": "box1",
+      "x": 60,
+      "y": 104,
+      "width": 1000,
+      "height": 520,
+      "label": "① AutoJs6 进程（L1 脚本库 = clients/vtouch_bundle.js）"
+    },
+    {
+      "id": "box2",
+      "x": 60,
+      "y": 652,
+      "width": 1000,
+      "height": 364,
+      "label": "② 面板进程 = daemon（app_process --nice-name=vtouch-ui）"
+    },
+    {
+      "id": "box3",
+      "x": 60,
+      "y": 1044,
+      "width": 1000,
+      "height": 286,
+      "label": "③ 内核与框架（单一转发流）"
+    },
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 1358,
+      "width": 1000,
+      "height": 364,
+      "label": "注记：并发原语与边界（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "a1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "主线程：require 单文件包",
+      "sublabel": "bundle:868 装配；加载只定义函数（DEMO:380）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "a2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "主线程：onRegion 建连 + 订阅",
+      "sublabel": "bundle:594 仅首次初始化（:601）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "a3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "主线程：保活 + exit 钩子",
+      "sublabel": "bundle:647 setInterval；:237 退出收尾",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "a4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "读线程：recv 轮询 → rgParseEv",
+      "sublabel": "bundle:617 非阻塞读；:776 解析",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "a5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "回调线程：每事件 threads.start",
+      "sublabel": "bundle:562 回调抛错只 toast（:564）",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "a6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "回调线程：finger()/tap → send",
+      "sublabel": "bundle:353 自动挑槽；:160 掩码帧",
+      "fill": "#f0fdf4",
+      "stroke": "#10b981",
+      "flat": true
+    },
+    {
+      "id": "b1",
+      "kind": "rect",
+      "x": 230,
+      "y": 692,
+      "width": 660,
+      "height": 56,
+      "label": "Java 主线程：40ms 轮询",
+      "sublabel": "java:170 可见性 + 每 8 tick 查方向",
+      "fill": "#eff6ff",
+      "stroke": "#3b82f6",
+      "flat": true
+    },
+    {
+      "id": "b2",
+      "kind": "rect",
+      "x": 230,
+      "y": 770,
+      "width": 660,
+      "height": 56,
+      "label": "render 线程：EGL/字形/重画门",
+      "sublabel": "cpp:1674 限频 33ms（:117）；首帧保证 :1751",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "b3",
+      "kind": "rect",
+      "x": 230,
+      "y": 848,
+      "width": 660,
+      "height": 56,
+      "label": "poll 线程：唯一事件泵",
+      "sublabel": "cpp:707 → core:1680 采集/合帧/匹配/解帧",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "b4",
+      "kind": "rect",
+      "x": 230,
+      "y": 926,
+      "width": 660,
+      "height": 56,
+      "label": "outq 线程：唯一写 socket/stderr",
+      "sublabel": "core:221 触摸线程只入队（:162）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "c1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1084,
+      "width": 660,
+      "height": 56,
+      "label": "/dev/input/eventN（Type-B，已 grab）",
+      "sublabel": "core:1666 采集源；:341 扫 event0..63",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "c2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1162,
+      "width": 660,
+      "height": 56,
+      "label": "uinput vtouch-merged（能力镜像）",
+      "sublabel": "core:446 仅 4 处冲突取相似值",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "c3",
+      "kind": "rect",
+      "x": 230,
+      "y": 1240,
+      "width": 660,
+      "height": 56,
+      "label": "InputReader → InputDispatcher → App",
+      "sublabel": "物理+虚拟同设备同帧序（先物理后虚拟）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 1398,
+      "width": 660,
+      "height": 56,
+      "label": "坐标三域（第 9 步）",
+      "sublabel": "core:257/270 · cpp:193 · bundle:280",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1476,
+      "width": 660,
+      "height": 56,
+      "label": "单 client WS（第 7 步）",
+      "sublabel": "core:55/:1581 127.0.0.1:27183",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z3",
+      "kind": "rect",
+      "x": 230,
+      "y": 1554,
+      "width": 660,
+      "height": 56,
+      "label": "区域唯一存储（第 11 步）",
+      "sublabel": "cpp:283 /data/local/vtouch-runtime",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z4",
+      "kind": "rect",
+      "x": 230,
+      "y": 1632,
+      "width": 660,
+      "height": 56,
+      "label": "线程均未命名（第 12 步）",
+      "sublabel": "core:1670 · cpp:1937/1941（无 setname）",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "a1",
+      "target": "a2",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "a2",
+      "target": "a3",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "a3",
+      "target": "a4",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "a4",
+      "target": "a5",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "a5",
+      "target": "a6",
+      "flow": "neutral",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "b1",
+      "target": "b2",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "b2",
+      "target": "b3",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar10",
+      "source": "b3",
+      "target": "b4",
+      "flow": "read",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar12",
+      "source": "c1",
+      "target": "c2",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar13",
+      "source": "c2",
+      "target": "c3",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "x1",
+      "source": "a6",
+      "target": "b2",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1728,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "read",
+      "label": "物理触摸采集/转发"
+    },
+    {
+      "flow": "control",
+      "label": "区域事件 / 控制面"
+    },
+    {
+      "flow": "neutral",
+      "label": "启动 / 库内 / 收尾"
+    }
+  ],
+  "footer": "行号：core=src/vtouchd.c · cpp=src-ui/vtouch_ui.cpp · java=src-ui/VTouchUI.java · bundle=scripts/build_bundle.py（JS 段）；与 docs/CODE_WALKTHROUGH.md 同源",
+  "footer_x": 70,
+  "footer_y": 1784
+}

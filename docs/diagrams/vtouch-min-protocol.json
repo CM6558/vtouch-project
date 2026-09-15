@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "mode": "data-flow",
+  "template_type": "data-flow",
+  "style": 1,
+  "width": 1120,
+  "height": 1196,
+  "title": "协议分支：9 条命令 → 走哪条路径 → 什么应答",
+  "subtitle": "handle_line 是唯一入口（src:479）；每条命令的判定顺序与失败应答都在这里，行号即分支行",
+  "containers": [
+    {
+      "id": "boxnote",
+      "x": 60,
+      "y": 886,
+      "width": 1000,
+      "height": 208,
+      "label": "注记（不是流程步骤）"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "e1",
+      "kind": "rect",
+      "x": 230,
+      "y": 144,
+      "width": 660,
+      "height": 56,
+      "label": "ping → pong",
+      "sublabel": "src:486 探活，无副作用",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e2",
+      "kind": "rect",
+      "x": 230,
+      "y": 222,
+      "width": 660,
+      "height": 56,
+      "label": "res → 尺寸与 raw 量程",
+      "sublabel": "src:487 回 res 宽 高 raw xmin xmax ymin ymax",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e3",
+      "kind": "rect",
+      "x": 230,
+      "y": 300,
+      "width": 660,
+      "height": 56,
+      "label": "reset → ok / err frame",
+      "sublabel": "src:492 帧中途拒绝；否则 owner_reset（抬全部虚拟）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e4",
+      "kind": "rect",
+      "x": 230,
+      "y": 378,
+      "width": 660,
+      "height": 56,
+      "label": "up <slot> → ok / err point",
+      "sublabel": "src:496 未按下/帧内 → err point；成功即单独成帧（:500）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e5",
+      "kind": "rect",
+      "x": 230,
+      "y": 456,
+      "width": 660,
+      "height": 56,
+      "label": "down|move <slot> <x> <y> → ok / err point",
+      "sublabel": "src:505 逻辑→raw :512 → 单独成帧；槽/坐标越界即 err",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e6",
+      "kind": "rect",
+      "x": 230,
+      "y": 534,
+      "width": 660,
+      "height": 56,
+      "label": "begin_frame → ok / err frame",
+      "sublabel": "src:517 拷 virt→staged，清 frame_seen",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e7",
+      "kind": "rect",
+      "x": 230,
+      "y": 612,
+      "width": 660,
+      "height": 56,
+      "label": "point <slot> <state> <x> <y> → ok / err point",
+      "sublabel": "src:523 仅帧内；同槽一帧一次（:531）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e8",
+      "kind": "rect",
+      "x": 230,
+      "y": 690,
+      "width": 660,
+      "height": 56,
+      "label": "end_frame → ok / err frame",
+      "sublabel": "src:536 staged→virt 提交一帧（:539）",
+      "fill": "#faf5ff",
+      "stroke": "#8b5cf6",
+      "flat": true
+    },
+    {
+      "id": "e9",
+      "kind": "rect",
+      "x": 230,
+      "y": 768,
+      "width": 660,
+      "height": 56,
+      "label": "其它 → err unknown",
+      "sublabel": "src:543 一字不差的兜底",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    },
+    {
+      "id": "z1",
+      "kind": "rect",
+      "x": 230,
+      "y": 926,
+      "width": 660,
+      "height": 56,
+      "label": "为什么各自成帧（第 4 步）",
+      "sublabel": "单指连续动作走 down/move/up；要「多指同一瞬间」才用 frame",
+      "fill": "#f8fafc",
+      "stroke": "#94a3b8",
+      "flat": true
+    },
+    {
+      "id": "z2",
+      "kind": "rect",
+      "x": 230,
+      "y": 1004,
+      "width": 660,
+      "height": 56,
+      "label": "帧没结尾的后果（第 8 步）",
+      "sublabel": "frame_open 期间其余命令全被拒；client_frame :829 断线时 owner_reset :468 兜底",
+      "fill": "#fef2f2",
+      "stroke": "#ef4444",
+      "flat": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "ar2",
+      "source": "e1",
+      "target": "e2",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar3",
+      "source": "e2",
+      "target": "e3",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar4",
+      "source": "e3",
+      "target": "e4",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar5",
+      "source": "e4",
+      "target": "e5",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar6",
+      "source": "e5",
+      "target": "e6",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar7",
+      "source": "e6",
+      "target": "e7",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar8",
+      "source": "e7",
+      "target": "e8",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    },
+    {
+      "id": "ar9",
+      "source": "e8",
+      "target": "e9",
+      "flow": "control",
+      "source_port": "bottom",
+      "target_port": "top"
+    }
+  ],
+  "legend_orientation": "horizontal",
+  "legend_x": 70,
+  "legend_y": 1100,
+  "legend_locked": true,
+  "legend": [
+    {
+      "flow": "control",
+      "label": "注入命令 / 回包"
+    }
+  ],
+  "footer": "行号：src/vtouchd.c（1015 行，最小版）· clients/vtouch.js · scripts/deploy.sh；与 README 的协议表同源",
+  "footer_x": 70,
+  "footer_y": 1156
+}

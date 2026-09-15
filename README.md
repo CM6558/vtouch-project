@@ -1,99 +1,89 @@
-# vtouch：Android 触摸合并系统
+# vtouch-project（最小版）
 
-通过用户态 `EVIOCGRAB` + `uinput` 把真实触摸与模拟触摸合并成**同一条**触摸流，Android 应用侧无法区分；供 AutoJs6 通过本地 WebSocket 调用。**区域匹配、管理面板、触摸注入全部单进程运行**。
+Android 上把**真实手指**和**注入的虚拟手指**合成**一条**触摸流的用户态方案，只需要 root。
+一个 C 文件、无 UI、无区域、无插件。
 
-- 用户态实现，无需内核模块；真实触摸与合成触摸共存、互不干扰
-- 动态发现触摸设备（Type-B MT），不硬编码 event 节点；自动做逻辑坐标 ↔ 原始触摸轴换算
-- 面板侧原生 region 匹配（≤32 区域，监听 down/up/enter/exit/move，**纯监听不代点**）
-- 单进程整合：核心 `src/vtouchd.c` 编译为 C 库（`vtouch_init/poll_step/region_*/set_callbacks`），嵌入 `app_process` 渲染进程（SurfaceControl 图层 → EGL GLES2 → Dear ImGui），UI / 触摸 / 匹配 / WS 同进程直连
-- 脚本侧只有一个入口：`vt.onRegion(id, [ev], fn)`，其余仪式（起面板、连接、订阅、校验、读线程、收尾）全在库里
-
-## 30 秒上手
-
-```javascript
-var vt = require("/sdcard/vtouch_bundle.js");
-
-// 区域 s3 被按下/抬起/进入/移出时回调；回调已在子线程，可直接 sleep/长按/拖拽
-vt.onRegion("s3", function (h) {
-    log(h.id + " " + h.ev + " @" + h.x + "," + h.y);
-    vt.finger().tap(h.x, h.y);        // 虚拟回注（与物理触摸合并后一起回系统）
-});
+```
+src/vtouchd.c        daemon：EVIOCGRAB 抓物理触摸屏 + uinput 合并转发（也接收注入命令）
+clients/vtouch.js    AutoJs6 客户端（Finger API：down/move/up/tap/swipe/frame）
+scripts/build.sh     NDK 交叉编译（arm64）
+scripts/deploy.sh    adb 推二进制到 /data/local/tmp + 起/停/状态（含回读 md5 对账）
+tests/ws_smoke.py    主机侧 smoke（adb forward 后跑；握手 + 注入命令链路）
+docs/                完整版（面板/区域那一代）的走读与工程图，与最小版无关，可删
+                     （最小版的流程图在 docs/diagrams/vtouch-min-*.png）
 ```
 
-`ev` 省略 = `down/up/enter/exit`（**不含 move**）；要 move 就显式写 `"move"` / `"down,move"` / `["down","move"]` / `"*"`。
-`id` 省略或 `"*"` = 所有区域。返回值带 `.stop()`。
+## 前提
 
-库内自动完成：`uiStart()`（起面板 = 起 daemon）→ `connect()` → `sub region` → `region list` 校验 id（写错/被禁用会 toast 报错，不会静默）→ 常驻读线程（`ping/pong` 探活）→ 事件过滤 → 回调丢子线程 → 主线程保活；
-**脚本结束自动收尾**：收面板 + 释放 EVIOCGRAB。想留面板用 `vt.autoStop(false)`；
-被新实例连上时旧实例自退让位（不动面板）。
+- 设备已 root（daemon 需要 `/dev/uinput` 与 `EVIOCGRAB`）。
+- 本机构建：Android NDK（默认 `C:/Users/21102/android-ndk-r27d`，可用 `NDK_ROOT` 覆盖）。
+- git-bash / Linux 均可跑脚本（脚本按 `uname` 选工具链后缀）。
 
-## 组件
-
-| 路径 | 说明 |
-|---|---|
-| `src/vtouchd.c` | 核心：EVIOCGRAB 采集 + uinput 注入 + region 匹配 + WS 服务器（`127.0.0.1:27183`）。库化接口 `vtouch_init/poll_step/cleanup`、`vtouch_region_clear/count/add/get_region`、`vtouch_set_callbacks`；命令行入口保留（`-w -h [-v] [-p] [-ui]`） |
-| `src-ui/vtouch_ui.cpp` + `VTouchUI.java` | 单进程面板：Java 只反射拿 SurfaceControl 图层，其余全 C++（EGL GLES2 + Dear ImGui）。区域表格（名称/形状/坐标/开关/显隐/删除）、＋矩形/＋圆形框选、事件日志、全屏透明 overlay（区域描边着色，命中闪烁） |
-| `scripts/build_ui.sh` | 编面板 → `build/ui/libtestimgui.so` + `build/ui/classes.dex` |
-| `scripts/build_bundle.py` | **唯一来源**：把 `build/vtouchd` + 面板 dex/so + JS 库装配成 `clients/vtouch_bundle.js` |
-| `scripts/verify_bundle.py` | **对账**：把 bundle 内嵌的 bin/dex/so 与本次编译产物逐字节/md5 比对，不匹配即失败（CI 与本地同一份） |
-| `scripts/package_dist.py` | **打包交付**：`build/dist/vtouch-bundle-<短md5>-arm64/` = bundle + README 说明 + `example.js` 调用示例 + md5.txt（模板 `scripts/templates/dist-README.md`） |
-| `clients/vtouch_bundle.js` | 生成物（设备侧唯一交付物）：自释放二进制 + WS 协议封装 + `onRegion` 库。文件较大，不入库 |
-| `clients/vtouch_region_min.js` | 最小可跑示例（一行 `onRegion` + 业务回调） |
-| `clients/vtouch_touchback.js`、`vtouch_orient_demo.js` | 示例：区域触发回触（滑/点）、转屏演示 |
-| `tests/onregion_harness.js` | 主机侧 Node 桩测（假 AutoJs6 + 假 daemon，46 项断言） |
-
-## 构建（本机 Git Bash）
+## 三步跑起来
 
 ```sh
-NDK=C:/Users/21102/android-ndk-r27d
-A64=$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd
-
-"$A64" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd   # ① 核心
-sh scripts/build_ui.sh                                                          # ② 面板 dex + so
-python scripts/build_bundle.py                                                  # ③ 出 bundle
-python scripts/verify_bundle.py --bin build/vtouchd --ui build/ui                # ④ 对账：内嵌项 vs 本次产物（发设备前跑）
-python scripts/package_dist.py --verify --bin build/vtouchd --ui build/ui        # ⑤ 打包：bundle + 说明 + 调用示例 → build/dist/
+sh scripts/build.sh                 # 出 build/vtouchd（arm64，零告警）
+sh scripts/deploy.sh deploy         # 推到 /data/local/tmp/vtouchd 并回读 md5 对账
+sh scripts/deploy.sh start          # 起（自动按 wm size 归一化成竖屏尺寸）
+adb forward tcp:27183 tcp:27183
+python tests/ws_smoke.py            # 主机侧验证握手 + 注入链路
+sh scripts/deploy.sh stop           # 停：EVIOCGRAB 随进程退出释放，物理触摸立刻回系统
 ```
 
-`build_ui.sh` 需要 JDK（`javac`/`d8`）与 Android SDK `platforms/android-24`、`build-tools/34.0.0`，以及 `thirdparty/imgui`（本仓库不入库，需自备）。
-路径都可用环境变量覆盖（`NDK_ROOT` / `ANDROID_SDK_ROOT` / `BUILD_TOOLS_VERSION` / `API_LEVEL`）。
-各产物的作用、**哪个才是手机可运行的最小包**、设备侧落盘位置见 [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md)。
-只要纯 daemon、不需要面板时用 headless 构建：`python scripts/build_bundle.py --headless`（此时 `uiStart()` 会明确报错，不会静默起不来）；默认不带这个开关**必须**有面板产物，避免误发一个没有 UI 的包。
+AutoJs6 里：
 
-CI（`.github/workflows/build.yml`）跑的就是上面三步：装 JDK 17 + Android SDK build-tools + 拉 `thirdparty/imgui` v1.91.8（都有 cache），对账通过后打成交付包（bundle + 说明 + 调用示例），发布两个 artifact：`vtouch-bundle-arm64`（真机用，含 `README.md`/`example.js`/`md5.txt`）与 `vtouch-bundle-x86_64-headless`（AVD 用）；x86_64 没有面板是因为面板 `.so` 只有 arm64 版。
-
-## 部署与验证
-
-```sh
-adb push clients/vtouch_bundle.js /sdcard/
-adb shell md5sum /sdcard/vtouch_bundle.js          # 回读对账，别信 push 回执
-adb shell su -c "pidof vtouch-ui"                  # 面板是否在跑（= 是否抓着 EVIOCGRAB）
-adb shell su -c "tail -20 /data/local/tmp/vtouch-runtime/vtouch-ui.log"
+```js
+var vt = require("/sdcard/vtouch.js");
+vt.start();
+var c = vt.connect();
+vt.finger().tap(540, 1200);                        // 自动挑空闲 slot
+vt.finger(1).down(100, 200).move(140, 240).up();   // 显式 slot
+vt.frame([{slot:0,state:"down",x:100,y:200},       // 多指合并进同一帧
+          {slot:1,state:"down",x:300,y:200}]);
+c.close(); vt.stop();                              // 收尾（务必：否则一直抓着物理触摸）
 ```
 
-在 AutoJs6 里运行 `clients/vtouch_region_min.js`（或你自己的脚本）即可。
-**强杀 App（强行停止）会跳过 exit 事件 → 收尾钩子不执行，面板会留在后台抓着触摸**，手动清理：`adb shell su -c "kill -9 $(pidof vtouch-ui)"`。
+## 线协议（loopback WS，一行一条命令，单客户端，新连接踢旧连接）
 
-## 测试
+| 命令 | 应答 | 说明 |
+|---|---|---|
+| `ping` | `pong` | 探活 |
+| `res` | `res <宽> <高> raw <xmin> <xmax> <ymin> <ymax>` | 逻辑尺寸与内核轴量程 |
+| `reset` | `ok` / `err frame` | 抬掉全部虚拟触点（帧中途拒绝） |
+| `down <slot> <x> <y>` | `ok` / `err point` | 按下（**各自成一帧**） |
+| `move <slot> <x> <y>` | `ok` / `err point` | 移动（各自成一帧） |
+| `up <slot>` | `ok` / `err point` | 抬起（各自成一帧） |
+| `begin_frame` | `ok` / `err frame` | 开始一帧多指 |
+| `point <slot> <down\|move\|up> <x> <y>` | `ok` / `err point` | 帧内一步（同一 slot 一帧一次） |
+| `end_frame` | `ok` / `err frame` | 提交这一帧 |
 
-```sh
-node tests/onregion_harness.js     # 期望 ALL PASS 46/46
-```
+坐标是**竖屏逻辑坐标**（`-w/-h` 那一套）。
 
-## 文档
+## 合并是怎么做的（四点，都在 `src/vtouchd.c`）
 
-- [`docs/ARTIFACTS.md`](docs/ARTIFACTS.md) — **编译产物说明**：哪个产物才是手机可运行的最小包（一个 `vtouch_bundle.js`）、各中间产物作用、设备侧落盘位置、CI 产物、完整性判据
-- [`docs/VTOUCH_BUNDLE.md`](docs/VTOUCH_BUNDLE.md) — **使用手册**（客户端 API / 区域监听 / 生命周期 / 常见问题）
-- [`docs/VTOUCH_PROTOCOL.md`](docs/VTOUCH_PROTOCOL.md) — WS 线协议（`sub` / `region` / `pev` / `region_ev` / `set_virtual` …）
-- [`docs/diagrams/`](docs/diagrams/README.md) — 工程图（全流程总览、优化前后对照；JSON 源 + SVG/PNG，可重渲）
+1. **抓**：扫 `/dev/input/event0..63` 找 Type-B 触摸屏（认槽/tracking id/XY 四轴），`EVIOCGRAB` 抓走它。
+2. **镜像声明**：把物理屏的 EV/KEY/ABS(+absinfo)/props 整份照抄到 uinput 设备，只有 4 处真冲突取相似值
+   （tool 量程、槽数、id 池、名字/bus）；`INPUT_PROP_DIRECT` 无条件声明，否则系统会把它当触控板画鼠标指针。
+3. **同帧合并**：每个 `SYN_REPORT` 触发一帧：先发待抬触点（`TRACKING_ID=-1`）→ 物理触点 → 虚拟触点 →
+   `BTN_TOUCH/BTN_TOOL_FINGER` → `SYN_REPORT`，**整个帧一次 `writev`**。物理与虚拟共用一套下游身份池
+   （槽与 tracking id 都重新分配，不透传客户端编号 → 不会撞号）。
+4. **失败兜底**：写帧失败绝不丢「抬手」那一帧，置重发标志 5ms 后再发（连续 200 次才认 uinput 真死并退出）。
+   客户端挂断/被踢时，抬掉它的虚拟触点并归还帧内身份（否则池会被泄漏的身份占死）。
 
-## 目录
+启动顺序是 **先起监听、最后 grab**：任何失败路径都不会留下「抓着触摸却没人能控制」的状态。
+退出码：`2`=尺寸缺失/扫不到触摸屏 · `3`=uinput 建不起来 · `4`=打不开设备 · `5`=grab 失败 · `6`=端口被占。
 
-```
-src/          C 核心（vtouchd.c）
-src-ui/       面板（vtouch_ui.cpp + VTouchUI.java）
-scripts/      构建：build_bundle.py（唯一来源）、build_ui.sh
-clients/      AutoJs6 脚本与生成物（vtouch_bundle.js）
-tests/        主机侧桩测（onregion_harness.js）
-docs/         手册 / 协议 / 流程图
-```
+## 有意删掉的功能（在完整版里）
+
+区域匹配与事件推送、订阅通道、ImGui 面板与 overlay、`regions.conf` 持久化、面板区吞触摸、
+旋转坐标换算、出站队列线程、host 侧桩测与产物对账脚本、CI。
+
+完整版连同它的文档、工程图都在 `build/_backup_full_<时间戳>/`
+（`files/` 是逐份拷贝，`from_head/` 是 HEAD 里被删前的文件，`RESTORE.md` 写了回滚步骤）；
+`docs/CODE_WALKTHROUGH.md` 与 `docs/diagrams/` 讲的也是完整版。
+
+## 已知边界（最小版没处理的）
+
+- **不做旋转换算**：daemon 恒为竖屏坐标系，横屏时由调用方自行换算（完整版有 c2p/p2c）。
+- 单客户端：新连接会踢掉旧连接；被踢的一方要自己发现（本客户端不做保活/重连）。
+- 注入与物理同一坐标时会出现两根触点共存（按坐标判定的应用会表现为「等注入结束才弹起」）。
