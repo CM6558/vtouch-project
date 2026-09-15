@@ -57,6 +57,13 @@ struct vt_state g = {
     .ws_port = 27183, .vslots = 10, .id_max = 31,
     .region_lock = PTHREAD_MUTEX_INITIALIZER,
 };
+/**
+ * (vtouch-doc: apply_args)
+ * @brief 解析命令行：-w 宽 -h 高（必需，逻辑尺寸）、-p 端口、-v 虚拟槽数。
+ * @param   argc     参数个数
+ * @param   argv     参数数组
+ * @note    取值越界会打日志并保留默认值。
+ */
 
 /* ===== §11 进程（参数 / 初始化 / 主循环 / 退出）===== */
 void apply_args(int argc, char **argv)
@@ -81,6 +88,14 @@ void apply_args(int argc, char **argv)
         }
     }
 }
+/**
+ * (vtouch-doc: vtouch_init)
+ * @brief 初始化：尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。
+ * @param   argc     参数个数
+ * @param   argv     参数数组
+ * @return  0 成功；负数 = 失败阶段（-2..-7），main 直接拿它当退出码。
+ * @note    这个顺序是有意的：任何失败路径都不会留下「抓着触摸却没人能控制」的状态。
+ */
 
 int vtouch_init(int argc, char **argv)
 {
@@ -121,6 +136,12 @@ int vtouch_init(int argc, char **argv)
             VTQ_CAP, OUTQ_CAP);
     return 0;
 }
+/**
+ * (vtouch-doc: vtouch_poll_step)
+ * @brief 主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。
+ * @return  0 继续；-1 该退出。
+ * @note    有待重发的整帧时 poll 超时压到 5ms，尽快把手指抬起来。
+ */
 
 /* 单轮 poll：返回 0 = 继续，-1 = 停止 */
 int vtouch_poll_step(void)
@@ -185,6 +206,11 @@ int vtouch_poll_step(void)
     if (g.client_fd >= 0 && ((p[3].revents & POLLOUT) || outq_pending())) outq_flush();
     return 0;
 }
+/**
+ * (vtouch-doc: cleanup)
+ * @brief 释放资源：关客户端 → 关监听 → 放 EVIOCGRAB → 关设备。
+ * @note    逆序释放：先放触摸（物理触摸立刻回系统），再拆设备。
+ */
 
 /* 收尾顺序固定：client → listen → 放 grab → 销毁 uinput。只跑一次。 */
 void cleanup(void)
@@ -200,8 +226,21 @@ void cleanup(void)
     }
     if (g.u_fd >= 0) { ioctl(g.u_fd, UI_DEV_DESTROY); close(g.u_fd); g.u_fd = -1; }
 }
+/**
+ * (vtouch-doc: on_signal)
+ * @brief 信号处理器：置退出标志，让主循环下一轮自己收尾（不在信号里做清理）。
+ * @param   s        信号编号
+ * @note    只置标志，不打印、不关 fd —— 信号处理函数里能做的事越少越安全。
+ */
 
 void on_signal(int s) { (void)s; g.stop_flag = 1; }
+/**
+ * (vtouch-doc: main)
+ * @brief 进程入口：装信号 → init → 主循环 → 置 stop_flag 并 join 区域线程 → cleanup。
+ * @param   argc     参数个数
+ * @param   argv     参数数组
+ * @return  0；init 失败时返回对应的错误码。
+ */
 
 int main(int argc, char **argv)
 {

@@ -1,5 +1,15 @@
 /* vt_util.c（§2 小工具） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
+/**
+ * (vtouch-doc: parse_long)
+ * @brief 把字符串解析成 [lo, hi] 区间内的整数（命令参数解析用）。
+ * @param   s        待解析文本
+ * @param   lo       允许下界（含）
+ * @param   hi       允许上界（含）
+ * @param   out      成功时写入结果
+ * @return  0 成功；-1 非数字、越界或带多余字符。
+ * @note    范围检查就是协议的一部分：越界一律回 err，不静默截断。
+ */
 
 int parse_long(const char *s, long lo, long hi, int *out)
 {
@@ -9,11 +19,26 @@ int parse_long(const char *s, long lo, long hi, int *out)
     if (errno || *e || v < lo || v > hi) return -1;
     *out = (int)v; return 0;
 }
+/**
+ * (vtouch-doc: bit)
+ * @brief 取位图（cap_* 那几张能力位图）里的第 n 位。
+ * @param   b        位图数组
+ * @param   n        位号
+ * @return  非 0 表示该位置位。
+ */
 
 int bit(const unsigned long *b, int n)
 {
     return (int)((b[(unsigned)n / (8 * sizeof(unsigned long))] >> ((unsigned)n % (8 * sizeof(unsigned long)))) & 1UL);
 }
+/**
+ * (vtouch-doc: logical_to_raw)
+ * @brief 逻辑坐标（设备像素）→ 触摸屏 raw 坐标。
+ * @param   logical  逻辑值
+ * @param   axis     0=X 1=Y
+ * @param   raw      输出 raw 值
+ * @return  0 成功；-1 轴非法或该轴量程为 0。
+ */
 
 /* 逻辑坐标（竖屏，脚本用的那一套）→ 内核 raw 轴值 */
 int logical_to_raw(int logical, int axis, int *raw)
@@ -27,6 +52,14 @@ int logical_to_raw(int logical, int axis, int *raw)
     if (value > g.axmax[axis]) value = g.axmax[axis];
     *raw = (int)value; return 0;
 }
+/**
+ * (vtouch-doc: raw_to_logical)
+ * @brief raw 坐标 → 逻辑坐标（转发 pev / 区域事件时用）。
+ * @param   raw      raw 值
+ * @param   axis     0=X 1=Y
+ * @param   logical  输出逻辑值
+ * @return  0 成功；-1 轴非法或量程非法。
+ */
 
 /* raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（pev / 区域判定用）。 */
 int raw_to_logical(int raw, int axis, int *logical)
@@ -41,6 +74,11 @@ int raw_to_logical(int raw, int axis, int *logical)
     if (v < 0) v = 0; if (v > size - 1) v = size - 1;
     *logical = (int)v; return 0;
 }
+/**
+ * (vtouch-doc: now_ns)
+ * @brief 单调时钟（纳秒），事件时间戳用。
+ * @return  单调递增的纳秒数（CLOCK_MONOTONIC）。
+ */
 
 /* ================= 转发引擎（方案 §4）：事件队列 / 区域线程 / 出站队列 =================
  * 目的（§1/§4）：把「判断（区域五事件）」和「推送（WS 写）」从触摸注入热路径里搬走。

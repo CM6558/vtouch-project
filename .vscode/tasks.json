@@ -111,6 +111,19 @@
       }
     },
     {
+      "label": "doc: 重建函数文档（幂等）",
+      "detail": "python scripts/apply_funcdoc.py —— 文案改在 scripts/funcdoc_data.py；跑完二进制应字节不变",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "-c",
+        "python scripts/apply_funcdoc.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
       "label": "diagrams: 重渲四张工程图",
       "detail": "sh build/_render_planb.sh（生成/渲染脚本在 build/ 下，未入库；缺失就说明没同步过这几张图）",
       "type": "process",

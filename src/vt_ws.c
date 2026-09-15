@@ -7,14 +7,37 @@ static size_t ws_in_len;
 /* 给主循环用的两个小接口：输入缓冲里还有没处理完的帧 / 清空它（新客户端接入时）。
  * 缓冲本身留在本模块（外面不需要知道它长什么样）。 */
 int ws_has_pending(void) { return ws_in_len > 0; }
+/**
+ * (vtouch-doc: ws_input_reset)
+ * @brief 复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。
+ */
 void ws_input_reset(void) { ws_in_len = 0; }
+/**
+ * (vtouch-doc: rol32)
+ * @brief 32 位循环左移（SHA-1 内部用）。
+ * @param   x        值
+ * @param   n        位数
+ * @return  左移结果。
+ */
 
 uint32_t rol32(uint32_t x, unsigned n) { return (x << n) | (x >> (32U - n)); }
+/**
+ * (vtouch-doc: be32)
+ * @brief 读 4 字节大端整数（SHA-1 内部用）。
+ * @param   p        字节指针
+ * @return  大端解读结果。
+ */
 
 uint32_t be32(const unsigned char *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
+/**
+ * (vtouch-doc: sha1_block)
+ * @brief 处理一个 64 字节块（SHA-1 内部）。
+ * @param   s        上下文
+ * @param   p        块起始
+ */
 
 void sha1_block(struct sha1 *s, const unsigned char *p)
 {
@@ -32,12 +55,24 @@ void sha1_block(struct sha1 *s, const unsigned char *p)
     }
     s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d; s->h[4] += e;
 }
+/**
+ * (vtouch-doc: sha1_init)
+ * @brief SHA-1 初始化。
+ * @param   s        上下文
+ */
 
 void sha1_init(struct sha1 *s)
 {
     s->h[0] = 0x67452301U; s->h[1] = 0xefcdab89U; s->h[2] = 0x98badcfeU;
     s->h[3] = 0x10325476U; s->h[4] = 0xc3d2e1f0U; s->bits = 0; s->used = 0;
 }
+/**
+ * (vtouch-doc: sha1_update)
+ * @brief SHA-1 追加数据。
+ * @param   s        上下文
+ * @param   p        数据
+ * @param   n        长度
+ */
 
 void sha1_update(struct sha1 *s, const unsigned char *p, size_t n)
 {
@@ -49,6 +84,12 @@ void sha1_update(struct sha1 *s, const unsigned char *p, size_t n)
         if (s->used == 64) { sha1_block(s, s->block); s->used = 0; }
     }
 }
+/**
+ * (vtouch-doc: sha1_final)
+ * @brief SHA-1 收尾，输出 20 字节摘要（WS 握手用）。
+ * @param   s        上下文
+ * @param   out      20 字节输出
+ */
 
 void sha1_final(struct sha1 *s, unsigned char out[20])
 {
@@ -65,6 +106,15 @@ void sha1_final(struct sha1 *s, unsigned char out[20])
         out[i*4+2] = (unsigned char)(s->h[i] >> 8); out[i*4+3] = (unsigned char)s->h[i];
     }
 }
+/**
+ * (vtouch-doc: base64)
+ * @brief 标准 Base64 编码。
+ * @param   in       输入
+ * @param   n        输入长度
+ * @param   out      输出缓冲
+ * @param   cap      缓冲容量
+ * @return  写入的字节数（含结尾 \0）；-1 缓冲不够。
+ */
 
 int base64(const unsigned char *in, size_t n, char *out, size_t cap)
 {
@@ -85,6 +135,15 @@ int base64(const unsigned char *in, size_t n, char *out, size_t cap)
     out[o] = 0;
     return (int)o;
 }
+/**
+ * (vtouch-doc: header_value)
+ * @brief 从 HTTP 请求头里取某个头的值（头名大小写不敏感）。
+ * @param   req      请求原文
+ * @param   name     头名
+ * @param   out      输出
+ * @param   cap      缓冲容量
+ * @return  0 找到；-1 没有或缓冲不够。
+ */
 
 int header_value(const char *req, const char *name, char *out, size_t cap)
 {
@@ -103,6 +162,13 @@ int header_value(const char *req, const char *name, char *out, size_t cap)
     }
     return -1;
 }
+/**
+ * (vtouch-doc: has_token)
+ * @brief 在请求头值里按逗号分词找 token（大小写不敏感，用于 Connection: Upgrade）。
+ * @param   s        头值
+ * @param   token    要找的 token
+ * @return  1 有；0 没有。
+ */
 
 int has_token(const char *s, const char *token)
 {
@@ -115,6 +181,15 @@ int has_token(const char *s, const char *token)
     }
     return 0;
 }
+/**
+ * (vtouch-doc: write_full)
+ * @brief 把 len 字节写满（EINTR、短写自动续写）。
+ * @param   fd       目标 fd
+ * @param   buf      数据
+ * @param   len      长度
+ * @return  0 成功；-1 出错。
+ * @note    握手与上行同步写用它；下行的响应/事件走出站队列，不走这里。
+ */
 
 /* 立刻可写才发：socket 当刻不可写就失败，由调用方踢掉这个客户端。
  * 为什么不等（哪怕 20ms）：这条路径跑在触摸线程上，等客户端 = 用户感到「点一下先顿一下」。 */
@@ -134,6 +209,13 @@ int write_full(int fd, const void *buf, size_t len)
     }
     return 0;
 }
+/**
+ * (vtouch-doc: websocket_handshake)
+ * @brief 读 HTTP 请求、校验 Upgrade 与 Sec-WebSocket-Key，回 101。
+ * @param   fd       已 accept 的连接
+ * @return  0 成功；-1 不是合法 WS 请求。
+ * @note    握手期用带超时的阻塞读（最多被拖 300ms）。
+ */
 
 /* 握手：socket 上已设 SO_RCVTIMEO（300ms），所以慢客户端最多拖这么久；
  * 校验 5 个头 + 回 101 + Sec-WebSocket-Accept。 */
@@ -173,6 +255,16 @@ int websocket_handshake(int fd)
                 write_full(fd, response, (size_t)len) == 0) ? 0 : -1;
     }
 }
+/**
+ * (vtouch-doc: ws_send)
+ * @brief 直接发一个 WS 帧（控制帧：close / pong 用）。
+ * @param   fd       连接
+ * @param   opcode   操作码
+ * @param   p        正文
+ * @param   n        正文长度
+ * @return  0 成功；-1 失败。
+ * @note    只给控制帧用；文本帧请走 outq_push_text。
+ */
 
 int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 {
@@ -184,6 +276,11 @@ int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
     else { h[1] = 126; h[2] = (unsigned char)(n >> 8); h[3] = (unsigned char)n; hn = 4; }
     return write_full(fd, h, hn) || write_full(fd, p, n);
 }
+/**
+ * (vtouch-doc: drop_client)
+ * @brief 丢弃当前客户端：关连接 + 抬掉它的虚拟触点 + 清订阅位 + 清出站队列。
+ * @note    残留的订阅与残包不许串给下一个客户端（§4.6）。
+ */
 
 /* 丢掉当前客户端：关连接 + 抬掉它的虚拟触点（只 close 会把虚拟手指永久粘在设备上） */
 void drop_client(void)
@@ -198,6 +295,14 @@ void drop_client(void)
     outq_reset();          /* §4.6：断连/被踢 → 出站队列销毁（残包不许串给下一个客户端） */
     owner_reset();
 }
+/**
+ * (vtouch-doc: ws_peek_frame)
+ * @brief 试着从接收缓冲里解析出一个完整帧的表头。
+ * @param   frame_len 输出整帧长度
+ * @param   opcode   输出操作码
+ * @param   payload_off 输出正文偏移
+ * @return  1 解析到；0 数据不够；-1 协议错。
+ */
 
 /* 输入缓冲：半包不消费，留到下一轮 poll 继续拼（以前逐字段 recv，跨 TCP 段就误判断线） */
 int ws_peek_frame(size_t *frame_len, unsigned *opcode, size_t *payload_off)
@@ -227,6 +332,15 @@ int ws_peek_frame(size_t *frame_len, unsigned *opcode, size_t *payload_off)
     *frame_len = off + 4 + (size_t)len;
     return (ws_in_len < *frame_len) ? 0 : 1;
 }
+/**
+ * (vtouch-doc: ws_next_frame)
+ * @brief 取出一个完整帧的正文（必要时继续收）。
+ * @param   payload  输出正文
+ * @param   plen     输出长度
+ * @param   opcode   输出操作码
+ * @return  0 取到；1 暂时没有数据（EAGAIN）；-1 连接关闭或协议错。
+ * @note    半包不消费，留到下一轮 poll 继续拼。
+ */
 
 int ws_next_frame(unsigned char *payload, size_t *plen, unsigned *opcode)
 {
@@ -257,6 +371,11 @@ int ws_next_frame(unsigned char *payload, size_t *plen, unsigned *opcode)
         return 0;
     }
 }
+/**
+ * (vtouch-doc: client_frame)
+ * @brief 处理客户端可读事件：一轮最多 32 个帧，解帧 → handle_line → 响应入出站队列。
+ * @return  0 保持连接；-1 断开（协议错或连接关闭）。
+ */
 
 /* 单轮最多处理 32 帧：一个 TCP 段里挤多条命令不会被「下一轮 poll」饿死，
  * 也不会让一整批命令长时间占住 poll 循环。返回 0 = 保持连接，-1 = 断开。 */
@@ -293,6 +412,11 @@ int client_frame(void)
     }
     return 0;
 }
+/**
+ * (vtouch-doc: make_listen)
+ * @brief 建监听 socket，只绑 127.0.0.1（回环），不对外暴露。
+ * @return  fd；-1 失败（调用方以退出码 6 退出）。
+ */
 
 int make_listen(void)
 {
@@ -311,6 +435,15 @@ int make_listen(void)
     }
     return fd;
 }
+/**
+ * (vtouch-doc: cmd_meta)
+ * @brief 命令族：ping / res / reset（不碰触点的元命令）。
+ * @param   t        命令词
+ * @param   stp      strtok_r 状态
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  1 不是本族命令（交给下一族）；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ */
 
 /* ---- §10.2 命令族：每族一个函数，只认自己的命令，handle_line 只做分派 ----
  * 返回约定：1 = 不是我的命令（交给下一族）；0 / -1 = 我处理了（resp 已写好，-1 表示是错误响应）。
@@ -332,6 +465,15 @@ int cmd_meta(char *t, char **stp, char *resp, size_t cap)
     }
     return 1;
 }
+/**
+ * (vtouch-doc: cmd_point_once)
+ * @brief 命令族：up / down / move —— 单点命令，每个命令提交一帧。
+ * @param   t        命令词
+ * @param   stp      strtok_r 状态
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ */
 
 /* up / down / move：单点命令，每个命令提交一帧 */
 int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
@@ -360,6 +502,15 @@ int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
     }
     return 1;
 }
+/**
+ * (vtouch-doc: cmd_frame)
+ * @brief 命令族：begin_frame / point / end_frame —— 帧内多点，一次 SYN 提交。
+ * @param   t        命令词
+ * @param   stp      strtok_r 状态
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ */
 
 /* begin_frame / point / end_frame：帧内多点，一次 SYN 提交 */
 int cmd_frame(char *t, char **stp, char *resp, size_t cap)
@@ -392,6 +543,16 @@ int cmd_frame(char *t, char **stp, char *resp, size_t cap)
     }
     return 1;
 }
+/**
+ * (vtouch-doc: cmd_region)
+ * @brief 命令族：region add | clear | list。
+ * @param   t        命令词
+ * @param   stp      strtok_r 状态
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ * @note    主线程只写表（短锁），判定全在区域线程。
+ */
 
 /* region add|del|clear|list：主线程只写表（短锁），判定全在区域线程（§4.4/§4.6） */
 int cmd_region(char *t, char **stp, char *resp, size_t cap)
@@ -438,6 +599,15 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
     }
     snprintf(resp, cap, "err region"); return -1;
 }
+/**
+ * (vtouch-doc: cmd_sub)
+ * @brief 命令族：sub [phys|region|all] / unsub（裸 sub = 两个通道都订）。
+ * @param   t        命令词
+ * @param   stp      strtok_r 状态
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ */
 
 /* sub [g.phys|region|all] / unsub：裸 sub = 全订（老脚本语义不变，§4.6） */
 int cmd_sub(char *t, char **stp, char *resp, size_t cap)
@@ -460,6 +630,15 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
     }
     return 1;
 }
+/**
+ * (vtouch-doc: handle_line)
+ * @brief 一行命令 → 一行回包：按命令族分派（每族一个 cmd_* 函数）。
+ * @param   line     命令文本（原地改）
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @return  0 有响应；-1 错误响应。
+ * @note    响应文本拼进 resp，由调用方（client_frame）入出站队列。
+ */
 
 /* 一行命令 -> 一行回包：这里只剩分派 */
 int handle_line(char *line, char *resp, size_t cap)
