@@ -99,6 +99,8 @@ c.close(); vt.stop();                              // 收尾（务必：否则�
    区域表由主线程写（短锁），区域线程读 —— 这把锁不在注入路径上。
 5. **出站（§4.5）**：响应 / `region_ev` / `pev` 全部进**出站队列**，主循环 `poll` 里只有一个刷出点
    （队列非空才挂 `POLLOUT`），socket 置 `O_NONBLOCK` —— **客户端慢只是堆队列，注入路径照常跑**。
+   队列里存的是**已经加好 WS 帧头**的完整帧（`outq_push_text()`）：成帧漏在入队这一层，
+   客户端会收到裸文本、一帧都解不出来，而注入照常生效 —— 所以这个漏法最不容易被发现。
 6. **订阅与踢（§4.6）**：订阅位决定推哪一路；断连/被踢时清订阅位并丢弃残包（不会串给下一个客户端）。
 
 ## 合并是怎么做的（四点）
@@ -107,10 +109,43 @@ c.close(); vt.stop();                              // 收尾（务必：否则�
 2. **镜像声明**：把物理屏的 EV/KEY/ABS(+absinfo)/props 整份照抄到 uinput 设备，只有 4 处真冲突取相似值
    （tool 量程、槽数、id 池、名字/bus）；`INPUT_PROP_DIRECT` 无条件声明，否则系统会把它当触控板画鼠标指针。
 3. **同帧合并**：先发待抬触点（`TRACKING_ID=-1`）→ 物理触点 → 虚拟触点 →
-   `BTN_TOUCH/BTN_TOOL_FINGER` → `SYN_REPORT`，**整个帧一次 `writev`**。物理与虚拟共用一套下游身份池
-   （槽与 tracking id 都重新分配，不透传客户端编号 → 不会撞号）。
+   `BTN_TOUCH/BTN_TOOL_FINGER` → `SYN_REPORT`，**整个帧一次 `writev`**。身份是**静态两段**
+   （物理直接用物理槽号，虚拟从 `phys_slots` 起，见下一节）—— 两段不可能撞号，所以不需要任何避让表。
 4. **失败兜底**：写帧失败绝不丢「抬手」那一帧，置重发标志 5ms 后再发（连续 200 次才认 uinput 真死并退出）。
    客户端挂断/被踢时，抬掉它的虚拟触点并归还帧内身份（否则池会被泄漏的身份占死）。
+
+## 身份两段（§5 改：静态分配，不做避让）
+
+物理占一段、虚拟占一段，两段**不可能**撞号，所以「查表找不撞的 id」这一层从设计上就不存在：
+
+| | 槽位 `ABS_MT_SLOT` | tracking id | 结果 |
+|---|---|---|---|
+| 物理触点 | 物理槽号 `0..phys_slots-1` | **= 槽号** | 原样透传；驱动报的 id 不再搬进系统 |
+| 虚拟触点 | `phys_slots + 客户端槽号` | **= 槽号** | 10 槽机器 → `10..19`（物理段被跳过） |
+
+- 合并设备因此要声明 `phys_slots + vslots` 个槽（10 槽机器 = 20 个），tracking id 上限 = 两段之和。
+- 删掉整套避让：`alloc_oid / alloc_oslot / id_taken / slot_taken / next_tracking_id / g_seq / evict_newest_virtual`
+  （`grep` 计数应为 0）。副产品：物理段永远空着给物理手指，**物理手指不会再被虚拟顶掉**。
+- **真机实测（每条这行都必须自己量一遍）**：OnePlus PJZ110 的触摸屏驱动报的 tracking id 是 **槽号 + 16**
+  （`slot0→id16` … `slot5→id21`），不是 0..9。所以「物理 id 就取槽号」成立的前提是**我们重新编号**：
+  驱动原始值 16..25 在合并设备流里一次都不该出现（这正是我们要丢掉的）。
+- **天花板**：Android 的 pointer id 是 32 位 BitSet（上限 31）。`phys_slots + vslots - 1 ≤ 31` 时 id 原样可见
+  （10 + 10 正好到 19）；超了由框架自分配 pointer id —— 功能不坏，但 app 看到的 id 不再等于 tracking id。
+
+验证四步（都可重跑，脚本在 `scripts/` 与 `tests/`）：
+
+```sh
+adb push build/vtouchd /sdcard/vtouchd && adb push scripts/ondev-run.sh /sdcard/
+adb shell "su -c 'sh /sdcard/ondev-run.sh 900'"      # 起 daemon（900 秒后自杀，不留住物理触摸）
+adb forward tcp:27183 tcp:27183
+python tests/ws_inject_hold.py --hold 120 &          # 保持一根虚拟触点（id 应为 10）
+adb push scripts/ondev-capture.sh /sdcard/ && adb shell "su -c 'sh /sdcard/ondev-capture.sh 300'"
+#   ↑ 这 300 秒里用真手指按屏幕（下半部），然后：
+python tests/id_split_check.py --require-both        # 断言 id==slot / 两段不重叠 / 无同 id 并发 / 都 ≤31
+```
+
+实测那一轮（PJZ110）：9 个触点会话，id 集合 `{0,1,2,10}` —— 物理 `0/1/2`、虚拟 `10`，
+其中 `slot0/id0 + slot1/id1 + slot10/id10` 有 **8.1 秒同时在按**；驱动原值 `16..25` 一次未出现。
 
 启动顺序是 **先起监听、最后 grab、区域线程再最后**：任何失败路径都不会留下「抓着触摸却没人能控制」的状态。
 
@@ -148,3 +183,6 @@ host 侧桩测与产物对账脚本、CI。区域匹配与订阅、出站队列�
 - **区域判定只认物理手指**：注入的虚拟触点不会产生 `region_ev` —— 这是防自激的**设计**，不是缺失。
 - **`move` 只在位置变化时报**：同一位置重复推不算事件（完整版同一规则）。
 - 注入与物理同一坐标时会出现两根触点共存（按坐标判定的应用会表现为「等注入结束才弹起」）。
+- **虚拟段受 pointer id 上限约束**：`phys_slots + vslots - 1 > 31` 后，超出那段的 id 会被框架改成自分配（见「身份两段」）。
+- **物理槽数与驱动的 id 偏置是逐设备量的**：别假设驱动 id == 槽号（本机是 +16）；换机器先抓一次原始设备
+  （`scripts/ondev-capture.sh`，改设备名前缀即可）再定虚拟起点。
