@@ -8,14 +8,10 @@
     "_GNU_SOURCE"
   ],
   "search.exclude": {
-    "build/**": true,
-    "docs/diagrams/**/*.json": true,
-    "docs/diagrams/**/*.svg": true
+    "build/**": true
   },
   "files.watcherExclude": {
-    "build/**": true,
-    "docs/diagrams/**/*.png": true,
-    "docs/diagrams/**/*.svg": true
+    "build/**": true
   },
   "terminal.integrated.profiles.windows": {
     "git-bash": {

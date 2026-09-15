@@ -122,18 +122,6 @@
       "options": {
         "cwd": "${workspaceFolder}"
       }
-    },
-    {
-      "label": "diagrams: 重渲四张工程图",
-      "detail": "sh build/_render_planb.sh（生成/渲染脚本在 build/ 下，未入库；缺失就说明没同步过这几张图）",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "build/_render_planb.sh"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}"
-      }
     }
   ]
 }

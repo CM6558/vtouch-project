@@ -41,7 +41,6 @@ for f in src/*.c; do .../aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror
 | `test: ws_smoke` | `python tests/ws_smoke.py`（需 daemon 在跑 + `adb forward tcp:27183 tcp:27183`） |
 | `doc: 重建函数文档（幂等）` | `python scripts/apply_funcdoc.py`（文案在 `scripts/funcdoc_data.py`；纯注释，产物二进制应字节不变） |
 | `test: id_split_check` | `python tests/id_split_check.py --require-both`（需设备上抓过 `merged.log`） |
-| `diagrams: 重渲四张工程图` | `sh build/_render_planb.sh`（脚本在 `build/` 下，未入库） |
 
 ## 换机器要改的地方（只有两处，其它都是相对的）
 

@@ -22,7 +22,7 @@ scripts/deploy.sh               adb 推二进制到 /data/local/tmp + 起/停/�
 tests/ws_smoke.py               主机侧 smoke（握手 + 注入命令链路）
 tests/ws_planb_regression.py    主机侧回归：命令面 / 订阅 / 五事件 / 回触不自激 / ws_kick
 docs/VTOUCH_ARCH_PLAN.md        本分支所依据的方案原文（§8 四步 = 本分支的四段改动）
-docs/                           完整版（面板那一代）的走读与工程图，与本分支无关，可删
+docs/                           VTOUCH_ARCH_PLAN.md（方案原文）+ CODE_WALKTHROUGH.md（完整版走查，可删）
 ```
 
 ## 前提
@@ -240,9 +240,10 @@ python tests/id_split_check.py --require-both        # 断言 id==slot / 两段�
 ImGui 面板与 overlay、`regions.conf` 持久化、面板区吞触摸、旋转坐标换算、
 host 侧桩测与产物对账脚本、CI。区域匹配与订阅、出站队列在本分支是**有**的（按 Plan B 重建）。
 
-完整版连同它的文档、工程图都在 `build/_backup_full_<时间戳>/`
+完整版连同它的文档都在 `build/_backup_full_<时间戳>/`
 （`files/` 是逐份拷贝，`from_head/` 是 HEAD 里被删前的文件，`RESTORE.md` 写了回滚步骤）；
-`docs/CODE_WALKTHROUGH.md` 与 `docs/diagrams/` 讲的也是完整版。
+`docs/CODE_WALKTHROUGH.md` 讲的也是完整版。工程图（`docs/diagrams/`）已按「只留最小核心」移出仓库，
+需要时从 git 历史取：`git checkout <旧分支> -- docs/diagrams`。
 
 ## 已知边界
 

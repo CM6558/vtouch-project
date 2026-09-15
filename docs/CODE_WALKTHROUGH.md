@@ -58,7 +58,7 @@ headless 兜底形态：`src/vtouchd.c:1777 main()` 独立进程（`/data/local/
 |---|---|---|
 | 项目上下文里的 `AGENTS.md`（内容 = `c22415b`(2026-09-09) 前后那一代） | `src/vtouchmerge.c`/`vtouchws.c`/`vtouchsupervise.c`、`ksu-module/`、`sdcard/vtouch-merge/`、`scripts/install_from_sdcard.sh`、`tests/ws_smoke.py` | 全都**不存在**：盘上是「面板 = daemon」单进程（`src/vtouchd.c` + `src-ui/*`），`tests/` 只有 `onregion_harness.js`；HEAD 里的 AGENTS.md 已是重写版（「面板（ImGui）本身就是 daemon」） |
 | skill 笔记 `vtouch-autojs6` 的若干条 | `recvBlocking`（标 `build_bundle.py:226`）、FIFO 256（`LinkedBlockingQueue`）+ pump 线程、`reserved` 占位、`vtouch_set_consume_cb`、桩测 **98** 断言 | 现码：`available()` 非阻塞读 + 2s ping/6s pong（:617–627）、每事件 `threads.start`（:562）、无 reserved、`hooks.consume`、桩测 **46** 断言 |
-| 归档图 `docs/diagrams/vtouch-full-flow` / `vtouch-click-journey`（HEAD 里、工作区已删）与草稿 `build/_gen_diagrams.py` | 同一代说法（recvBlocking / LinkedBlockingQueue / pump / `vtouch_init:1495`） | 同上；现况请看 `docs/diagrams/vtouch-current-journey.*` |
+| 归档图 `docs/diagrams/vtouch-full-flow` / `vtouch-click-journey`（`docs/diagrams/` 已整体移出仓库）与草稿 `build/_gen_diagrams.py` | 同一代说法（recvBlocking / LinkedBlockingQueue / pump / `vtouch_init:1495`） | 同上；现况请看本分支的 README |
 
 ## §1 全景：进程 / 线程 / 数据流
 
@@ -480,9 +480,9 @@ vt.onRegion("s3", "down", function (h) { vt.finger().tap(h.x, h.y); });
 | 28 | 脚本主线程 | `build_bundle.py:237` | 脚本运行结束 → `events.on("exit")` 钩子 → `vtouchStop()`（:249）→ `uiStop`（:514，`kill -9 $(pidof vtouch-ui)` 语义） |
 | 29 | 核心 | `vtouchd.c:510` | 进程退出路径 `cleanup()`：停发送线程（:521）→ 关 client/listen（:522–523）→ **`EVIOCGRAB(0)` + 关物理 fd（:524–529）** → `UI_DEV_DESTROY`（:530）⇒ 物理触摸回到系统直读 |
 
-对照图（工程图归档在 `docs/diagrams/`）：
-- **`vtouch-current-journey`（本次新出，25 节点）**：就是上表的图形版，每个节点标「谁在做 + 文件:行」，两侧红色虚框是并发原语（锁 / 出站 FIFO / 身份池）。四件套 `.json/.svg/.png/.report.json`，重渲命令见 §11.4。
-- `vtouch-full-flow` / `vtouch-click-journey`：**HEAD 里还在、工作区已被删**，且内容描述的是另一代实现（见 §10-F2）——要恢复得 `git checkout -- docs/diagrams` 后再按现码改 JSON 重渲，别直接当现况用。
+对照图（工程图已按「只留最小核心」移出仓库；要恢复：`git checkout <旧分支> -- docs/diagrams`）。
+- 已归档的 `vtouch-current-journey`（25 节点）：就是上表的图形版，每个节点标「谁在做 + 文件:行」，两侧红色虚框是并发原语（锁 / 出站 FIFO / 身份池）。四件套 `.json/.svg/.png/.report.json`，重渲命令见 §11.4。
+- `vtouch-full-flow` / `vtouch-click-journey`：描述的是另一代实现（见 §10-F2），已随工程图一起移出仓库。
 
 ---
 
@@ -569,34 +569,11 @@ scripts/gen_ui_chars.py ─▶ build/ui/ui_chars.h（字形表：按源码实际
 | `frame_open` | `begin_frame`…`end_frame` 之间为真；期间拒绝一切单点命令与 `reset` |
 | `g_force_frames` | 渲染侧强制连画 N 帧（切换显隐/开关/换 Surface 后兜底） |
 
-### 11.4 工程图怎么重渲（本次实际用的命令）
+### 11.4 工程图（已移出仓库）
 
-现况图共 **10 张**（9 张走读全套 + 早期 1 张旅程概览），归档在 `docs/diagrams/`，索引见 `docs/diagrams/README.md`：
+工程图（`docs/diagrams/`：走读全套 + 旅程概览）与它们的生成脚本已按「只留最小核心」移出仓库，本地也不保留。
+需要时从 git 历史取回（例：`git checkout planb/id-split -- docs/diagrams`），渲染命令与自检清单在该图历史版本的目录 README 里。
 
-| 图 | 讲什么 | 对应本文 |
-|---|---|---|
-| `vtouch-map-overview` | 四层 / 四线程 / 三条边界 + 坐标三域注记 | §1、§2 |
-| `vtouch-core-data` | core 数据面：定序 → 采集 → 合帧 → writev → 匹配 → 出站 | §3.1–3.5、§3.7 |
-| `vtouch-core-control` | core 控制面：连接/踢旧/握手/解帧/命令表/回包/挂断 | §3.6、§3.8、§3.9 |
-| `vtouch-failure-exits` | 失败出口与降级（启动码 / 退出码 / 兜底） | §9 |
-| `vtouch-panel-java` | 面板侧四层：Java 建层 → native 桥 → 交互与渲染 → 落盘 | §4、§5 |
-| `vtouch-js-lib` | L1 脚本库六段逐函数 | §6 |
-| `vtouch-example-29-steps` | 示例贯通（24 个执行步骤 = §8 的 29 行明细，同层相邻行合并） | §8 |
-| `vtouch-region-system` | 区域系统：表在 core / 存储归面板 / 脚本只读下发 | §3.5、§10 |
-| `vtouch-build-chain` | 交付链：构建五阶段 → 装配 → 对账 → 打包 → CI → 设备侧 | §11.2、§11.5、§11.6 |
-| `vtouch-current-journey` | 早期单张：一次区域触发的 21 步概览 | §8 |
-
-```sh
-cd /c/Users/21102/vtouch-project
-python build/_gen_walkthrough_diagrams.py   # 生成全套 JSON（权威源；数据驱动，改内容只改这里）
-bash   build/_render_all.sh                 # 逐张：渲染 + 五道校验 + 版面自检 + PNG
-```
-
-本轮结果（10 张全绿）：五道校验（xml / markers / collisions / geometry / composition）全 ok、
-composition score=**100**（`bridged_crossings` 0、`total_bends` 0~6、`max_route_stretch` ≤4.4）；
-版面自检三项 PASS（节点无重叠 / 文字无超宽 / PNG 无贴边）；PNG 均为画布 2×（例：`vtouch-js-lib` 2240×4744）；
-视觉复核逐张读回通过——**并据此抓到一处内容错**：示例图标题曾写「29 步」而图上只有 24 个节点，已改成「24 步」。
-**改图只改生成器或 JSON 再重渲，不要手改 SVG。**
 
 ### 11.5 构建 / 测试 / CI 脚本（逐行级，行号均本次现读）
 
