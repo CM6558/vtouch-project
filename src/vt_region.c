@@ -11,7 +11,6 @@ static int r_slot_last_x[MAX_PHYS], r_slot_last_y[MAX_PHYS];
  * (vtouch-doc: regions_clear)
  * @brief 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。
  */
-
 void regions_clear(void)
 {
     pthread_mutex_lock(&g.region_lock);
@@ -33,7 +32,6 @@ void regions_clear(void)
  * @return  0 成功；-1 参数非法、id 去重失败或表满。
  * @note    几何合法性（是否超出逻辑尺寸等）也在这里判。
  */
-
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
     struct region *rg;
@@ -83,7 +81,6 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
  * @param   ly       逻辑 y
  * @return  1 命中；0 未命中。
  */
-
 int region_hit(const struct region *rg, int lx, int ly)
 {
     if (!rg->enabled) return 0;
@@ -102,10 +99,11 @@ int region_hit(const struct region *rg, int lx, int ly)
  * @param   lx       逻辑 x
  * @param   ly       逻辑 y
  * @note    低频事件；只报物理手指。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
+ *   只订了 g.phys 通道就不白推 region_ev（和 pev 的开关对称）。
  */
-
-/* 命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
- * 只订了 g.phys 通道就不白推 region_ev（和 pev 的开关对称）。 */
 void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {
     char msg[96];
@@ -122,17 +120,18 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
  * @brief 五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。
  * @param   ev       来自 region_q 的事件
  * @note    virt=1 的事件直接跳过（这就是「回触不自激」）；三张状态表是线程私有的，只在 region_lock 里读区域表。
- */
-
-/* 五事件判定的事件化版本（§4.4）。与完整版 region_match 逐分支等价：
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   五事件判定的事件化版本（§4.4）。与完整版 region_match 逐分支等价：
  *   DOWN → 命中就 slot_hit=1 并报 down；无论命中与否都把按下位置记为 move 基准
- *          （完整版：`if (g.phys.down) { if (!g.ps_down) {...} }`）
+ *   （完整版：`if (g.phys.down) { if (!g.ps_down) {...} }`）
  *   MOVE → 先用「上一事件的 slot_in」比 enter/exit，再在「此前已在区域内且位置变化」时报 move
- *          （完整版：`if (hit && !slot_in) enter; else if (!hit && slot_in) exit;` + move 条件）
+ *   （完整版：`if (hit && !slot_in) enter; else if (!hit && slot_in) exit;` + move 条件）
  *   UP   → slot_hit && 命中 → 报 up，随后清 slot_hit
- *          （完整版在「该槽空闲后的下一帧」清；事件模型里没有空闲帧，就地在抬起事件清 ——
- *            up 的判定还要 g.ps_down（只有抬起事件才进这分支），清早了不会误报）
- * 每事件末 slot_in = (down && hit)，与完整版每帧末的赋值一致。 */
+ *   （完整版在「该槽空闲后的下一帧」清；事件模型里没有空闲帧，就地在抬起事件清 ——
+ *   up 的判定还要 g.ps_down（只有抬起事件才进这分支），清早了不会误报）
+ *   每事件末 slot_in = (down && hit)，与完整版每帧末的赋值一致。
+ */
 void region_apply(const struct vt_ev *ev)
 {
     int rid, hit, lx = ev->x, ly = ev->y, slot = ev->slot;
@@ -174,10 +173,11 @@ void region_apply(const struct vt_ev *ev)
  * @param   arg      未使用
  * @return  NULL（线程不主动退出）。
  * @note    只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   区域线程（§4.4）：只消费队列、只写自己的状态表、只把 region_ev 塞进出站队列。
+ *   绝不注入、绝不直写 socket、绝不碰 g.phys[]/g.virt[]。
  */
-
-/* 区域线程（§4.4）：只消费队列、只写自己的状态表、只把 region_ev 塞进出站队列。
- * 绝不注入、绝不直写 socket、绝不碰 g.phys[]/g.virt[]。 */
 void *region_thread_main(void *arg)
 {
     struct vt_ev ev;

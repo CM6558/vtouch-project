@@ -233,6 +233,7 @@ int make_listen(void);
 int handle_line(char *line, char *resp, size_t cap);
 
 /* ---- vt_ws.c 的对外小接口（输入缓冲状态）---- */
+/* WS 输入缓冲里是否还有没解析完的半包数据（主循环据此继续挂 POLLIN）。 (vtouch-doc: ws_has_pending) */
 int ws_has_pending(void);
 /* 复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。 (vtouch-doc: ws_input_reset) */
 void ws_input_reset(void);

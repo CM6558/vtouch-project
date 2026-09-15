@@ -13,10 +13,11 @@ static pthread_mutex_t outq_lock = PTHREAD_MUTEX_INITIALIZER;
  * @param   what     队列名（"事件" / "出站"）
  * @param   n        该队列累计丢弃数
  * @note    诊断不占热路径（代价只是一次取模比较）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   溢出只在日志里留一行（首次 3 次 + 每 100 次；计数器本身在队列结构里）——
+ *   诊断用，不进热路径的代价：一次整数取模比较。
  */
-
-/* 溢出只在日志里留一行（首次 3 次 + 每 100 次；计数器本身在队列结构里）——
- * 诊断用，不进热路径的代价：一次整数取模比较。 */
 void queue_drop_log(const char *what, unsigned long n)
 {
     if (n <= 3 || n % 100 == 0)
@@ -28,12 +29,13 @@ void queue_drop_log(const char *what, unsigned long n)
  * @param   q        队列
  * @param   ev       事件（按值拷入）
  * @note    永不阻塞、永不失败：队满先尝试把队尾同槽同类 move 原地合并，仍满则丢最旧（CAS 推 head，因为消费者也在推它）。消费端最多少收一条事件，注入路径不受影响。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   溢出策略（§4.3）：① 队尾同槽同类的 move 原地合并（丢旧位置不影响增量语义）；
+ *   ② 仍然满 → 丢最旧（CAS 推 head，因为消费者也在推它）。
+ *   队列满时丢的必然是 move：同时按下的物理槽 ≤ g.phys_slots，down/up 事件在手指抬起前
+ *   每槽只会出现一次，不可能把 64 格塞满；而且就算真丢，注入路径也照常（只是事件少一条）。
  */
-
-/* 溢出策略（§4.3）：① 队尾同槽同类的 move 原地合并（丢旧位置不影响增量语义）；
- * ② 仍然满 → 丢最旧（CAS 推 head，因为消费者也在推它）。
- * 队列满时丢的必然是 move：同时按下的物理槽 ≤ g.phys_slots，down/up 事件在手指抬起前
- * 每槽只会出现一次，不可能把 64 格塞满；而且就算真丢，注入路径也照常（只是事件少一条）。 */
 void vtq_push(struct vtq *q, const struct vt_ev *ev)
 {
     unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
@@ -63,7 +65,6 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
  * @param   ev       输出事件
  * @return  1 取到；0 队空。
  */
-
 int vtq_pop(struct vtq *q, struct vt_ev *ev)
 {
     unsigned head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
@@ -78,7 +79,6 @@ int vtq_pop(struct vtq *q, struct vt_ev *ev)
  * @brief 清空出站队列（新客户端接入 / 断连时）。
  * @note    残包不许串给下一个客户端（§4.6）。
  */
-
 void outq_reset(void)
 {
     pthread_mutex_lock(&outq_lock);
@@ -90,7 +90,6 @@ void outq_reset(void)
  * @brief 出站队列是否非空（主循环据此决定要不要挂 POLLOUT）。
  * @return  1 有；0 无。
  */
-
 int outq_pending(void)
 {
     int r;
@@ -106,7 +105,6 @@ int outq_pending(void)
  * @param   n        长度
  * @note    队满丢最旧；文本请用 outq_push_text，不要直接调这个。
  */
-
 void outq_push(const char *p, size_t n)
 {
     int next;
@@ -126,12 +124,13 @@ void outq_push(const char *p, size_t n)
  * @param   s        文本
  * @param   n        长度
  * @note    成帧必须在这一层做 —— 队列里存的就是完整帧，刷出端只负责写字节。漏了这步的症状：客户端收到裸文本、一帧都解不出来，而注入照常生效（所以最难发现）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   服务端 → 客户端：**文本帧**（未加掩码）。成帧必须发生在入队这里 ——
+ *   队列里存的就是「完整的 WS 帧」，刷出端只负责把字节写出去（它支持半包续写）。
+ *   少了这一步的症状：客户端收到裸文本，一帧都解不出来（响应 / pev / region_ev 全哑），
+ *   而注入本身照常生效 —— 所以很容易漏掉（§4.5 改队列时就是这么漏的）。
  */
-
-/* 服务端 → 客户端：**文本帧**（未加掩码）。成帧必须发生在入队这里 ——
- * 队列里存的就是「完整的 WS 帧」，刷出端只负责把字节写出去（它支持半包续写）。
- * 少了这一步的症状：客户端收到裸文本，一帧都解不出来（响应 / pev / region_ev 全哑），
- * 而注入本身照常生效 —— 所以很容易漏掉（§4.5 改队列时就是这么漏的）。 */
 void outq_push_text(const char *s, size_t n)
 {
     char buf[OUTQ_MSG];
@@ -148,10 +147,11 @@ void outq_push_text(const char *s, size_t n)
  * (vtouch-doc: outq_flush)
  * @brief 主循环唯一的刷出点：socket 可写才写，写不完留到下次；真错（EPIPE/ECONNRESET）才踢客户端。
  * @note    客户端 socket 是非阻塞的，这里绝不阻塞主线程。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   主循环专用：socket 可写才写（客户端 socket 握手后设为非阻塞，所以这里绝不阻塞主线程）。
+ *   写不完留着，下一次 POLLOUT 继续；真错（EPIPE/ECONNRESET）才踢客户端。
  */
-
-/* 主循环专用：socket 可写才写（客户端 socket 握手后设为非阻塞，所以这里绝不阻塞主线程）。
- * 写不完留着，下一次 POLLOUT 继续；真错（EPIPE/ECONNRESET）才踢客户端。 */
 void outq_flush(void)
 {
     for (;;) {

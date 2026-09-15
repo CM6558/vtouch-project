@@ -156,6 +156,8 @@ DOCS = {
 "cleanup": dict(brief="释放资源：关客户端 → 关监听 → 放 EVIOCGRAB → 关设备。",
     note="逆序释放：先放触摸（物理触摸立刻回系统），再拆设备。"),
 "ws_input_reset": dict(brief="复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。"),
+"ws_has_pending": dict(brief="WS 输入缓冲里是否还有没解析完的半包数据（主循环据此继续挂 POLLIN）。", ret="1 有；0 没有。",
+    note="半包不消费：解析不出完整帧就留着，等下一轮 poll 再拼。"),
 "on_signal": dict(brief="信号处理器：置退出标志，让主循环下一轮自己收尾（不在信号里做清理）。",
     params=[("s", "信号编号")], note="只置标志，不打印、不关 fd —— 信号处理函数里能做的事越少越安全。"),
 "main": dict(brief="进程入口：装信号 → init → 主循环 → 置 stop_flag 并 join 区域线程 → cleanup。",

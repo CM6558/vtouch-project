@@ -14,7 +14,6 @@ static int vs_down[MAX_VIRT], vs_x[MAX_VIRT], vs_y[MAX_VIRT];
  * @param   v        值
  * @note    上限 MAX_IOV，超出直接忽略。
  */
-
 void ev_add(int t, int c, int v)
 {
     if (ev_n >= MAX_IOV) return;
@@ -28,10 +27,11 @@ void ev_add(int t, int c, int v)
  * @brief 把当前帧一次 writev 写进 uinput；EAGAIN 时等最多 3×20ms 再试。
  * @return  实际写出的字节数；-1 真错。
  * @note    uinput 是以 O_NONBLOCK 打开的。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   uinput 是 O_NONBLOCK 打开的：队列满会 EAGAIN，短暂等一等（3×20ms），
+ *   只有一直不可写才算真错（调用方据此重发/收摊）。
  */
-
-/* uinput 是 O_NONBLOCK 打开的：队列满会 EAGAIN，短暂等一等（3×20ms），
- * 只有一直不可写才算真错（调用方据此重发/收摊）。 */
 ssize_t uinput_writev_retry(void)
 {
     int k;
@@ -52,9 +52,10 @@ ssize_t uinput_writev_retry(void)
  * (vtouch-doc: emit_iov_writev)
  * @brief 提交本帧；**短写要把剩下的 iovec 补完**（只补一条会丢帧尾的 SYN_REPORT，系统里就成了半帧）。
  * @return  0 成功；-1 失败。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   提交这一帧；短写要把剩下的 iovec 全补完（只补一个会丢帧尾 SYN_REPORT）。
  */
-
-/* 提交这一帧；短写要把剩下的 iovec 全补完（只补一个会丢帧尾 SYN_REPORT）。 */
 int emit_iov_writev(void)
 {
     ssize_t n, need = 0;
@@ -100,9 +101,10 @@ int emit_iov_writev(void)
  * @brief 本帧是否真的发了触点（决定 BTN_TOUCH / BTN_TOOL_FINGER 的值）。
  * @return  1 有触点；0 没有。
  * @note    判的是来源状态里有触点，不是 iovec 里有没有 —— 虚拟触点抬起时不能把真手指的 BTN_TOUCH 带下去。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   BTN_TOUCH 只认真的进了帧的触点（有下游身份）
  */
-
-/* BTN_TOUCH 只认真的进了帧的触点（有下游身份） */
 int any_emitted(void)
 {
     int i;
@@ -115,15 +117,16 @@ int any_emitted(void)
  * @brief 把 phys[]/virt[] 合成一帧并提交：待抬 → 物理 → 虚拟 → BTN → SYN，整帧一次 writev。
  * @return  0 提交成功；-1 提交失败（置 g_reemit，由主循环重发）。
  * @note    身份按下标算（物理 = i，虚拟 = phys_slots + i）；写失败绝不清 pending_up、绝不释放身份。
- */
-
-/* 一帧的固定顺序（每一步都有理由）：
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   一帧的固定顺序（每一步都有理由）：
  *   ① 待抬的触点先发 ABS_MT_TRACKING_ID=-1（身份静态，帧写失败也不用「保住」它）
  *   ② 物理触点（身份 = 它所在的物理槽号，直接发）
  *   ③ 虚拟触点（身份在 WS 命令里就分好了）
  *   ④ BTN_TOUCH / BTN_TOOL_FINGER（只有真的发了触点才置 1）
  *   ⑤ SYN_REPORT，整个帧一次 writev 提交
- * 写失败：绝不清 pending_up、绝不释放身份，置 g.g_reemit 由 poll 循环重发。 */
+ *   写失败：绝不清 pending_up、绝不释放身份，置 g.g_reemit 由 poll 循环重发。
+ */
 int emit_frame(void)
 {
     int i;
@@ -177,9 +180,10 @@ int emit_frame(void)
  * @param   y        raw y
  * @return  0 成功；-1 状态非法（重复 down、没 down 就 move/up）。
  * @note    只改来源状态，不写身份字段（身份发射时按下标算）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   单点命令与帧内命令共用这一段：state 只认 down/move/up
  */
-
-/* 单点命令与帧内命令共用这一段：state 只认 down/move/up */
 int set_virtual(struct contact *state, int slot, const char *name, int x, int y)
 {
     if (!strcmp(name, "down")) {
@@ -199,10 +203,11 @@ int set_virtual(struct contact *state, int slot, const char *name, int x, int y)
  * (vtouch-doc: owner_reset)
  * @brief 客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。
  * @note    少了这段，客户端在 begin_frame..end_frame 中间断开会把虚拟手指永久粘在设备上。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   客户端断开/被踢：抬掉它的虚拟触点并归还「帧内已分配但没提交」的身份。
+ *   少了这段，客户端在 begin_frame..end_frame 中断开会永久占住池里的身份（之后注入全回 err point）。
  */
-
-/* 客户端断开/被踢：抬掉它的虚拟触点并归还「帧内已分配但没提交」的身份。
- * 少了这段，客户端在 begin_frame..end_frame 中断开会永久占住池里的身份（之后注入全回 err point）。 */
 void owner_reset(void)
 {
     int i;
@@ -216,12 +221,13 @@ void owner_reset(void)
  * (vtouch-doc: broadcast_phys)
  * @brief 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q（喂区域线程），并在订了 phys 时推 pev。
  * @note    推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
+ *   只推状态变化（down/up/move），静止不刷屏。
+ *   注意：完整版只在 subscribed 时才广播（广播只服务客户端）；现在广播还负责喂区域线程，
+ *   所以每帧都跑，订阅与否只决定 pev 那一路（纯内存比较，不进热路径的写）。
  */
-
-/* §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
- * 只推状态变化（down/up/move），静止不刷屏。
- * 注意：完整版只在 subscribed 时才广播（广播只服务客户端）；现在广播还负责喂区域线程，
- * 所以每帧都跑，订阅与否只决定 pev 那一路（纯内存比较，不进热路径的写）。 */
 void broadcast_phys(void)
 {
     int i, lx, ly, action;
@@ -250,7 +256,6 @@ void broadcast_phys(void)
  * @brief 虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。
  * @note    「回触不自激」可断言的那一半：区域线程遇到 virt=1 直接跳过；虚拟轨迹不进 pev（不回灌客户端自己的轨迹）。
  */
-
 void broadcast_virt(void)
 {
     int i, lx, ly, action;

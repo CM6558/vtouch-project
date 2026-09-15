@@ -110,8 +110,9 @@ c.close(); vt.stop();                              // 收尾（务必：否则�
 
 ### 函数文档（Doxygen 风格，机器可维护）
 
-每个函数定义上方是一个固定格式的文档块，`src/vt_internal.h` 里每个原型上方还有一句话（`@brief` 第一句），
-所以 VSCode 悬停和读源码两种方式都能看到同一份说明。当前 **62/62 个函数**都有文档。
+**每个函数定义的正上方就是它唯一的文档块**（中间不留空行），一块说完接口契约 + 为什么这么写；
+`src/vt_internal.h` 里每个原型上方还有一句话（`@brief` 首句），所以 VSCode 悬停和读源码看到的是同一份说明。
+当前 **63/63 个函数**都有文档，脚本会在每次运行后断言这条不变式。
 
 ```c
 /**
@@ -119,18 +120,24 @@ c.close(); vt.stop();                              // 收尾（务必：否则�
  * @brief 把 phys[]/virt[] 合成一帧并提交：待抬 -> 物理 -> 虚拟 -> BTN -> SYN，整帧一次 writev。
  * @return  0 提交成功；-1 提交失败（置 g_reemit，由主循环重发）。
  * @note    身份按下标算（物理 = i，虚拟 = phys_slots + i）；写失败绝不清 pending_up、绝不释放身份。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   一帧的固定顺序（每一步都有理由）：
+ *   ① 待抬的触点先发 ABS_MT_TRACKING_ID=-1 ...
  */
-int emit_frame(void)              <- 它下面还保留着原有的「为什么这么写」注释
+int emit_frame(void)
 ```
 
-文档的**唯一来源**是 `scripts/funcdoc_data.py`（函数名 -> brief / params / return / note），改文案后：
+段落横幅（`/* ---- §10.2 命令族 ---- */` 这类章节头）留在文档块上方，不并入。原有注释一律逐字保留，
+只是搬进文档块里，所以**文案没丢**。文档的**唯一来源**是 `scripts/funcdoc_data.py`
+（函数名 -> brief / params / return / note），改文案后：
 
 ```sh
-python scripts/apply_funcdoc.py   # 幂等：写回各定义处 + 原型处；第二遍跑必须是「写入 0 处」
-sh scripts/build.sh               # 注释改动不该改出机器码
-sha256sum build/vtouchd           # 应与改前一致 —— 这就是「只动了注释」的机器证据
+python scripts/apply_funcdoc.py --check   # 先看要改哪些（不改文件）
+python scripts/apply_funcdoc.py           # 幂等写入；再来一遍必须是「共调整 0 处」
+sh scripts/build.sh                       # 注释改动不该改出机器码
+sha256sum build/vtouchd                   # 应与改前一致 —— 这就是「只动了注释」的机器证据
 ```
-
 ### 重构/搬迁这类改动怎么证明没改行为
 
 同一批命令分别打给改动前/后的二进制，把合并设备的事件流按内容逐条比对：

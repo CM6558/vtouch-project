@@ -1,5 +1,8 @@
 /* vt_input.c（§7 物理输入与 uinput 设备） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
+
+static int selected_slot;   /* 当前正被解析的物理槽（-1 = 忽略）*/
+
 /**
  * (vtouch-doc: validate_device)
  * @brief 认一块设备是不是 Type-B 触摸屏（槽 + tracking id + XY 四轴 + 量程），并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。
@@ -11,12 +14,11 @@
  * @param   ymax     输出 Y 上界
  * @return  0 是；-1 不是或打不开。
  * @note    不写死 eventN：由 discover 扫 event0..63 逐个问。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   认一块设备是不是 Type-B 触摸屏：EV_ABS 里必须有槽/tracking id/XY 四轴，槽数合规，
+ *   X/Y 量程有效；并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。
  */
-
-static int selected_slot;   /* 当前正被解析的物理槽（-1 = 忽略）*/
-
-/* 认一块设备是不是 Type-B 触摸屏：EV_ABS 里必须有槽/tracking id/XY 四轴，槽数合规，
- * X/Y 量程有效；并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。 */
 int validate_device(const char *p, int *slots, int *xmin, int *xmax, int *ymin, int *ymax)
 {
     unsigned long ev[CAP_LONGS(EV_MAX)];
@@ -58,9 +60,10 @@ int validate_device(const char *p, int *slots, int *xmin, int *xmax, int *ymin, 
  * @param   out      输出设备节点路径
  * @param   n        缓冲长度
  * @return  0 找到；-1 没找到。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   动态发现：扫 event0..63 找第一块 Type-B 触摸屏，不写死节点号
  */
-
-/* 动态发现：扫 event0..63 找第一块 Type-B 触摸屏，不写死节点号 */
 int discover(char *out, size_t n)
 {
     int k;
@@ -75,9 +78,10 @@ int discover(char *out, size_t n)
  * @brief 建合并 uinput 设备：照抄物理屏的能力（EV / KEY / ABS+absinfo / props），只改 4 处真冲突（TOOL_TYPE 量程、槽数、tracking id 量程、名字与 bus），并强制 INPUT_PROP_DIRECT。
  * @return  0 成功；-1 失败（调用方以退出码 3 退出）。
  * @note    槽数 = phys_slots + vslots；tracking id 上限 = total_slots - 1。名字加 _vtouch 后缀，避免与物理设备同名。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   合并设备的能力声明 = 照抄物理屏；只有 4 处真冲突取相似值。
  */
-
-/* 合并设备的能力声明 = 照抄物理屏；只有 4 处真冲突取相似值。 */
 int setup_uinput(void)
 {
     struct uinput_setup s; struct uinput_abs_setup a;
@@ -137,9 +141,10 @@ fail:
  * (vtouch-doc: physical_events)
  * @brief 读物理流：解析 Type-B 事件进 phys[]（按槽），在 SYN_REPORT 处提交一帧并转发。
  * @note    一次 read 可能攒好几帧，边沿在每帧处理完就清；SYN_DROPPED 保守地把所有槽当抬起。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   物理流：一次 read() 可能攒好几帧，所以边沿（按下/抬起）在每一帧处理完就清。
  */
-
-/* 物理流：一次 read() 可能攒好几帧，所以边沿（按下/抬起）在每一帧处理完就清。 */
 void physical_events(void)
 {
     struct input_event e;

@@ -10,7 +10,6 @@
  * @return  0 成功；-1 非数字、越界或带多余字符。
  * @note    范围检查就是协议的一部分：越界一律回 err，不静默截断。
  */
-
 int parse_long(const char *s, long lo, long hi, int *out)
 {
     char *e; long v;
@@ -26,7 +25,6 @@ int parse_long(const char *s, long lo, long hi, int *out)
  * @param   n        位号
  * @return  非 0 表示该位置位。
  */
-
 int bit(const unsigned long *b, int n)
 {
     return (int)((b[(unsigned)n / (8 * sizeof(unsigned long))] >> ((unsigned)n % (8 * sizeof(unsigned long)))) & 1UL);
@@ -38,9 +36,10 @@ int bit(const unsigned long *b, int n)
  * @param   axis     0=X 1=Y
  * @param   raw      输出 raw 值
  * @return  0 成功；-1 轴非法或该轴量程为 0。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   逻辑坐标（竖屏，脚本用的那一套）→ 内核 raw 轴值
  */
-
-/* 逻辑坐标（竖屏，脚本用的那一套）→ 内核 raw 轴值 */
 int logical_to_raw(int logical, int axis, int *raw)
 {
     int size = axis ? g.logical_height : g.logical_width;
@@ -59,9 +58,10 @@ int logical_to_raw(int logical, int axis, int *raw)
  * @param   axis     0=X 1=Y
  * @param   logical  输出逻辑值
  * @return  0 成功；-1 轴非法或量程非法。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（pev / 区域判定用）。
  */
-
-/* raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（pev / 区域判定用）。 */
 int raw_to_logical(int raw, int axis, int *logical)
 {
     int size = axis ? g.logical_height : g.logical_width;
@@ -74,15 +74,15 @@ int raw_to_logical(int raw, int axis, int *logical)
     if (v < 0) v = 0; if (v > size - 1) v = size - 1;
     *logical = (int)v; return 0;
 }
+/* ================= 转发引擎（方案 §4）：事件队列 / 区域线程 / 出站队列 =================
+ * 目的（§1/§4）：把「判断（区域五事件）」和「推送（WS 写）」从触摸注入热路径里搬走。
+ * 热路径只剩两件事：合成帧写 uinput（writev）+ push 队列（微秒级、永不阻塞、永不碰 socket）。
+ */
+
 /**
  * (vtouch-doc: now_ns)
  * @brief 单调时钟（纳秒），事件时间戳用。
  * @return  单调递增的纳秒数（CLOCK_MONOTONIC）。
- */
-
-/* ================= 转发引擎（方案 §4）：事件队列 / 区域线程 / 出站队列 =================
- * 目的（§1/§4）：把「判断（区域五事件）」和「推送（WS 写）」从触摸注入热路径里搬走。
- * 热路径只剩两件事：合成帧写 uinput（writev）+ push 队列（微秒级、永不阻塞、永不碰 socket）。
  */
 uint64_t now_ns(void)
 {
