@@ -1,3 +1,5 @@
 build/
 thirdparty/
 *.log
+__pycache__/
+*.pyc
