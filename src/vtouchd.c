@@ -13,8 +13,9 @@
  *   区域线程  region_apply()：五事件判定，slot_in/slot_hit/slot_last 线程私有（§4.4）
  *   出站队列  outq       容量 64 帧，生产者 = 主线程(响应/pev) + 区域线程(region_ev)，
  *                        消费者 = 主线程 POLLOUT 刷出（§4.5）
- *   身份分段  静态两段、不做避让：物理触点 oslot = oid = 物理槽号（0..phys_slots-1，虚拟跳过这一段）；
- *             虚拟触点 oslot = oid = phys_slots + 客户端槽号（§5 改，见 README「身份两段」）
+ *   身份分段  静态两段、不做避让，而且**不落字段**：发给系统的槽位与 tracking id 都是下标的纯函数 ——
+ *             物理触点 = 物理槽号（0..phys_slots-1，虚拟跳过这一段），虚拟触点 = phys_slots + 客户端槽号。
+ *             （README「身份两段」；发射点见 emit_frame）
  *
  * 有意不做（别在这里找）：面板(ImGui) / 区域持久化 / UI 回调 / 旋转换算 / 落盘 —— 完整版在 build/_backup_full_*。
  *
