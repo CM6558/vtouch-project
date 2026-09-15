@@ -49,12 +49,38 @@ struct contact { int id, x, y, down, pending_up; };
 static struct contact phys[MAX_PHYS], virt[MAX_VIRT];
 static int raw_to_logical(int raw, int axis, int *logical);   /* 前向声明（定义在下方） */
 
-/* ---- UI 回调（单进程整合：面板只收 edge 事件；level 状态由渲染线程直读） ---- */
+/* ---- UI 回调（单进程整合：面板在本进程内直接收触摸/事件，无 socket） ---- */
+static int ui_enabled = 0;   /* -ui：开启 UI 回调路径 */
+static void (*vtouch_touch_cb)(int x, int y, int state);   /* state: 1=down 2=move 0=up */
 static void (*vtouch_ev_cb)(const char *line);
-void vtouch_set_event_cb(void (*ev_cb)(const char *))
+void vtouch_set_callbacks(void (*touch_cb)(int, int, int), void (*ev_cb)(const char *))
 {
+    vtouch_touch_cb = touch_cb;
     vtouch_ev_cb = ev_cb;
-    fprintf(stderr, "vtouchd: event callback set ec=%p\n", (void *)ev_cb);
+    fprintf(stderr, "vtouchd: callbacks set tc=%p ec=%p\n", (void *)touch_cb, (void *)ev_cb);
+}
+static int ui_last_down[MAX_PHYS], ui_last_x[MAX_PHYS], ui_last_y[MAX_PHYS];
+static void vtouch_ui_sync(void)
+{
+    int i, lx, ly;
+    if (!vtouch_touch_cb) { fprintf(stderr, "vtouchd: ui_sync cb NULL\n"); return; }
+    for (i = 0; i < phys_slots; i++) {
+        if (phys[i].down && !ui_last_down[i]) {
+            if (raw_to_logical(phys[i].x, 0, &lx) == 0 && raw_to_logical(phys[i].y, 1, &ly) == 0) {
+                vtouch_touch_cb(lx, ly, 1);
+                ui_last_x[i] = lx; ui_last_y[i] = ly;
+            }
+        } else if (phys[i].down && ui_last_down[i]) {
+            if (raw_to_logical(phys[i].x, 0, &lx) == 0 && raw_to_logical(phys[i].y, 1, &ly) == 0 &&
+                (lx != ui_last_x[i] || ly != ui_last_y[i])) {
+                vtouch_touch_cb(lx, ly, 2);
+                ui_last_x[i] = lx; ui_last_y[i] = ly;
+            }
+        } else if (!phys[i].down && ui_last_down[i]) {
+            vtouch_touch_cb(ui_last_x[i], ui_last_y[i], 0);
+        }
+        ui_last_down[i] = phys[i].down;
+    }
 }
 static int next_tracking_id = 1;
 /* single-client frame staging */
@@ -62,11 +88,8 @@ static int frame_open;
 static int frame_seen[MAX_VIRT];
 static struct contact staged[MAX_VIRT];
 static int staged_id;
-/* 订阅通道位掩码（0 = 未订阅）：裸 sub 两个通道都订（老客户端语义不变），
- * sub region 只订区域事件、sub phys 只订原始轨迹 —— 纯区域脚本不必再白收 pev。 */
-#define SUB_REGION 1
-#define SUB_PHYS   2
-static int sub_mask;
+/* pev 订阅 + 已上报状态（变化才广播） */
+static int subscribed;
 static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
 static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n);
 static void drop_client(void);
@@ -324,7 +347,6 @@ static unsigned char slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一帧该槽是否
 static unsigned char slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下时是否命中（onUp 代点依据） */
 static int slot_last_x[MAX_PHYS], slot_last_y[MAX_PHYS]; /* 上次 move 推送位置（位置变化才推） */
 
-static void region_changed(void);   /* 定义在导出接口处（region_add 上方需先声明） */
 static void regions_clear(void)
 {
     region_count = 0;
@@ -355,7 +377,6 @@ static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, 
             rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
             fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
                 rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
-            region_changed();
             return 0;
         }
     }
@@ -368,7 +389,6 @@ static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, 
     rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
     fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
         rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
-    region_changed();
     return 0;
 }
 
@@ -382,10 +402,6 @@ static int region_hit(const struct region *rg, int lx, int ly)
     return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
 }
 
-/* region 表变化通知（面板重绘用，默认 NULL）。WS/面板任何一方改表都触发。 */
-static void (*vtouch_region_cb)(void);
-void vtouch_set_region_cb(void (*cb)(void)) { vtouch_region_cb = cb; }
-static void region_changed(void) { if (vtouch_region_cb) vtouch_region_cb(); }
 /* ---- 导出接口（单进程整合：ImGui 面板直接读写 region 表） ---- */
 void vtouch_region_clear(void) { regions_clear(); }
 int vtouch_region_count(void) { return region_count; }
@@ -403,26 +419,14 @@ int vtouch_get_region(int i, char *id, int idn, int *type, int *a1, int *a2, int
     *enabled = rg->enabled;
     return 0;
 }
-/* 同进程 UI 直读物理触摸（代替 touch_cb 全量镜像）：level 状态轮询，带 slot 下标。
- * arm64 对齐字读写原子，最坏单帧 1px 撕裂；定界数组，无内存不安全。 */
-int vtouch_phys_slots(void) { return phys_slots; }
-int vtouch_phys_get(int i, int *down, int *lx, int *ly)
-{
-    int x, y;
-    if (i < 0 || i >= phys_slots || !down || !lx || !ly) return -1;
-    x = phys[i].x; y = phys[i].y;
-    *down = phys[i].down;
-    if (raw_to_logical(x, 0, lx) < 0 || raw_to_logical(y, 1, ly) < 0) return -1;
-    return 0;
-}
-/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 SUB_REGION 订阅位 */
+/* 命中事件通知（低频：down/up/enter/exit，move 不推）；跟随 subscribed */
 static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {
     char msg[96];
     int n;
     n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
     if (vtouch_ev_cb) vtouch_ev_cb(msg);   /* 面板优先：无 WS 客户端也通知（闪烁/日志） */
-    if (client_fd < 0 || !(sub_mask & SUB_REGION)) {
+    if (client_fd < 0 || !subscribed) {
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (NO-CLIENT/UNSUB)\n",
             id, ev, slot, lx, ly);
         return;
@@ -529,24 +533,10 @@ static int handle_line(char *line, char *resp, size_t cap)
         snprintf(resp, cap, "err region"); return -1;
     }
     if (!strcmp(t, "sub")) {
-        /* sub [region|phys|all]...：不带参数 = 两个通道都订（向后兼容） */
-        char *sm = strtok_r(NULL, " \t", &st);
-        int mask = SUB_REGION | SUB_PHYS;
-        if (sm) {
-            mask = 0;
-            do {
-                if (!strcmp(sm, "region")) mask |= SUB_REGION;
-                else if (!strcmp(sm, "phys")) mask |= SUB_PHYS;
-                else if (!strcmp(sm, "all") || !strcmp(sm, "both")) mask = SUB_REGION | SUB_PHYS;
-                else { snprintf(resp, cap, "err sub"); return -1; }
-            } while ((sm = strtok_r(NULL, " \t", &st)));
-        }
-        if (!mask) { snprintf(resp, cap, "err sub"); return -1; }
-        sub_mask = mask;
-        snprintf(resp, cap, "ok"); return 0;
+        subscribed = 1; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "unsub")) {
-        sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
+        subscribed = 0; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "up")) {
         char *ss = strtok_r(NULL, " \t", &st);
@@ -597,10 +587,7 @@ static int handle_line(char *line, char *resp, size_t cap)
     snprintf(resp, cap, "err unknown"); return -1;
 }
 
-/* pev 状态跟踪每 SYN 必走（region_match 的新按/抬起判定依赖它）；
- * WS 发送只在订阅时走。之前两者绑在一起，无订阅客户端时 ps_down 冻住，
- * 按住的手指每帧重报 down，enter/move/up 全丢。 */
-static void broadcast_phys(int send)
+static void broadcast_phys(void)
 {
     int i, lx, ly, n; char msg[64]; const char *st;
     for (i = 0; i < phys_slots; i++) {
@@ -611,7 +598,6 @@ static void broadcast_phys(int send)
         if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
         if (phys[i].down) { ps_down[i] = 1; ps_x[i] = phys[i].x; ps_y[i] = phys[i].y; }
         else ps_down[i] = 0;
-        if (!send) continue;
         n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i, st, lx, ly);
         if (n <= 0 || (size_t)n >= sizeof msg ||
             ws_send(client_fd, 1, (const unsigned char *)msg, (size_t)n) < 0) {
@@ -645,9 +631,10 @@ static void physical_events(void)
             syn_seen = 1;
             if (emit_frame() < 0) { stop_flag = 1; return; }
             region_match();   /* 物理帧注入完成后才匹配+代点：帧边界安全，不阻塞注入 */
+            vtouch_ui_sync();   /* 进程内回调（透传注入不受影响） */
         }
     }
-    if (syn_seen) broadcast_phys(client_fd >= 0 && (sub_mask & SUB_PHYS));
+    if (syn_seen && client_fd >= 0 && subscribed) broadcast_phys();
     if (n < 0 && (errno == ENODEV || errno == EIO)) stop_flag = 1;
 }
 
@@ -827,7 +814,7 @@ static int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n)
 static void drop_client(void)
 {
     if (client_fd >= 0) { close(client_fd); client_fd = -1; }
-    sub_mask = 0;
+    subscribed = 0;
     owner_reset();
 }
 
@@ -895,7 +882,7 @@ static void apply_args(int argc, char **argv)
         } else if (!strcmp(argv[i], "-h") && i + 1 < argc && parse_long(argv[++i], 2, 100000, &logical_height) == 0) {
         } else if (!strcmp(argv[i], "-p") && i + 1 < argc && parse_long(argv[++i], 1, 65535, &ws_port) == 0) {
         } else if (!strcmp(argv[i], "-ui")) {
-            /* 兼容旧启动行：单进程直读后无用，忽略 */
+            ui_enabled = 1;   /* 触摸镜像转发给渲染进程 (127.0.0.1:27184) */
         } else if (!strcmp(argv[i], "-s") && i + 1 < argc) {
             ++i; /* accepted for compatibility with vtouchmerge start lines; unused */
         } else if (strcmp(argv[i], "-v") && strcmp(argv[i], "-w") && strcmp(argv[i], "-h") &&
@@ -963,7 +950,7 @@ int vtouch_poll_step(int timeout_ms)
         if (ncf >= 0) {
             if (client_fd >= 0) {
                 fprintf(stderr, "vtouchd: kicking old ws client\n");
-                close(client_fd); client_fd = -1; frame_open = 0; sub_mask = 0;
+                close(client_fd); client_fd = -1; frame_open = 0; subscribed = 0;
             }
             setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
             setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -990,17 +977,6 @@ int vtouch_poll_step(int timeout_ms)
 }
 
 void vtouch_cleanup(void) { cleanup(); }
-
-/* UI-only 初始化（渲染进程首阶段）：只定逻辑尺寸+清表，不碰设备/grab/socket。
- * 物理触摸由 JNI 合成 touch_cb 注入验证；全量联调再走 vtouch_init。 */
-int vtouch_init_ui(int w, int h)
-{
-    if (w < 2 || h < 2) return -1;
-    setvbuf(stderr, NULL, _IONBF, 0);
-    logical_width = w; logical_height = h;
-    regions_clear();
-    return 0;
-}
 
 int main(int argc, char **argv)
 {
