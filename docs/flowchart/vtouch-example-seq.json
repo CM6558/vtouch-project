@@ -1,0 +1,201 @@
+{
+ "title": "vtouch-project 完整实现逻辑 (vtouch_touchback.js 示例)",
+ "participants": [
+  {
+   "id": "a",
+   "label": "GitHub Actions"
+  },
+  {
+   "id": "b",
+   "label": "AutoJs6 bundle"
+  },
+  {
+   "id": "c",
+   "label": "vtouchd 核心 (root)"
+  },
+  {
+   "id": "d",
+   "label": "/dev/uinput"
+  },
+  {
+   "id": "e",
+   "label": "Android 应用"
+  }
+ ],
+ "messages": [
+  {
+   "from": "a",
+   "to": "a",
+   "label": "① Actions: 交叉编译 + bundle 生成",
+   "desc": "NDK r27d → vtouchd(arm64+x86_64) → build_bundle.py → artifact"
+  },
+  {
+   "from": "a",
+   "to": "b",
+   "label": "② adb push 部署",
+   "desc": "vtouch_bundle-arm64.js → /sdcard/vtouch_bundle.js → AutoJs6 打开示例脚本"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "③ 示例加载仪式",
+   "desc": "require(bundle) → eval(vt.uiSource) 进主上下文 → bootWatch(handlers)"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "④ 单实例互踢 (vt-takeover)",
+   "desc": "events.broadcast 唯一 token; 旧实例 → 关 UI + vt.stop + exit"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "⑤ vt.ensure(): 幂等启动",
+   "desc": "pid 存活→直返 · 缺则 install: Base64→su cp→chmod 755→/data/local/tmp"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "⑥ wm size 竖屏归一 → nohup",
+   "desc": "W<H 归一 → nohup vtouchd -w W -h H -p 27183 → 写 pid"
+  },
+  {
+   "from": "b",
+   "to": "c",
+   "label": "⑦ 二进制自释放启动",
+   "desc": "vtouchd 单进程拉起 (root)"
+  },
+  {
+   "from": "c",
+   "to": "c",
+   "label": "⑧ vtouch_init: 发现+初始化",
+   "desc": "扫 event0..63 (Type-B) → uinput「vtouch-merged」→ listen 27183 → EVIOCGRAB 最后"
+  },
+  {
+   "from": "b",
+   "to": "c",
+   "label": "⑨ WS 握手连接",
+   "desc": "GET + Sec-WebSocket-Key → SHA-1 accept 校验 · 300ms 重试至超时"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "⑩ loadRegions + ovShow overlay",
+   "desc": "storages「vtouch_regions」→ 区域红描边预览 · 手指蓝点由 pev 驱动"
+  },
+  {
+   "from": "b",
+   "to": "c",
+   "label": "⑪ region 配置下发",
+   "desc": "region clear → add swipeL 矩形(60,2200,660,2900) → add tapR"
+  },
+  {
+   "from": "b",
+   "to": "c",
+   "label": "⑫ sub 订阅触摸流",
+   "desc": "daemon 此后推 pev · 断连/被踢需重 sub"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "⑬ 读线程死循环 (loop)",
+   "desc": "recv → dispatch; 无数据 3s ping; region_ev → 五事件 handlers"
+  },
+  {
+   "from": "e",
+   "to": "e",
+   "label": "⑭ 用户手指按下 swipeL",
+   "desc": "示例: 屏幕左下方 (500,2500) 按下"
+  },
+  {
+   "from": "d",
+   "to": "c",
+   "label": "⑮ 物理触摸事件流 (24B)",
+   "desc": "ABS_MT_SLOT=0 · TRACKING_ID → POSITION_X/Y → 迁移 phys[0]"
+  },
+  {
+   "from": "c",
+   "to": "c",
+   "label": "⑯ SYN 帧边界三连",
+   "desc": "emit_frame 物理透传 → region_match → vtouch_ui_sync"
+  },
+  {
+   "from": "c",
+   "to": "d",
+   "label": "⑰ 合并帧注入 uinput",
+   "desc": "物理槽 0 原样 + BTN_TOUCH + SYN_REPORT → 单次 writev"
+  },
+  {
+   "from": "c",
+   "to": "c",
+   "label": "⑱ region_match 命中判定",
+   "desc": "500,2500 ∈ swipeL → slot_hit=1 → 推 down · 纯监听不拦截"
+  },
+  {
+   "from": "c",
+   "to": "b",
+   "label": "⑲ region_ev swipeL down",
+   "desc": "进程内回调(面板闪烁) → WS 推送 region_ev swipeL down 0 500 2500"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "⑳ onDown 分发 + 触发回触",
+   "desc": "dispatch → P2C → onDown → ovFlash 绿闪 → toast → busy(threads.start)"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "㉑ 虚拟手指 swipe 序列",
+   "desc": "finger().swipe(720,2400→720,1200,350ms): down→move×N→up · 16.7ms 插值"
+  },
+  {
+   "from": "b",
+   "to": "c",
+   "label": "㉒ 虚拟触点注入命令",
+   "desc": "down 0 720 2400 / move 0 x y ×N / up 0 (逻辑坐标)"
+  },
+  {
+   "from": "c",
+   "to": "c",
+   "label": "㉓ 坐标换算 + 虚拟槽",
+   "desc": "logical_to_raw → 槽 phys_slots+0 · tracking id 自增(回绕)"
+  },
+  {
+   "from": "c",
+   "to": "d",
+   "label": "㉔ 合并帧发射 (writev)",
+   "desc": "物理+虚拟同帧 → 单次 SYN_REPORT → 零碎片"
+  },
+  {
+   "from": "d",
+   "to": "e",
+   "label": "㉕ InputReader → 应用响应",
+   "desc": "系统识别上滑手势 · 虚拟触摸不产生 region_ev → 回触不自激"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "㉖ pev 持续推送",
+   "desc": "物理手指 move/up 状态变化才推 → overlay 手指更新"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "㉗ 5s 兜底轮询",
+   "desc": "regions JSON 比对 → 变更即重新下发 · rotSync 旋转自适应"
+  },
+  {
+   "from": "b",
+   "to": "b",
+   "label": "㉘ 断线重连闭环 (异常)",
+   "desc": "读线程异常 → close → ensure → connect → 重新 sub + pushRegions"
+  },
+  {
+   "from": "c",
+   "to": "c",
+   "label": "㉙ 退出清理",
+   "desc": "exit → vt.stop(killall)+关UI · vtouchd cleanup: 释放 EVIOCGRAB + 销毁 uinput"
+  }
+ ]
+}
