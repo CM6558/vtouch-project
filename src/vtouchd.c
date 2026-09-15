@@ -92,17 +92,17 @@ static unsigned long cap_prop[CAP_LONGS(INPUT_PROP_MAX)];
 static struct input_absinfo cap_ai[ABS_MAX + 1];
 static unsigned char cap_ai_ok[ABS_MAX + 1];
 static char cap_name[UINPUT_MAX_NAME_SIZE];
-static int oid_mod = 32;                 /* 物理屏声明的 tracking id 量程（与 32 取小） */
-static int id_max = 31;                  /* 要给系统声明的 tracking id 上限 = max(两段最大 id, oid_mod-1) */
+static int id_max = 31;                  /* 要给系统声明的 tracking id 上限 = 两段身份的并集上界 = total_slots-1 */
 
-/* 一根触点。oslot/oid 是**我们发给系统的身份**，静态分两段（§5 改）：
- *   物理段 0..phys_slots-1：物理触点的 oslot/oid 就取它所在的物理槽号，原样透传；
- *   虚拟段 phys_slots..：虚拟触点的 oslot/oid = phys_slots + 客户端槽号。
- * 两段重合不可能，所以不需要「查表避让活跃 id」；代价是合并设备要声明 phys+virt 个槽
- * （Android 侧 pointer id 只有 0..31，见 README「身份两段」的取舍）。 */
+/* 一根触点：只存**来源状态**（原始坐标 + 生命周期）。
+ *
+ * 发给系统的身份（ABS_MT_SLOT 与 ABS_MT_TRACKING_ID）不存字段 —— 它是下标的纯函数：
+ *     物理：下标 i               → 槽 = id = i              （物理段 0..phys_slots-1）
+ *     虚拟：下标 k（客户端槽号） → 槽 = id = phys_slots + k  （虚拟段紧接其后）
+ * 两段值域不交 ⇒ 并发撞号在结构上不可能；也没有哨兵值、分配失败、需要同步的字段 ——
+ * 发射点直接算（emit_frame），所以「身份字段与范围不同步」这类 bug 无处可生。 */
 struct contact {
-    int id, x, y, down, pending_up;      /* 来源状态：内核 id 与原始坐标 */
-    int oslot, oid;                      /* 下游身份：槽位 / tracking id（静态，不查表） */
+    int x, y, down, pending_up;          /* 来源状态：原始坐标与生命周期 */
 };
 static struct contact phys[MAX_PHYS], virt[MAX_VIRT];
 
@@ -577,11 +577,6 @@ static int validate_device(const char *p, int *slots, int *xmin, int *xmax, int 
         if (bit(cap_abs, c) && ioctl(f, EVIOCGABS(c), &cap_ai[c]) == 0) cap_ai_ok[c] = 1;
     memset(cap_name, 0, sizeof cap_name);
     if (ioctl(f, EVIOCGNAME(sizeof cap_name - 1), cap_name) < 0) cap_name[0] = 0;
-    if (cap_ai_ok[ABS_MT_TRACKING_ID]) {
-        int mx = cap_ai[ABS_MT_TRACKING_ID].maximum;
-        oid_mod = (mx >= 31) ? 32 : mx + 1;
-        if (oid_mod < 2) oid_mod = 2;
-    }
     close(f);
     return 0;
 }
@@ -695,7 +690,7 @@ static int setup_uinput(void)
         if (c == ABS_MT_POSITION_Y) { a.absinfo.minimum = axmin[1]; a.absinfo.maximum = axmax[1]; }
         /* 冲突① 真机 ABS_MT_TOOL_TYPE 量程常是 0..0，装不下 tool 值 → 抬到能装 PALM */
         if (c == ABS_MT_TOOL_TYPE && a.absinfo.maximum < MT_TOOL_PALM) a.absinfo.maximum = MT_TOOL_PALM;
-        /* 冲突② 槽数上限不能小于我们真正要用的池 */
+        /* 冲突② 槽数上限不能小于两段身份之和 */
         if (c == ABS_MT_SLOT && a.absinfo.maximum < total_slots - 1) a.absinfo.maximum = total_slots - 1;
         /* 冲突③ tracking id 量程至少要装下两段身份（物理段 + 虚拟段） */
         if (c == ABS_MT_TRACKING_ID && a.absinfo.maximum < id_max) a.absinfo.maximum = id_max;
@@ -749,8 +744,8 @@ static void cleanup(void)
 static int any_emitted(void)
 {
     int i;
-    for (i = 0; i < phys_slots; i++) if (phys[i].down && phys[i].oslot >= 0) return 1;
-    for (i = 0; i < vslots; i++) if (virt[i].down && virt[i].oslot >= 0) return 1;
+    for (i = 0; i < phys_slots; i++) if (phys[i].down) return 1;
+    for (i = 0; i < vslots; i++) if (virt[i].down) return 1;
     return 0;
 }
 
@@ -766,27 +761,27 @@ static int emit_frame(void)
     int i;
     if (u_fd < 0) return -1;
     ev_n = 0;
-    for (i = 0; i < phys_slots; i++) if (phys[i].pending_up && phys[i].oslot >= 0) {
-        ev_add(EV_ABS, ABS_MT_SLOT, phys[i].oslot);
+    for (i = 0; i < phys_slots; i++) if (phys[i].pending_up) {
+        ev_add(EV_ABS, ABS_MT_SLOT, i);                    /* 物理身份 = 下标 */
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
-    for (i = 0; i < vslots; i++) if (virt[i].pending_up && virt[i].oslot >= 0) {
-        ev_add(EV_ABS, ABS_MT_SLOT, virt[i].oslot);
+    for (i = 0; i < vslots; i++) if (virt[i].pending_up) {
+        ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);       /* 虚拟身份 = phys_slots + 下标 */
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
     for (i = 0; i < phys_slots; i++) {
         if (!phys[i].down) continue;
-        ev_add(EV_ABS, ABS_MT_SLOT, phys[i].oslot);
-        ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys[i].oid);
+        ev_add(EV_ABS, ABS_MT_SLOT, i);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, i);
         ev_add(EV_ABS, ABS_MT_POSITION_X, phys[i].x);
         ev_add(EV_ABS, ABS_MT_POSITION_Y, phys[i].y);
         ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
         if (has_pressure) ev_add(EV_ABS, ABS_MT_PRESSURE, pressure_max);
     }
     for (i = 0; i < vslots; i++) {
-        if (!virt[i].down || virt[i].oslot < 0) continue;
-        ev_add(EV_ABS, ABS_MT_SLOT, virt[i].oslot);
-        ev_add(EV_ABS, ABS_MT_TRACKING_ID, virt[i].oid);
+        if (!virt[i].down) continue;
+        ev_add(EV_ABS, ABS_MT_SLOT, phys_slots + i);
+        ev_add(EV_ABS, ABS_MT_TRACKING_ID, phys_slots + i);
         ev_add(EV_ABS, ABS_MT_POSITION_X, virt[i].x);
         ev_add(EV_ABS, ABS_MT_POSITION_Y, virt[i].y);
         ev_add(EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
@@ -813,9 +808,7 @@ static int set_virtual(struct contact *state, int slot, const char *name, int x,
 {
     if (!strcmp(name, "down")) {
         if (state[slot].down || state[slot].pending_up) return -1;
-        /* §5 改：虚拟身份 = phys_slots + 客户端槽号 —— 直接算出来，不查表、不可能撞物理段。
-         * 物理段永远空着给物理手指，所以「池满顶掉虚拟」那条路也一起没了。 */
-        state[slot].oslot = phys_slots + slot; state[slot].oid = phys_slots + slot;
+        /* 身份不落字段：发射时按下标算（虚拟段 = phys_slots + 客户端槽号）。 */
         state[slot].down = 1;
     } else if (!strcmp(name, "move")) {
         if (!state[slot].down) return -1;
@@ -978,8 +971,7 @@ static void physical_events(void)
             if (e.code == ABS_MT_TRACKING_ID) {
                 if (e.value < 0) {                       /* 抬手 */
                     phys[selected_slot].down = 0; phys[selected_slot].pending_up = 1;
-                } else {                                 /* 按下 */
-                    phys[selected_slot].id = e.value;
+                } else {                                 /* 按下（原值不用存：身份按下标算） */
                     phys[selected_slot].down = 1;
                     ps_press_ns[selected_slot] = now_ns();   /* §4.2：down 上报的是「按下时刻」 */
                 }
@@ -1333,33 +1325,21 @@ static void apply_args(int argc, char **argv)
 static int vtouch_init(int argc, char **argv)
 {
     char dev[PATH_MAX];
-    int z;
     setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，别被全缓冲吞掉 */
     apply_args(argc, argv);
     if (logical_width < 2 || logical_height < 2) {
         fprintf(stderr, "vtouchd: 需要逻辑尺寸（-w 宽 -h 高）\n");
         return -2;
     }
-    memset(phys, 0, sizeof phys); memset(virt, 0, sizeof virt);
-    for (z = 0; z < MAX_PHYS; z++) { phys[z].oslot = -1; phys[z].oid = -1; }
-    for (z = 0; z < MAX_VIRT; z++) {
-        virt[z].oslot = -1; virt[z].oid = -1;
-        staged[z].oslot = -1; staged[z].oid = -1;
-    }
+    memset(phys, 0, sizeof phys); memset(virt, 0, sizeof virt); memset(staged, 0, sizeof staged);
     if (discover(dev, sizeof dev) < 0) {
         fprintf(stderr, "vtouchd: 没找到 Type-B 触摸屏（扫了 /dev/input/event0..63）\n");
         return -2;
     }
-    /* §5 改：身份静态两段 —— 物理段 0..phys_slots-1（原样透传，虚拟跳过这一段），
-     * 虚拟段 phys_slots..phys_slots+vslots-1（= phys_slots + 客户端槽号）。
-     * 声明给系统的槽数与 tracking id 量程都要盖住两段之和。 */
+    /* 身份两段（物理段 0..phys_slots-1，虚拟段紧接其后）只是下标算术，没有要初始化的状态；
+     * 这里只算两个要给系统声明的数：槽数与 tracking id 上界 —— 都盖住两段之和。 */
     total_slots = phys_slots + vslots;
-    id_max = (total_slots - 1 > oid_mod - 1) ? total_slots - 1 : oid_mod - 1;
-    for (z = 0; z < phys_slots; z++) { phys[z].oslot = z; phys[z].oid = z; }
-    for (z = 0; z < vslots; z++) {
-        virt[z].oslot = phys_slots + z; virt[z].oid = phys_slots + z;
-        staged[z].oslot = phys_slots + z; staged[z].oid = phys_slots + z;
-    }
+    id_max = total_slots - 1;
     if (setup_uinput() < 0) {
         fprintf(stderr, "vtouchd: uinput 建设备失败: %s\n", strerror(errno));
         return -3;
