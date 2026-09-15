@@ -78,17 +78,26 @@ class WS:
         self.s.settimeout(timeout)
         try:
             while len(self.buf) < 2:
-                self.buf += self.s.recv(4096)
+                chunk = self.s.recv(4096)
+                if not chunk:                      # EOF：服务端直接关连接（不空转）
+                    raise RuntimeError("服务端关闭连接（EOF）")
+                self.buf += chunk
             b0, b1 = self.buf[0], self.buf[1]
             ln = b1 & 127
             off = 2
             if ln == 126:
                 while len(self.buf) < 4:
-                    self.buf += self.s.recv(4096)
+                    chunk = self.s.recv(4096)
+                    if not chunk:
+                        raise RuntimeError("服务端关闭连接（EOF）")
+                    self.buf += chunk
                 ln = struct.unpack(">H", self.buf[2:4])[0]
                 off = 4
             while len(self.buf) < off + ln:
-                self.buf += self.s.recv(4096)
+                chunk = self.s.recv(4096)
+                if not chunk:
+                    raise RuntimeError("服务端关闭连接（EOF）")
+                self.buf += chunk
             if (b0 & 15) == 8:
                 raise RuntimeError("服务端关闭连接")
             payload = self.buf[off:off + ln]

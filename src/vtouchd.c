@@ -1,13 +1,21 @@
-/* vtouchd —— 最小版：物理触摸合并 + 虚拟触摸注入（单文件、无 UI、无区域）。
+/* vtouchd —— 最小核心 + 转发引擎（Plan B：合并/转发 与 判断/推送 分离）。
  *
- * 它做什么（只有两件事）：
- *   1) 抓取物理触摸屏（EVIOCGRAB），把内核的 Type-B 触点解析进 phys[]；
- *   2) 在同一帧里把「物理触点 + 虚拟触点（来自 WS 命令的注入）」一起写进一个 uinput 设备，
- *      对外表现为一块统一的触摸屏：应用看到的手指既可能是真手，也可能是注入的。
+ * 它做什么（两块）：
+ *   ① 合并方案（进）：EVIOCGRAB 抓物理触摸屏 → 解析进 phys[]；和 WS 注入的 virt[] 在同一帧里
+ *      一起写进一个 uinput 设备 → Android 看到一块统一的触摸屏，不区分真手与注入。
+ *   ② 转发方案（出）：物理帧边界（SYN）之后，把「状态变化」入队，判断与推送各自离开热路径：
+ *        事件队列 region_q  → 区域线程（五事件判定）→ region_ev
+ *        出站队列 outq      → 主循环 POLLOUT → 客户端 socket
+ *      注入热路径只剩 writev + push（微秒级、永不阻塞）；客户端再慢也只堆积在它的出站队列里。
  *
- * 它有意不做什么（从完整版删掉的功能，别在这里找）：
- *   区域匹配 / 事件推送 / 订阅(sub) / 面板(ImGui) / 区域持久化 / pev 上报 /
- *   出站队列线程 / UI 钩子 / 旋转坐标换算 / 落盘。这些都在 build/_backup_full_* 里的完整版。
+ * 引擎部件（方案 §4/§5，都是本文件里新加的）：
+ *   事件队列  region_q   SPSC 无锁环，容量 64，主线程 push / 区域线程 pop（§4.3）
+ *   区域线程  region_apply()：五事件判定，slot_in/slot_hit/slot_last 线程私有（§4.4）
+ *   出站队列  outq       容量 64 帧，生产者 = 主线程(响应/pev) + 区域线程(region_ev)，
+ *                        消费者 = 主线程 POLLOUT 刷出（§4.5）
+ *   身份池    oslot/oid 统一分配，虚拟 id 永远避开活跃物理 id（§5，见 alloc_oid）
+ *
+ * 有意不做（别在这里找）：面板(ImGui) / 区域持久化 / UI 回调 / 旋转换算 / 落盘 —— 完整版在 build/_backup_full_*。
  *
  * 用法: vtouchd -w <竖屏宽> -h <竖屏高> [-p 端口] [-v 虚拟槽数]
  * 协议: 一行一条命令，回一行（loopback WS，单客户端，新连接踢旧连接）
@@ -20,8 +28,17 @@
  *   begin_frame              -> ok | err frame
  *   point <slot> <down|move|up> <lx> <ly> -> ok | err point   （多指合并进同一帧）
  *   end_frame                -> ok | err frame
+ *   region clear             -> ok <n>
+ *   region list              -> region <id> <type> <a1> <a2> <a3> <a4> <en>… / end <n>
+ *   region add <id> <type> <a1> <a2> <a3> <a4> <en> -> ok <n> | err region
+ *   sub [phys|region|all]    -> ok（不带参数 = 两个通道都订；只订 region 就不白收高频 pev）
+ *   unsub                    -> ok
  *
- * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点）；grab 与 uinput 不受影响。
+ * 出站事件（订阅后推给客户端，走发送队列）：
+ *   pev <slot> <down|up|move> <lx> <ly>                          物理触摸轨迹
+ *   region_ev <id> <down|up|enter|exit|move> <slot> <lx> <ly>     区域五事件（只报物理手指）
+ *
+ * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点 + 清它的出站队列）；grab 与 uinput 不受影响。
  * 构建: sh scripts/build.sh
  */
 #include <arpa/inet.h>
@@ -33,6 +50,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -43,6 +61,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_PHYS 64
@@ -96,6 +115,19 @@ static int next_tracking_id;
 static volatile int g_reemit;
 static int g_emit_fail;
 
+/* 物理槽上一帧的快照（主线程私有）：转发方案用它判 down/up/move。
+ * ps_down 在 broadcast_phys 里更新 —— 区域线程拿到的事件因此永远是「完整帧状态」的快照。 */
+static int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];
+static uint64_t ps_press_ns[MAX_PHYS];   /* 该槽按下时刻（方案 §4.2 的 down=按下时刻） */
+
+/* 订阅通道（§4.6）：sub 不带参数 = 两个都订；只订 region 的脚本不白收高频 pev */
+#define SUB_PHYS   1
+#define SUB_REGION 2
+static int sub_mask;
+
+static pthread_t region_tid;
+static int region_started;
+
 static int write_full(int fd, const void *buf, size_t len);
 static void drop_client(void);
 static int alloc_oslot(void);
@@ -126,6 +158,372 @@ static int logical_to_raw(int logical, int axis, int *raw)
     if (value < axmin[axis]) value = axmin[axis];
     if (value > axmax[axis]) value = axmax[axis];
     *raw = (int)value; return 0;
+}
+
+/* raw -> logical：把物理触点从内核 raw 轴值换算回脚本坐标（pev / 区域判定用）。 */
+static int raw_to_logical(int raw, int axis, int *logical)
+{
+    int size = axis ? logical_height : logical_width;
+    long span = (long)axmax[axis] - axmin[axis];
+    long v;
+    if (size < 2 || span <= 0) return -1;
+    if (raw < axmin[axis]) raw = axmin[axis];
+    if (raw > axmax[axis]) raw = axmax[axis];
+    v = ((long)(raw - axmin[axis]) * (size - 1) + span / 2) / span;
+    if (v < 0) v = 0; if (v > size - 1) v = size - 1;
+    *logical = (int)v; return 0;
+}
+
+/* ================= 转发引擎（方案 §4）：事件队列 / 区域线程 / 出站队列 =================
+ * 目的（§1/§4）：把「判断（区域五事件）」和「推送（WS 写）」从触摸注入热路径里搬走。
+ * 热路径只剩两件事：合成帧写 uinput（writev）+ push 队列（微秒级、永不阻塞、永不碰 socket）。
+ */
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ---- §4.2 事件：主线程只填这张结构，判断留给消费者 ---- */
+#define VT_UP   0
+#define VT_DOWN 1
+#define VT_MOVE 2
+struct vt_ev {
+    int slot;                /* 槽号（物理槽 or 虚拟槽） */
+    int action;              /* 0=up 1=down 2=move */
+    int x, y;                /* 逻辑坐标 */
+    uint64_t ts;             /* down=按下时刻, move/up=帧到达时刻（手势识别预留） */
+    int virt;                /* 0=物理 1=虚拟 —— 区域线程按这一位过滤（防自激） */
+};
+
+/* ---- §4.3 事件队列：SPSC 无锁环，容量 64；生产者 = 主线程，消费者 = 区域线程 ---- */
+#define VTQ_CAP 64
+struct vtq {
+    struct vt_ev buf[VTQ_CAP];
+    unsigned head, tail;     /* 消费者只写 head，生产者只写 tail */
+    unsigned long drops;     /* 溢出丢弃计数（仅诊断） */
+};
+static struct vtq region_q;
+static unsigned r_seen_gen;  /* 区域线程已见到的区域表代次（用于重置私有状态） */
+
+/* 溢出只在日志里留一行（首次 3 次 + 每 100 次；计数器本身在队列结构里）——
+ * 诊断用，不进热路径的代价：一次整数取模比较。 */
+static void queue_drop_log(const char *what, unsigned long n)
+{
+    if (n <= 3 || n % 100 == 0)
+        fprintf(stderr, "vtouchd: %s队列满，丢弃第 %lu 条（§4.3/§4.5 丢最旧，注入路径不受影响）\n", what, n);
+}
+
+/* 溢出策略（§4.3）：① 队尾同槽同类的 move 原地合并（丢旧位置不影响增量语义）；
+ * ② 仍然满 → 丢最旧（CAS 推 head，因为消费者也在推它）。
+ * 队列满时丢的必然是 move：同时按下的物理槽 ≤ phys_slots，down/up 事件在手指抬起前
+ * 每槽只会出现一次，不可能把 64 格塞满；而且就算真丢，注入路径也照常（只是事件少一条）。 */
+static void vtq_push(struct vtq *q, const struct vt_ev *ev)
+{
+    unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
+    unsigned head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    unsigned i;
+    if (tail - head >= VTQ_CAP) {
+        struct vt_ev *last = &q->buf[(tail - 1u) % VTQ_CAP];
+        if (ev->action == VT_MOVE && last->action == VT_MOVE &&
+            last->slot == ev->slot && last->virt == ev->virt) {
+            last->x = ev->x; last->y = ev->y; last->ts = ev->ts;
+            return;
+        }
+        for (i = 0; i < 4; i++) {
+            if (__atomic_compare_exchange_n(&q->head, &head, head + 1u, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) { queue_drop_log("事件", ++q->drops); break; }
+            if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head < VTQ_CAP) break;   /* 消费者已腾出格子 */
+        }
+        if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head >= VTQ_CAP) { queue_drop_log("事件", ++q->drops); return; }
+    }
+    q->buf[tail % VTQ_CAP] = *ev;
+    __atomic_store_n(&q->tail, tail + 1u, __ATOMIC_RELEASE);
+}
+
+static int vtq_pop(struct vtq *q, struct vt_ev *ev)
+{
+    unsigned head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
+    unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return 0;
+    *ev = q->buf[head % VTQ_CAP];
+    __atomic_store_n(&q->head, head + 1u, __ATOMIC_RELEASE);
+    return 1;
+}
+
+/* ---- §4.5 出站发送队列：把 socket 写从热路径上摘干净 ----
+ * 生产者两个：主线程（命令响应 / pev）与区域线程（region_ev）→ 一把短锁只包住一次 memcpy；
+ * 消费者一个：主循环在 POLLOUT 时刷出。客户端慢 → 只在这个队列里堆积，注入路径照常跑。
+ * 满了丢最旧（响应/事件都是增量状态，丢一条不影响注入正确性）。 */
+#define OUTQ_CAP 64
+#define OUTQ_MSG (MAX_LINE + 8)          /* region list 这种多行响应也要放得下 */
+struct out_msg { int len, sent; char buf[OUTQ_MSG]; };
+static struct out_msg outq[OUTQ_CAP];
+static int outq_head, outq_tail;
+static unsigned long outq_dropped;
+static pthread_mutex_t outq_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void outq_reset(void)
+{
+    pthread_mutex_lock(&outq_lock);
+    outq_head = outq_tail = 0;
+    pthread_mutex_unlock(&outq_lock);
+}
+
+static int outq_pending(void)
+{
+    int r;
+    pthread_mutex_lock(&outq_lock);
+    r = (outq_head != outq_tail);
+    pthread_mutex_unlock(&outq_lock);
+    return r;
+}
+
+static void outq_push(const char *p, size_t n)
+{
+    int next;
+    if (client_fd < 0 || n == 0 || n >= (size_t)OUTQ_MSG) return;
+    pthread_mutex_lock(&outq_lock);
+    next = (outq_tail + 1) % OUTQ_CAP;
+    if (next == outq_head) { outq_head = (outq_head + 1) % OUTQ_CAP; queue_drop_log("出站", ++outq_dropped); }
+    outq[outq_tail].len = (int)n;
+    outq[outq_tail].sent = 0;
+    memcpy(outq[outq_tail].buf, p, n);
+    outq_tail = next;
+    pthread_mutex_unlock(&outq_lock);
+}
+
+/* 主循环专用：socket 可写才写（客户端 socket 握手后设为非阻塞，所以这里绝不阻塞主线程）。
+ * 写不完留着，下一次 POLLOUT 继续；真错（EPIPE/ECONNRESET）才踢客户端。 */
+static void outq_flush(void)
+{
+    for (;;) {
+        struct out_msg *m;
+        ssize_t n;
+        pthread_mutex_lock(&outq_lock);
+        if (client_fd < 0 || outq_head == outq_tail) { pthread_mutex_unlock(&outq_lock); return; }
+        m = &outq[outq_head];
+        n = send(client_fd, m->buf + m->sent, (size_t)(m->len - m->sent), MSG_NOSIGNAL);
+        if (n > 0) {
+            m->sent += (int)n;
+            if (m->sent >= m->len) outq_head = (outq_head + 1) % OUTQ_CAP;
+        }
+        pthread_mutex_unlock(&outq_lock);
+        if (n <= 0) {
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return;
+            drop_client();
+            return;
+        }
+    }
+}
+
+/* ---- §4.4 区域表 + 五事件判定（完整版 region_match 的逻辑原样搬入，语义零变化）----
+ * 只有两个线程碰它：区域线程（读表 + 写下面三张状态表）、主线程的 region 命令（写表，短锁）。
+ * 状态表是区域线程私有的（§4.4：主线程不再持有区域状态），主线程只用 region_gen 通知重置。
+ * 这把锁不在注入路径上（注入路径只 push 队列）。 */
+#define MAX_REGIONS 32
+#define REGION_ID_MAX 15
+struct region {
+    char id[REGION_ID_MAX + 1];
+    int type;              /* 0=rect 1=circle */
+    int enabled;
+    int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
+};
+static struct region regions[MAX_REGIONS];
+static int region_count;
+static unsigned region_gen;
+static unsigned char r_slot_in[MAX_PHYS][MAX_REGIONS];    /* 上一个事件后该槽是否在区域内 */
+static unsigned char r_slot_hit[MAX_PHYS][MAX_REGIONS];   /* 本次按下时是否命中（onUp 代点依据） */
+static int r_slot_last_x[MAX_PHYS], r_slot_last_y[MAX_PHYS]; /* 上次 move 推送位置 */
+static pthread_mutex_t region_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void regions_clear(void)
+{
+    pthread_mutex_lock(&region_lock);
+    region_count = 0;
+    memset(regions, 0, sizeof regions);
+    region_gen++;                    /* 区域线程看到代次变化会自己清私有状态 */
+    pthread_mutex_unlock(&region_lock);
+}
+
+static int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
+{
+    struct region *rg;
+    size_t n;
+    int i, rc = 0;
+    if (!id) return -1;
+    n = strlen(id);
+    if (n == 0 || n > REGION_ID_MAX) return -1;
+    if (type != 0 && type != 1) return -1;
+    if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
+    if (a1 >= logical_width || a2 >= logical_height) return -1;
+    pthread_mutex_lock(&region_lock);
+    /* 同 id 查重：存在则原地更新（开关/挪区域只改属性，不新增） */
+    for (i = 0; i < region_count; i++) {
+        if (strcmp(regions[i].id, id) == 0) {
+            rg = &regions[i];
+            rg->type = type;
+            rg->enabled = enabled ? 1 : 0;
+            rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+            region_gen++;
+            fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
+                    rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+            pthread_mutex_unlock(&region_lock);
+            return 0;
+        }
+    }
+    if (region_count >= MAX_REGIONS) rc = -1;
+    else {
+        rg = &regions[region_count++];
+        memset(rg, 0, sizeof *rg);
+        memcpy(rg->id, id, n);
+        rg->type = type;
+        rg->enabled = enabled ? 1 : 0;
+        rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
+        region_gen++;
+        fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
+                rg->id, type, a1, a2, a3, a4, rg->enabled, region_count);
+    }
+    pthread_mutex_unlock(&region_lock);
+    return rc;
+}
+
+static int region_hit(const struct region *rg, int lx, int ly)
+{
+    if (!rg->enabled) return 0;
+    if (rg->type == 1) {
+        int dx = lx - rg->a1, dy = ly - rg->a2;
+        return dx * dx + dy * dy <= rg->a3 * rg->a3;
+    }
+    return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
+}
+
+/* 命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
+ * 只订了 phys 通道就不白推 region_ev（和 pev 的开关对称）。 */
+static void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
+{
+    char msg[96];
+    int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    if (sub_mask & SUB_REGION) {
+        if (n > 0 && (size_t)n < sizeof msg) outq_push(msg, (size_t)n);
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
+    } else {
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (UNSUB)\n", id, ev, slot, lx, ly);
+    }
+}
+
+/* 五事件判定的事件化版本（§4.4）。与完整版 region_match 逐分支等价：
+ *   DOWN → 命中就 slot_hit=1 并报 down；无论命中与否都把按下位置记为 move 基准
+ *          （完整版：`if (phys.down) { if (!ps_down) {...} }`）
+ *   MOVE → 先用「上一事件的 slot_in」比 enter/exit，再在「此前已在区域内且位置变化」时报 move
+ *          （完整版：`if (hit && !slot_in) enter; else if (!hit && slot_in) exit;` + move 条件）
+ *   UP   → slot_hit && 命中 → 报 up，随后清 slot_hit
+ *          （完整版在「该槽空闲后的下一帧」清；事件模型里没有空闲帧，就地在抬起事件清 ——
+ *            up 的判定还要 ps_down（只有抬起事件才进这分支），清早了不会误报）
+ * 每事件末 slot_in = (down && hit)，与完整版每帧末的赋值一致。 */
+static void region_apply(const struct vt_ev *ev)
+{
+    int rid, hit, lx = ev->x, ly = ev->y, slot = ev->slot;
+    if (slot < 0 || slot >= MAX_PHYS) return;
+    pthread_mutex_lock(&region_lock);
+    if (r_seen_gen != region_gen) {                 /* region clear/add：重置本线程私有状态 */
+        r_seen_gen = region_gen;
+        memset(r_slot_in, 0, sizeof r_slot_in);
+        memset(r_slot_hit, 0, sizeof r_slot_hit);
+        memset(r_slot_last_x, 0, sizeof r_slot_last_x);
+        memset(r_slot_last_y, 0, sizeof r_slot_last_y);
+    }
+    for (rid = 0; rid < region_count; rid++) {
+        struct region *rg = &regions[rid];
+        int was_in = r_slot_in[slot][rid];
+        if (!rg->enabled) { r_slot_in[slot][rid] = 0; continue; }
+        hit = region_hit(rg, lx, ly);
+        if (ev->action == VT_DOWN) {
+            if (hit) { r_slot_hit[slot][rid] = 1; region_ev_send(rg->id, "down", slot, lx, ly); }
+            r_slot_last_x[slot] = lx; r_slot_last_y[slot] = ly;
+        } else if (ev->action == VT_MOVE) {
+            if (hit && !was_in) region_ev_send(rg->id, "enter", slot, lx, ly);
+            else if (!hit && was_in) region_ev_send(rg->id, "exit", slot, lx, ly);
+            if (hit && was_in && (r_slot_last_x[slot] != lx || r_slot_last_y[slot] != ly)) {
+                r_slot_last_x[slot] = lx; r_slot_last_y[slot] = ly;
+                region_ev_send(rg->id, "move", slot, lx, ly);
+            }
+        } else {
+            if (r_slot_hit[slot][rid] && hit) region_ev_send(rg->id, "up", slot, lx, ly);
+            r_slot_hit[slot][rid] = 0;
+        }
+        r_slot_in[slot][rid] = (ev->action != VT_UP && hit) ? 1 : 0;
+    }
+    pthread_mutex_unlock(&region_lock);
+}
+
+/* 区域线程（§4.4）：只消费队列、只写自己的状态表、只把 region_ev 塞进出站队列。
+ * 绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。 */
+static void *region_thread_main(void *arg)
+{
+    struct vt_ev ev;
+    (void)arg;
+    for (;;) {
+        if (!vtq_pop(&region_q, &ev)) {
+            if (stop_flag) break;
+            usleep(1000);                        /* 空闲 1ms 一轮：不烧 CPU，也不给事件加延迟 */
+            continue;
+        }
+        if (ev.virt) continue;                   /* 虚拟触摸不参与匹配（防自激） */
+        region_apply(&ev);
+    }
+    return NULL;
+}
+
+/* §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
+ * 只推状态变化（down/up/move），静止不刷屏。
+ * 注意：完整版只在 subscribed 时才广播（广播只服务客户端）；现在广播还负责喂区域线程，
+ * 所以每帧都跑，订阅与否只决定 pev 那一路（纯内存比较，不进热路径的写）。 */
+static void broadcast_phys(void)
+{
+    int i, lx, ly, action;
+    struct vt_ev ev;
+    for (i = 0; i < phys_slots; i++) {
+        if (phys[i].down && !ps_down[i]) action = VT_DOWN;
+        else if (!phys[i].down && ps_down[i]) action = VT_UP;
+        else if (phys[i].down && (phys[i].x != ps_x[i] || phys[i].y != ps_y[i])) action = VT_MOVE;
+        else continue;
+        if (raw_to_logical(phys[i].x, 0, &lx) < 0 || raw_to_logical(phys[i].y, 1, &ly) < 0) continue;
+        if (phys[i].down) { ps_down[i] = 1; ps_x[i] = phys[i].x; ps_y[i] = phys[i].y; }
+        else ps_down[i] = 0;
+        ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly; ev.virt = 0;
+        ev.ts = (action == VT_DOWN) ? ps_press_ns[i] : now_ns();
+        vtq_push(&region_q, &ev);                              /* 区域线程（队列唯一消费者） */
+        if (sub_mask & SUB_PHYS) {                             /* 外部客户端（走出站队列） */
+            char msg[64];
+            int n = snprintf(msg, sizeof msg, "pev %d %s %d %d", i,
+                             action == VT_DOWN ? "down" : (action == VT_UP ? "up" : "move"), lx, ly);
+            if (n > 0 && (size_t)n < sizeof msg) outq_push(msg, (size_t)n);
+        }
+    }
+}
+
+/* 虚拟触摸的状态变化也入队（§4.1：virtual 也推，消费者按 virt 位过滤）。
+ * 过滤点就是区域线程那句 `if (ev.virt) continue;` —— 有了这条，才能证明「注入不会自激」。 */
+static int vs_down[MAX_VIRT], vs_x[MAX_VIRT], vs_y[MAX_VIRT];
+static void broadcast_virt(void)
+{
+    int i, lx, ly, action;
+    struct vt_ev ev;
+    for (i = 0; i < vslots; i++) {
+        if (virt[i].down && !vs_down[i]) action = VT_DOWN;
+        else if (!virt[i].down && vs_down[i]) action = VT_UP;
+        else if (virt[i].down && (virt[i].x != vs_x[i] || virt[i].y != vs_y[i])) action = VT_MOVE;
+        else continue;
+        vs_down[i] = virt[i].down;
+        vs_x[i] = virt[i].x; vs_y[i] = virt[i].y;
+        if (raw_to_logical(virt[i].x, 0, &lx) < 0 || raw_to_logical(virt[i].y, 1, &ly) < 0) continue;
+        ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
+        ev.ts = now_ns(); ev.virt = 1;
+        vtq_push(&region_q, &ev);
+        /* 虚拟轨迹不进 pev：pev 只报真手指（客户端自己注入的轨迹不该被回灌） */
+    }
 }
 
 /* 认一块设备是不是 Type-B 触摸屏：EV_ABS 里必须有槽/tracking id/XY 四轴，槽数合规，
@@ -404,6 +802,9 @@ static int emit_frame(void)
     for (i = 0; i < vslots; i++) virt[i].pending_up = 0;
     for (i = 0; i < phys_slots; i++) if (!phys[i].down) { phys[i].oslot = -1; phys[i].oid = -1; }
     for (i = 0; i < vslots; i++) if (!virt[i].down) { virt[i].oslot = -1; virt[i].oid = -1; }
+    /* §4.1：虚拟状态变化也入队（消费者按 virt 位自己过滤）——这样「注入不会自激」是可断言的，
+     * 而不是靠「反正没把虚拟触点喂回去」的口头保证。 */
+    broadcast_virt();
     return 0;
 }
 
@@ -451,7 +852,8 @@ static int set_virtual(struct contact *state, int slot, const char *name, int x,
         nid = alloc_oid();
         if (nid < 0) return -1;
         state[slot].oslot = s2; state[slot].oid = nid; state[slot].seq = ++g_seq;
-        state[slot].id = next_tracking_id;
+        /* 不再写 .id：虚拟触点的下游身份只来自统一池（alloc_oid 已避开活跃物理 id，见 §5）。
+         * 完整版那行 state[slot].id = next_tracking_id 是个没人读的遗留写法，还误导「id 由游标决定」。 */
         state[slot].down = 1;
     } else if (!strcmp(name, "move")) {
         if (!state[slot].down) return -1;
@@ -539,6 +941,65 @@ static int handle_line(char *line, char *resp, size_t cap)
         if (emit_frame() < 0) { frame_open = 0; snprintf(resp, cap, "err frame"); return -1; }
         frame_open = 0; snprintf(resp, cap, "ok"); return 0;
     }
+    /* ---- §4.4/§4.6 区域表：主线程只写表（短锁），判定全在区域线程 ---- */
+    if (!strcmp(t, "region")) {
+        char *op = strtok_r(NULL, " \t", &st);
+        if (op && !strcmp(op, "clear")) {
+            if (strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err region"); return -1; }
+            regions_clear(); snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        if (op && !strcmp(op, "list")) {
+            size_t used = 0;
+            int i, n;
+            if (strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err region"); return -1; }
+            pthread_mutex_lock(&region_lock);
+            n = region_count;
+            for (i = 0; i < region_count && used + 1 < cap; i++) {
+                int w = snprintf(resp + used, cap - used, "region %s %d %d %d %d %d %d\n", regions[i].id,
+                                 regions[i].type, regions[i].a1, regions[i].a2, regions[i].a3, regions[i].a4,
+                                 regions[i].enabled);
+                if (w <= 0 || (size_t)w >= cap - used) break;   /* 放不下就截断：客户端以末行 end 兜底 */
+                used += (size_t)w;
+            }
+            pthread_mutex_unlock(&region_lock);
+            snprintf(resp + used, cap - used, "end %d", n);
+            return 0;
+        }
+        if (op && !strcmp(op, "add")) {
+            char *sid = strtok_r(NULL, " \t", &st), *stype = strtok_r(NULL, " \t", &st);
+            char *sa1 = strtok_r(NULL, " \t", &st), *sa2 = strtok_r(NULL, " \t", &st);
+            char *sa3 = strtok_r(NULL, " \t", &st), *sa4 = strtok_r(NULL, " \t", &st);
+            char *sen = strtok_r(NULL, " \t", &st);
+            int type, a1, a2, a3, a4, en;
+            /* 这里只做「词数 + 数值范围」检查；id 去重/上限、几何合法性（超出逻辑尺寸等）交给 region_add */
+            if (!sid || !*sid || strlen(sid) > REGION_ID_MAX || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
+                strtok_r(NULL, " \t", &st) ||
+                parse_long(stype, 0, 1, &type) || parse_long(sa1, 0, 100000, &a1) || parse_long(sa2, 0, 100000, &a2) ||
+                parse_long(sa3, 0, 100000, &a3) || parse_long(sa4, 0, 100000, &a4) || parse_long(sen, 0, 1, &en) ||
+                region_add(sid, type, a1, a2, a3, a4, en) != 0) {
+                snprintf(resp, cap, "err region"); return -1;
+            }
+            snprintf(resp, cap, "ok %d", region_count); return 0;
+        }
+        snprintf(resp, cap, "err region"); return -1;
+    }
+    /* ---- §4.6 订阅：sub [phys|region|all]，裸 sub = 全订（老脚本语义不变） ---- */
+    if (!strcmp(t, "sub")) {
+        char *ch = strtok_r(NULL, " \t", &st);
+        int want = SUB_PHYS | SUB_REGION;
+        if (ch) {
+            if (!strcmp(ch, "phys")) want = SUB_PHYS;
+            else if (!strcmp(ch, "region")) want = SUB_REGION;
+            else if (!strcmp(ch, "all")) want = SUB_PHYS | SUB_REGION;
+            else { snprintf(resp, cap, "err sub"); return -1; }
+        }
+        if (strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err sub"); return -1; }
+        sub_mask = want; snprintf(resp, cap, "ok"); return 0;
+    }
+    if (!strcmp(t, "unsub")) {
+        if (strtok_r(NULL, " \t", &st)) { snprintf(resp, cap, "err sub"); return -1; }
+        sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
+    }
     snprintf(resp, cap, "err unknown"); return -1;
 }
 
@@ -558,6 +1019,7 @@ static void physical_events(void)
                 } else {                                 /* 按下 */
                     phys[selected_slot].id = e.value;
                     phys[selected_slot].down = 1;
+                    ps_press_ns[selected_slot] = now_ns();   /* §4.2：down 上报的是「按下时刻」 */
                 }
             } else if (e.code == ABS_MT_POSITION_X) phys[selected_slot].x = e.value;
             else if (e.code == ABS_MT_POSITION_Y) phys[selected_slot].y = e.value;
@@ -571,6 +1033,9 @@ static void physical_events(void)
         if (e.type == EV_SYN && e.code == SYN_REPORT) {
             if (emit_frame() < 0) g_emit_fail++;
             else g_emit_fail = 0;
+            /* §4.1 时机：帧边界、emit_frame() 之后入队（快照 = 完整帧状态）。
+             * 完整版是「有订阅才广播」；现在广播还负责喂区域线程，所以每帧都跑（纯内存比较）。 */
+            broadcast_phys();
         }
     }
     if (n < 0 && (errno == ENODEV || errno == EIO)) {
@@ -762,6 +1227,8 @@ static void drop_client(void)
         fprintf(stderr, "vtouchd: ws client dropped\n");
     }
     ws_in_len = 0;
+    sub_mask = 0;          /* §4.6：断连/被踢 → 订阅清零（下一个客户端要自己重新 sub） */
+    outq_reset();          /* §4.6：断连/被踢 → 出站队列销毁（残包不许串给下一个客户端） */
     owner_reset();
 }
 
@@ -854,7 +1321,8 @@ static int client_frame(void)
         if (len >= sizeof line) return -1;
         memcpy(line, payload, len); line[len] = 0;
         handle_line(line, resp, sizeof resp);
-        if (write_full(client_fd, resp, strlen(resp)) < 0) return -1;
+        /* §4.5：响应进发送队列，主线程只在主循环里刷 —— socket 慢不再卡住注入热路径 */
+        outq_push(resp, strlen(resp));
     }
     return 0;
 }
@@ -932,22 +1400,32 @@ static int vtouch_init(int argc, char **argv)
     listen_fd = make_listen();
     if (listen_fd < 0) { cleanup(); return -6; }
     if (ioctl(input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return -5; }
-    fprintf(stderr, "vtouchd: dev=%s pool=%d virt_max=%d pressure=%s ws=127.0.0.1:%d size=%dx%d\n",
-            dev, total_slots, vslots, has_pressure ? "on" : "off", ws_port, logical_width, logical_height);
+    /* §4.3：区域线程最后起 —— 它一起来就吃队列，所以要等「所有能失败的步骤」都过了再拉它 */
+    if (pthread_create(&region_tid, NULL, region_thread_main, NULL) != 0) {
+        fprintf(stderr, "vtouchd: 区域线程创建失败: %s\n", strerror(errno));
+        cleanup(); return -7;
+    }
+    region_started = 1;
+    fprintf(stderr, "vtouchd: dev=%s pool=%d virt_max=%d pressure=%s ws=127.0.0.1:%d size=%dx%d engine=on(evq=%d outq=%d)\n",
+            dev, total_slots, vslots, has_pressure ? "on" : "off", ws_port, logical_width, logical_height,
+            VTQ_CAP, OUTQ_CAP);
     return 0;
 }
 
 /* 单轮 poll：返回 0 = 继续，-1 = 停止 */
 static int vtouch_poll_step(void)
 {
-    struct pollfd p[3];
+    struct pollfd p[4];
     int to = g_reemit ? 5 : 1000;      /* 有待重发的整帧：5ms 一轮，尽快把手抬起来 */
-    int r;
+    int want_out, r;
     if (stop_flag) return -1;
+    want_out = (client_fd >= 0 && outq_pending());
     p[0] = (struct pollfd){ input_fd, POLLIN | POLLHUP | POLLERR, 0 };
     p[1] = (struct pollfd){ listen_fd, POLLIN, 0 };
     p[2] = (struct pollfd){ client_fd, client_fd >= 0 ? (POLLIN | POLLHUP | POLLERR) : 0, 0 };
-    r = poll(p, client_fd >= 0 ? 3 : 2, to);
+    /* §4.5：队列非空就把客户端 fd 也挂上 POLLOUT（可写的 socket 总是报 POLLOUT → poll 立刻返回） */
+    p[3] = (struct pollfd){ client_fd, want_out ? POLLOUT : 0, 0 };
+    r = poll(p, client_fd >= 0 ? 4 : 2, to);
     if (r < 0) {
         if (errno == EINTR) return 0;
         fprintf(stderr, "vtouchd: poll 失败 errno=%d (%s) → 停止\n", errno, strerror(errno));
@@ -979,8 +1457,11 @@ static int vtouch_poll_step(void)
                 fprintf(stderr, "vtouchd: ws 握手失败\n");
                 close(ncf);
             } else {
+                int fl = fcntl(ncf, F_GETFL, 0);
+                if (fl >= 0) fcntl(ncf, F_SETFL, fl | O_NONBLOCK);   /* §4.5：出站写永不阻塞主线程 */
                 client_fd = ncf;
                 ws_in_len = 0;
+                outq_reset();
                 fprintf(stderr, "vtouchd: ws client connected\n");
             }
         }
@@ -990,6 +1471,8 @@ static int vtouch_poll_step(void)
     if (client_fd >= 0 && ((p[2].revents & POLLIN) || ws_in_len > 0)) {
         if (client_frame() < 0) drop_client();
     }
+    /* §4.5：唯一的刷出点 —— 队列里可能是刚入队的响应、区域线程的 region_ev，或本帧的 pev */
+    if (client_fd >= 0 && ((p[3].revents & POLLOUT) || outq_pending())) outq_flush();
     return 0;
 }
 
@@ -1007,9 +1490,11 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     rc = vtouch_init(argc, argv);
-    if (rc != 0) return -rc;            /* 退出码 = 2/3/4/5/6（见 README 的失败出口表） */
+    if (rc != 0) return -rc;            /* 退出码 = 2..7（见 README 的失败出口表） */
     while (vtouch_poll_step() == 0)
         ;
+    stop_flag = 1;                      /* 让区域线程从 1ms 空转里出来 */
+    if (region_started) pthread_join(region_tid, NULL);
     cleanup();
     return 0;
 }
