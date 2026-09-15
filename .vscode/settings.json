@@ -1,0 +1,29 @@
+{
+  "files.associations": {
+    "*.h": "c"
+  },
+  "C_Cpp.default.cStandard": "gnu17",
+  "C_Cpp.default.intelliSenseMode": "linux-clang-arm64",
+  "C_Cpp.default.defines": [
+    "_GNU_SOURCE"
+  ],
+  "search.exclude": {
+    "build/**": true,
+    "docs/diagrams/**/*.json": true,
+    "docs/diagrams/**/*.svg": true
+  },
+  "files.watcherExclude": {
+    "build/**": true,
+    "docs/diagrams/**/*.png": true,
+    "docs/diagrams/**/*.svg": true
+  },
+  "terminal.integrated.profiles.windows": {
+    "git-bash": {
+      "path": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "-l"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "git-bash"
+}

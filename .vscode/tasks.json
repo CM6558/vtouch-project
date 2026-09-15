@@ -1,0 +1,126 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build: vtouchd (arm64 · 全部模块)",
+      "detail": "sh scripts/build.sh —— NDK 交叉编译 src/*.c → build/vtouchd（-Wall -Wextra -Werror）",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "scripts/build.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "check: 语法检查当前文件（NDK clang）",
+      "detail": "只跑 -fsyntax-only，秒级；用的是 build.sh 同一套 NDK 与同一组告警开关",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "-c",
+        "CC=C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang; \"$CC\" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -fsyntax-only \"${relativeFile}\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "device: deploy（推二进制并对账 md5）",
+      "detail": "sh scripts/deploy.sh deploy —— 需要 adb + 设备 root",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "scripts/deploy.sh",
+        "deploy"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "device: start（起 daemon）",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "scripts/deploy.sh",
+        "start"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "device: stop（停 daemon，释放物理触摸）",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "scripts/deploy.sh",
+        "stop"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "device: status（pid + 日志尾部）",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "scripts/deploy.sh",
+        "status"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "test: ws_smoke（协议面，需 daemon 在跑 + adb forward）",
+      "detail": "adb forward tcp:27183 tcp:27183 之后跑 python tests/ws_smoke.py（退出码 0 = 全过）",
+      "type": "process",
+      "command": "python",
+      "args": [
+        "tests/ws_smoke.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "test: id_split_check（身份两段，读合并设备抓包）",
+      "detail": "需要设备上抓过 /data/local/tmp/merged.log（见 scripts/ondev-capture.sh）",
+      "type": "process",
+      "command": "python",
+      "args": [
+        "tests/id_split_check.py",
+        "--require-both"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "diagrams: 重渲四张工程图",
+      "detail": "sh build/_render_planb.sh（生成/渲染脚本在 build/ 下，未入库；缺失就说明没同步过这几张图）",
+      "type": "process",
+      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
+      "args": [
+        "build/_render_planb.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ]
+}

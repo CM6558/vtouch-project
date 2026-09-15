@@ -1,0 +1,29 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "Android arm64 (NDK r27d / API 24)",
+      "compilerPath": "C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd",
+      "intelliSenseMode": "linux-clang-arm64",
+      "cStandard": "gnu17",
+      "defines": [
+        "_GNU_SOURCE"
+      ],
+      "includePath": [
+        "${workspaceFolder}/src",
+        "C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/18/include",
+        "C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android",
+        "C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}/src",
+          "C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include"
+        ],
+        "limitSymbolsToIncludedHeaders": true
+      },
+      "compilerArgs": [],
+      "forcedInclude": []
+    }
+  ]
+}
