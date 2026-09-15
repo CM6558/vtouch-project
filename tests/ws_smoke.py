@@ -149,6 +149,12 @@ def main():
     r = ws.cmd("bogus")
     ok("未知命令 → %r" % r) if (r or "").startswith("err") else bad("未知命令应答异常: %r" % r)
 
+    for line, want in [("sub", "ok"), ("sub phys", "ok"), ("sub region", "ok"), ("sub all", "ok"),
+                       ("sub bogus", "err"), ("sub phys extra", "err"), ("unsub", "ok")]:
+        r = ws.cmd(line)
+        got = "ok" if (r or "").startswith("ok") else "err"
+        (ok if got == want else bad)("%s → %r（期望 %s）" % (line, r, want))
+
     r = ws.cmd("point 0 down 10 10")
     ok("帧外 point 被拒 → %r" % r) if (r or "").startswith("err") else bad("帧外 point 竟然通过: %r" % r)
 

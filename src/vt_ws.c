@@ -622,7 +622,7 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
         char *ch = strtok_r(NULL, " \t", stp);
         int want = SUB_PHYS | SUB_REGION;
         if (ch) {
-            if (!strcmp(ch, "g.phys")) want = SUB_PHYS;
+            if (!strcmp(ch, "phys")) want = SUB_PHYS;
             else if (!strcmp(ch, "region")) want = SUB_REGION;
             else if (!strcmp(ch, "all")) want = SUB_PHYS | SUB_REGION;
             else { snprintf(resp, cap, "err sub"); return -1; }
