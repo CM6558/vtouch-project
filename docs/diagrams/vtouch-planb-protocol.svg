@@ -89,7 +89,7 @@
   <g id="node-p2" data-graph-role="node" data-node-id="p2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,222,890,278">
   <rect x="230.0" y="222.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="250.0" text-anchor="middle" class="node-title" font-size="18.0">down|move|up &lt;slot&gt; &lt;x&gt; &lt;y&gt;</text>
-  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:907 → ok；帧满/池满 → err point</text>
+  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:907 → ok；槽未按下/坐标非法 → err point</text>
   </g>
   <g id="node-p3" data-graph-role="node" data-node-id="p3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,300,890,356">
   <rect x="230.0" y="300.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -123,8 +123,8 @@
   </g>
   <g id="node-e3" data-graph-role="node" data-node-id="e3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,848,890,904">
   <rect x="230.0" y="848.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
-  <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">err point：帧已提交或槽池耗尽</text>
-  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:925 与 ok 同列，按词区分</text>
+  <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">err point：槽未按下 / 帧内重复 slot</text>
+  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:925 身份是静态两段，不再有「池满」这条</text>
   </g>
   <g id="node-u1" data-graph-role="node" data-node-id="u1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1006,890,1062">
   <rect x="230.0" y="1006.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>

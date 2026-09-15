@@ -113,7 +113,7 @@
   <g id="node-a4" data-graph-role="node" data-node-id="a4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,378,890,434">
   <rect x="230.0" y="378.0" width="660.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
   <text x="560.0" y="406.0" text-anchor="middle" class="node-title" font-size="18.0">setup_uinput：能力镜像 + 4 处冲突</text>
-  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">src:262 tool/槽数/id 池/名字与 bus；id 池量程 src:557</text>
+  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">src:262 tool/槽数/tracking id 量程/名字与 bus；量程下限 src:565</text>
   </g>
   <g id="node-a5" data-graph-role="node" data-node-id="a5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,456,890,512">
   <rect x="230.0" y="456.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
@@ -218,7 +218,7 @@
   <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2416,890,2472">
   <rect x="230.0" y="2416.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="2444.0" text-anchor="middle" class="node-title" font-size="18.0">② broadcast_phys()：快照是「帧状态」而不是活数组</text>
-  <text x="560.0" y="2466.0" text-anchor="middle" class="node-sub">src:120/483 消费者拿到的永远是整帧之后的值（§4.1）</text>
+  <text x="560.0" y="2466.0" text-anchor="middle" class="node-sub">src:120/483 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 src:1352</text>
   </g>
   <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,2494,890,2550">
   <rect x="230.0" y="2494.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>

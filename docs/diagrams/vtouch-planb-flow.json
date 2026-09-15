@@ -105,7 +105,7 @@
       "width": 660,
       "height": 56,
       "label": "setup_uinput：能力镜像 + 4 处冲突",
-      "sublabel": "src:262 tool/槽数/id 池/名字与 bus；id 池量程 src:557",
+      "sublabel": "src:262 tool/槽数/tracking id 量程/名字与 bus；量程下限 src:565",
       "fill": "#fff7ed",
       "stroke": "#f97316",
       "flat": true
@@ -378,7 +378,7 @@
       "width": 660,
       "height": 56,
       "label": "② broadcast_phys()：快照是「帧状态」而不是活数组",
-      "sublabel": "src:120/483 消费者拿到的永远是整帧之后的值（§4.1）",
+      "sublabel": "src:120/483 消费者拿到的永远是整帧之后的值（§4.1）；身份静态两段 src:1352",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
