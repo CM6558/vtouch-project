@@ -19,7 +19,7 @@ CC="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android${API}-clan
 [ -f "$CC" ] || { echo "缺编译器 $CC —— 检查 NDK_ROOT / API_LEVEL / 平台"; exit 1; }
 
 mkdir -p build
-"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/vtouchd.c -o build/vtouchd
+"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/*.c -o build/vtouchd   # 模块化后是多个 .c，一起链成一个可执行
 
 ls -l build/vtouchd
 md5sum build/vtouchd

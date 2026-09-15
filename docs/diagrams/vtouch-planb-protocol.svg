@@ -84,87 +84,87 @@
   <g id="node-p1" data-graph-role="node" data-node-id="p1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,144,890,200">
   <rect x="230.0" y="144.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="172.0" text-anchor="middle" class="node-title" font-size="18.0">ping / res / reset</text>
-  <text x="560.0" y="194.0" text-anchor="middle" class="node-sub">src:843/844/849 → pong · res &lt;w&gt; &lt;h&gt; raw … · ok</text>
+  <text x="560.0" y="194.0" text-anchor="middle" class="node-sub">vt_ws.c:471/324/329 → pong · res &lt;w&gt; &lt;h&gt; raw … · ok</text>
   </g>
   <g id="node-p2" data-graph-role="node" data-node-id="p2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,222,890,278">
   <rect x="230.0" y="222.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="250.0" text-anchor="middle" class="node-title" font-size="18.0">down|move|up &lt;slot&gt; &lt;x&gt; &lt;y&gt;</text>
-  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">src:862 → ok；槽未按下/坐标非法 → err point</text>
+  <text x="560.0" y="272.0" text-anchor="middle" class="node-sub">vt_ws.c:349 → ok；槽未按下/坐标非法 → err point</text>
   </g>
   <g id="node-p3" data-graph-role="node" data-node-id="p3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,300,890,356">
   <rect x="230.0" y="300.0" width="660.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
   <text x="560.0" y="328.0" text-anchor="middle" class="node-title" font-size="18.0">begin_frame / point / end_frame</text>
-  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">src:880 帧内暂存 staged → 原子多指单 SYN</text>
+  <text x="560.0" y="350.0" text-anchor="middle" class="node-sub">vt_ws.c:374 帧内暂存 staged → 原子多指单 SYN</text>
   </g>
   <g id="node-p4" data-graph-role="node" data-node-id="p4" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,378,890,434">
   <rect x="230.0" y="378.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="406.0" text-anchor="middle" class="node-title" font-size="18.0">region add|del|clear|list …</text>
-  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">src:900 只写表返回 ok &lt;n&gt;；list 以 end &lt;n&gt; 兜底</text>
+  <text x="560.0" y="428.0" text-anchor="middle" class="node-sub">vt_ws.c:397 只写表返回 ok &lt;n&gt;；list 以 end &lt;n&gt; 兜底</text>
   </g>
   <g id="node-p5" data-graph-role="node" data-node-id="p5" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,456,890,512">
   <rect x="230.0" y="456.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="484.0" text-anchor="middle" class="node-title" font-size="18.0">sub / unsub [phys|region|all]</text>
-  <text x="560.0" y="506.0" text-anchor="middle" class="node-sub">src:942/954 裸 sub = 全订（老脚本语义不变）</text>
+  <text x="560.0" y="506.0" text-anchor="middle" class="node-sub">vt_ws.c:443/457 裸 sub = 全订（老脚本语义不变）</text>
   </g>
   <g id="node-p6" data-graph-role="node" data-node-id="p6" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,534,890,590">
   <rect x="230.0" y="534.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="562.0" text-anchor="middle" class="node-title" font-size="18.0">其它 → err unknown</text>
-  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">src:958 未识别命令不改变任何状态</text>
+  <text x="560.0" y="584.0" text-anchor="middle" class="node-sub">vt_ws.c:477 未识别命令不改变任何状态</text>
   </g>
   <g id="node-e1" data-graph-role="node" data-node-id="e1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,692,890,748">
   <rect x="230.0" y="692.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="720.0" text-anchor="middle" class="node-title" font-size="18.0">err region：词数/数值/去重/上限</text>
-  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">src:930 id ≤15 字符、坐标 0..100000、去重与上限在 region_add</text>
+  <text x="560.0" y="742.0" text-anchor="middle" class="node-sub">vt_ws.c:429 id ≤15 字符、坐标 0..100000、去重与上限在 region_add</text>
   </g>
   <g id="node-e2" data-graph-role="node" data-node-id="e2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,770,890,826">
   <rect x="230.0" y="770.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="798.0" text-anchor="middle" class="node-title" font-size="18.0">err sub：未知名或多带词</text>
-  <text x="560.0" y="820.0" text-anchor="middle" class="node-sub">src:942 只认 phys / region / all</text>
+  <text x="560.0" y="820.0" text-anchor="middle" class="node-sub">vt_ws.c:443 只认 phys / region / all</text>
   </g>
   <g id="node-e3" data-graph-role="node" data-node-id="e3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,848,890,904">
   <rect x="230.0" y="848.0" width="660.0" height="56.0" rx="10.0" fill="#fef2f2" stroke="#ef4444" stroke-width="1.8"/>
   <text x="560.0" y="876.0" text-anchor="middle" class="node-title" font-size="18.0">err point：槽未按下 / 帧内重复 slot</text>
-  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">src:880 身份是静态两段，不再有「池满」这条</text>
+  <text x="560.0" y="898.0" text-anchor="middle" class="node-sub">vt_ws.c:374 身份是静态两段，不再有「池满」这条</text>
   </g>
   <g id="node-u1" data-graph-role="node" data-node-id="u1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1006,890,1062">
   <rect x="230.0" y="1006.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1034.0" text-anchor="middle" class="node-title" font-size="18.0">pev &lt;槽&gt; &lt;事件&gt; &lt;x&gt; &lt;y&gt;：只报物理</text>
-  <text x="560.0" y="1056.0" text-anchor="middle" class="node-sub">src:517 SUB_PHYS 才推；一整帧的增量（静止不刷屏）</text>
+  <text x="560.0" y="1056.0" text-anchor="middle" class="node-sub">vt_frame.c:189 SUB_PHYS 才推；一整帧的增量（静止不刷屏）</text>
   </g>
   <g id="node-u2" data-graph-role="node" data-node-id="u2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1084,890,1140">
   <rect x="230.0" y="1084.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1112.0" text-anchor="middle" class="node-title" font-size="18.0">region_ev &lt;区域&gt; &lt;事件&gt; &lt;槽&gt; &lt;x&gt; &lt;y&gt;</text>
-  <text x="560.0" y="1134.0" text-anchor="middle" class="node-sub">src:421 五事件 down/enter/move/exit/up</text>
+  <text x="560.0" y="1134.0" text-anchor="middle" class="node-sub">vt_region.c:74 五事件 down/enter/move/exit/up</text>
   </g>
   <g id="node-u3" data-graph-role="node" data-node-id="u3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1162,890,1218">
   <rect x="230.0" y="1162.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1190.0" text-anchor="middle" class="node-title" font-size="18.0">两条推送都过 outq，不直写 socket</text>
-  <text x="560.0" y="1212.0" text-anchor="middle" class="node-sub">src:283 客户端慢不影响注入（§4.5）</text>
+  <text x="560.0" y="1212.0" text-anchor="middle" class="node-sub">vt_queue.c:72 客户端慢不影响注入（§4.5）</text>
   </g>
   <g id="node-k1" data-graph-role="node" data-node-id="k1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1320,890,1376">
   <rect x="230.0" y="1320.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="1348.0" text-anchor="middle" class="node-title" font-size="18.0">新连接 → 踢掉旧连接（ws_kick）</text>
-  <text x="560.0" y="1370.0" text-anchor="middle" class="node-sub">src:1402 被踢方要自己发现（回归 T5）</text>
+  <text x="560.0" y="1370.0" text-anchor="middle" class="node-sub">vtouchd.c:161 被踢方要自己发现（回归 T5）</text>
   </g>
   <g id="node-k2" data-graph-role="node" data-node-id="k2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1398,890,1454">
   <rect x="230.0" y="1398.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="1426.0" text-anchor="middle" class="node-title" font-size="18.0">断连/被踢 → 清订阅 + 丢残包</text>
-  <text x="560.0" y="1448.0" text-anchor="middle" class="node-sub">src:1176 sub_mask=0 + outq_reset</text>
+  <text x="560.0" y="1448.0" text-anchor="middle" class="node-sub">vt_ws.c:188 sub_mask=0 + outq_reset</text>
   </g>
   <g id="node-z1" data-graph-role="node" data-node-id="z1" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1556,890,1612">
   <rect x="230.0" y="1556.0" width="660.0" height="56.0" rx="10.0" fill="#f0fdf4" stroke="#10b981" stroke-width="1.8"/>
   <text x="560.0" y="1584.0" text-anchor="middle" class="node-title" font-size="18.0">① region 命令族：表在主线程、判定在区域线程</text>
-  <text x="560.0" y="1606.0" text-anchor="middle" class="node-sub">src:446/900 主线程拿短锁只写表；写入 bump region_gen 让判据线程重置私有状态</text>
+  <text x="560.0" y="1606.0" text-anchor="middle" class="node-sub">vt_region.c:98 · vt_ws.c:397 主线程拿短锁只写表；写入 bump region_gen 让判据线程重置私有状态</text>
   </g>
   <g id="node-z2" data-graph-role="node" data-node-id="z2" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1634,890,1690">
   <rect x="230.0" y="1634.0" width="660.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
   <text x="560.0" y="1662.0" text-anchor="middle" class="node-title" font-size="18.0">③ region_ev：五事件没有「press」也没有「hold」</text>
-  <text x="560.0" y="1684.0" text-anchor="middle" class="node-sub">src:460-470 down/enter/move/exit/up：按住不动不产生事件，要等就自己 sleep</text>
+  <text x="560.0" y="1684.0" text-anchor="middle" class="node-sub">vt_region.c:113-123 down/enter/move/exit/up：按住不动不产生事件，要等就自己 sleep</text>
   </g>
   <g id="node-z3" data-graph-role="node" data-node-id="z3" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="230,1712,890,1768">
   <rect x="230.0" y="1712.0" width="660.0" height="56.0" rx="10.0" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.8"/>
   <text x="560.0" y="1740.0" text-anchor="middle" class="node-title" font-size="18.0">④ ws_kick：被踢与断连同一条收尾路径</text>
-  <text x="560.0" y="1762.0" text-anchor="middle" class="node-sub">src:1176 因此订阅位不会残留给下一个连接</text>
+  <text x="560.0" y="1762.0" text-anchor="middle" class="node-sub">vt_ws.c:188 因此订阅位不会残留给下一个连接</text>
   </g>
   <g id="legend" data-graph-role="legend">
     <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="60" y="1794" width="676" height="46" rx="10" fill="none" stroke="none"/>
@@ -177,7 +177,7 @@
     <line data-graph-role="decoration" x1="548.8000000000001" y1="1808.0" x2="578.8000000000001" y2="1808.0" stroke="#6b7280" stroke-width="2.4" marker-end="url(#arrowH)"/>
     <text data-graph-role="decoration" x="588.8000000000001" y="1812.0" class="legend">启动 / 收尾 / 线程内部</text>
   </g>
-  <g id="footer" data-graph-role="reserved" data-graph-bounds="70,1852,1064,1868">
-  <text x="70.0" y="1864.0" class="footnote">行号：src/vtouchd.c（1492 行，planb/impl 分支）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4.1–§4.6 / §8）；与 tests/ws_planb_regression.py 的 T1–T5 同源</text>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="70,1852,644,1868">
+  <text x="70.0" y="1864.0" class="footnote">行号：src/ 下各模块（见 vt_internal.h）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4/§8）</text>
   </g>
 </svg>

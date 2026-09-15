@@ -6,7 +6,7 @@
   "width": 1120,
   "height": 1532,
   "title": "Plan B 时序：物理帧 → 区域线程 → 出站队列 → 脚本回触（回触不自激）",
-  "subtitle": "自上而下是时间；竖直虚线是生命线，横向箭头是消息/数据流（行号对 src/vtouchd.c 1492 行，planb/impl）",
+  "subtitle": "自上而下是时间；竖直虚线是生命线，横向箭头是消息/数据流（行号对 src/ 下各模块文件（见 vt_internal.h 的模块地图））",
   "containers": [
     {
       "id": "lifeline0",
@@ -146,7 +146,7 @@
     {
       "id": "m1",
       "flow": "read",
-      "label": "① 手指按下：Type-B 帧（src:962）",
+      "label": "① 手指按下：Type-B 帧（vt_input.c:112）",
       "x1": 200,
       "y1": 236,
       "x2": 410,
@@ -155,7 +155,7 @@
     {
       "id": "m2",
       "flow": "data",
-      "label": "② emit_frame：物理+虚拟同帧一次 writev（src:759）",
+      "label": "② emit_frame：物理+虚拟同帧一次 writev（vt_frame.c:96）",
       "x1": 410,
       "y1": 298,
       "x2": 200,
@@ -164,7 +164,7 @@
     {
       "id": "m3",
       "flow": "neutral",
-      "label": "③ 更新 ps_* 快照（帧后状态，src:500）",
+      "label": "③ 更新 ps_* 快照（帧后状态，vt_frame.c:172）",
       "x1": 436.0,
       "y1": 334,
       "x2": 436.0,
@@ -187,7 +187,7 @@
     {
       "id": "m4",
       "flow": "read",
-      "label": "④ region_q：帧快照入队（src:514）",
+      "label": "④ region_q：帧快照入队（vt_frame.c:186）",
       "x1": 450,
       "y1": 422,
       "x2": 660,
@@ -196,7 +196,7 @@
     {
       "id": "m5",
       "flow": "neutral",
-      "label": "⑤ 五事件判定（状态表线程私有，src:446）",
+      "label": "⑤ 五事件判定（状态表线程私有，vt_region.c:98）",
       "x1": 686.0,
       "y1": 458,
       "x2": 686.0,
@@ -219,7 +219,7 @@
     {
       "id": "m6",
       "flow": "data",
-      "label": "⑥ region_ev down → outq（不直写 socket，src:421）",
+      "label": "⑥ region_ev down → outq（不直写 socket，vt_region.c:74）",
       "x1": 660,
       "y1": 546,
       "x2": 450,
@@ -228,7 +228,7 @@
     {
       "id": "m7",
       "flow": "data",
-      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（src:1425）",
+      "label": "⑦ POLLOUT 刷出：region_ev 命中区域（vtouchd.c:184）",
       "x1": 450,
       "y1": 608,
       "x2": 910,
@@ -237,7 +237,7 @@
     {
       "id": "m8",
       "flow": "control",
-      "label": "⑧ 脚本回触：down/move/up 注入槽（src:862）",
+      "label": "⑧ 脚本回触：down/move/up 注入槽（vt_ws.c:349）",
       "x1": 910,
       "y1": 670,
       "x2": 450,
@@ -246,7 +246,7 @@
     {
       "id": "m9",
       "flow": "neutral",
-      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，src:807）",
+      "label": "⑨ set_virtual → 立即 emit_frame（不进队列，vt_frame.c:141）",
       "x1": 436.0,
       "y1": 706,
       "x2": 436.0,
@@ -278,7 +278,7 @@
     {
       "id": "m11",
       "flow": "read",
-      "label": "⑪ broadcast_virt：virt=1 也入队（src:540）",
+      "label": "⑪ broadcast_virt：virt=1 也入队（vt_frame.c:209）",
       "x1": 450,
       "y1": 856,
       "x2": 660,
@@ -287,7 +287,7 @@
     {
       "id": "m12",
       "flow": "neutral",
-      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（src:490）",
+      "label": "⑫ 门②：virt 事件被跳过 → 无 region_ev（vt_region.c:142）",
       "x1": 686.0,
       "y1": 892,
       "x2": 686.0,
@@ -310,7 +310,7 @@
     {
       "id": "m13",
       "flow": "control",
-      "label": "⑬ up / close → 清订阅 + 丢残包（src:1176）",
+      "label": "⑬ up / close → 清订阅 + 丢残包（vt_ws.c:188）",
       "x1": 910,
       "y1": 980,
       "x2": 450,
@@ -319,7 +319,7 @@
     {
       "id": "m14",
       "flow": "neutral",
-      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（src:729）",
+      "label": "⑭ cleanup：EVIOCGRAB(0) 先放触摸（vtouchd.c:189）",
       "x1": 410,
       "y1": 1042,
       "x2": 200,
@@ -348,7 +348,5 @@
       "label": "线程内部 / 收尾"
     }
   ],
-  "footer": "行号：src/vtouchd.c（1492 行，planb/impl）· clients/vtouch.js；与 docs/diagrams/vtouch-planb-flow、vtouch-planb-engine、vtouch-planb-protocol 同源",
-  "footer_x": 70,
-  "footer_y": 1492
+  "footer": "行号：src/ 下各模块（见 vt_internal.h）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4/§8）"
 }

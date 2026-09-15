@@ -5,7 +5,14 @@ Android 上把**真实手指**和**注入的虚拟手指**合成**一条**触摸
 **「合并 / 转发」与「判断 / 推送」分离** —— 注入路径只往队列里塞事件，判断与推送都在别的路子上，互不阻塞。
 
 ```
-src/vtouchd.c                   daemon：EVIOCGRAB 抓物理触摸屏 + uinput 合并 + WS 注入
+src/vt_internal.h               模块地图 + 共享类型 + struct vt_state g + 各模块原型
+src/vtouchd.c                   进程：共享状态定义 / 参数 / init / poll 主循环 / main
+src/vt_input.c                  物理输入（认设备 / 读帧）+ 建 uinput 合并设备
+src/vt_frame.c                  组帧（iovec / 一次 writev）+ 合帧、身份两段、转发
+src/vt_ws.c                     WebSocket（握手 / 帧解析 / 命令族）
+src/vt_region.c                 区域表 / 五事件判定 / 区域线程
+src/vt_queue.c                  事件队列（SPSC 无锁环）+ 出站发送队列
+src/vt_util.c                   小工具（参数解析 / 逻辑↔raw 换算 / 时钟）
                                + 事件队列 → 区域线程（五事件判定）→ 出站队列 → 客户端
 clients/vtouch.js               AutoJs6 客户端（Finger API：down/move/up/tap/swipe/frame）
 clients/region_demo.js          示例：建区域 + 订阅，逐条打印 down/enter/move/exit/up
@@ -85,7 +92,33 @@ c.close(); vt.stop();                              // 收尾（务必：否则�
 两条推送的边界是对称的：**`pev` 只报物理手指**（客户端自己注入的轨迹不会被回灌成事件），
 **`region_ev` 只由物理手指产生**（虚拟触点进得了队列、进不了判定）—— 后者就是「回触不会自己触发自己」的保证。
 
-## 引擎是怎么做的（六点，都在 `src/vtouchd.c`）
+## 代码结构（按功能分模块，链成一个可执行）
+
+| 模块 | 职责 |
+|---|---|
+| `src/vt_internal.h` | 模块地图 + 共享类型 + `struct vt_state g` + 各模块原型（**先看这个**）|
+| `src/vtouchd.c` | §1 共享状态定义 + §11 进程（参数 / init / poll 主循环 / 收尾 / main）|
+| `src/vt_input.c` | §7 物理输入（认设备 / 读帧）+ 建 uinput 合并设备 |
+| `src/vt_frame.c` | §8+§9 组帧（一次 `writev`）+ 合帧、身份两段、转发 |
+| `src/vt_ws.c` | §10 WebSocket（握手 / 帧解析 / `cmd_*` 命令族）|
+| `src/vt_region.c` | §5+§6 区域表 / 五事件判定 / 区域线程 |
+| `src/vt_queue.c` | §3+§4 事件队列（SPSC 无锁环）+ 出站队列 |
+| `src/vt_util.c` | §2 小工具（解析 / 坐标换算 / 时钟）|
+
+共享状态只有一份：`struct vt_state g`（`vt_internal.h` 声明、`vtouchd.c` 定义）；各模块私有状态留在
+自己的 `.c` 里当 `static`。构建就是 `src/*.c` 一起链（`sh scripts/build.sh`）。
+
+### 重构/搬迁这类改动怎么证明没改行为
+
+同一批命令分别打给改动前/后的二进制，把合并设备的事件流按内容逐条比对：
+
+```sh
+sh build/_equiv_run.sh pre  build/_vtouchd_v2_flat_handle.bin   # 旧二进制（留档）
+sh build/_equiv_run.sh new  build/vtouchd                       # 新二进制
+# 比对：事件逐条相同 + 24/24 响应相同（本仓库模块化那轮的结果）
+```
+
+## 引擎是怎么做的（六点；实现现在分在 `vt_frame.c` / `vt_region.c` / `vt_queue.c` / `vt_ws.c` 里）
 
 1. **转发（§4.1）**：物理帧边界（每个 `SYN_REPORT`）在 `emit_frame()` 之后做一次状态比较，
    只把**变化**（down/up/move）打包成事件推给队列 —— 推的是「完整帧状态的快照」，静止不刷屏。

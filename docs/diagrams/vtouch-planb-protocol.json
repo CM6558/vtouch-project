@@ -58,7 +58,7 @@
       "width": 660,
       "height": 56,
       "label": "ping / res / reset",
-      "sublabel": "src:843/844/849 → pong · res <w> <h> raw … · ok",
+      "sublabel": "vt_ws.c:471/324/329 → pong · res <w> <h> raw … · ok",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -71,7 +71,7 @@
       "width": 660,
       "height": 56,
       "label": "down|move|up <slot> <x> <y>",
-      "sublabel": "src:862 → ok；槽未按下/坐标非法 → err point",
+      "sublabel": "vt_ws.c:349 → ok；槽未按下/坐标非法 → err point",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -84,7 +84,7 @@
       "width": 660,
       "height": 56,
       "label": "begin_frame / point / end_frame",
-      "sublabel": "src:880 帧内暂存 staged → 原子多指单 SYN",
+      "sublabel": "vt_ws.c:374 帧内暂存 staged → 原子多指单 SYN",
       "fill": "#faf5ff",
       "stroke": "#8b5cf6",
       "flat": true
@@ -97,7 +97,7 @@
       "width": 660,
       "height": 56,
       "label": "region add|del|clear|list …",
-      "sublabel": "src:900 只写表返回 ok <n>；list 以 end <n> 兜底",
+      "sublabel": "vt_ws.c:397 只写表返回 ok <n>；list 以 end <n> 兜底",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -110,7 +110,7 @@
       "width": 660,
       "height": 56,
       "label": "sub / unsub [phys|region|all]",
-      "sublabel": "src:942/954 裸 sub = 全订（老脚本语义不变）",
+      "sublabel": "vt_ws.c:443/457 裸 sub = 全订（老脚本语义不变）",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -123,7 +123,7 @@
       "width": 660,
       "height": 56,
       "label": "其它 → err unknown",
-      "sublabel": "src:958 未识别命令不改变任何状态",
+      "sublabel": "vt_ws.c:477 未识别命令不改变任何状态",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -136,7 +136,7 @@
       "width": 660,
       "height": 56,
       "label": "err region：词数/数值/去重/上限",
-      "sublabel": "src:930 id ≤15 字符、坐标 0..100000、去重与上限在 region_add",
+      "sublabel": "vt_ws.c:429 id ≤15 字符、坐标 0..100000、去重与上限在 region_add",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -149,7 +149,7 @@
       "width": 660,
       "height": 56,
       "label": "err sub：未知名或多带词",
-      "sublabel": "src:942 只认 phys / region / all",
+      "sublabel": "vt_ws.c:443 只认 phys / region / all",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -162,7 +162,7 @@
       "width": 660,
       "height": 56,
       "label": "err point：槽未按下 / 帧内重复 slot",
-      "sublabel": "src:880 身份是静态两段，不再有「池满」这条",
+      "sublabel": "vt_ws.c:374 身份是静态两段，不再有「池满」这条",
       "fill": "#fef2f2",
       "stroke": "#ef4444",
       "flat": true
@@ -175,7 +175,7 @@
       "width": 660,
       "height": 56,
       "label": "pev <槽> <事件> <x> <y>：只报物理",
-      "sublabel": "src:517 SUB_PHYS 才推；一整帧的增量（静止不刷屏）",
+      "sublabel": "vt_frame.c:189 SUB_PHYS 才推；一整帧的增量（静止不刷屏）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -188,7 +188,7 @@
       "width": 660,
       "height": 56,
       "label": "region_ev <区域> <事件> <槽> <x> <y>",
-      "sublabel": "src:421 五事件 down/enter/move/exit/up",
+      "sublabel": "vt_region.c:74 五事件 down/enter/move/exit/up",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -201,7 +201,7 @@
       "width": 660,
       "height": 56,
       "label": "两条推送都过 outq，不直写 socket",
-      "sublabel": "src:283 客户端慢不影响注入（§4.5）",
+      "sublabel": "vt_queue.c:72 客户端慢不影响注入（§4.5）",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -214,7 +214,7 @@
       "width": 660,
       "height": 56,
       "label": "新连接 → 踢掉旧连接（ws_kick）",
-      "sublabel": "src:1402 被踢方要自己发现（回归 T5）",
+      "sublabel": "vtouchd.c:161 被踢方要自己发现（回归 T5）",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -227,7 +227,7 @@
       "width": 660,
       "height": 56,
       "label": "断连/被踢 → 清订阅 + 丢残包",
-      "sublabel": "src:1176 sub_mask=0 + outq_reset",
+      "sublabel": "vt_ws.c:188 sub_mask=0 + outq_reset",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -240,7 +240,7 @@
       "width": 660,
       "height": 56,
       "label": "① region 命令族：表在主线程、判定在区域线程",
-      "sublabel": "src:446/900 主线程拿短锁只写表；写入 bump region_gen 让判据线程重置私有状态",
+      "sublabel": "vt_region.c:98 · vt_ws.c:397 主线程拿短锁只写表；写入 bump region_gen 让判据线程重置私有状态",
       "fill": "#f0fdf4",
       "stroke": "#10b981",
       "flat": true
@@ -253,7 +253,7 @@
       "width": 660,
       "height": 56,
       "label": "③ region_ev：五事件没有「press」也没有「hold」",
-      "sublabel": "src:460-470 down/enter/move/exit/up：按住不动不产生事件，要等就自己 sleep",
+      "sublabel": "vt_region.c:113-123 down/enter/move/exit/up：按住不动不产生事件，要等就自己 sleep",
       "fill": "#eff6ff",
       "stroke": "#3b82f6",
       "flat": true
@@ -266,7 +266,7 @@
       "width": 660,
       "height": 56,
       "label": "④ ws_kick：被踢与断连同一条收尾路径",
-      "sublabel": "src:1176 因此订阅位不会残留给下一个连接",
+      "sublabel": "vt_ws.c:188 因此订阅位不会残留给下一个连接",
       "fill": "#f8fafc",
       "stroke": "#94a3b8",
       "flat": true
@@ -376,7 +376,7 @@
       "label": "启动 / 收尾 / 线程内部"
     }
   ],
-  "footer": "行号：src/vtouchd.c（1492 行，planb/impl 分支）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4.1–§4.6 / §8）；与 tests/ws_planb_regression.py 的 T1–T5 同源",
+  "footer": "行号：src/ 下各模块（见 vt_internal.h）· clients/vtouch.js · docs/VTOUCH_ARCH_PLAN.md（§4/§8）",
   "footer_x": 70,
   "footer_y": 1864
 }
