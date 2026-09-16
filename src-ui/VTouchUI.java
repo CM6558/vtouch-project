@@ -292,10 +292,13 @@ public class VTouchUI {
                 try {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                     if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
-                        /* 先遮挡（这一帧起屏幕上看不到面板）→ 再改尺寸 / 换新 Surface → 等首帧上屏恢复 */
+                        /* 先遮挡（这一帧起屏幕上看不到面板）→ 再改尺寸 / 换新 Surface → 等首帧上屏恢复。
+                         * 诊断开关 VTOUCH_UI_NOGUARD=1：**不遮挡**，把平时只有 ~10ms 的错位状态
+                         * 持续成整段换绑时间（~300ms），这样 9fps 的录屏也能拍下来看它到底什么样。 */
                         guard = true; guardT0 = System.currentTimeMillis();
                         Object tt = txnNew();
-                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, 0.0f);
+                        if (!"1".equals(System.getenv("VTOUCH_UI_NOGUARD")))
+                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, 0.0f);
                         txnCall(tt, "setBufferSize", new Class<?>[]{SCC, int.class, int.class},
                                 layer, d2[0], d2[1]);
                         txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},

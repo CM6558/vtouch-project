@@ -77,6 +77,9 @@ static volatile int g_swap_armed = 0, g_swap_done = 0;
 /* 换绑后逐帧打点（只打 8 帧）：转屏时"面板卡片闪现到错位置"这类问题靠它定位 ——
  * 每帧把 surface 尺寸、方向、面板落位、屏幕尺寸一起打出来，哪一帧用了旧值一目了然。 */
 static int g_diag_frames = 0;
+/* 待生效的显示状态（Java 线程写、渲染线程在接手新窗口时取用；见 nativeOnDisplay 注释） */
+static volatile int g_pend_disp = 0;
+static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 
 /* 面板几何（唯一来源：下面 #define + panel_w()/in_panel() + build_panel() 三处同公式）
@@ -1726,6 +1729,10 @@ static void *render_thread_fn(void *)
         pthread_mutex_lock(&g_mu);
         if (g_swap_win) {   /* 换 Surface（首次 / 换方向 / 换尺寸）：旧 EGL surface 必须销毁，
                              * 否则还挂在旧窗口上（尺寸还是旧的）。context/ImGui 都保留。 */
+            if (g_pend_disp) {   /* 落位/朝向与新窗口**同时**生效（避免"新落位画进旧缓冲"那一帧） */
+                g_pend_disp = 0;
+                on_display(g_pend_w, g_pend_h, g_pend_rot);
+            }
             if (g_surf != EGL_NO_SURFACE) {
                 eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
                 eglDestroySurface(g_dpy, g_surf); g_surf = EGL_NO_SURFACE;
@@ -2007,12 +2014,17 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeOnSurface(JNIEnv *env, jclass, jint i
     ALOGI("surface ready t=+%.0fms", (double)t_since_start());
 }
 
-/* Java 轮询到方向/尺寸变化就调它（随后会再送一个新 Surface） */
+/* Java 轮询到方向/尺寸变化就调它（随后会再送一个新 Surface）。
+ *
+ * **只暂存，不当场改面板落位**：Java 线程改落位、渲染线程画帧 —— 两者之间有个缝：
+ * "新落位 + 旧尺寸缓冲"会被画出一帧（真机实测：那一帧面板形状正常、位置不对，就是用户看到的
+ * "窗口位置闪现"；平时被 alpha 遮挡挡住，边界上会漏）。所以落位改成**在渲染线程接手新窗口的
+ * 那一刻一起生效**，让"换尺寸/换 surface/换落位"在时间上不可分割。 */
 JNIEXPORT void JNICALL Java_VTouchUI_nativeOnDisplay(JNIEnv *, jclass, jint w, jint h, jint rot)
 {
-    pthread_mutex_lock(&g_mu);
-    on_display(w, h, rot);
-    pthread_mutex_unlock(&g_mu);
+    g_pend_w = w; g_pend_h = h; g_pend_rot = rot;
+    __sync_synchronize();
+    g_pend_disp = 1;
 }
 
 JNIEXPORT void JNICALL Java_VTouchUI_nativeDestroy(JNIEnv *, jclass)
