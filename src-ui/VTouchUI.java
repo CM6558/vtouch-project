@@ -225,8 +225,11 @@ public class VTouchUI {
         int tick = 0;
         long visWarn = 0, dispWarn = 0;   /* 各失败路径的限频时刻 */
         for (;;) {
-            /* 40ms：可见性判定要跟手（点「关闭 UI」屏幕要立刻干净）；显示状态按事件 + 兜底周期 */
-            try { Thread.sleep(40); } catch (Throwable t) {}
+            /* 平时 40ms（可见性判定跟手够了）；**转屏期间收紧到 5ms** ——
+             * 这两段等待（观察窗内查值、遮挡期内等首帧）直接决定"屏幕上看不到面板"的时长：
+             * 原来各要等最多一个 40ms 周期，收紧后各 ≤5ms。 */
+            boolean tight = guard || System.currentTimeMillis() < settleUntil;
+            try { Thread.sleep(tight ? 5 : 40); } catch (Throwable t) {}
             /* ① 转屏遮挡收尾：越早恢复越好（此刻屏幕是隐的） */
             if (guard) {
                 boolean done = nativeTakeSwapDone() != 0;
