@@ -74,6 +74,9 @@ static int g_swap_win = 0;
 /* 换绑后"首帧是否真的提交了"的信号：Java 在转屏时先把图层 alpha 归 0（挡住被拉伸的旧尺寸帧），
  * 拿到这个信号才恢复 alpha。用"eglSwapBuffers 成功"当判据 —— 与探针实测同一口径（误差 ~6ms）。 */
 static volatile int g_swap_armed = 0, g_swap_done = 0;
+/* 换绑后逐帧打点（只打 8 帧）：转屏时"面板卡片闪现到错位置"这类问题靠它定位 ——
+ * 每帧把 surface 尺寸、方向、面板落位、屏幕尺寸一起打出来，哪一帧用了旧值一目了然。 */
+static int g_diag_frames = 0;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 
 /* 面板几何（唯一来源：下面 #define + panel_w()/in_panel() + build_panel() 三处同公式）
@@ -1731,6 +1734,7 @@ static void *render_thread_fn(void *)
             g_win = g_win_new; g_win_new = 0;
             g_swap_win = 0;
             g_swap_armed = 1;      /* 下一帧成功提交 = 新 surface 的首帧上屏 */
+            g_diag_frames = 8;     /* 接下来 8 帧逐帧打点（转屏定位用） */
             g_need = 1;
             g_force_frames = 4;
             ALOGI("surface swapped t=+%.0fms", (double)t_since_start());
@@ -1882,6 +1886,12 @@ static void *render_thread_fn(void *)
                 g_drew_once = 1;
                 ALOGI("first frame t=+%.0fms draw=%.0fms", (double)t_since_start(),
                       (double)(now_ms() - b0));
+            }
+            if (g_diag_frames > 0) {
+                g_diag_frames--;
+                ALOGI("diag 换绑后第%d帧: surf=%dx%d rot=%d scr=%dx%d pan=%.0f,%.0f panel=%.0fx%.0f logical=%dx%d",
+                      8 - g_diag_frames, sw, sh, g_rot, g_scr_w, g_scr_h,
+                      (double)g_pan_x, (double)g_pan_y, (double)panel_w(), (double)panel_h(), g_w, g_h);
             }
             long dt = now_ms() - b0;
             g_frame_ms = g_frame_ms * 0.8 + (double)dt * 0.2;
