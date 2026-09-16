@@ -87,6 +87,13 @@ struct region {
 struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used; };
 
 /* ---- 共享状态（唯一定义在 vtouchd.c）---- */
+/* 状态的初值表（唯一一份）：默认构建直接拿它初始化 g；VT_UI 构建拿它初始化引导副本，
+ * 再由 vt_shm_create() 拷进共享内存。两者初始化表达式逐字相同 → 默认构建产物不变。 */
+#define VT_STATE_DEFAULTS \
+    .input_fd = -1, .u_fd = -1, .listen_fd = -1, .client_fd = -1, \
+    .ws_port = 27183, .vslots = 10, .id_max = 31, \
+    .region_lock = PTHREAD_MUTEX_INITIALIZER
+
 struct vt_state {
     volatile sig_atomic_t stop_flag;
     int input_fd, u_fd, listen_fd, client_fd;
@@ -116,7 +123,15 @@ struct vt_state {
     pthread_t region_tid;
     int region_started;
 };
+#ifdef VT_UI
+/* VT_UI：状态本体放在共享内存（面板只读映射同一份），g 只是「指向它的引用」——
+ * 全库 200+ 处 g.xxx 调用点因此一行不用改。启动早期 g_ptr 指向引导副本，
+ * vt_shm_create() 之后指向映射。（见 docs/UI_INTEGRATION.md §4） */
+extern struct vt_state *g_ptr;
+#define g (*g_ptr)
+#else
 extern struct vt_state g;
+#endif
 
 /* ---- vt_util.c ---- */
 /* 把字符串解析成 [lo, hi] 区间内的整数（命令参数解析用）。 (vtouch-doc: parse_long) */
@@ -153,6 +168,12 @@ void outq_flush(void);
 void regions_clear(void);
 /* 新增或覆盖一个区域（主线程持 region_lock 写表）。 (vtouch-doc: region_add) */
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);
+#ifdef VT_UI
+/* 按 id 删除区域（只面板用得到；region_gen 是 vt_region.c 的文件内静态，只能在这里改）。 (vtouch-doc: region_del) */
+int region_del(const char *id);
+/* 区域改名（目标 id 已存在则失败）。 (vtouch-doc: region_rename) */
+int region_rename(const char *old_id, const char *new_id);
+#endif
 /* 点是否落在区域内（矩形含边界；圆按半径平方比较）。 (vtouch-doc: region_hit) */
 int region_hit(const struct region *rg, int lx, int ly);
 /* 发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。 (vtouch-doc: region_ev_send) */
@@ -234,6 +255,16 @@ int ws_has_pending(void);
 /* 复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。 (vtouch-doc: ws_input_reset) */
 void ws_input_reset(void);
 
+#ifdef VT_UI
+/* ---- vt_panel.c（核心拉起面板子进程）---- */
+/* 拉起面板子进程（fork/exec app_process）并把共享内存 fd 传下去；-1 = 没起来（按无 UI 继续）。 (vtouch-doc: vt_panel_start) */
+int  vt_panel_start(int shm_fd);
+/* 主循环每轮调：回收子进程、判心跳、按策略重启。 (vtouch-doc: vt_panel_watchdog) */
+void vt_panel_watchdog(void);
+/* 停面板：SIGTERM → 800ms → SIGKILL。 (vtouch-doc: vt_panel_stop) */
+void vt_panel_stop(void);
+#endif
+
 /* ---- vtouchd.c ---- */
 /* 解析命令行：-w 宽 -h 高（必需，逻辑尺寸）、-p 端口、-v 虚拟槽数。 (vtouch-doc: apply_args) */
 void apply_args(int argc, char **argv);
@@ -247,4 +278,7 @@ void cleanup(void);
 void on_signal(int s);
 /* 进程入口：装信号 → init → 主循环 → 置 stop_flag 并 join 区域线程 → cleanup。 (vtouch-doc: main) */
 int main(int argc, char **argv);
+/* 共享内存契约（VT_UI 构建才展开内容；必须放在 struct vt_state 定义之后）。 */
+#include "vt_shm.h"
+
 #endif /* VT_INTERNAL_H */

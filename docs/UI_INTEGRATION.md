@@ -110,7 +110,7 @@ service.sh(root)
 | `src/vt_region.c` | `region_del(id)` / `region_rename(old,new)`；变更后 `gen++`；区域线程改读共享表 | ~25 行 | **绕不开**：`region_gen` 是文件内静态，面板直接改表碰不到它，区域线程会拿过期状态（`vt_region.c:140` 的 `r_seen_gen != region_gen` 重置私有状态） |
 | `src/vt_frame.c` + `src/vt_input.c` | 吞触摸：`eaten[]` 锁存 + `emit_frame()` 物理段跳过（`vt_frame.c:130-163`）+ 可选 `enqueue_phys_changes()` 跳过 | ~12 行 | 只有核心能做（`EVIOCGRAB` 后 App 看不到任何事件） |
 | `src/vt_queue.c` | `outq_push_text()` 开头把文本行也写进事件环 | 2 行 | 面板免 socket 收事件 |
-| `src/vtouchd.c` + 各 fd | `input_fd`/`u_fd`/`listen_fd`/`client_fd` 设 `FD_CLOEXEC` | ~5 行 | **硬性检查项**：不做 → 面板继承带 `EVIOCGRAB` 的 fd，核心退出后 grab 不释放、**物理触摸回不来**。验证：`ls -l /proc/<ui_pid>/fd` |
+| `src/vtouchd.c` + 各 fd | `input_fd`/`u_fd`/`listen_fd`/`client_fd` 设 `FD_CLOEXEC`；**子进程里再显式清掉共享内存目标 fd 的 CLOEXEC** | ~8 行 | **硬性检查项**：不做 → 面板继承带 `EVIOCGRAB` 的 fd，核心退出后 grab 不释放、**物理触摸回不来**。⚠️ 反向坑：父进程给 memfd 设了 CLOEXEC 后，若它恰好就是 `VT_SHM_FD`，子进程不会走 `dup2`（而 `dup2` 是唯一会清 CLOEXEC 的操作）→ fd 在 exec 时被关掉、随后被 ART 复用成别的 fd（实测被复用成 socket，面板拿不到共享内存）→ 必须 `fcntl(VT_SHM_FD, F_SETFD, 0)`。验证：`sh scripts/ondev-ui-smoke.sh` |
 
 **不再需要**（相对早期方案删掉）：`vtouch_poll_step(ms)` 加 timeout 参数、命令通道/socketpair/eventfd/opcode/解析器、每帧 memcpy 镜像、`outq_push_text` 的"面板当 WS 客户端"版本、`region_del/rename` 做成 C 接口给面板直接调。
 
@@ -214,12 +214,27 @@ service.sh(root)
 | 阶段 | 内容 | 验收门 |
 |---|---|---|
 | P0 | 本方案 + 启动时序图入库 | 文档事实与代码一致（逐条 `文件:行号` 抽查） |
-| P1 | 核心侧改动（`g` 搬迁 + memfd + CLOEXEC + 吞触摸 + `region_del/rename`） | ① 默认构建（`VT_UI` 关）**`.text` 逐字节不变**；② 关掉 UI 跑 `tests/ws_smoke.py` 全绿；③ `/proc/<pid>/fd` 回读确认 `event/uinput` 无泄漏；④ 触摸注入功能与改动前一致 |
+| P1 | 核心侧改动（`g` 搬迁 + memfd + CLOEXEC + 吞触摸 + `region_del/rename`） | ① 默认构建 **`.text`/`.data`/`.rodata` 逐字节不变**（实测通过；整文件 md5 差异只来自新增两个空 TU 的文件名符号）；② 关掉 UI 跑 `tests/ws_smoke.py` 全绿；③ `/proc/<ui_pid>/fd` 回读：`event/uinput` **0 条**、`memfd:vtouch-shm` **≥1 条**（实测通过）；④ 触摸注入功能与改动前一致 |
 | P2 | `vt_panel_start()` + 面板子进程拉起 | 真机：核心起 → 面板起（PID 回读）→ 面板 fd 表**没有** event/uinput；杀面板 → 核心继续注入 |
 | P3 | `ui_glue.c` + 面板 11 接口换实现 | 桩模式隔离验证仍全绿；面板显示物理触点轨迹、区域卡片数据与核心一致 |
 | P4 | 面板编辑 → 核心生效 | 手指点面板不穿透（`consume` 生效）；新建/移动/删除/改名区域后核心区域线程 1~2ms 内吃到 |
 | P5 | 旋转 | 策略 C 四条到位：零拉伸、不可见 ≤80ms、稳定窗内不吞触摸、矩形换算正确（横屏下点面板命中准确） |
 | P6 | 性能与打点（可选） | 延迟直方图（P50/P99）出现在面板上；`eglSwapInterval(0)`、紧凑复查等收益可测 |
+
+## 10.1 P1 已实测（真机 PJZ110）
+
+| 项 | 结果 |
+|---|---|
+| 默认构建不变 | `.text` 22856 B / `.data` 8272 B / `.rodata` 2052 B，与改动前**逐字节相同**（基线由 `git archive HEAD` 另建一棵树编出，比较前先断言文件存在——写松了会把"文件缺失"读成"变了"） |
+| 共享内存 | `vtouchd: 共享内存就绪 fd=3 total=28672 state@4096(12288) b@16384 c@20480` |
+| 核心拉起面板 | `面板已启动 pid=2522（dir=/data/local/tmp/vtouch-ui shm_fd=3）`，面板父进程 = 核心 pid ✓ |
+| fd 卫生 | 面板 `fd 3 -> /memfd:vtouch-shm`；指向 `/dev/input/event*` 或 `/dev/uinput` 的 fd **0 条** ✓ |
+| 面板崩/被杀 | `面板已退出 status=0x9（核心继续跑，注入不受影响）` + 按策略重启、1 分钟上限 3 次 ✓ |
+| 停核心 | SIGTERM → 面板一起停 ✓ → `/dev/input/event8` 持有者回到系统自身 3 个 ✓（grab 正确释放） |
+| 无 UI 降级 | 面板目录缺失时 `面板未就绪（缺 …/classes.dex）→ 以无 UI 模式继续`，引擎照常起来 ✓ |
+| 面板产物 | 必须连同 **`libc++_shared.so`** 一起交付（NDK 默认动态链 libc++；缺它 `System.load` 抛 `UnsatisfiedLinkError`，被 `VTouchUI.java:149` 的 catch 吞掉后 `return` → **进程退 0、什么都不干**，极难查）。已由 `scripts/build_ui.sh` 自动带上 |
+
+验证脚本：`scripts/ondev-ui-smoke.sh`（设备侧 `su -c 'sh …'`，三种模式：默认、`stop`、`noui`）。
 
 ## 11. 风险与对策
 

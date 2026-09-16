@@ -1,6 +1,6 @@
 #!/bin/sh
 # build_ui.sh — 编译 ImGui 单进程面板（本机 Git Bash / CI Linux 通用）。
-# 产物: build/ui/classes.dex + build/ui/libtestimgui.so
+# 产物: build/ui/classes.dex + build/ui/libtestimgui.so + build/ui/libc++_shared.so
 # 用法: sh scripts/build_ui.sh
 #   默认先清掉 classes/obj（陈旧 .class/.o 被打进 dex/so 是踩过的坑）；
 #   想跳过大头（imgui 的 .o，重编约 40s）设 VTOUCH_UI_KEEP=1 —— 只在你确定源没动时用。
@@ -53,7 +53,7 @@ else
   rm -rf build/ui/classes
   mkdir -p build/ui/classes
 fi
-echo "[0/5] 面板字形表..."
+echo "[0/6] 面板字形表..."
 # 字形表按源码实际用到的字符生成（别用 ChineseFull：2 万+ 汉字 × 44/30 两档全烘，真机 ~860ms）；
 # 每次编译都重生成，改文案不可能漏（源码头 src-ui/ui_chars.h 由 gen_ui_chars.py 生成到 build/）。
 PY=""
@@ -62,13 +62,13 @@ for c in python3 python; do            # Windows 上 python3 可能只是商店�
 done
 [ -n "$PY" ] || { echo "缺可用的 python3/python —— 生成面板字形表要用"; exit 1; }
 "$PY" scripts/gen_ui_chars.py --out build/ui/ui_chars.h
-echo "[1/5] javac..."
+echo "[1/6] javac..."
 javac -encoding UTF-8 -cp "$AJAR" -d build/ui/classes src-ui/VTouchUI.java
-echo "[2/5] d8..."
+echo "[2/6] d8..."
 # 喂全部 class（别写 VTouchUI*：类名一变/多一个顶层类就静默漏编，历史上 SCProbe.class 就这么混过）
 "$D8" --lib "$AJAR" --min-api "$API" --output build/ui/dex build/ui/classes/*.class
 mv build/ui/dex/classes.dex build/ui/classes.dex
-echo "[3/5] ndk cc..."
+echo "[3/6] ndk cc..."
 # 核心来源（新核心是模块化多文件，UI 也要一个不依赖核心的单跑模式）:
 #   VTOUCH_UI_CORE=stub（默认）面板单跑：11 个 vtouch_* 由 src-ui/ui_stubs.c 提供
 #   VTOUCH_UI_CORE=real        接新核心：编译 src/*.c 全部 + 胶水层 src-ui/ui_glue.c
@@ -86,11 +86,18 @@ done
 "$CXX" -O2 -Wall -fPIC -DIMGUI_IMPL_OPENGL_ES2 -I$IMG -c $IMG/backends/imgui_impl_opengl3.cpp \
   -o build/ui/obj/imgui_impl_opengl3.o
 "$CXX" -O2 -Wall -fPIC -I$IMG -Isrc-ui -Ibuild/ui -c src-ui/vtouch_ui.cpp -o build/ui/obj/vtouch_ui.o
-echo "[4/5] link..."
+echo "[4/6] link..."
 "$CXX" -shared -o build/ui/libtestimgui.so build/ui/obj/*.o \
   -lEGL -lGLESv2 -landroid -llog -lm
-echo "[5/5] strip..."
+echo "[5/6] strip..."
 "$STRIP" --strip-unneeded -o build/ui/libtestimgui.so.stripped build/ui/libtestimgui.so
 mv -f build/ui/libtestimgui.so.stripped build/ui/libtestimgui.so
-ls -l build/ui/classes.dex build/ui/libtestimgui.so
-md5sum build/ui/classes.dex build/ui/libtestimgui.so | tee build/ui/md5.txt
+echo "[6/6] libc++_shared.so..."
+# 面板是 C++，NDK 默认**动态**链 libc++ —— 少了这个 .so，真机上 System.load 直接
+# UnsatisfiedLinkError（被 VTouchUI 的 catch 吞成一条日志后 return，表现为"进程退 0 什么都不干"）。
+# 踩过的坑，所以由脚本固定交付，不靠人记得。
+LIBCXX="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+[ -f "$LIBCXX" ] || { echo "缺 $LIBCXX —— NDK 安装不完整（sysroot 里应该有）"; exit 1; }
+cp -f "$LIBCXX" build/ui/libc++_shared.so
+ls -l build/ui/classes.dex build/ui/libtestimgui.so build/ui/libc++_shared.so
+md5sum build/ui/classes.dex build/ui/libtestimgui.so build/ui/libc++_shared.so | tee build/ui/md5.txt

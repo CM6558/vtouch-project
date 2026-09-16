@@ -73,6 +73,70 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
     pthread_mutex_unlock(&g.region_lock);
     return rc;
 }
+#ifdef VT_UI
+/**
+ * (vtouch-doc: region_del)
+ * @brief 按 id 删除区域，并把代次 +1（区域线程据此重置私有状态）。
+ * @param   id       区域名
+ * @return  0 成功；-1 没找到 / 参数非法。
+ * @note    面板删除区域走这里 —— region_gen 是本文件静态，面板直接改表碰不到它，
+ *          区域线程会拿过期私有状态（见 vt_region.c 顶部 region_gen 的用法）。
+ */
+int region_del(const char *id)
+{
+    int i, k;
+    if (!id) return -1;
+    pthread_mutex_lock(&g.region_lock);
+    for (i = 0; i < g.region_count; i++) {
+        if (strcmp(g.regions[i].id, id) != 0) continue;
+        for (k = i; k + 1 < g.region_count; k++) g.regions[k] = g.regions[k + 1];
+        g.region_count--;
+        memset(&g.regions[g.region_count], 0, sizeof g.regions[0]);
+        region_gen++;
+        fprintf(stderr, "vtouchd: region del %s (total %d)\n", id, g.region_count);
+        pthread_mutex_unlock(&g.region_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return -1;
+}
+/**
+ * (vtouch-doc: region_rename)
+ * @brief 区域改名（目标 id 已被别的区域占用则失败），代次 +1。
+ * @param   old_id   原区域名
+ * @param   new_id   新区域名（≤ REGION_ID_MAX）
+ * @return  0 成功；-1 找不到 / 重名 / 参数非法。
+ */
+int region_rename(const char *old_id, const char *new_id)
+{
+    size_t n;
+    int i;
+    if (!old_id || !new_id) return -1;
+    n = strlen(new_id);
+    if (n == 0 || n > REGION_ID_MAX) return -1;
+    pthread_mutex_lock(&g.region_lock);
+    if (strcmp(old_id, new_id) != 0) {
+        for (i = 0; i < g.region_count; i++) {
+            if (strcmp(g.regions[i].id, new_id) == 0) {   /* 目标 id 已被占 */
+                pthread_mutex_unlock(&g.region_lock);
+                return -1;
+            }
+        }
+    }
+    for (i = 0; i < g.region_count; i++) {
+        if (strcmp(g.regions[i].id, old_id) != 0) continue;
+        memset(g.regions[i].id, 0, sizeof g.regions[i].id);
+        memcpy(g.regions[i].id, new_id, n);
+        region_gen++;
+        fprintf(stderr, "vtouchd: region rename %s -> %s\n", old_id, new_id);
+        pthread_mutex_unlock(&g.region_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return -1;
+}
+#endif /* VT_UI */
+
 /**
  * (vtouch-doc: region_hit)
  * @brief 点是否落在区域内（矩形含边界；圆按半径平方比较）。

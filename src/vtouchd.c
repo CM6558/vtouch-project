@@ -51,11 +51,14 @@
 #include "vt_internal.h"
 
 /* ===== §1 共享状态（唯一定义在这里）===== */
-struct vt_state g = {
-    .input_fd = -1, .u_fd = -1, .listen_fd = -1, .client_fd = -1,
-    .ws_port = 27183, .vslots = 10, .id_max = 31,
-    .region_lock = PTHREAD_MUTEX_INITIALIZER,
-};
+#ifdef VT_UI
+/* VT_UI 构建：状态本体放进共享内存（面板只读映射同一份）。启动早期 g 指向引导副本
+ * ——apply_args 要往里写；vt_shm_create() 之后 g 指向映射，全库调用点一行不改。 */
+static struct vt_state G_BOOT = { VT_STATE_DEFAULTS };
+struct vt_state *g_ptr = &G_BOOT;
+#else
+struct vt_state g = { VT_STATE_DEFAULTS };
+#endif
 /* ===== §11 进程（参数 / 初始化 / 主循环 / 退出）===== */
 
 /**
@@ -98,12 +101,19 @@ void apply_args(int argc, char **argv)
 int vtouch_init(int argc, char **argv)
 {
     char dev[PATH_MAX];
+#ifdef VT_UI
+    int shm_fd = -1;
+#endif
     setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，别被全缓冲吞掉 */
     apply_args(argc, argv);
     if (g.logical_width < 2 || g.logical_height < 2) {
         fprintf(stderr, "vtouchd: 需要逻辑尺寸（-w 宽 -h 高）\n");
         return -2;
     }
+#ifdef VT_UI
+    /* 状态进共享内存（在拿设备之前：之后就都在映射里写了）。失败不致命 → 按无 UI 模式继续。 */
+    shm_fd = vt_shm_create();
+#endif
     memset(g.phys, 0, sizeof g.phys); memset(g.virt, 0, sizeof g.virt); memset(g.staged, 0, sizeof g.staged);
     if (discover(dev, sizeof dev) < 0) {
         fprintf(stderr, "vtouchd: 没找到 Type-B 触摸屏（扫了 /dev/input/event0..63）\n");
@@ -132,6 +142,11 @@ int vtouch_init(int argc, char **argv)
     fprintf(stderr, "vtouchd: dev=%s pool=%d virt_max=%d pressure=%s ws=127.0.0.1:%d size=%dx%d engine=on(evq=%d outq=%d)\n",
             dev, g.total_slots, g.vslots, g.has_pressure ? "on" : "off", g.ws_port, g.logical_width, g.logical_height,
             VTQ_CAP, OUTQ_CAP);
+#ifdef VT_UI
+    /* 以核心为准：引擎（设备 / grab / uinput / 监听 / 区域线程）全部就绪，最后才拉面板；
+     * 面板没起来也不影响注入 —— 它只是观察者 + 输入面板。 */
+    if (shm_fd >= 0 && vt_panel_start(shm_fd) == 0) vt_shm_tick();
+#endif
     return 0;
 }
 /**
@@ -146,9 +161,20 @@ int vtouch_init(int argc, char **argv)
 int vtouch_poll_step(void)
 {
     struct pollfd p[4];
+#ifdef VT_UI
+    /* UI 在场：空闲也 8ms 一轮 —— 面板的编辑/心跳要跟得上（区域线程本来就 1ms 一轮，这点唤醒是噪声）。
+     * 无 UI 时保持 1000ms（默认构建行为逐字节不变）。 */
+    int to = g.g_reemit ? 5 : 8;
+#else
     int to = g.g_reemit ? 5 : 1000;      /* 有待重发的整帧：5ms 一轮，尽快把手抬起来 */
+#endif
     int want_out, r;
     if (g.stop_flag) return -1;
+#ifdef VT_UI
+    vt_shm_tick();                       /* 核心心跳 */
+    vt_shm_edit_apply();                 /* 面板投的区域编辑：这一轮就吃掉 */
+    if (vt_shm_stop_req()) { fprintf(stderr, "vtouchd: 面板请求停引擎 → 退出\n"); return -1; }
+#endif
     want_out = (g.client_fd >= 0 && outq_pending());
     p[0] = (struct pollfd){ g.input_fd, POLLIN | POLLHUP | POLLERR, 0 };
     p[1] = (struct pollfd){ g.listen_fd, POLLIN, 0 };
@@ -203,6 +229,9 @@ int vtouch_poll_step(void)
     }
     /* §4.5：唯一的刷出点 —— 队列里是刚入队的响应，或区域线程塞进来的 region_ev */
     if (g.client_fd >= 0 && ((p[3].revents & POLLOUT) || outq_pending())) outq_flush();
+#ifdef VT_UI
+    vt_panel_watchdog();                 /* 回收子进程 / 判心跳 / 按策略重启 */
+#endif
     return 0;
 }
 /**
@@ -218,6 +247,9 @@ void cleanup(void)
     static int cleaned;
     if (cleaned) return;
     cleaned = 1;
+#ifdef VT_UI
+    vt_panel_stop();                     /* 先停面板，再放 grab（面板不该在抓着触摸时继续画） */
+#endif
     if (g.client_fd >= 0) { close(g.client_fd); g.client_fd = -1; }
     if (g.listen_fd >= 0) { close(g.listen_fd); g.listen_fd = -1; }
     if (g.input_fd >= 0) {
