@@ -86,25 +86,63 @@ static void glue_watch_table(void)
     if (HK_ok && HK.region_changed) HK.region_changed();     /* 面板据此清失效引用 + 重画 + 置落盘 */
 }
 
-static void glue_post(uint32_t op, const char *id, const char *new_id,
-                      int t, int a1, int a2, int a3, int a4, int en)
+static int glue_find(const char *id)
+{
+    int i, n;
+    if (!S || !id || !*id) return -1;
+    n = S->region_count;
+    for (i = 0; i < n && i < MAX_REGIONS; i++)
+        if (strncmp(S->regions[i].id, id, REGION_ID_MAX) == 0) return i;
+    return -1;
+}
+
+/* 编辑到底成没成：核心不给逐条回执，就**回读区域表**判（旧接口的返回值面板在用：
+ * 例如"区域数已达上限"的提示靠 region_add != 0 触发）。 */
+static int glue_verify(uint32_t op, const char *id, const char *new_id)
+{
+    int i, j;
+    if (!S) return -1;
+    i = id ? glue_find(id) : -1;
+    j = new_id ? glue_find(new_id) : -1;
+    switch (op) {
+    case VT_EDIT_ADD:    return (i >= 0) ? 0 : -1;
+    case VT_EDIT_DEL:    return (i < 0) ? 0 : -1;
+    case VT_EDIT_RENAME: return (j >= 0 && (i < 0 || i == j)) ? 0 : -1;
+    case VT_EDIT_CLEAR:  return (S->region_count == 0) ? 0 : -1;
+    default: break;
+    }
+    return -1;
+}
+
+/* 返回 0 = 核心确实生效了；-1 = 没生效（被核心拒了 / 超时） */
+static int glue_post(uint32_t op, const char *id, const char *new_id,
+                     int t, int a1, int a2, int a3, int a4, int en)
 {
     struct vt_shm_edit e;
-    if (!B) return;
+    int spins = 0;
+    if (!B) return -1;
     memset(&e, 0, sizeof e);
     e.op = op; e.type = t; e.a1 = a1; e.a2 = a2; e.a3 = a3; e.a4 = a4; e.enabled = en;
     if (id) snprintf(e.id, sizeof e.id, "%s", id);
     if (new_id) snprintf(e.new_id, sizeof e.new_id, "%s", new_id);
     e.seq = ++glue_seq;
+    /* 拖改的"直播写"是**绝对值**（每次都给完整几何），丢中间几次无害 → 不等，避免拖动手感被
+     * 每帧 8ms 的等待拖住。只有"新建 / 删除 / 改名 / 清空"才必须等核心吃掉：丢一次就是真丢
+     * （启动批量加载 regions.conf 就是这么丢过 2/3 条）。 */
+    if (op == VT_EDIT_ADD && glue_find(id) >= 0) {
+        vt_shm_post_edit(&e);
+        return 0;
+    }
     vt_shm_post_edit(&e);
     /* 邮箱是**单槽**的：不等核心吃掉就投下一条，前一条会被覆盖（启动批量加载 regions.conf 时
      * 实测 3 个区域只落地 1 个）。这里等一拍 —— 核心 8ms 一轮，实际通常 0~8ms。
      * 顺带让面板拿回"同步"语义：调用返回时核心已经生效，后面回读区域表不会看到旧值。 */
-    {
-        int spins = 0;
-        while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
-        if (B->edit_applied != e.seq) fprintf(stderr, "vtouch-ui: 编辑 seq=%u 超时未生效\n", e.seq);
+    while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
+    if (B->edit_applied != e.seq) {
+        fprintf(stderr, "vtouch-ui: 编辑 seq=%u 超时未生效\n", e.seq);
+        return -1;
     }
+    return glue_verify(op, id, new_id);
 }
 
 /* ---------- 面板侧额外入口（vtouch_ui.cpp 只多调这两个） ---------- */
@@ -140,10 +178,14 @@ int vtouch_phys_slots(void) { return S ? S->phys_slots : 0; }
 
 int vtouch_phys_get(int i, int *down, int *lx, int *ly)
 {
+    int x, y;
     if (!S || !down || !lx || !ly || i < 0 || i >= S->phys_slots) return -1;
+    x = S->phys[i].x; y = S->phys[i].y;
     *down = S->phys[i].down ? 1 : 0;
-    *lx = *ly = 0;
-    if (*down && (raw_to_logical(S->phys[i].x, 0, lx) < 0 || raw_to_logical(S->phys[i].y, 1, ly) < 0)) return -1;
+    /* 与旧核心**逐字同一契约**（backup src_vtouchd.c:913-915）：无论按下与否都返回当前（含抬起后的
+     * 最后）位置。面板的"抬手提交拖改"就靠 up 那一帧的位置 —— 这里清零会把区域拖到 (0,0)：
+     * 实测现象 = "拖完之后位置变了但不是我要的"。 */
+    if (raw_to_logical(x, 0, lx) < 0 || raw_to_logical(y, 1, ly) < 0) return -1;
     return 0;
 }
 
@@ -210,20 +252,17 @@ int vtouch_get_region(int i, char *id, int idn, int *type, int *a1, int *a2, int
 
 int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
-    glue_post(VT_EDIT_ADD, id, NULL, type, a1, a2, a3, a4, enabled);
-    return 0;
+    return glue_post(VT_EDIT_ADD, id, NULL, type, a1, a2, a3, a4, enabled);
 }
 
 int vtouch_region_del(const char *id)
 {
-    glue_post(VT_EDIT_DEL, id, NULL, 0, 0, 0, 0, 0, 0);
-    return 0;
+    return glue_post(VT_EDIT_DEL, id, NULL, 0, 0, 0, 0, 0, 0);
 }
 
 int vtouch_region_rename(const char *old_id, const char *new_id)
 {
-    glue_post(VT_EDIT_RENAME, old_id, new_id, 0, 0, 0, 0, 0, 0);
-    return 0;
+    return glue_post(VT_EDIT_RENAME, old_id, new_id, 0, 0, 0, 0, 0, 0);
 }
 
 void vtouch_region_clear(void)
