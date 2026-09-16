@@ -42,3 +42,33 @@ adb shell "su -c 'cd /data/local/tmp/vtouch-probe && ./probe_native /data/local/
 
 - **旋转时 Surface 要不要重建**：策略 A（图层恒竖屏尺寸 + 合成器 transform）、B（同 Surface 只改 buffer 几何）、C（现状：重建）——只能真人转动手机看。
 - **`DisplayListener` 回调**（去掉 320ms 轮询）在 `app_process` 下的可用性（反射注册、Looper 线程）。
+
+## 五、旋转策略实测结论（真机 PJZ110 / ColorOS / Android 16）
+
+面板是"全屏 `SurfaceControl` 图层 + ImGui"，旋转时必须决定 surface 怎么处理。三种策略都真机试过：
+
+| 策略 | 做法 | 结果 |
+|---|---|---|
+| **B** 只改 buffer 几何 | `Transaction.setBufferSize` + `ANativeWindow_setBuffersGeometry`，surface 与 EGLSurface 都不重建 | ✗ 必失败：**EGL 窗口 surface 的尺寸在创建时固定**，驱动仍按旧尺寸出帧 → 合成器把旧尺寸帧铺满新显示尺寸 = **拉伸** |
+| **A** 恒定 buffer + 合成器旋转 | buffer 永远竖屏尺寸，旋转交给 `setGeometry`/`setMatrix` | ✗ 本 ROM 上不可用：`setGeometry(sc, src, dst, orient)` 把图层摆到可视区外（实测整层不可见）；`setMatrix(sc, Matrix, float[])` 抛 `ArrayIndexOutOfBoundsException`（该重载底层 `Matrix.getValues` 要求 9 个元素数组）。靠逐 ROM 试隐藏 API，兼容性差 |
+| **C** 重建 surface（**采用**） | Java：`setBufferSize(new)` + 同图层 `new Surface`；native：帧边界销毁旧 EGLSurface → 换 window → 重建 EGLSurface（G 上下文/字体/ImGui 全保留） | ✓ 跨 ROM 稳、零拉伸、只用 `SurfaceControl.Builder`(公开) + `Surface(SurfaceControl)` + 标准 NDK EGL |
+| D 双图层 + 原子翻转 | 准备隐藏层 → 单事务 `alpha` 对切 | 机制可行（事件→翻转 3~28ms），但旋转后**合成结果与 native 账本不一致**（日志报 `绘制用=显示尺寸`，屏幕实际只有下半屏 1440×1440 区域、横向拉伸 2.13 倍）→ 未采用，记录备查 |
+
+### C 的最终形态（要搬进面板的四条）
+
+1. **检测**：公开 API `DisplayManager.registerDisplayListener`（`ActivityThread.systemMain()` 拿 system Context）+ **500ms 稳定观察窗**（回调常早于显示状态更新，实测开窗能把"读到过期值→漏掉旋转"变成 6ms 内抓到真值）+ 窗外 2 秒一次保险检查；
+2. **顺序**：新 EGLSurface **先建好并提交首帧**，**再**销毁旧的（重叠，不留空档）；建 surface 要**重试**（`0x3003 EGL_BAD_ALLOC` 是 resize 后的瞬态）；
+3. **遮挡**：旋转是非等比缩放（2.2×），准备期间可见层仍显示旧尺寸 = 必然拉伸 → 先把可见层 `alpha=0`，新首帧上屏后恢复；
+4. **尺寸来源**：图层按**当前显示尺寸**建；绘制尺寸取 **`eglQuerySurface`**，不要用 `ANativeWindow_getWidth/Height`（那是图层 default 几何，换绑后会陈旧 → 实测把场景画成错位椭圆）。
+
+量化（真机三次旋转）：事件→读到正确状态 6~7ms；换绑完成 19~26ms；首帧上屏 +6ms；**可见层不可见总时长 40~80ms**（这是裸图层的物理下限）。
+
+### 过程中踩到并已写进代码注释的坑
+
+| 坑 | 症状 | 规避 |
+|---|---|---|
+| `ActivityThread.systemMain()` 放非主线程 | 进程**静默消失**、无异常日志 | 只能主线程调；且主线程要先 `Looper.prepareMainLooper()`，否则 `RuntimeException: Can't create handler …` |
+| `fork/exec app_process` 环境不全 | 子进程**连 main 都进不去**、静默退 0 | 必须带完整 `environ`（不是精选几个变量） |
+| `memfd` 本体 fd 未设 CLOEXEC | 子进程多继承一份 fd（无害但不洁） | `dup2` 后对新 fd 补 `FD_CLOEXEC` |
+| `-O2` 把成对 `sinf/cosf` 融成 `sincosf/sincos` | `dlopen: cannot locate symbol` → `.so` 加载失败 | 探针直接改用预计算单位圆表，不碰 libm |
+| `glUseProgram`/`glBindBuffer` 漏写 | 只出清屏色、没有图元，且不报错 | 补齐；`glGetError` 在初始化后与首帧各查一次 |
