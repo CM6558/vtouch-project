@@ -21,14 +21,26 @@ STAGE=/sdcard/vtouch-ui-stage
 
 need_adb() { command -v adb >/dev/null 2>&1 || { echo "缺 adb"; exit 1; }; }
 
+# 构建失败要**大声报**：以前把输出吞进 /dev/null，编不过就静悄悄中止（自己踩过）
+run_build() {
+    log=build/_ui_build.log
+    mkdir -p build
+    if ! "$@" >"$log" 2>&1; then
+        echo "构建失败：$*"
+        grep -E 'error|Error|错误' "$log" | head -20
+        echo "（完整日志：$log）"
+        exit 1
+    fi
+}
+
 do_build() {
     echo "[1/4] 编面板（real 模式：接核心）..."
-    VTOUCH_UI_CORE=real sh scripts/build_ui.sh >/dev/null 2>&1
+    run_build sh -c 'VTOUCH_UI_CORE=real sh scripts/build_ui.sh'
     for f in classes.dex libtestimgui.so libc++_shared.so; do
         echo "      build/ui/$f$(printf '%*s' $((24 - ${#f})) '')$(md5sum build/ui/$f | cut -d' ' -f1)"
     done
     echo "[2/4] 编带 UI 的核心（把面板三件套内嵌进去）..."
-    sh scripts/build.sh ui >/dev/null
+    run_build sh scripts/build.sh ui
     echo "      build/vtouchd_ui            $(md5sum build/vtouchd_ui | cut -d' ' -f1)  ($(wc -c < build/vtouchd_ui) 字节)"
 }
 

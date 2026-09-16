@@ -12,6 +12,7 @@ public class VTouchUI {
 
     static native int nativeInit(int w, int h);
     static native void nativeOnSurface(int id, Surface surface);
+    static native void nativeOnFlip(int slot);   /* 原子翻转完成后告诉 native 现在可见的是哪个槽 */
     static native void nativeOnDisplay(int w, int h, int rot);
     static native void nativeDestroy();
     static native int nativeWantLayerVisible();
@@ -28,6 +29,8 @@ public class VTouchUI {
     static volatile Object layerRef;
     static volatile int[] dispNow = new int[]{1440, 3168, 0};
     static volatile boolean guardPending;
+    /* 转屏模式：flip（默认）= 双图层原子翻转，屏幕不空；hide = 单图层遮挡换绑（旧行为）。 */
+    static boolean rotFlip = true;
 
     static void startDisplayListener() {
         Thread th = new Thread(new Runnable() {
@@ -52,17 +55,20 @@ public class VTouchUI {
                                      *      (1440x3168 ↔ 3168x1440)，方向先猜 +1；
                                      *   ③ 真值到了只做校正（猜错也在遮挡里，看不见）。
                                      * 于是"屏幕转过去的那一刻"面板已经在新位置了。 */
-                                    int[] dn = dispNow;
-                                    try {
-                                        Object lr = layerRef;
-                                        if (lr != null) {
-                                            Object tt0 = txnNew();
-                                            txnCall(tt0, "setAlpha", new Class<?>[]{SCC, float.class}, lr, 0.0f);
-                                            TXN.getMethod("apply").invoke(tt0);
-                                            guardPending = true;
-                                        }
-                                    } catch (Throwable t2) { /* 失败就让主循环按老路处理 */ }
-                                    nativeOnDisplay(dn[1], dn[0], (dn[2] + 1) & 3);
+                                    /* 双图层模式（默认）不需要在回调里遮挡/预测：可见槽继续出图，
+                                     * 备用槽按新尺寸准备好后一个事务原子翻转 —— 屏幕既不空也不闪。
+                                     * 单图层模式（VTOUCH_UI_ROT_MODE=hide）才在这里先遮挡。 */
+                                    if (!rotFlip) {
+                                        try {
+                                            Object lr = layerRef;
+                                            if (lr != null) {
+                                                Object tt0 = txnNew();
+                                                txnCall(tt0, "setAlpha", new Class<?>[]{SCC, float.class}, lr, 0.0f);
+                                                TXN.getMethod("apply").invoke(tt0);
+                                                guardPending = true;
+                                            }
+                                        } catch (Throwable t2) { /* 失败就让主循环按老路处理 */ }
+                                    }
                                     /* 立刻叫醒主循环（否则要等它睡满一个周期才发现）。 */
                                     Thread mt = mainTh;
                                     if (mt != null) mt.interrupt();
@@ -229,16 +235,27 @@ public class VTouchUI {
 
         Object layer = null;
         int[] disp = queryDisplay(w, h, 0);
+        Object[] layers = new Object[2];   /* 双图层：layers[cur] 可见，另一个待命 */
+        int cur = 0;
+        rotFlip = !"hide".equals(System.getenv("VTOUCH_UI_ROT_MODE"));
         try {
             SCC = Class.forName("android.view.SurfaceControl");
             TXN = Class.forName("android.view.SurfaceControl$Transaction");
             startDisplayListener();   /* 事件驱动优先；注册失败自动回落轮询 */
-            layer = makeLayer("vtouch-ui", disp[0], disp[1]);
+            layer = makeLayer("vtouch-ui-A", disp[0], disp[1]);
+            layers[0] = layer;
+            if (rotFlip) {
+                layers[1] = makeLayer("vtouch-ui-B", disp[0], disp[1]);
+                Object tt0 = txnNew();
+                txnCall(tt0, "setAlpha", new Class<?>[]{SCC, float.class}, layers[1], 0.0f);
+                TXN.getMethod("apply").invoke(tt0);      /* B 起始隐藏 */
+            }
             nativeOnDisplay(disp[0], disp[1], disp[2]);
             nativeOnSurface(0, newSurface(layer));
-            layerRef = layer;          /* 事件回调里要立刻改它的 alpha / 落位 */
+            layerRef = layer;          /* 单图层模式的事件回调里要立刻改它的 alpha */
             dispNow = disp;
-            Log.i(TAG, "layer up " + disp[0] + "x" + disp[1] + " rot=" + disp[2]);
+            Log.i(TAG, "layer up " + disp[0] + "x" + disp[1] + " rot=" + disp[2]
+                      + "  转屏模式=" + (rotFlip ? "flip（双图层原子翻转）" : "hide（遮挡换绑）"));
         } catch (Throwable t) { Log.e(TAG, "layer", t); System.exit(2); }
         /* 主循环三件事：
          *  ① 转屏遮挡的收尾：转屏时先把图层 alpha 归 0（旋转是非等比缩放，准备期间旧尺寸帧铺新屏
@@ -276,10 +293,22 @@ public class VTouchUI {
                 if (done || gdt > 500) {
                     try {
                         Object tt = txnNew();
-                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, vis ? 1.0f : 0.0f);
-                        TXN.getMethod("apply").invoke(tt);
-                        Log.i(TAG, "转屏遮挡结束（" + (done ? "首帧已上屏" : "500ms 兜底/伪事件")
-                                  + "，用时 " + (System.currentTimeMillis() - guardT0) + "ms）");
+                        if (rotFlip && changedSeen && layers[1] != null) {
+                            /* **原子翻转**：一个事务里旧槽 alpha→0、新槽 alpha→1，SurfaceFlinger 一次提交，
+                             * 中间不存在"两边都不可见"的帧 —— 这就是转屏零空白的来源。 */
+                            int hid = 1 - cur;
+                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], 0.0f);
+                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[hid], vis ? 1.0f : 0.0f);
+                            TXN.getMethod("apply").invoke(tt);
+                            nativeOnFlip(hid);
+                            cur = hid;
+                            Log.i(TAG, "原子翻转 → 可见槽 " + cur + "（用时 " + gdt + "ms，屏幕无空白）");
+                        } else {
+                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], vis ? 1.0f : 0.0f);
+                            TXN.getMethod("apply").invoke(tt);
+                            Log.i(TAG, "转屏遮挡结束（" + (done ? "首帧已上屏" : "500ms 兜底/伪事件")
+                                      + "，用时 " + gdt + "ms）");
+                        }
                         guard = false;
                     } catch (Throwable t) {
                         long now0 = System.currentTimeMillis();
@@ -296,11 +325,13 @@ public class VTouchUI {
                     try {
                         Object tt = txnNew();
                         try {
-                            txnCall(tt, "setVisibility", new Class<?>[]{SCC, boolean.class}, layer, want);
+                            txnCall(tt, "setVisibility", new Class<?>[]{SCC, boolean.class}, layers[cur], want);
                         } catch (Throwable e) {
                             Log.w(TAG, "setVisibility 不可用，退回 alpha");   /* 隐藏 API 变了也能关掉 */
                         }
-                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, want ? 1.0f : 0.0f);
+                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], want ? 1.0f : 0.0f);
+                        if (rotFlip && layers[1] != null)   /* 待命槽恒为 0，只有翻转那一刻才上 */
+                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[1 - cur], 0.0f);
                         TXN.getMethod("apply").invoke(tt);
                     } catch (Throwable e) {
                         /* 切换失败：**不提交 vis**（下一轮重试），但日志限频 —— 以前这里每 40ms
@@ -326,23 +357,35 @@ public class VTouchUI {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                     if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
                         changedSeen = true;
-                        /* 先遮挡（这一帧起屏幕上看不到面板）→ 再改尺寸 / 换新 Surface → 等首帧上屏恢复。
-                         * 诊断开关 VTOUCH_UI_NOGUARD=1：**不遮挡**，把平时只有 ~10ms 的错位状态
-                         * 持续成整段换绑时间（~300ms），这样 9fps 的录屏也能拍下来看它到底什么样。 */
-                        guard = true; guardT0 = System.currentTimeMillis();
                         Object tt = txnNew();
-                        if (!"1".equals(System.getenv("VTOUCH_UI_NOGUARD")))
-                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, 0.0f);
-                        txnCall(tt, "setBufferSize", new Class<?>[]{SCC, int.class, int.class},
-                                layer, d2[0], d2[1]);
-                        txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},
-                                layer, 0.0f, 0.0f);
+                        int target;
+                        if (rotFlip && layers[1] != null) {
+                            /* 双图层（默认）：给**待命槽**按新尺寸准备 —— 可见槽继续出它自己的图，
+                             * 屏幕全程有内容；待命槽画满两帧后一个事务原子翻转。 */
+                            target = 1 - cur;
+                            txnCall(tt, "setBufferSize", new Class<?>[]{SCC, int.class, int.class},
+                                    layers[target], d2[0], d2[1]);
+                            txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},
+                                    layers[target], 0.0f, 0.0f);
+                        } else {
+                            /* 单图层（VTOUCH_UI_ROT_MODE=hide）：先遮挡再换绑，代价是那一段看不见面板。
+                             * 诊断开关 VTOUCH_UI_NOGUARD=1 时不遮挡（把错位状态拉长便于录屏取证）。 */
+                            target = cur;
+                            if (!"1".equals(System.getenv("VTOUCH_UI_NOGUARD")))
+                                txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], 0.0f);
+                            txnCall(tt, "setBufferSize", new Class<?>[]{SCC, int.class, int.class},
+                                    layers[cur], d2[0], d2[1]);
+                            txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},
+                                    layers[cur], 0.0f, 0.0f);
+                        }
                         TXN.getMethod("apply").invoke(tt);
-                        nativeOnDisplay(d2[0], d2[1], d2[2]);   /* 真值：校正回调里的预测 */
+                        nativeOnDisplay(d2[0], d2[1], d2[2]);
                         dispNow = d2;
-                        nativeOnSurface(0, newSurface(layer));
+                        nativeOnSurface(target, newSurface(layers[target]));
+                        guard = true; guardT0 = System.currentTimeMillis();
                         Log.i(TAG, "display " + d2[0] + "x" + d2[1] + " rot=" + d2[2]
-                                  + "（图层已遮挡，等新 surface 首帧上屏）");
+                                  + (rotFlip ? ("（待命槽 " + target + " 准备中，可见槽 " + cur + " 继续出图）")
+                                             : "（图层已遮挡，等新 surface 首帧上屏）"));
                         disp = d2;   /* 全部成功才提交：中途抛错就停在旧值，下一轮重试 */
                     }
                 } catch (Throwable t) {

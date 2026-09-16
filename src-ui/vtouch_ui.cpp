@@ -64,13 +64,23 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_render_th, g_poll_th;
 static int g_poll_on = 0;
 
-/* EGL（单 surface） */
+/* EGL（双槽：双图层原子翻转用。g_cur = 当前可见槽；老代码里的 g_win/g_surf 通过下面的宏
+ * 自动指向"当前槽"，所以除了换绑/翻转那几处，其余代码一行不用改）。 */
 static EGLDisplay g_dpy = EGL_NO_DISPLAY;
 static EGLContext g_ctx = EGL_NO_CONTEXT;
 static EGLConfig g_cfg = 0;
-static ANativeWindow *g_win = 0;
-static ANativeWindow *g_win_new = 0;    /* Java 送来的新 Surface：换方向/换尺寸时由渲染线程接手 */
-static int g_swap_win = 0;
+static ANativeWindow *g_win2[2] = {0, 0};
+static ANativeWindow *g_win_new2[2] = {0, 0};   /* Java 送来的新 Surface（按槽） */
+static EGLSurface g_surf2[2] = {EGL_NO_SURFACE, EGL_NO_SURFACE};
+static int g_swap_win2[2] = {0, 0};
+static int g_cur = 0;                  /* 当前可见槽（Java 原子翻转后调 nativeOnFlip 更新） */
+static int g_pending = -1;             /* 正在准备的槽（-1 = 无） */
+static int g_pending_frames = 0;       /* 待命槽已成功提交的帧数（到 2 才算就绪） */
+static volatile int g_flip_req = 0;    /* 待命槽就绪 → 请 Java 做原子翻转 */
+#define g_win      (g_win2[g_cur])
+#define g_win_new  (g_win_new2[g_cur])
+#define g_surf     (g_surf2[g_cur])
+#define g_swap_win (g_swap_win2[g_cur])
 /* 换绑后"首帧是否真的提交了"的信号：Java 在转屏时先把图层 alpha 归 0（挡住被拉伸的旧尺寸帧），
  * 拿到这个信号才恢复 alpha。用"eglSwapBuffers 成功"当判据 —— 与探针实测同一口径（误差 ~6ms）。 */
 static volatile int g_swap_armed = 0, g_swap_done = 0;
@@ -80,7 +90,6 @@ static int g_diag_frames = 0;
 /* 待生效的显示状态（Java 线程写、渲染线程在接手新窗口时取用；见 nativeOnDisplay 注释） */
 static volatile int g_pend_disp = 0;
 static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
-static EGLSurface g_surf = EGL_NO_SURFACE;
 
 /* 面板几何（唯一来源：下面 #define + panel_w()/in_panel() + build_panel() 三处同公式）
  * sidebar-fixed 骨架：固定侧栏 w-64(256) 不随内容滚，内容页自己滚。 */
@@ -1727,6 +1736,28 @@ static void *render_thread_fn(void *)
             ALOGI("ui %s (off=%d) t=+%.0fms", onp ? "show" : "hide", onp ? 0 : 1, (double)t_since_start());
         }
         pthread_mutex_lock(&g_mu);
+        /* 待命槽（双图层）：为它单建 EGLSurface —— **不动可见槽**，所以屏幕一直有图。
+         * 建好后由下面的"待命槽出帧"计数两帧，再请 Java 原子翻转。 */
+        if (g_pending >= 0 && g_swap_win2[g_pending]) {
+            int p = g_pending;
+            if (g_pend_disp) { g_pend_disp = 0; on_display(g_pend_w, g_pend_h, g_pend_rot); }
+            if (g_surf2[p] != EGL_NO_SURFACE) {
+                eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+                eglDestroySurface(g_dpy, g_surf2[p]); g_surf2[p] = EGL_NO_SURFACE;
+            }
+            if (g_win2[p]) ANativeWindow_release(g_win2[p]);
+            g_win2[p] = g_win_new2[p]; g_win_new2[p] = 0;
+            g_swap_win2[p] = 0;
+            ANativeWindow_setBuffersGeometry(g_win2[p], 0, 0, WINDOW_FORMAT_RGBA_8888);
+            g_surf2[p] = eglCreateWindowSurface(g_dpy, g_cfg, g_win2[p], 0);
+            if (g_surf2[p] == EGL_NO_SURFACE) {
+                ALOGE("待命槽 %d 建 EGLSurface 失败 (0x%x)", p, eglGetError());
+                g_pending = -1;
+            } else {
+                g_pending_frames = 0;
+                ALOGI("待命槽 %d 就绪（可见槽 %d 继续出图，屏幕不空）", p, g_cur);
+            }
+        }
         if (g_swap_win) {   /* 换 Surface（首次 / 换方向 / 换尺寸）：旧 EGL surface 必须销毁，
                              * 否则还挂在旧窗口上（尺寸还是旧的）。context/ImGui 都保留。 */
             if (g_pend_disp) {   /* 落位/朝向与新窗口**同时**生效（避免"新落位画进旧缓冲"那一帧） */
@@ -1903,6 +1934,22 @@ static void *render_thread_fn(void *)
                       8 - g_diag_frames, sw, sh, g_rot, g_scr_w, g_scr_h,
                       (double)g_pan_x, (double)g_pan_y, (double)panel_w(), (double)panel_h(), g_w, g_h);
             }
+            /* 待命槽也画：画满两帧才请 Java 翻转（只画一帧就翻，合成器可能还没取走首个缓冲）。 */
+            if (g_pending >= 0 && g_surf2[g_pending] != EGL_NO_SURFACE) {
+                EGLint pw = 0, ph = 0;
+                int save = g_cur;
+                eglQuerySurface(g_dpy, g_surf2[g_pending], EGL_WIDTH, &pw);
+                eglQuerySurface(g_dpy, g_surf2[g_pending], EGL_HEIGHT, &ph);
+                if (pw > 0 && ph > 0) {
+                    g_cur = g_pending;                 /* 让 draw_frame 里的宏指向待命槽 */
+                    draw_frame((int)pw, (int)ph);
+                    g_cur = save;
+                    if (++g_pending_frames >= 2) {
+                        g_flip_req = 1;
+                        ALOGI("待命槽 %d 已画 %d 帧 → 请 Java 原子翻转", g_pending, g_pending_frames);
+                    }
+                }
+            }
             long dt = now_ms() - b0;
             g_frame_ms = g_frame_ms * 0.8 + (double)dt * 0.2;
             if (g_swap_fail >= 100) {   /* ~1.6s 一帧都没上屏：不假装在跑，收干净退出让脚本看得见 */
@@ -2000,18 +2047,37 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     return 0;
 }
 
+/* Java 送来某个槽的新 Surface（0/1 = 槽号）。非当前槽 = 双图层模式下的"待命槽"：
+ * 渲染线程会为它单建一个 EGLSurface 并先画两帧（此期间可见槽照常出图，屏幕不空）。 */
 JNIEXPORT void JNICALL Java_VTouchUI_nativeOnSurface(JNIEnv *env, jclass, jint id, jobject surf)
 {
-    if (id != 0) return;
-    ANativeWindow *w = ANativeWindow_fromSurface(env, surf);
+    ANativeWindow *w;
+    if (id < 0 || id > 1) return;
+    w = ANativeWindow_fromSurface(env, surf);
     if (!w) { ALOGE("fromSurface 失败"); return; }
     pthread_mutex_lock(&g_mu);
-    if (g_win_new) ANativeWindow_release(g_win_new);
-    g_win_new = w;
-    g_swap_win = 1;          /* 实际接手在渲染线程（EGL 归它管） */
+    if (g_win_new2[id]) ANativeWindow_release(g_win_new2[id]);
+    g_win_new2[id] = w;
+    g_swap_win2[id] = 1;
+    if (id != g_cur) { g_pending = id; g_pending_frames = 0; g_flip_req = 0; }
     g_need = 1;
     pthread_mutex_unlock(&g_mu);
-    ALOGI("surface ready t=+%.0fms", (double)t_since_start());
+    ALOGI("surface ready slot=%d t=+%.0fms", id, (double)t_since_start());
+}
+
+/* Java 做完原子翻转后调它，告诉 native"现在可见的是哪个槽"。 */
+JNIEXPORT void JNICALL Java_VTouchUI_nativeOnFlip(JNIEnv *, jclass, jint slot)
+{
+    pthread_mutex_lock(&g_mu);
+    if (slot >= 0 && slot <= 1) {
+        g_cur = slot;
+        g_pending = -1;
+        g_pending_frames = 0;
+        g_flip_req = 0;
+        g_need = 1;
+    }
+    pthread_mutex_unlock(&g_mu);
+    ALOGI("flip done → 可见槽=%d", g_cur);
 }
 
 /* Java 检测到方向/尺寸变化就调它（随后会再送一个新 Surface）。
@@ -2019,13 +2085,14 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeOnSurface(JNIEnv *env, jclass, jint i
  * **立刻生效**（不延迟到换绑）：Java 的 DisplayListener 回调早于真实状态更新，所以回调里会先用
  * 预测值调一次这里（尺寸交换、方向 +1），让"屏幕转过去的那一刻"面板已经在新落位 —— 用户要的
  * "位置切换自然"就是这么来的；真值到了再调一次做校正（猜错也在遮挡里，看不见）。
- * 这里的直接后果是：换绑前可能存在"新落位 + 旧尺寸缓冲"的帧 —— 那一帧由 Java 侧的 alpha=0
- * 遮挡（回调里先遮挡、再调这里）保证不可见；真机实测过它的样子：形状正常、位置不对。 */
+ * 但**不当场改落位**：落位/朝向改在"某个槽接手新窗口的那一刻"生效（当前槽与待命槽两条路径都
+ * 会应用它）。否则可见槽会用新落位去画旧尺寸缓冲 —— 真机实测过那一帧：形状正常、位置不对，
+ * 也就是用户看到的"窗口位置闪现"。 */
 JNIEXPORT void JNICALL Java_VTouchUI_nativeOnDisplay(JNIEnv *, jclass, jint w, jint h, jint rot)
 {
-    pthread_mutex_lock(&g_mu);
-    on_display(w, h, rot);
-    pthread_mutex_unlock(&g_mu);
+    g_pend_w = w; g_pend_h = h; g_pend_rot = rot;
+    __sync_synchronize();
+    g_pend_disp = 1;
 }
 
 JNIEXPORT void JNICALL Java_VTouchUI_nativeDestroy(JNIEnv *, jclass)
@@ -2045,8 +2112,10 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeWantLayerVisible(JNIEnv *, jclass)
 /* Java 主循环轮询它：转屏遮挡期间"新 surface 首帧提交了没有"。读到即清零（一次性事件）。 */
 JNIEXPORT jint JNICALL Java_VTouchUI_nativeTakeSwapDone(JNIEnv *, jclass)
 {
-    int v = g_swap_done;
+    /* 两种模式共用一个"就绪"信号：单图层换绑（g_swap_done）/ 双图层待命槽（g_flip_req）。 */
+    int v = g_swap_done || g_flip_req;
     g_swap_done = 0;
+    g_flip_req = 0;
     return v;
 }
 
