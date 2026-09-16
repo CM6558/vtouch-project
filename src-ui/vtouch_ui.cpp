@@ -44,6 +44,9 @@ int vtouch_region_del(const char *id);                      /* 单条删（不�
 int vtouch_region_rename(const char *old_id, const char *new_id);   /* 原地改名（位置不变） */
 int vtouch_get_region(int i, char *id, int idn, int *type,
                       int *a1, int *a2, int *a3, int *a4, int *enabled);
+/* 接核心时代新增：把面板矩形推给核心（核心据此吞触摸）。入参是**当前屏坐标**，
+ * 逆变换回竖屏逻辑坐标由胶水层做（见 src-ui/ui_glue.c）。单跑模式（ui_stubs.c）里是空实现。 */
+void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2);
 }
 
 #define LOGT "VTouchUI"
@@ -602,6 +605,11 @@ static void snapshot_touches(void)
      * 会被这里看到 —— 面板控件/框选/拖改必须一律不响应，否则用户在原面板位置点一下就会把面板
      * 拖走、起框选、甚至改动区域表并落盘（而屏幕上什么都看不见，只能靠 regions.conf 发现）。 */
     int ui_live = (!g_ui_off && g_want_layer) ? 1 : 0;
+    /* 把"面板现在占哪块屏幕、可不可见"推给核心：核心在注入前拿它决定这只手是给面板还是给 App。
+     * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。 */
+    vtouch_ui_publish_rect(ui_live, g_rot, g_scr_w, g_scr_h,
+                           (int)g_pan_x, (int)g_pan_y,
+                           (int)(g_pan_x + panel_w()), (int)(g_pan_y + panel_h()));
     if (n > 64) n = 64;
     for (i = 0; i < n; i++) {
         int d = 0, x = 0, y = 0;

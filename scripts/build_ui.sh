@@ -73,10 +73,12 @@ echo "[3/6] ndk cc..."
 #   VTOUCH_UI_CORE=stub（默认）面板单跑：11 个 vtouch_* 由 src-ui/ui_stubs.c 提供
 #   VTOUCH_UI_CORE=real        接新核心：编译 src/*.c 全部 + 胶水层 src-ui/ui_glue.c
 if [ "${VTOUCH_UI_CORE:-stub}" = "real" ]; then
-  for f in src/*.c; do
-    "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -Isrc -c "$f" -o "build/ui/obj/core_$(basename "$f" .c).o"
-  done
-  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -Isrc -Isrc-ui -c src-ui/ui_glue.c -o build/ui/obj/ui_glue.o
+  # 面板是**独立进程**：它只读区 A（状态）、读写区 B（邮箱/矩形）、只读区 C（事件环），
+  # 所以只编 vt_util.c（raw_to_logical 等只读辅助）+ vt_shm.c 的面板半边（-DVT_UI_PANEL）。
+  # 引擎在核心进程里跑（scripts/build.sh ui → build/vtouchd_ui），面板不再托管它。
+  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_util.c -o build/ui/obj/vt_util.o
+  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_shm.c  -o build/ui/obj/vt_shm.o
+  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -Isrc-ui -c src-ui/ui_glue.c -o build/ui/obj/ui_glue.o
 else
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -Isrc-ui -c src-ui/ui_stubs.c -o build/ui/obj/ui_stubs.o
 fi

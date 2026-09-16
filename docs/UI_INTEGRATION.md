@@ -215,8 +215,8 @@ service.sh(root)
 |---|---|---|
 | P0 | 本方案 + 启动时序图入库 | 文档事实与代码一致（逐条 `文件:行号` 抽查） |
 | P1 | 核心侧改动（`g` 搬迁 + memfd + CLOEXEC + 吞触摸 + `region_del/rename`） | ① 默认构建 **`.text`/`.data`/`.rodata` 逐字节不变**（实测通过；整文件 md5 差异只来自新增两个空 TU 的文件名符号）；② 关掉 UI 跑 `tests/ws_smoke.py` 全绿；③ `/proc/<ui_pid>/fd` 回读：`event/uinput` **0 条**、`memfd:vtouch-shm` **≥1 条**（实测通过）；④ 触摸注入功能与改动前一致 |
-| P2 | `vt_panel_start()` + 面板子进程拉起 | 真机：核心起 → 面板起（PID 回读）→ 面板 fd 表**没有** event/uinput；杀面板 → 核心继续注入 |
-| P3 | `ui_glue.c` + 面板 11 接口换实现 | 桩模式隔离验证仍全绿；面板显示物理触点轨迹、区域卡片数据与核心一致 |
+| P2 | `vt_panel_start()` + 面板子进程拉起 | ✅ 已实测：核心起 → 面板起（父进程=核心）→ 面板 fd 表 `memfd:vtouch-shm` 1 条、`event/uinput` **0 条**；杀面板 → 核心继续注入并按策略重启 |
+| P3 | `ui_glue.c` + 面板 12 接口换实现 | ✅ 已实测：面板 `已接核心（逻辑 1440x3168 core_pid=…）`；`regions.conf` 3 条 → 面板投邮箱 → 核心 `region add` 三条全落地（total 3）→ 面板卡片 `监听中 · 3/32`、`ui_wide 已停用` 与核心状态逐项一致（截图复核）；`fd 3 -> /memfd:vtouch-shm` 且触摸设备 fd 0 条 |
 | P4 | 面板编辑 → 核心生效 | 手指点面板不穿透（`consume` 生效）；新建/移动/删除/改名区域后核心区域线程 1~2ms 内吃到 |
 | P5 | 旋转 | 策略 C 四条到位：零拉伸、不可见 ≤80ms、稳定窗内不吞触摸、矩形换算正确（横屏下点面板命中准确） |
 | P6 | 性能与打点（可选） | 延迟直方图（P50/P99）出现在面板上；`eglSwapInterval(0)`、紧凑复查等收益可测 |
@@ -235,6 +235,29 @@ service.sh(root)
 | 面板产物 | 必须连同 **`libc++_shared.so`** 一起交付（NDK 默认动态链 libc++；缺它 `System.load` 抛 `UnsatisfiedLinkError`，被 `VTouchUI.java:149` 的 catch 吞掉后 `return` → **进程退 0、什么都不干**，极难查）。已由 `scripts/build_ui.sh` 自动带上 |
 
 验证脚本：`scripts/ondev-ui-smoke.sh`（设备侧 `su -c 'sh …'`，三种模式：默认、`stop`、`noui`）。
+
+## 10.2 P3 联调实测（真机）
+
+链路：面板启动读 `regions.conf` → `vtouch_region_add` 投**编辑邮箱** → 核心 `vt_shm_edit_apply()` 按 `region_add` 语义生效 → 面板每帧从区 A 回读并绘制。
+
+```
+vtouch-ui: 已接核心（逻辑 1440x3168 core_pid=14811 面板 pid=14815）
+vtouchd: region add ui_rect   type0 120,700,1320,1500 en1 (total 1)
+vtouchd: region add ui_circle type1 720,2300,260,0   en1 (total 2)
+vtouchd: region add ui_wide   type0 200,2500,1240,2900 en0 (total 3)
+面板: panel init 1440x3168 regions=3 / first frame t=+291ms draw=19ms
+面板标题栏: 监听中 · 3/32 · 2.4ms      ← 区域数与引擎延迟都是核心的真实数据
+```
+
+**过程中修掉的三个真 bug（都由"验收判据"抓出，不是猜的）**：
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 面板上线即 `SIGSEGV (SEGV_ACCERR)`，backtrace `vt_shm_ui_tick+32`、fault addr = 头部页 `+0x28`（`ui_hb` 偏移） | 我把**头部**也映射成只读，而 `ui_hb`/`panel_pid` 本来就是面板写的 | 头部 + 区 B 面板可写；**区 A 单独再映射一段 `PROT_READ`** 盖住 —— 状态只读由 MMU 强制，头部只读属误伤 |
+| `regions.conf` 3 条只落地 1 条 | 编辑邮箱是**单槽**的，连续投会被覆盖 | `glue_post()` 投完等核心吃掉（`edit_applied == seq`，上限 1s）；顺带把"调用返回即已生效"的同步语义还给面板 |
+| 冒烟脚本 fd 判据误报"不合格" | 用的是日志里最后一个 pid（可能已退出/被重启过），且 `grep event` 会命中 ART 自己的 `anon_inode:[eventfd]` | 判据改成"当前活着的面板 pid" + 精确匹配 `/dev/input/event\|/dev/uinput` |
+
+**待人工确认（需要手指，机器造不出来）**：① 手指点面板 → 面板响应（ImGui 输入来自核心物理槽表）；② 点面板**不穿透**到后面 App（核心日志应出现 `面板吞掉 slotN @x,y`）；③ 面板上改区域 → 核心日志出现 `region add/upd/del`。
 
 ## 11. 风险与对策
 

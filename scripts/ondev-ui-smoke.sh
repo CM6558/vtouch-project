@@ -53,9 +53,11 @@ sleep 2
 
 echo "==== 核心日志 ===="
 cat $LOG 2>/dev/null
-CPID=$(grep -o 'pid=[0-9]*' $LOG 2>/dev/null | tail -1 | cut -d= -f2)
-echo "==== 核心 pid=$(pidof vtouchd_ui) / 面板子进程 pid=$CPID ===="
+CPID=$(ps -A 2>/dev/null | grep 'vtouch-ui' | grep -v grep | awk '{print $2}' | head -1)
+[ -z "$CPID" ] && CPID=$(grep -o 'pid=[0-9]*' $LOG 2>/dev/null | tail -1 | cut -d= -f2)
+echo "==== 核心 pid=$(pidof vtouchd_ui) / 当前活着的面板 pid=$CPID ===="
 if [ -z "$CPID" ]; then echo "结论：面板未启动（看上面日志原因）"; exit 0; fi
+if [ ! -e /proc/$CPID ]; then echo "结论：面板起来又退出了（看日志）"; exit 0; fi
 
 echo "面板父进程 pid=$(cat /proc/$CPID/stat 2>/dev/null | awk '{print $4}')（应等于核心 pid）"
 echo "fd 3 -> $(readlink /proc/$CPID/fd/3 2>/dev/null)"

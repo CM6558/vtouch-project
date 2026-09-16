@@ -108,22 +108,20 @@ int vt_shm_stop_req(void)
 
 void vt_shm_ring_push(const char *s, size_t n)
 {
-    struct vt_shm_header *h;
-    uint32_t tail, next;
-    if (!S_c || !S_base) return;
-    h = (struct vt_shm_header *)S_base;
+    uint32_t tail, next, rd;
+    if (!S_c || !S_b) return;
     if (n >= VT_RING_LINE) n = VT_RING_LINE - 1;
     tail = S_c->tail;
     next = (tail + 1) % VT_RING_SLOTS;
-    if (next == S_c->head) {                    /* 环满：丢最旧（面板是观察者，丢它比堵核心好） */
-        S_c->head = (S_c->head + 1) % VT_RING_SLOTS;
+    rd = S_b->ring_read;                        /* 消费者下标在区 B（面板写；读到旧值最多多丢一条） */
+    if (next == rd) {
+        S_b->ring_read = (rd + 1) % VT_RING_SLOTS;
         S_c->drops++;
     }
     memcpy(S_c->line[tail], s, n);
     S_c->line[tail][n] = 0;
     __sync_synchronize();
     S_c->tail = next;
-    (void)h;
 }
 
 void vt_shm_edit_apply(void)
@@ -191,6 +189,10 @@ int vt_shm_attach(int fd)
     sz = lseek(fd, 0, SEEK_END);
     if (sz <= 0) { fprintf(stderr, "vtouch-ui: 共享内存 fd=%d 长度异常 (%ld)\n", fd, (long)sz); return -1; }
     total = (uint32_t)sz;
+    /* 头部 + 区 B 是面板可写的：头部里 ui_hb / panel_pid 本来就是面板写的（核心只看不改），
+     * 区 B 是编辑邮箱 + 面板矩形。**状态段（区 A）保持只读** —— "面板改不了核心状态"靠的就是它。
+     * 踩过的坑：把头部也映射成只读 → 面板写 ui_hb 直接 SIGSEGV(SEGV_ACCERR)，backtrace 落在
+     * vt_shm_ui_tick+32、fault addr = 头部页 + 0x28（ui_hb 的偏移）。 */
     base = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (base == MAP_FAILED) {
         fprintf(stderr, "vtouch-ui: mmap(fd=%d) 失败: %s\n", fd, strerror(errno));
@@ -207,15 +209,46 @@ int vt_shm_attach(int fd)
         munmap(base, total); return -1;
     }
     S_base = base;
-    S_state = (struct vt_state *)((char *)base + h->off_state);
-    S_b = (struct vt_shm_b *)((char *)base + h->off_b);
-    S_c = (struct vt_shm_c *)((char *)base + h->off_c);
-    /* 面板对状态段是**只读**的（这里只保证不写；真正的 MMU 保护由 ui_glue 单独按 PROT_READ 重映射，
-     * 但那会把整块拆成多段映射，P2 再收 —— 现在先把"不写"当纪律）。 */
+    /* 区 A 单独再映射一段只读并**盖住**刚才的可写映射：状态只能读，"写它=SIGSEGV"由 MMU 保证。 */
+    {
+        void *ro = mmap(NULL, h->size_state, PROT_READ, MAP_SHARED, fd, (off_t)h->off_state);
+        if (ro == MAP_FAILED) {
+            fprintf(stderr, "vtouch-ui: mmap(区A 只读) 失败: %s\n", strerror(errno));
+            munmap(base, total); return -1;
+        }
+        S_state = (struct vt_state *)ro;
+    }
+    S_c = (struct vt_shm_c *)((char *)base + h->off_c);              /* 只读 */
+    /* 区 B 单独再映射一段 RW：这是面板唯一能写的地方（编辑邮箱 / 面板矩形 / 停引擎 / 环读下标）。
+     * 三段分开映射之后，"面板改不了状态"是 MMU 强制的，不是纪律。 */
+    S_b = (struct vt_shm_b *)mmap(NULL, h->size_b, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)h->off_b);
+    if (S_b == MAP_FAILED) {
+        fprintf(stderr, "vtouch-ui: mmap(区B) 失败: %s\n", strerror(errno));
+        munmap(base, total); S_b = NULL; return -1;
+    }
+    g_ptr = S_state;                       /* 只读辅助函数（raw_to_logical 等）直接用 g */
     fprintf(stderr, "vtouch-ui: 共享内存附着成功 total=%u state@%u b@%u c@%u 逻辑=%dx%d core_pid=%d\n",
             total, h->off_state, h->off_b, h->off_c, h->logical_w, h->logical_h, h->core_pid);
     return 0;
 }
+
+/* 面板侧定义 g_ptr 并指向**只读**状态映射：vt_util.c 里的 raw_to_logical() 等只读辅助函数
+ * 因此可以直接复用，而任何写操作都会被 MMU 拦成 SIGSEGV（只死面板，不动核心）。 */
+struct vt_state *g_ptr;
+
+int vt_shm_ring_pop(char *out, size_t cap)
+{
+    uint32_t rd;
+    if (!S_c || !S_b || !out || cap == 0) return 0;
+    rd = S_b->ring_read;
+    if (rd == S_c->tail) return 0;               /* 空 */
+    snprintf(out, cap, "%s", S_c->line[rd]);
+    __sync_synchronize();
+    S_b->ring_read = (rd + 1) % VT_RING_SLOTS;
+    return 1;
+}
+
+struct vt_shm_header *vt_shm_hdr(void) { return (struct vt_shm_header *)S_base; }
 
 struct vt_state *vt_shm_state(void) { return S_state; }
 struct vt_shm_b *vt_shm_b(void)     { return S_b; }

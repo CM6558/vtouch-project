@@ -172,6 +172,10 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
 {
     char msg[96];
     int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+#ifdef VT_UI
+    /* 面板的事件环：独立通道，和「脚本有没有订阅」无关（面板不该因为没脚本就看不到事件）。 */
+    if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
+#endif
     if (g.sub_mask & SUB_REGION) {
         if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);

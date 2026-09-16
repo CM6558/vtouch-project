@@ -63,6 +63,7 @@ struct vt_shm_b {
     volatile int32_t  lock;           /* 自旋锁（只护邮箱，别在热路径上拿） */
     struct vt_shm_edit edit;
     volatile uint32_t edit_applied;   /* 核心已应用的 seq（诊断） */
+    volatile uint32_t ring_read;      /* 事件环的消费者下标（只有面板写） */
     volatile int32_t  stop_req;       /* 面板请求停引擎（核心据此退出；面板另发 SIGTERM 兜底） */
     volatile uint32_t rect_seq;       /* 面板矩形发布序号：偶=稳定 */
     int32_t  panel_visible;           /* 面板当前是否可见（不可见 = 一律不吞） */
@@ -70,9 +71,9 @@ struct vt_shm_b {
     int32_t  rx1, ry1, rx2, ry2;      /* 面板矩形，**竖屏逻辑坐标**（外空间） */
 };
 
-/* 区 C：事件环（核心写 tail，面板读 head；SPSC，满则丢最旧）。 */
+/* 区 C：事件环。核心写 tail/line（生产者），**面板对区 C 只有读权限**；
+ * 消费者的读下标放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。 */
 struct vt_shm_c {
-    volatile uint32_t head;
     volatile uint32_t tail;
     uint32_t drops;
     char line[VT_RING_SLOTS][VT_RING_LINE];
@@ -85,6 +86,8 @@ int  vt_shm_create(void);
 void vt_shm_tick(void);
 /* 事件环入队（核心唯一写方）。 (vtouch-doc: vt_shm_ring_push) */
 void vt_shm_ring_push(const char *s, size_t n);
+/* 事件环出队（面板唯一读方）；读到一行返回 1，空返回 0。 (vtouch-doc: vt_shm_ring_pop) */
+int  vt_shm_ring_pop(char *out, size_t cap);
 /* 吃一次编辑邮箱（面板有编辑就应用）。 (vtouch-doc: vt_shm_edit_apply) */
 void vt_shm_edit_apply(void);
 /* 读面板矩形（seqlock 一次重试）；返回 0 = 可信，-1 = 拿不准（调用方应保守不吞）。 (vtouch-doc: vt_shm_panel_rect) */
@@ -100,6 +103,7 @@ int  vt_shm_stop_req(void);
 /* 从固定 fd 附着共享内存、校验契约；返回 0 成功。 (vtouch-doc: vt_shm_attach) */
 int  vt_shm_attach(int fd);
 /* 取各段指针（面板侧 getter）。 (vtouch-doc: vt_shm_state) */
+struct vt_shm_header *vt_shm_hdr(void);
 struct vt_state *vt_shm_state(void);
 struct vt_shm_b *vt_shm_b(void);
 struct vt_shm_c *vt_shm_c(void);

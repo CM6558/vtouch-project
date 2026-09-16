@@ -5,6 +5,12 @@
 static struct input_event ev_buf[MAX_IOV];
 static struct iovec ev_iov[MAX_IOV];
 static int ev_n;
+#ifdef VT_UI
+/* 被面板吞掉的手（面板覆盖区域内按下）：按下那一刻问一次谓词，**锁存整段手势**到抬起。
+ * 为什么必须由核心做：EVIOCGRAB 之后 App 根本看不到任何事件 —— 只有核心能在注入前把这只手拿掉。
+ * 锁存的理由：一次手势中途改判会让下层看到「没有 down 的 up」。 */
+static unsigned char ui_eaten[MAX_PHYS];
+#endif
 /**
  * (vtouch-doc: ev_add)
  * @brief 往本帧的 iovec 里追加一条 input_event（纯内存，不做系统调用）。
@@ -107,7 +113,12 @@ int emit_iov_writev(void)
 int any_emitted(void)
 {
     int i;
-    for (i = 0; i < g.phys_slots; i++) if (g.phys[i].down) return 1;
+    for (i = 0; i < g.phys_slots; i++) {
+#ifdef VT_UI
+        if (ui_eaten[i]) continue;              /* 被吞的手不进帧，别让它把 BTN_TOUCH 拉起来 */
+#endif
+        if (g.phys[i].down) return 1;
+    }
     for (i = 0; i < g.vslots; i++) if (g.virt[i].down) return 1;
     return 0;
 }
@@ -131,7 +142,11 @@ int emit_frame(void)
     int i;
     if (g.u_fd < 0) return -1;
     ev_n = 0;
-    for (i = 0; i < g.phys_slots; i++) if (g.phys[i].pending_up) {
+    for (i = 0; i < g.phys_slots; i++) {
+#ifdef VT_UI
+        if (ui_eaten[i]) continue;          /* 从没发过 down 的手，不需要补发 up */
+#endif
+        if (!g.phys[i].pending_up) continue;
         ev_add(EV_ABS, ABS_MT_SLOT, i);                    /* 物理身份 = 下标 */
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
@@ -141,6 +156,18 @@ int emit_frame(void)
     }
     for (i = 0; i < g.phys_slots; i++) {
         if (!g.phys[i].down) continue;
+#ifdef VT_UI
+        /* 按下那一刻（上一帧还没 down）问一次面板：这只手是给它用的吗？ */
+        if (!ui_eaten[i] && !g.ps_down[i]) {
+            int elx, ely;
+            if (raw_to_logical(g.phys[i].x, 0, &elx) == 0 && raw_to_logical(g.phys[i].y, 1, &ely) == 0
+                && vt_shm_should_eat(elx, ely)) {
+                ui_eaten[i] = 1;
+                fprintf(stderr, "vtouchd: 面板吞掉 slot%d @%d,%d\n", i, elx, ely);
+            }
+        }
+        if (ui_eaten[i]) continue;
+#endif
         ev_add(EV_ABS, ABS_MT_SLOT, i);
         ev_add(EV_ABS, ABS_MT_TRACKING_ID, i);
         ev_add(EV_ABS, ABS_MT_POSITION_X, g.phys[i].x);
@@ -163,6 +190,10 @@ int emit_frame(void)
     if (emit_iov_writev() < 0) { g.g_reemit = 1; return -1; }
     for (i = 0; i < g.phys_slots; i++) g.phys[i].pending_up = 0;
     for (i = 0; i < g.vslots; i++) g.virt[i].pending_up = 0;
+#ifdef VT_UI
+    for (i = 0; i < g.phys_slots; i++)          /* 手完全抬起后才解除锁存（整段手势一起吞） */
+        if (!g.phys[i].down && !g.phys[i].pending_up) ui_eaten[i] = 0;
+#endif
     /* 身份不再在帧末释放（静态两段，§5 改）——上面两行清 pending_up 就够了。 */
     /* §4.1：虚拟触点**不入**转发队列 —— 区域判定只吃物理手指，
      * 「回触不自激」由此在源头成立（不是送进去再过滤）。 */
@@ -236,6 +267,11 @@ void enqueue_phys_changes(void)
         if (raw_to_logical(g.phys[i].x, 0, &lx) < 0 || raw_to_logical(g.phys[i].y, 1, &ly) < 0) continue;
         if (g.phys[i].down) { g.ps_down[i] = 1; g.ps_x[i] = g.phys[i].x; g.ps_y[i] = g.phys[i].y; }
         else g.ps_down[i] = 0;
+#ifdef VT_UI
+        /* 快照照更新（emit_frame 靠它判 down 沿），但不进区域判定：
+         * 否则「用手指点面板」会真的触发脚本的 region down/enter/up。 */
+        if (ui_eaten[i]) continue;
+#endif
         ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
         ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i] : now_ns();
         vtq_push(&g.region_q, &ev);                              /* 区域线程（队列唯一消费者） */

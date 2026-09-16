@@ -39,6 +39,12 @@ static void seed(void)
     R[RN].type = 1; R[RN].a1 = 720; R[RN].a2 = 2100; R[RN].a3 = 300; R[RN].a4 = 0; R[RN].enabled = 1; RN++;
 }
 
+/* 接核心时代新增的入口：单跑模式下没人可推，空实现（接口面保持一致，面板代码两边都能编） */
+void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2)
+{
+    (void)visible; (void)rot; (void)scr_w; (void)scr_h; (void)x1; (void)y1; (void)x2; (void)y2;
+}
+
 /* ---- 11 个接口的桩 ---- */
 void vtouch_set_hooks(const struct vtouch_hooks *h) { if (!h) return; H = *h; H_ok = 1; }
 
