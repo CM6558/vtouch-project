@@ -49,7 +49,7 @@ DOCS = {
             ("lx", "逻辑 x"), ("ly", "逻辑 y")], note="低频事件；只报物理手指。"),
 "region_apply": dict(brief="五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。",
     params=[("ev", "来自 region_q 的事件")],
-    note="virt=1 的事件直接跳过（这就是「回触不自激」）；三张状态表是线程私有的，只在 region_lock 里读区域表。"),
+    note="三张状态表是线程私有的，只在 region_lock 里读区域表。"),
 "region_thread_main": dict(brief="区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。",
     params=[("arg", "未使用")], ret="NULL（线程不主动退出）。",
     note="只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。"),
@@ -89,8 +89,6 @@ DOCS = {
     note="少了这段，客户端在 begin_frame..end_frame 中间断开会把虚拟手指永久粘在设备上。"),
 "enqueue_phys_changes": dict(brief="物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。",
     note="推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。"),
-"enqueue_virt_changes": dict(brief="虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。",
-    note="「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。"),
 
 # ---------------- §10 WebSocket ----------------
 "rol32": dict(brief="32 位循环左移（SHA-1 内部用）。", params=[("x", "值"), ("n", "位数")], ret="左移结果。"),

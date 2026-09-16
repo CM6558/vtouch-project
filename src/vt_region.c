@@ -119,7 +119,7 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
  * (vtouch-doc: region_apply)
  * @brief 五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。
  * @param   ev       来自 region_q 的事件
- * @note    virt=1 的事件直接跳过（这就是「回触不自激」）；三张状态表是线程私有的，只在 region_lock 里读区域表。
+ * @note    三张状态表是线程私有的，只在 region_lock 里读区域表。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   五事件判定的事件化版本（§4.4）。与完整版 region_match 逐分支等价：
@@ -188,7 +188,6 @@ void *region_thread_main(void *arg)
             usleep(1000);                        /* 空闲 1ms 一轮：不烧 CPU，也不给事件加延迟 */
             continue;
         }
-        if (ev.virt) continue;                   /* 虚拟触摸不参与匹配（防自激） */
         region_apply(&ev);
     }
     return NULL;

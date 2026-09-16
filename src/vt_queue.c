@@ -44,7 +44,7 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
     if (tail - head >= VTQ_CAP) {
         struct vt_ev *last = &q->buf[(tail - 1u) % VTQ_CAP];
         if (ev->action == VT_MOVE && last->action == VT_MOVE &&
-            last->slot == ev->slot && last->virt == ev->virt) {
+            last->slot == ev->slot) {
             last->x = ev->x; last->y = ev->y; last->ts = ev->ts;
             return;
         }

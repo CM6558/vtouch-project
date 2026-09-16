@@ -14,7 +14,8 @@
   2) python tests/ws_planb_regression.py            # 退出码 0 = 全过
   3) 物理用例会往 daemon 抓着的触摸节点写事件（等价于真有手指在动）：
      - 需要 root（脚本默认走 `su -c`，AVD userdebug 可加 --no-su）
-     - **跑之前别碰屏幕**：伪造手指与真人共用内核槽位
+     - **跑之前别碰屏幕**：伪造手指与真人共用内核槽位（设备侧残留的「已按下」槽会吞掉伪造 down，
+   所以 T3 开始前会先把全部物理槽抬起一遍）
      - 无 root / 不想动物理链路时加 --skip-phys（跳过 T3，T4/T5 仍跑）
 
 用法:
@@ -151,13 +152,20 @@ class Phys:
         return self._run("up %d" % slot)
 
 
+phys_n = 10          # 物理槽数（discover_phys 里从 daemon 日志的 pool=/virt_max= 反推）
+
 def discover_phys(ws, res_line):
-    """从 daemon 日志拿 dev=，从 res 拿 raw 量程算 SCALE。返回 (dev, scale) 或 (None, None)。"""
+    """从 daemon 日志拿 dev= 与物理槽数，从 res 拿 raw 量程算 SCALE。返回 (dev, scale) 或 (None, None)。"""
+    global phys_n
     dev = None
     rc, out = sh("cat /data/local/tmp/vtouchd.log 2>/dev/null | grep -o 'dev=[^ ]*' | tail -1")
     m = re.search(r"dev=(\S+)", out or "")
     if m:
         dev = m.group(1)
+    rc, out = sh("cat /data/local/tmp/vtouchd.log 2>/dev/null | grep -o 'pool=[0-9]* virt_max=[0-9]*' | tail -1")
+    m = re.search(r"pool=(\d+) virt_max=(\d+)", out or "")
+    if m and int(m.group(1)) > int(m.group(2)):
+        phys_n = int(m.group(1)) - int(m.group(2))
     scale = None
     m = re.search(r"raw (\d+) (\d+) (\d+) (\d+)", res_line or "")
     if m and ws_lw:
@@ -279,7 +287,19 @@ def main():
         ws.cmd("sub region")
         drain(ws, 0.3)
         slot = 0
-        phys.down(slot, cx, cy)
+        # 设备侧可能残留「已按下」的槽（真人碰过屏，或上一次跑中断在半路）：
+        # 那种槽上伪造 down 不算变化 → 没有 down 事件（现象：同 daemon 换别的槽一切正常）。
+        # 所以先把这个内核里见过的槽全部抬起，再开始用例。
+        for s in range(phys_n):
+            phys.up(s)
+        drain(ws, 0.5)
+        # 预热：驱动对「闲置槽的第一次按下」那一帧不报坐标（实测 down 帧 x=y=0，于是按下点落在区域外
+        # → 整条 down 不上报）。先按一次（位置随便）再抬起，把槽唤醒，后面的按下就带坐标了。
+        phys.down(slot, 5, 5)
+        drain(ws, 0.4)
+        phys.up(slot)
+        drain(ws, 0.5)
+        phys.down(slot, cx, cy)                       # ← 真正按下
         rline, seen2 = wait_for(ws, lambda l: l.startswith("region_ev "))
         check(rline is not None and rline.split()[2] == "down",
               "区域内按下 → region_ev down（带上 id/slot/逻辑坐标）", rline or seen2)
@@ -310,6 +330,8 @@ def main():
         phys.up(slot)
         drain(ws, 0.3)
         check(evs(got, "region_ev") == [], "区域外按下没有 region_ev（判定按区域来）", evs(got, "region_ev"))
+        for s in range(phys_n):          # 收尾：不给下一次留脏槽位
+            phys.up(s)
 
         # ------------------------------------------------------------ T4 回触
         section("T4 回触示例：注入虚拟触点回触区域，不产生任何事件（不自激）")

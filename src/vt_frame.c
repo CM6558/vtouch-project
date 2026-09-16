@@ -5,7 +5,6 @@
 static struct input_event ev_buf[MAX_IOV];
 static struct iovec ev_iov[MAX_IOV];
 static int ev_n;
-static int vs_down[MAX_VIRT], vs_x[MAX_VIRT], vs_y[MAX_VIRT];
 /**
  * (vtouch-doc: ev_add)
  * @brief 往本帧的 iovec 里追加一条 input_event（纯内存，不做系统调用）。
@@ -165,9 +164,8 @@ int emit_frame(void)
     for (i = 0; i < g.phys_slots; i++) g.phys[i].pending_up = 0;
     for (i = 0; i < g.vslots; i++) g.virt[i].pending_up = 0;
     /* 身份不再在帧末释放（静态两段，§5 改）——上面两行清 pending_up 就够了。 */
-    /* §4.1：虚拟状态变化也入队（消费者按 g.virt 位自己过滤）——这样「注入不会自激」是可断言的，
-     * 而不是靠「反正没把虚拟触点喂回去」的口头保证。 */
-    enqueue_virt_changes();
+    /* §4.1：虚拟触点**不入**转发队列 —— 区域判定只吃物理手指，
+     * 「回触不自激」由此在源头成立（不是送进去再过滤）。 */
     return 0;
 }
 /**
@@ -238,31 +236,8 @@ void enqueue_phys_changes(void)
         if (raw_to_logical(g.phys[i].x, 0, &lx) < 0 || raw_to_logical(g.phys[i].y, 1, &ly) < 0) continue;
         if (g.phys[i].down) { g.ps_down[i] = 1; g.ps_x[i] = g.phys[i].x; g.ps_y[i] = g.phys[i].y; }
         else g.ps_down[i] = 0;
-        ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly; ev.virt = 0;
+        ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
         ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i] : now_ns();
         vtq_push(&g.region_q, &ev);                              /* 区域线程（队列唯一消费者） */
-    }
-}
-/**
- * (vtouch-doc: enqueue_virt_changes)
- * @brief 虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。
- * @note    「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。
- */
-void enqueue_virt_changes(void)
-{
-    int i, lx, ly, action;
-    struct vt_ev ev;
-    for (i = 0; i < g.vslots; i++) {
-        if (g.virt[i].down && !vs_down[i]) action = VT_DOWN;
-        else if (!g.virt[i].down && vs_down[i]) action = VT_UP;
-        else if (g.virt[i].down && (g.virt[i].x != vs_x[i] || g.virt[i].y != vs_y[i])) action = VT_MOVE;
-        else continue;
-        vs_down[i] = g.virt[i].down;
-        vs_x[i] = g.virt[i].x; vs_y[i] = g.virt[i].y;
-        if (raw_to_logical(g.virt[i].x, 0, &lx) < 0 || raw_to_logical(g.virt[i].y, 1, &ly) < 0) continue;
-        ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
-        ev.ts = now_ns(); ev.virt = 1;
-        vtq_push(&g.region_q, &ev);
-        /* 虚拟事件只喂区域线程；区域线程按 virt 位跳过，不产生任何推送 */
     }
 }

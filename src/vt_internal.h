@@ -69,7 +69,6 @@ struct vt_ev {
     int action;              /* 0=up 1=down 2=move */
     int x, y;                /* 逻辑坐标 */
     uint64_t ts;             /* down=按下时刻, move/up=帧到达时刻（手势识别预留） */
-    int virt;                /* 0=物理 1=虚拟 —— 区域线程按这一位过滤（防自激） */
 };
 
 struct vtq {
@@ -190,8 +189,6 @@ int set_virtual(struct contact *state, int slot, const char *name, int x, int y)
 void owner_reset(void);
 /* 物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。 (vtouch-doc: enqueue_phys_changes) */
 void enqueue_phys_changes(void);
-/* 虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。 (vtouch-doc: enqueue_virt_changes) */
-void enqueue_virt_changes(void);
 
 /* ---- vt_ws.c ---- */
 /* 32 位循环左移（SHA-1 内部用）。 (vtouch-doc: rol32) */
