@@ -44,7 +44,7 @@ static int g_sw, g_sh;                /* 当前 EGLSurface 真实尺寸：画坐
 static volatile int g_running = 1, g_frame;
 static volatile int g_dw = 1440, g_dh = 3168, g_drot;
 static volatile int g_geom_pending;   /* 需要 ANativeWindow_setBuffersGeometry */
-static int g_swap_fail, g_logged_geom = -1, g_mode;   /* g_mode: 0=B 1=A 2=C（重建，兼容性主路径） */
+static int g_swap_fail, g_logged_geom = -1, g_mode;   /* 0=B 1=A 2=C（重建）3=E（固定竖屏图层+绘制旋转）*/
 static volatile int g_after_swap;     /* 换绑后待打点：首帧真正上屏时记一行（量换绑延迟） */
 /* ---- 模式 D：双槽（双图层 + 双 EGLSurface + 单 GL 上下文）---- */
 static ANativeWindow *g_win2[2];
@@ -53,6 +53,19 @@ static int  g_slot_cur;               /* 当前可见槽 */
 static volatile int g_prep_slot = -1;  /* 待准备（不可见）的槽 */
 static volatile int g_prep_w, g_prep_h;
 static int g_slotw[2], g_sloth[2];    /* 各槽目标尺寸（surface 建的时候用） */
+static int g_cw, g_ch;                /* 内容画布尺寸 = 用户当前朝向的逻辑尺寸（rot 0/2: w×h；rot 1/3: h×w）*/
+
+/* 策略 E：内容坐标(px) → 缓冲区坐标(px)。缓冲区永远是竖屏尺寸，旋转只体现在这里。
+ * 四个方向都是「旋转 + 平移」，无缩放 —— 所以圆永远是圆。 */
+static void c2b(float cx, float cy, float *bx, float *by)
+{
+    switch (g_drot) {
+        case 1:  *bx = cy;                *by = (float)g_sh - cx; break;   /* 内容旋转 90°CCW */
+        case 3:  *bx = (float)g_sw - cy;  *by = cx;              break;   /* 内容旋转 90°CW  */
+        case 2:  *bx = (float)g_sw - cx;  *by = (float)g_sh - cy; break;  /* 180° */
+        default: *bx = cx;                *by = cy;              break;
+    }
+}
 static volatile int g_diag;           /* 置 1 = 下一帧打一次全尺寸诊断 */
 static jmethodID g_mid_hidden_frame;
 static volatile int g_swap_done;      /* 换绑后首帧已上屏（供 Java 恢复图层 alpha） */
@@ -126,11 +139,15 @@ static int gl_init(void)
     return 0;
 }
 
-/* 像素坐标（原点左上）→ NDC */
+/* 内容像素坐标（原点左上）→ 先按 rot 旋进缓冲区，再转 NDC。
+ * bw/bh 忽略（保留签名以免改动所有调用点）：缓冲区尺寸用 g_sw/g_sh。 */
 static void px2ndc(float x, float y, float bw, float bh, float *ox, float *oy)
 {
-    *ox = (x / bw) * 2.0f - 1.0f;
-    *oy = 1.0f - (y / bh) * 2.0f;
+    float bx, by;
+    (void)bw; (void)bh;
+    c2b(x, y, &bx, &by);
+    *ox = (bx / (float)g_sw) * 2.0f - 1.0f;
+    *oy = 1.0f - (by / (float)g_sh) * 2.0f;
 }
 
 static void draw_verts(const float *v, int n, GLenum mode, float r, float g, float b)
@@ -193,7 +210,7 @@ static void circle(ANativeWindow *w, float cx, float cy, float rad, float r, flo
 
 static void draw_scene(ANativeWindow *w)
 {
-    float bw = (float)g_sw, bh = (float)g_sh;
+    float bw = (float)g_cw, bh = (float)g_ch;   /* 按用户当前朝向布局，旋转交给 px2ndc */
     float t = 6.0f;                      /* 边框粗细 */
     float m = 120.0f;                    /* 角标长度 */
     float side = (bw < bh ? bw : bh) * 0.5f;
@@ -548,6 +565,7 @@ JNIEXPORT void JNICALL Java_RotProbeMain_nativeOnDisplay(JNIEnv *env, jclass cls
 {
     (void)env; (void)cls;
     g_dw = w; g_dh = h; g_drot = rot;
+    if (g_mode == 3) { g_cw = (rot == 1 || rot == 3) ? h : w; g_ch = (rot == 1 || rot == 3) ? w : h; }
     g_geom_pending = 1;
     pthread_cond_broadcast(&cv);
     LOGI("nativeOnDisplay %dx%d rot=%d → 排队改几何（不新建 Surface）", (int)w, (int)h, (int)rot);

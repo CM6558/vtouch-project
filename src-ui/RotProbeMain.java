@@ -261,6 +261,7 @@ public class RotProbeMain {
         String mode = (args.length > 2) ? args[2].toUpperCase() : "C";
         boolean modeA = mode.equals("A");
         modeD = mode.equals("D");
+        boolean modeE = mode.equals("E");
         Log.i(TAG, "start " + w + "x" + h + "  模式=" + mode
               + (mode.equals("C") ? "（重建 Surface：兼容性主路径）"
                  : mode.equals("A") ? "（恒定 buffer + 合成器旋转，ROM 相关）" : "（只改几何，实验）"));
@@ -278,7 +279,7 @@ public class RotProbeMain {
         try {
             System.load("/data/local/tmp/vtouch-rotprobe/librotprobe.so");
         } catch (Throwable t) { Log.e(TAG, "load so", t); return; }
-        if (nativeStart(w, h, mode.equals("A") ? 1 : mode.equals("B") ? 0 : 2) != 0) { Log.e(TAG, "nativeStart failed"); System.exit(3); }
+        if (nativeStart(w, h, mode.equals("A") ? 1 : mode.equals("B") ? 0 : mode.equals("E") ? 3 : 2) != 0) { Log.e(TAG, "nativeStart failed"); System.exit(3); }
 
         Object layer = null;
         int[] disp = queryDisplay(w, h, 0);
@@ -299,6 +300,13 @@ public class RotProbeMain {
             }
             if (modeD) {
                 layer = layers[0];                   /* 模式 D 只用双图层，不建单图层 */
+            } else if (modeE) {
+                /* 策略 E：按**竖屏逻辑尺寸**建一次，此后永不 resize、永不重建、不动 alpha。
+                 * 旋转只改绘制变换（native 侧 px2ndc），图层尺寸始终不变。 */
+                layer = makeLayer("vtouch-rotprobe-E", w, h);
+                nativeOnDisplay(disp[0], disp[1], disp[2]);
+                nativeOnSurface(newSurface(layer));
+                Log.i(TAG, "模式 E：固定竖屏图层 " + w + "x" + h + "（永不改尺寸），旋转只改绘制变换");
             } else {
                 layer = makeLayer("vtouch-rotprobe", modeA ? w : disp[0], modeA ? h : disp[1]);
                 /* 模式 A：图层 buffer 恒为竖屏逻辑尺寸，永不改；模式 C：按当前显示尺寸建，旋转时 setBufferSize 重建 */
@@ -338,7 +346,12 @@ public class RotProbeMain {
                 int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                 if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
                     Object tt = txnNew();
-                    if (modeD) {
+                    if (modeE) {
+                        /* 只通知 native 更新 rotation（它据此旋转绘制）；图层本身一点不动 */
+                        nativeOnDisplay(d2[0], d2[1], d2[2]);
+                        Log.i(TAG, "display " + d2[0] + "x" + d2[1] + " rot=" + d2[2]
+                                  + "  → 模式E：仅更新绘制变换（图层未动、无重建、无空白）");
+                    } else if (modeD) {
                         /* 在隐藏层上准备新尺寸（可见层原样不动，全程无空白），首帧上屏后由回调原子翻转 */
                         int hidden2 = 1 - curIdx;
                         swapWaitT0 = System.currentTimeMillis();

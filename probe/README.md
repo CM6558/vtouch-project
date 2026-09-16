@@ -52,6 +52,7 @@ adb shell "su -c 'cd /data/local/tmp/vtouch-probe && ./probe_native /data/local/
 | **B** 只改 buffer 几何 | `Transaction.setBufferSize` + `ANativeWindow_setBuffersGeometry`，surface 与 EGLSurface 都不重建 | ✗ 必失败：**EGL 窗口 surface 的尺寸在创建时固定**，驱动仍按旧尺寸出帧 → 合成器把旧尺寸帧铺满新显示尺寸 = **拉伸** |
 | **A** 恒定 buffer + 合成器旋转 | buffer 永远竖屏尺寸，旋转交给 `setGeometry`/`setMatrix` | ✗ 本 ROM 上不可用：`setGeometry(sc, src, dst, orient)` 把图层摆到可视区外（实测整层不可见）；`setMatrix(sc, Matrix, float[])` 抛 `ArrayIndexOutOfBoundsException`（该重载底层 `Matrix.getValues` 要求 9 个元素数组）。靠逐 ROM 试隐藏 API，兼容性差 |
 | **C** 重建 surface（**采用**） | Java：`setBufferSize(new)` + 同图层 `new Surface`；native：帧边界销毁旧 EGLSurface → 换 window → 重建 EGLSurface（G 上下文/字体/ImGui 全保留） | ✓ 跨 ROM 稳、零拉伸、只用 `SurfaceControl.Builder`(公开) + `Surface(SurfaceControl)` + 标准 NDK EGL |
+| **E** 固定竖屏图层 + 绘制旋转 | 图层按竖屏逻辑尺寸建一次（永不 resize/重建），旋转只在 `px2ndc` 里把内容坐标旋转后画进同一块 buffer | ✗ 不成立：合成器会把**全屏图层按显示尺寸拉伸**，图层声明的 buffer 尺寸拦不住它 → 横屏实测红圆 1219×1440（宽高比 0.847，横向 2.2×/纵向 0.45× 拉伸）、角标被裁出屏外。**根因同时解释了为什么 A/B 也必失败**：只要不允许拉伸，图层声明尺寸就必须等于当前显示的逻辑尺寸 → 每次旋转必须改尺寸 → EGL 窗口 surface 尺寸不可变 → **surface 必须重建 = C** |
 | D 双图层 + 原子翻转 | 准备隐藏层 → 单事务 `alpha` 对切 | 机制可行（事件→翻转 3~28ms），但旋转后**合成结果与 native 账本不一致**（日志报 `绘制用=显示尺寸`，屏幕实际只有下半屏 1440×1440 区域、横向拉伸 2.13 倍）→ 未采用，记录备查 |
 
 ### C 的最终形态（要搬进面板的四条）
