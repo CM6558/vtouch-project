@@ -15,6 +15,48 @@ public class VTouchUI {
     static native void nativeOnDisplay(int w, int h, int rot);
     static native void nativeDestroy();
     static native int nativeWantLayerVisible();
+    static native int nativeTakeSwapDone();      /* 转屏后"新 surface 首帧已提交"（读到即清零） */
+
+    /* 显示变化：事件驱动（公开 API DisplayManager.registerDisplayListener）。
+     * 事件只告诉我们"去查"——实测回调常早于状态更新（getRotation() 仍返回旧值），所以配一个
+     * 500ms 观察窗复查到值真变；注册失败自动回落轮询，绝不影响可用性。 */
+    static Object sysCtx;
+    static volatile long settleUntil = 0;
+    static volatile boolean listenerOk = false;
+
+    static void startDisplayListener() {
+        Thread th = new Thread(new Runnable() {
+            public void run() {
+                try {
+                    android.os.Looper.prepare();
+                    final android.os.Handler h = new android.os.Handler();
+                    if (sysCtx == null) { Log.w(TAG, "没有 system Context → 回落 320ms 轮询"); android.os.Looper.loop(); return; }
+                    Object dm = sysCtx.getClass().getMethod("getSystemService", Class.class)
+                                       .invoke(sysCtx, Class.forName("android.hardware.display.DisplayManager"));
+                    Class<?> dl = Class.forName("android.hardware.display.DisplayManager$DisplayListener");
+                    Object proxy = java.lang.reflect.Proxy.newProxyInstance(dl.getClassLoader(),
+                        new Class<?>[]{dl}, new java.lang.reflect.InvocationHandler() {
+                            public Object invoke(Object p, java.lang.reflect.Method m, Object[] a2) {
+                                if ("onDisplayChanged".equals(m.getName())) {
+                                    settleUntil = System.currentTimeMillis() + 500;
+                                    Log.i(TAG, "DisplayListener: onDisplayChanged（事件到达，开 500ms 观察窗）");
+                                }
+                                return null;
+                            }
+                        });
+                    dm.getClass().getMethod("registerDisplayListener", dl, android.os.Handler.class)
+                                .invoke(dm, proxy, h);
+                    listenerOk = true;
+                    Log.i(TAG, "DisplayListener 注册成功（公开 API）：转屏事件驱动，轮询退化为兜底");
+                } catch (Throwable t) {
+                    Log.w(TAG, "DisplayListener 注册失败 → 回落 320ms 轮询", t);
+                }
+                android.os.Looper.loop();
+            }
+        }, "disp-listener");
+        th.setDaemon(true);
+        th.start();
+    }
 
     /* 真实显示状态：DisplayManagerGlobal（隐藏类，单例；包名是 android.hardware.display，
      * 不是 android.view）→ Display(0) → rotation + real size。
@@ -148,29 +190,62 @@ public class VTouchUI {
             System.load("/data/local/tmp/vtouch-ui/libtestimgui.so");
         } catch (Throwable t) { Log.e(TAG, "load so", t); return; }
         if (nativeInit(w, h) != 0) { Log.e(TAG, "nativeInit failed"); System.exit(3); }
+        /* system Context（**必须主线程取**：ActivityThread.systemMain() 放非主线程会让整个进程静默消失；
+         * 且主线程要先 prepareMainLooper()，否则它内部 new Handler 抛 "Can't create handler ..."）。 */
+        try {
+            android.os.Looper.prepareMainLooper();
+            Class<?> atCls = Class.forName("android.app.ActivityThread");
+            Object at = atCls.getMethod("systemMain").invoke(null);
+            sysCtx = atCls.getMethod("getSystemContext").invoke(at);
+            Log.i(TAG, "system Context 获取成功=" + (sysCtx != null));
+        } catch (Throwable t) { Log.w(TAG, "取 system Context 失败 → 回落轮询", t); }
+
         Object layer = null;
         int[] disp = queryDisplay(w, h, 0);
         try {
             SCC = Class.forName("android.view.SurfaceControl");
             TXN = Class.forName("android.view.SurfaceControl$Transaction");
+            startDisplayListener();   /* 事件驱动优先；注册失败自动回落轮询 */
             layer = makeLayer("vtouch-ui", disp[0], disp[1]);
             nativeOnDisplay(disp[0], disp[1], disp[2]);
             nativeOnSurface(0, newSurface(layer));
             Log.i(TAG, "layer up " + disp[0] + "x" + disp[1] + " rot=" + disp[2]);
         } catch (Throwable t) { Log.e(TAG, "layer", t); System.exit(2); }
-        /* 主循环两件事：
-         *  ① 轮询 native 的「图层要不要显示」——「关闭 UI」时把图层藏掉（alpha=0 +
-         *     setVisibility(false)），屏幕零占用；恢复时一起还原。
-         *  ② 轮询 display 方向/尺寸（每 ~300ms 一次）——变了就按新尺寸重建 buffer 并换一个新
-         *     Surface 给 native（native 侧销毁旧 EGL surface、按新尺寸重排面板、换算坐标）。
-         * 用轮询而不是回调：app_process 没有 Looper 泵消息，这两个延迟对人操作都够。 */
-        boolean vis = true;
+        /* 主循环三件事：
+         *  ① 转屏遮挡的收尾：转屏时先把图层 alpha 归 0（旋转是非等比缩放，准备期间旧尺寸帧铺新屏
+         *     必然被拉伸），等 native 报"新 surface 首帧已提交"再恢复 —— 用真实信号，不靠定时猜。
+         *  ② 图层可见性：轮询 native 的「图层要不要显示」（「关闭 UI」→ alpha=0 + setVisibility(false)）。
+         *  ③ 显示方向/尺寸：**事件驱动**（公开 API DisplayManager.registerDisplayListener）+ 500ms
+         *     观察窗（回调常早于状态更新，直接读会拿到旧值 → 白做一次换绑、还漏掉这次旋转）；
+         *     注册失败回落 320ms 轮询，注册成功也留 2s 一次的漏事件保险。
+         * 变化处理顺序：先遮挡 → 再改 buffer / 换新 Surface → native 首帧上屏 → 恢复。 */
+        boolean vis = true;          /* 逻辑可见性（native 说的要不要显示） */
+        boolean guard = false;       /* 转屏遮挡中：此期间不碰 alpha（由遮挡逻辑管） */
+        long guardT0 = 0;
         int tick = 0;
-        long visWarn = 0, dispWarn = 0;   /* 两条失败路径各自的限频时刻 */
+        long visWarn = 0, dispWarn = 0;   /* 各失败路径的限频时刻 */
         for (;;) {
-            /* 40ms：可见性判定要跟手（点「关闭 UI」屏幕要立刻干净）；显示状态另按 tick 计数降频 */
+            /* 40ms：可见性判定要跟手（点「关闭 UI」屏幕要立刻干净）；显示状态按事件 + 兜底周期 */
             try { Thread.sleep(40); } catch (Throwable t) {}
-            /* ① 图层可见性（关闭 UI / 恢复）：只影响合成，失败也只重试自己，不牵连 ②。 */
+            /* ① 转屏遮挡收尾：越早恢复越好（此刻屏幕是隐的） */
+            if (guard) {
+                boolean done = nativeTakeSwapDone() != 0;
+                if (done || System.currentTimeMillis() - guardT0 > 500) {
+                    try {
+                        Object tt = txnNew();
+                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, vis ? 1.0f : 0.0f);
+                        TXN.getMethod("apply").invoke(tt);
+                        Log.i(TAG, "转屏遮挡结束（" + (done ? "首帧已上屏" : "500ms 兜底")
+                                  + "，用时 " + (System.currentTimeMillis() - guardT0) + "ms）");
+                        guard = false;
+                    } catch (Throwable t) {
+                        long now0 = System.currentTimeMillis();
+                        if (now0 - visWarn > 3000) { visWarn = now0; Log.w(TAG, "转屏恢复 alpha 失败（下轮重试）", t); }
+                    }
+                }
+            }
+            /* ② 图层可见性（关闭 UI / 恢复）：遮挡期间不碰 alpha；失败只重试自己。 */
+            if (!guard)
             try {
                 boolean want = nativeWantLayerVisible() != 0;
                 if (want != vis) {
@@ -200,12 +275,17 @@ public class VTouchUI {
                     }
                 }
             } catch (Throwable t) { Log.e(TAG, "visibility poll", t); }
-            /* ② 显示方向/尺寸（≈320ms 一次）：buffer + 新 Surface 一起提交，失败同样只重试自己。 */
-            if ((tick++ % 8) == 0) {
+            /* ③ 显示方向/尺寸：观察窗内每轮查；否则按兜底周期（注册成功 2s / 失败 320ms）。 */
+            boolean settling = System.currentTimeMillis() < settleUntil;
+            int period = (listenerOk && !settling) ? 50 : 8;
+            if (settling || (tick++ % period) == 0) {
                 try {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                     if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
+                        /* 先遮挡（这一帧起屏幕上看不到面板）→ 再改尺寸 / 换新 Surface → 等首帧上屏恢复 */
+                        guard = true; guardT0 = System.currentTimeMillis();
                         Object tt = txnNew();
+                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, 0.0f);
                         txnCall(tt, "setBufferSize", new Class<?>[]{SCC, int.class, int.class},
                                 layer, d2[0], d2[1]);
                         txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},
@@ -213,7 +293,8 @@ public class VTouchUI {
                         TXN.getMethod("apply").invoke(tt);
                         nativeOnDisplay(d2[0], d2[1], d2[2]);
                         nativeOnSurface(0, newSurface(layer));
-                        Log.i(TAG, "display " + d2[0] + "x" + d2[1] + " rot=" + d2[2]);
+                        Log.i(TAG, "display " + d2[0] + "x" + d2[1] + " rot=" + d2[2]
+                                  + "（图层已遮挡，等新 surface 首帧上屏）");
                         disp = d2;   /* 全部成功才提交：中途抛错就停在旧值，下一轮重试 */
                     }
                 } catch (Throwable t) {

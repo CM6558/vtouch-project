@@ -71,6 +71,9 @@ static EGLConfig g_cfg = 0;
 static ANativeWindow *g_win = 0;
 static ANativeWindow *g_win_new = 0;    /* Java 送来的新 Surface：换方向/换尺寸时由渲染线程接手 */
 static int g_swap_win = 0;
+/* 换绑后"首帧是否真的提交了"的信号：Java 在转屏时先把图层 alpha 归 0（挡住被拉伸的旧尺寸帧），
+ * 拿到这个信号才恢复 alpha。用"eglSwapBuffers 成功"当判据 —— 与探针实测同一口径（误差 ~6ms）。 */
+static volatile int g_swap_armed = 0, g_swap_done = 0;
 static EGLSurface g_surf = EGL_NO_SURFACE;
 
 /* 面板几何（唯一来源：下面 #define + panel_w()/in_panel() + build_panel() 三处同公式）
@@ -492,7 +495,7 @@ static void cap_commit(void)
         }
     }
 }
-/* 拖改应用（移动/缩放影子值；50ms 节流直播进表，up 时提交落盘） */
+/* 拖改应用（移动/缩放影子值；16ms 节流直播进表 ≈60Hz 跟手，up 时提交落盘） */
 static void edit_apply_live(int x, int y)
 {
     int t = 0, na1 = 0, na2 = 0, na3 = 0, na4 = 0;
@@ -534,7 +537,9 @@ static void edit_apply_live(int x, int y)
             if (na3 >= g_w) na3 = g_w - 1; if (na4 >= g_h) na4 = g_h - 1;
         }
     }
-    if (now_ms() - g_edit_last >= 50) {
+    /* 16ms ≈ 一帧（原来 50ms 是 20Hz，真机上明显跟不上手指）。每次写的是**绝对值**，
+     * 中间被核心合并掉几次无害（胶水对已存在区域不等核心回执）。 */
+    if (now_ms() - g_edit_last >= 16) {
         if (vtouch_region_add(id, t, na1, na2, na3, na4, en) == 0) g_edit_last = now_ms();
     }
 }
@@ -607,7 +612,11 @@ static void snapshot_touches(void)
     int ui_live = (!g_ui_off && g_want_layer) ? 1 : 0;
     /* 把"面板现在占哪块屏幕、可不可见"推给核心：核心在注入前拿它决定这只手是给面板还是给 App。
      * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。 */
-    vtouch_ui_publish_rect(ui_live, g_rot, g_scr_w, g_scr_h,
+    /* 稳定窗内一律**不吞**（宁放不吞）：转屏瞬间坐标系正在换，而吞触摸判定是"按下问一次、
+     * 锁存整段手势"，一次错判会让手指整段被吞或整段漏吞（老面板在进程内的谓词里也是这个规矩，
+     * 现在挪到"推给核心的矩形"上）。 */
+    int eat_ok = ui_live && (now_ms() >= g_rot_settle_t);
+    vtouch_ui_publish_rect(eat_ok, g_rot, g_scr_w, g_scr_h,
                            (int)g_pan_x, (int)g_pan_y,
                            (int)(g_pan_x + panel_w()), (int)(g_pan_y + panel_h()));
     if (n > 64) n = 64;
@@ -1646,7 +1655,13 @@ static void draw_frame(int sw, int sh)
         g_swap_fail++;
         if (g_swap_fail == 1 || g_swap_fail % 50 == 0)
             ALOGE("eglSwapBuffers 失败 x%d (0x%x)", g_swap_fail, eglGetError());
-    } else g_swap_fail = 0;
+    } else {
+        g_swap_fail = 0;
+        if (g_swap_armed) {
+            g_swap_armed = 0; g_swap_done = 1;
+            ALOGI("换绑后首帧已提交上屏（Java 可恢复图层）t=+%.0fms", (double)t_since_start());
+        }
+    }
 }
 
 /* 面板侧是否还有这个 id（区域表被脚本改过之后用来清理悬空引用）。
@@ -1715,6 +1730,7 @@ static void *render_thread_fn(void *)
             if (g_win) ANativeWindow_release(g_win);
             g_win = g_win_new; g_win_new = 0;
             g_swap_win = 0;
+            g_swap_armed = 1;      /* 下一帧成功提交 = 新 surface 的首帧上屏 */
             g_need = 1;
             g_force_frames = 4;
             ALOGI("surface swapped t=+%.0fms", (double)t_since_start());
@@ -1808,6 +1824,16 @@ static void *render_thread_fn(void *)
                 pthread_mutex_unlock(&g_mu);
                 usleep(200 * 1000);
                 continue;
+            }
+        }
+        if (g_surf != EGL_NO_SURFACE) {
+            /* 绘制尺寸的**唯一可信来源**是 eglQuerySurface 的真实缓冲区尺寸。
+             * 踩过的坑（探针实测）：ANativeWindow_getWidth/Height 返回的是图层 **default** 几何，
+             * 旋转换绑之后会陈旧 → 拿它算坐标会把场景画成错位椭圆（横屏红"圆"变 439x791）。 */
+            EGLint ew = 0, eh = 0;
+            if (eglQuerySurface(g_dpy, g_surf, EGL_WIDTH, &ew) && eglQuerySurface(g_dpy, g_surf, EGL_HEIGHT, &eh)
+                && ew > 0 && eh > 0) {
+                sw = (int)ew; sh = (int)eh;
             }
         }
         if (gl_ready && g_surf == EGL_NO_SURFACE && g_win) {
@@ -1988,6 +2014,14 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeDestroy(JNIEnv *, jclass)
 JNIEXPORT jint JNICALL Java_VTouchUI_nativeWantLayerVisible(JNIEnv *, jclass)
 {
     return g_want_layer;
+}
+
+/* Java 主循环轮询它：转屏遮挡期间"新 surface 首帧提交了没有"。读到即清零（一次性事件）。 */
+JNIEXPORT jint JNICALL Java_VTouchUI_nativeTakeSwapDone(JNIEnv *, jclass)
+{
+    int v = g_swap_done;
+    g_swap_done = 0;
+    return v;
 }
 
 } /* extern "C" */
