@@ -8,7 +8,7 @@
 #   sh ui_ondev.sh <W> <H> start    起（已在跑会先停干净）
 #   sh ui_ondev.sh <W> <H> stop     停并验证 grab 已释放
 #   sh ui_ondev.sh <W> <H> status   只看现状
-W=${1:-1440}; H=${2:-3168}; ACT=${3:-status}
+W=$1; H=$2; ACT=${3:-status}     # 给 "-" 或省略 = 不传尺寸，核心自己探测
 BIN=/data/local/tmp/vtouchd_ui
 LOG=/data/local/tmp/vt_ui_core.log
 
@@ -44,7 +44,9 @@ do_status() {
 do_start() {
     do_stop >/dev/null 2>&1
     cd /data/local/tmp || exit 1
-    nohup $BIN -w $W -h $H >$LOG 2>&1 </dev/null &
+    case "$W" in ""|-|auto) ARGS=""; echo "（不传逻辑尺寸 → 核心启动时自己探测）";;
+                    *) ARGS="-w $W -h $H"; echo "（显式指定逻辑尺寸 $W x $H）";; esac
+    nohup $BIN $ARGS >$LOG 2>&1 </dev/null &
     sleep 3
     echo "--- 核心日志 ---"; cat $LOG
     echo

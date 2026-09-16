@@ -67,7 +67,7 @@ do_verify_extracted() {
     done
 }
 
-ondev() { adb shell "su -c 'sh /data/local/tmp/ui_ondev.sh 1440 3168 $1'" 2>/dev/null; }
+ondev() { adb shell "su -c 'sh /data/local/tmp/ui_ondev.sh - - $1'" 2>/dev/null; }
 
 case "${1:-all}" in
   build)  need_adb; do_build ;;

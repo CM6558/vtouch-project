@@ -144,6 +144,8 @@ int logical_to_raw(int logical, int axis, int *raw);
 int raw_to_logical(int raw, int axis, int *logical);
 /* 单调时钟（纳秒），事件时间戳用。 (vtouch-doc: now_ns) */
 uint64_t now_ns(void);
+/* 自动探测逻辑尺寸（框架 wm size 优先、内核模式兜底；不传 -w/-h 时用）。 (vtouch-doc: detect_logical_size) */
+int detect_logical_size(int *w, int *h, const char **src);
 
 /* ---- vt_queue.c ---- */
 /* 队列丢弃的诊断日志：前 3 次每次都打，之后每 100 次打一行。 (vtouch-doc: queue_drop_log) */

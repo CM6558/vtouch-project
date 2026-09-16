@@ -1,5 +1,71 @@
 /* vt_util.c（§2 小工具） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
+#include <signal.h>
+/**
+ * (vtouch-doc: detect_logical_size)
+ * @brief 自动探测"逻辑坐标空间"尺寸 —— 问框架（`wm size`）；不传 -w/-h 时用。
+ * @param   w       成功时写入宽度（逻辑像素）
+ * @param   h       成功时写入高度
+ * @param   src     成功时写入来源说明（给日志用，可传 NULL）
+ * @return  0 成功；-1 拿不到（调用方报错，要求显式 -w/-h）。
+ * @note    逻辑尺寸是这套系统的坐标契约（区域表/事件/脚本坐标全在同一空间），必须
+ *          **固定、不随屏幕旋转变**，所以把 wm 的答案归一化成竖屏（短边当宽）。
+ *          只认这一个来源：`wm size` 是 AOSP 公开命令（/system/bin/wm → cmd window），
+ *          和脚本看到的 device.width/height 同源，且天然覆盖 wm size 覆盖值/屏幕缩放。
+ *          内核 sysfs（/sys/class/drm、fb0）**故意不用**：实测本机 card0-DP-1 报
+ *          2560x5120（外接屏连接器抢答），拿它当坐标空间会全线错位 —— 宁可启动失败
+ *          让人显式 -w/-h，也不要静默用错的坐标空间。
+ *          输出形如 "Physical size: 1440x3168"；设过覆盖时最后一行是 "Override size: ..."，
+ *          因此取**最后**一个 WxH。要起一次 app_process，约 0.3s，带 2s 超时保护。
+ */
+/* SIGALRM 只置位：读管道时被打断（无 SA_RESTART）就放弃探测，不让启动卡住。 */
+static volatile sig_atomic_t g_probe_alarm = 0;
+static void probe_alarm(int sig) { (void)sig; g_probe_alarm = 1; }
+
+static void normalize_portrait(int *w, int *h)
+{
+    if (*w > *h) { int t = *w; *w = *h; *h = t; }
+}
+
+int detect_logical_size(int *w, int *h, const char **src)
+{
+    struct sigaction sa, old;
+    FILE *f;
+    char buf[512];
+    int a = 0, b = 0, got = 0;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = probe_alarm;
+    sigemptyset(&sa.sa_mask);              /* 故意不设 SA_RESTART：让 fgets 可被打断 */
+    sigaction(SIGALRM, &sa, &old);
+    g_probe_alarm = 0;
+    alarm(2);
+    f = popen("wm size 2>/dev/null", "r");
+    if (f) {
+        while (fgets(buf, sizeof buf, f)) {
+            char *p = buf;
+            while ((p = strchr(p, 'x')) != NULL) {
+                int x = 0, y = 0;
+                char *q = p;
+                while (q > buf && q[-1] >= '0' && q[-1] <= '9') q--;   /* 'x' 前是宽 */
+                if (p[1] >= '0' && p[1] <= '9'
+                    && sscanf(q, "%dx%d", &x, &y) == 2 && x >= 2 && y >= 2) {
+                    a = x; b = y; got = 1;   /* 取最后一个：有 Override 时它才是生效值 */
+                }
+                p++;
+            }
+            if (g_probe_alarm) break;
+        }
+        pclose(f);
+    }
+    alarm(0);
+    sigaction(SIGALRM, &old, NULL);
+    if (!got) return -1;
+    *w = a; *h = b;
+    normalize_portrait(w, h);
+    if (src) *src = "框架 wm size";
+    return 0;
+}
 /**
  * (vtouch-doc: parse_long)
  * @brief 把字符串解析成 [lo, hi] 区间内的整数（命令参数解析用）。

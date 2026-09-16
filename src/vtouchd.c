@@ -63,7 +63,7 @@ struct vt_state g = { VT_STATE_DEFAULTS };
 
 /**
  * (vtouch-doc: apply_args)
- * @brief 解析命令行：-w 宽 -h 高（必需，逻辑尺寸）、-p 端口、-v 虚拟槽数。
+ * @brief 解析命令行：-w 宽 -h 高（可选，不给就自动探测）、-p 端口、-v 虚拟槽数。
  * @param   argc     参数个数
  * @param   argv     参数数组
  * @note    取值越界会打日志并保留默认值。
@@ -86,7 +86,7 @@ void apply_args(int argc, char **argv)
             if (i + 1 >= argc || parse_long(argv[++i], 1, 65535, &g.ws_port) != 0)
                 fprintf(stderr, "vtouchd: -p 取值无效，保留默认 %d\n", g.ws_port);
         } else if (strcmp(argv[i], "-w") && strcmp(argv[i], "-h") && strcmp(argv[i], "-v") && strcmp(argv[i], "-p")) {
-            fprintf(stderr, "用法: %s -w 宽 -h 高 [-v 虚拟槽数] [-p 端口]\n", argv[0]);
+            fprintf(stderr, "用法: %s [-w 宽 -h 高] [-v 虚拟槽数] [-p 端口]（尺寸缺省自动探测）\n", argv[0]);
         }
     }
 }
@@ -107,8 +107,17 @@ int vtouch_init(int argc, char **argv)
     setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，别被全缓冲吞掉 */
     apply_args(argc, argv);
     if (g.logical_width < 2 || g.logical_height < 2) {
-        fprintf(stderr, "vtouchd: 需要逻辑尺寸（-w 宽 -h 高）\n");
-        return -2;
+        int dw = 0, dh = 0;
+        const char *src = "?";
+        /* 没给 -w/-h 就自己探测：先问框架（wm size，和脚本 device.width/height 同源），
+         * 拿不到再读内核的屏幕模式。两者都归一化成竖屏逻辑空间（不随旋转变）。 */
+        if (detect_logical_size(&dw, &dh, &src) == 0) {
+            g.logical_width = dw; g.logical_height = dh;
+            fprintf(stderr, "vtouchd: 未指定逻辑尺寸 → 自动探测 %dx%d（来源：%s）\n", dw, dh, src);
+        } else {
+            fprintf(stderr, "vtouchd: 需要逻辑尺寸：自动探测失败，请显式给 -w 宽 -h 高\n");
+            return -2;
+        }
     }
 #ifdef VT_UI
     /* 状态进共享内存（在拿设备之前：之后就都在映射里写了）。失败不致命 → 按无 UI 模式继续。 */
@@ -118,6 +127,15 @@ int vtouch_init(int argc, char **argv)
     if (discover(dev, sizeof dev) < 0) {
         fprintf(stderr, "vtouchd: 没找到 Type-B 触摸屏（扫了 /dev/input/event0..63）\n");
         return -2;
+    }
+    /* 一致性自检：触摸屏 raw 量程的比例必须与逻辑尺寸的比例一致，否则整套坐标是歪的
+     *（这台机器 raw 0..23040 × 0..50688 ↔ 1440×3168，正好 16×）。只告警，不改值。 */
+    {
+        long rw = (long)g.axmax[0] - g.axmin[0] + 1, rh = (long)g.axmax[1] - g.axmin[1] + 1;
+        double dr = (double)rw / (double)rh;
+        double dl = (double)g.logical_width / (double)g.logical_height;
+        if (dr > dl * 1.02 || dr < dl * 0.98)
+            fprintf(stderr, "vtouchd: 警告：raw 量程比 %.4f 与逻辑尺寸比 %.4f 不一致，坐标可能错位\n", dr, dl);
     }
     /* 身份两段（物理段 0..phys_slots-1，虚拟段紧接其后）只是下标算术，没有要初始化的状态；
      * 这里只算两个要给系统声明的数：槽数与 tracking id 上界 —— 都盖住两段之和。 */
