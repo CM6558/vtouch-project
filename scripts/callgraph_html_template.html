@@ -1,0 +1,102 @@
+<!DOCTYPE html><meta charset="utf-8"><title>vtouchd 完整调用图</title>
+<style>
+ body{margin:0;font:13px/1.5 var(--app-font,system-ui);color:var(--foreground,#1f2937);background:transparent}
+ .bar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:8px 2px 10px}
+ .bar label{display:flex;gap:5px;align-items:center;color:var(--muted-foreground,#6b7280);cursor:pointer;user-select:none}
+ .bar b{color:var(--foreground,#1f2937);font-weight:600}
+ .hint{color:var(--muted-foreground,#6b7280);font-size:12px}
+ .wrap{display:flex;gap:12px;align-items:flex-start}
+ #stage{position:relative;max-height:72vh;overflow:auto;border:1px solid var(--border,#d1d5db);border-radius:8px;flex:1}
+ #inner{position:relative}
+ .colh{position:absolute;color:var(--muted-foreground,#6b7280);font-size:12px;font-weight:600;letter-spacing:.02em}
+ .node{position:absolute;box-sizing:border-box;border:1px solid var(--border,#d1d5db);border-radius:7px;padding:6px 8px;
+       background:var(--card,#ffffff);cursor:pointer;transition:opacity .12s,border-color .12s}
+ .node .nm{font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .node .br{color:var(--muted-foreground,#6b7280);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .node .bg{position:absolute;top:5px;right:6px;font-size:10px;color:var(--muted-foreground,#6b7280)}
+ .node.dim{opacity:.28}
+ .node.hot{border-color:var(--accent,#2563eb);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent,#2563eb) 25%,transparent)}
+ .node.sel{border-color:var(--accent,#2563eb);background:color-mix(in srgb,var(--accent,#2563eb) 12%,var(--card,#ffffff))}
+ .node.entry{border-left-width:3px}
+ .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px}
+ #side{width:330px;flex:0 0 330px;border:1px solid var(--border,#d1d5db);border-radius:8px;padding:10px 12px;max-height:72vh;overflow:auto}
+ #side h3{margin:2px 0 6px;font-size:14px}
+ #side .kv{color:var(--muted-foreground,#6b7280);font-size:12px;margin:2px 0}
+ #side code{background:color-mix(in srgb,var(--foreground,#1f2937) 8%,transparent);padding:1px 4px;border-radius:4px;font-size:11.5px}
+ #side ul{margin:6px 0 6px 4px;padding-left:14px}
+ #side li{font-size:12px;margin:2px 0}
+ svg{position:absolute;left:0;top:0;pointer-events:none}
+ path{fill:none;stroke:var(--muted-foreground,#6b7280);stroke-width:1.1;opacity:.22}
+ path.hi{stroke:var(--accent,#2563eb);opacity:.95;stroke-width:1.8}
+ path.lbl{stroke-width:1}
+</style>
+<div class="bar">
+  <b>vtouchd 完整调用图</b><span class="hint">62 个函数 · <span id="ec"></span> 条调用边 · 悬停高亮、点击看作用</span>
+  <label><input type="checkbox" id="tlibc"> 显示 libc/系统调用</label>
+  <label><input type="checkbox" id="tthread" checked> 按线程着色</label>
+  <label><input type="checkbox" id="tfocus"> 只显示选中函数的一跳</label>
+</div>
+<div class="wrap"><div id="stage"><div id="inner"><svg id="sv"></svg></div></div>
+<div id="side"><h3>点一个函数</h3><div class="kv">左边每个方块是一个函数；箭头方向 = 调用方向。子标题就是它的作用（取自代码里的 <code>@brief</code>）。</div></div></div>
+<script>
+const D = __DATA__;
+const W=300,H=58,GAPX=26,GAPY=12,PADX=8,PADY=26;
+const colIdx = {}; D.mods.forEach((m,i)=>colIdx[m]=i);
+const byCol = {}; D.nodes.forEach(n=>(byCol[n.mod]=byCol[n.mod]||[]).push(n));
+let maxRows=0; D.mods.forEach(m=>maxRows=Math.max(maxRows,(byCol[m]||[]).length));
+D.mods.forEach((m,i)=>{ (byCol[m]||[]).forEach((n,j)=>{ n.x=PADX+i*(W+GAPX); n.y=PADY+j*(H+GAPY); }); });
+const inner=document.getElementById('inner');
+inner.style.width=(PADX+D.mods.length*(W+GAPX))+'px';
+inner.style.height=(PADY+maxRows*(H+GAPY)+16)+'px';
+const svg=document.getElementById('sv'); svg.setAttribute('width',inner.style.width); svg.setAttribute('height',inner.style.height);
+const N={}; D.nodes.forEach(n=>N[n.id]=n);
+const group=document.createElementNS('http://www.w3.org/2000/svg','g'); svg.appendChild(group);
+const paths={};
+D.edges.forEach((e,i)=>{ const a=N[e.a],b=N[e.b]; if(!a||!b) return;
+  const x1=a.x+W, y1=a.y+H/2, x2=b.x, y2=b.y+H/2, dx=Math.max(30,Math.abs(x2-x1)/2);
+  const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+  p.setAttribute('d',`M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`);
+  p.dataset.a=e.a; p.dataset.b=e.b; group.appendChild(p); paths[e.a+'|'+e.b]=p; });
+D.mods.forEach((m,i)=>{ const h=document.createElement('div'); h.className='colh';
+  h.style.left=(PADX+i*(W+GAPX))+'px'; h.style.top='4px'; h.textContent=D.modTitle[m]; inner.appendChild(h); });
+D.nodes.forEach(n=>{ const el=document.createElement('div'); el.className='node'+(n.entry?' entry':'');
+  el.style.left=n.x+'px'; el.style.top=n.y+'px'; el.style.width=W+'px'; el.style.height=H+'px';
+  el.dataset.id=n.id; n.el=el;
+  el.innerHTML=`<div class="bg">↑${n.in} ↓${n.out}</div><div class="nm"><span class="dot" style="background:${n.thread==='区域线程'?'#f97316':n.thread==='信号处理器'?'#a855f7':'#3b82f6'}"></span>${n.id}()</div><div class="br">${(n.brief||'').replace(/</g,'&lt;')}</div>`;
+  el.title=n.id+'() — '+(n.brief||'');
+  inner.appendChild(el); });
+const side=document.getElementById('side');
+function doc(n){ side.innerHTML=`<h3>${n.id}()</h3>
+  <div class="kv">${n.mod.replace('.c','')} · 第 ${n.line} 行 · ${n.thread}${n.entry?' · '+n.entry:''} · 被调 ${n.in} 次 / 调用别人 ${n.out} 次</div>
+  <div class="kv" style="margin-top:8px"><b>作用</b>：${(n.brief||'—').replace(/</g,'&lt;')}</div>
+  ${n.params&&n.params.length?'<ul>'+n.params.map(p=>`<li><code>${p[0]}</code> ${p[1]}</li>`).join('')+'</ul>':''}
+  ${n.ret?`<div class="kv"><b>返回</b>：${n.ret.replace(/</g,'&lt;')}</div>`:''}
+  ${n.note?`<div class="kv"><b>注意</b>：${n.note.replace(/</g,'&lt;')}</div>`:''}
+  ${n.libc&&n.libc.length?`<div class="kv"><b>用到的库/系统调用</b>：${n.libc.map(x=>`<code>${x}</code>`).join(' ')}</div>`:''}
+  <div class="kv" style="margin-top:8px"><b>调用谁</b>：${D.edges.filter(e=>e.a===n.id).map(e=>`<a href="#" data-go="${e.b}">${e.b}()</a>`).join('、')||'—'}</div>
+  <div class="kv"><b>被谁调</b>：${D.edges.filter(e=>e.b===n.id).map(e=>`<a href="#" data-go="${e.a}">${e.a}()</a>`).join('、')||'—'}</div>`; }
+function clearHot(){ D.nodes.forEach(n=>n.el.classList.remove('hot','dim')); Object.values(paths).forEach(p=>p.classList.remove('hi')); }
+function hover(n){ clearHot(); if(!n) return;
+  D.nodes.forEach(x=>x.el.classList.add('dim')); n.el.classList.remove('dim'); n.el.classList.add('hot');
+  D.edges.forEach(e=>{ if(e.a===n.id||e.b===n.id){ const p=paths[e.a+'|'+e.b]; if(p) p.classList.add('hi');
+     N[e.a]&&N[e.a].el.classList.remove('dim'); N[e.b]&&N[e.b].el.classList.remove('dim'); } }); }
+function focus(n){ if(!document.getElementById('tfocus').checked){ D.nodes.forEach(x=>{x.el.style.display=x.el.style.display==='none'?'':x.el.style.display;}); Object.values(paths).forEach(p=>p.style.display=''); return; }
+  const keep=new Set([n.id]); D.edges.forEach(e=>{ if(e.a===n.id) keep.add(e.b); if(e.b===n.id) keep.add(e.a); });
+  D.nodes.forEach(x=>{ x.el.style.display=keep.has(x.id)?'':'none'; });
+  Object.values(paths).forEach(p=>{ p.style.display=(keep.has(p.dataset.a)&&keep.has(p.dataset.b))?'':'none'; }); }
+let sel=null;
+document.querySelectorAll('.node').forEach(el=>{
+  el.addEventListener('mouseenter',()=>hover(N[el.dataset.id]));
+  el.addEventListener('mouseleave',()=>{ hover(sel); });
+  el.addEventListener('click',(ev)=>{ ev.stopPropagation(); sel=N[el.dataset.id];
+    document.querySelectorAll('.node').forEach(x=>x.classList.remove('sel')); el.classList.add('sel');
+    doc(sel); hover(sel); focus(sel); });
+});
+document.getElementById('stage').addEventListener('click',()=>{ sel=null; clearHot();
+  document.querySelectorAll('.node').forEach(x=>x.classList.remove('sel'));
+  document.getElementById('tfocus').checked=false; focus({id:''}); });
+side.addEventListener('click',e=>{ const g=e.target.dataset&&e.target.dataset.go; if(g){ e.preventDefault(); sel=N[g];
+  document.querySelectorAll('.node').forEach(x=>x.classList.toggle('sel',x.dataset.id===g)); doc(sel); hover(sel); } });
+document.getElementById('tfocus').addEventListener('change',()=>focus(sel||{id:''}));
+document.getElementById('ec').textContent=D.edges.length;
+</script>

@@ -19,10 +19,15 @@ clients/region_demo.js          示例：建区域 + 订阅，逐条打印 down/
 clients/touchback_demo.js       示例：命中区域就回触（自带「不自激」自检）
 scripts/build.sh                NDK 交叉编译（arm64）
 scripts/deploy.sh               adb 推二进制到 /data/local/tmp + 起/停/状态（含回读 md5 对账）
+scripts/gen_callgraph.py         调用图 JSON 生成（函数与调用边现取 src/*.c，作用文案取函数文档）
+scripts/fix_diagram_ports.py     渲染器路由冲突自动消解（端口提示写回 JSON 权威源）
+scripts/render_callgraphs.sh     一键：生成 → 消解 → 五道校验 → 版面自检三项 → 2× PNG
+scripts/gen_callgraph_html.py    生成全量交互版调用图（悬停高亮 / 点击看文档 / 焦点模式）
 tests/ws_smoke.py               主机侧 smoke（握手 + 注入命令链路）
 tests/ws_planb_regression.py    主机侧回归：命令面 / 订阅 / 五事件 / 回触不自激 / ws_kick
 docs/VTOUCH_ARCH_PLAN.md        本分支所依据的方案原文（§8 四步 = 本分支的四段改动）
 docs/                           VTOUCH_ARCH_PLAN.md（方案原文）+ CODE_WALKTHROUGH.md（完整版走查，可删）
+docs/diagrams/                  调用图图鉴：JSON 权威源 + SVG + PNG + 校验报告 + 交互版 HTML（见其 README）
 ```
 
 ## 前提

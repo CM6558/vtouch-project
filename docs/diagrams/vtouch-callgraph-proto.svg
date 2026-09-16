@@ -1,0 +1,330 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 3936" width="1240" height="3936" data-generator="fireworks-tech-graph" data-schema-version="1" data-text-metrics="heuristic-v1" data-style-id="1" data-visual-theme="Flat Icon" data-diagram-type="data-flow" data-motion-scene="" data-semantic-profile="generic" data-semantic-valid="true" data-quality-profile="standard" data-max-bends-per-edge="12" data-max-total-bends="160" data-max-route-stretch="8.0" data-max-bridged-crossings="60" data-min-node-gap="0.0" data-min-container-gutter="0.0" data-min-label-clearance="2.0" data-min-segment-length="0.0">
+  <defs>
+    <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowB" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10b981"/>
+    </marker>
+    <marker id="arrowC" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowE" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f97316"/>
+    </marker>
+    <marker id="arrowF" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="arrowH" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/>
+    </marker>
+    <filter id="shadowSoft" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <filter id="shadowGlass" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+    .title { font-size: 30px; font-weight: 700; fill: #111827; }
+    .subtitle { font-size: 14px; font-weight: 500; fill: #6b7280; }
+    .section { font-size: 13px; font-weight: 700; fill: #2563eb; letter-spacing: 1.4px; }
+    .section-sub { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .node-title { font-weight: 700; fill: #111827; }
+    .node-sub { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .node-type { font-size: 12px; font-weight: 700; fill: #9ca3af; letter-spacing: 0.08em; }
+    .arrow-label { font-size: 12px; font-weight: 600; fill: #6b7280; }
+    .legend { font-size: 12px; font-weight: 500; fill: #6b7280; }
+    .footnote { font-size: 12px; font-weight: 500; fill: #94a3b8; }
+    .metric-label { font-size: 8.5px; font-weight: 700; fill: #94a3b8; text-transform: uppercase; }
+    .metric-value { font-size: 9.5px; font-weight: 700; fill: #111827; }
+    </style>
+  </defs>
+  <rect data-graph-role="background" width="1240.0" height="3936.0" fill="#ffffff"/>
+  <text x="620.0" y="56" text-anchor="middle" class="title">WebSocket 协议链：握手 → 摘要 → 发送 → 解帧（29 个函数 · 25 条调用）</text>
+  <text x="620.0" y="82" text-anchor="middle" class="subtitle">带 = 调用深度层（按调用关系自动分层，箭头只跨层）；箭头 = 调用方向；节点副标题 = 该函数的作用（取自代码 @brief）</text>
+  <g id="band0" data-graph-role="container" data-container-id="band0" data-semantic-role="boundary" data-graph-bounds="100,104,800,294">
+  <rect data-graph-role="container" x="100.0" y="104.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="128.0" class="section">层 0 · VT_QUEUE</text>
+    <rect id="band0-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="110" width="132.44" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band1" data-graph-role="container" data-container-id="band1" data-semantic-role="boundary" data-graph-bounds="100,354,800,580">
+  <rect data-graph-role="container" x="100.0" y="354.0" width="700.0" height="226.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="378.0" class="section">层 0 · VT_WS（2）</text>
+    <rect id="band1-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="360" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band2" data-graph-role="container" data-container-id="band2" data-semantic-role="boundary" data-graph-bounds="100,640,800,830">
+  <rect data-graph-role="container" x="100.0" y="640.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="664.0" class="section">层 0 · VT_WS（3）</text>
+    <rect id="band2-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="646" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band3" data-graph-role="container" data-container-id="band3" data-semantic-role="boundary" data-graph-bounds="100,890,800,1080">
+  <rect data-graph-role="container" x="100.0" y="890.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="914.0" class="section">层 1 · VT_QUEUE</text>
+    <rect id="band3-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="896" width="132.44" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band4" data-graph-role="container" data-container-id="band4" data-semantic-role="boundary" data-graph-bounds="100,1140,800,1330">
+  <rect data-graph-role="container" x="100.0" y="1140.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="1164.0" class="section">层 1 · VT_WS（2）</text>
+    <rect id="band4-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="1146" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band5" data-graph-role="container" data-container-id="band5" data-semantic-role="boundary" data-graph-bounds="100,1390,800,1580">
+  <rect data-graph-role="container" x="100.0" y="1390.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="1414.0" class="section">层 1 · VT_WS（3）</text>
+    <rect id="band5-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="1396" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band6" data-graph-role="container" data-container-id="band6" data-semantic-role="boundary" data-graph-bounds="100,1640,800,1830">
+  <rect data-graph-role="container" x="100.0" y="1640.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="1664.0" class="section">层 1 · VT_WS（4）</text>
+    <rect id="band6-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="1646" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band7" data-graph-role="container" data-container-id="band7" data-semantic-role="boundary" data-graph-bounds="100,1890,800,2092">
+  <rect data-graph-role="container" x="100.0" y="1890.0" width="700.0" height="202.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="1914.0" class="section">层 1 · VT_WS（5）</text>
+    <rect id="band7-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="1896" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band8" data-graph-role="container" data-container-id="band8" data-semantic-role="boundary" data-graph-bounds="100,2152,800,2342">
+  <rect data-graph-role="container" x="100.0" y="2152.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="2176.0" class="section">层 2 · VT_WS</text>
+    <rect id="band8-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="2158" width="112.94" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band9" data-graph-role="container" data-container-id="band9" data-semantic-role="boundary" data-graph-bounds="100,2402,800,2592">
+  <rect data-graph-role="container" x="100.0" y="2402.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="2426.0" class="section">层 2 · VT_WS（2）</text>
+    <rect id="band9-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="2408" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band10" data-graph-role="container" data-container-id="band10" data-semantic-role="boundary" data-graph-bounds="100,2652,800,2842">
+  <rect data-graph-role="container" x="100.0" y="2652.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="2676.0" class="section">层 2 · VT_WS（3）</text>
+    <rect id="band10-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="2658" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band11" data-graph-role="container" data-container-id="band11" data-semantic-role="boundary" data-graph-bounds="100,2902,800,3092">
+  <rect data-graph-role="container" x="100.0" y="2902.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="2926.0" class="section">层 2 · VT_WS（4）</text>
+    <rect id="band11-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="2908" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band12" data-graph-role="container" data-container-id="band12" data-semantic-role="boundary" data-graph-bounds="100,3152,800,3342">
+  <rect data-graph-role="container" x="100.0" y="3152.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="3176.0" class="section">层 3 · VT_REGION</text>
+    <rect id="band12-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="3158" width="136.6" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band13" data-graph-role="container" data-container-id="band13" data-semantic-role="boundary" data-graph-bounds="100,3402,800,3516">
+  <rect data-graph-role="container" x="100.0" y="3402.0" width="700.0" height="114.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="3426.0" class="section">层 3 · VT_WS（2）</text>
+    <rect id="band13-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="3408" width="146.48" height="30" fill="none" stroke="none"/>
+  </g>
+  <g id="band14" data-graph-role="container" data-container-id="band14" data-semantic-role="boundary" data-graph-bounds="100,3576,800,3766">
+  <rect data-graph-role="container" x="100.0" y="3576.0" width="700.0" height="190.0" rx="16.0" fill="none" stroke="#dbe5f1" stroke-width="1.4" stroke-dasharray="6 5"/>
+  <text x="118.0" y="3600.0" class="section">层 4 · VT_WS</text>
+    <rect id="band14-header" data-graph-role="reserved" data-reserved-kind="container-header" x="108" y="3582" width="112.94" height="30" fill="none" stroke="none"/>
+  </g>
+  <path id="e0" data-graph-role="edge" data-edge-id="e0" data-source="client_frame" data-target="handle_line" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.484" data-bridges="" d="M 413,736 L 413,751.3 L 754,751.3 L 754,1990.7 L 440,1990.7 L 440,2006" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e1-bridge-mask" data-graph-role="bridge-mask" data-owner="e1" d="M 431,736 L 431,756 L 730,756 L 730,909.6 L 440,909.6 L 440,930" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e1" data-graph-role="edge" data-edge-id="e1" data-source="client_frame" data-target="outq_push_text" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="3.857" data-bridges="431,751.3" d="M 431,736 L 431,756 L 730,756 L 730,909.6 L 440,909.6 L 440,930" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="e2-bridge-mask" data-graph-role="bridge-mask" data-owner="e2" d="M 449,736 L 436,736 A 5 5 0 0 1 426,736 L 418,736 A 5 5 0 0 1 408,736 L 84,736 L 84,1872 L 440,1872 L 440,1930" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e2" data-graph-role="edge" data-edge-id="e2" data-source="client_frame" data-target="ws_next_frame" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="3" data-route-stretch="1.592" data-bridges="413,736;431,736" d="M 449,736 L 436,736 A 5 5 0 0 1 426,736 L 418,736 A 5 5 0 0 1 408,736 L 84,736 L 84,1872 L 440,1872 L 440,1930" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e3-bridge-mask" data-graph-role="bridge-mask" data-owner="e3" d="M 467,736 L 467,746 L 764,746 L 764,1740.7 L 440,1740.7 L 440,1756" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e3" data-graph-role="edge" data-edge-id="e3" data-source="client_frame" data-target="ws_send" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.567" data-bridges="754,1740.7" d="M 467,736 L 467,746 L 764,746 L 764,1740.7 L 440,1740.7 L 440,1756" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e4" data-graph-role="edge" data-edge-id="e4" data-source="cmd_region" data-target="region_add" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="3.079" data-bridges="" d="M 431,2998 L 431,3013.3 L 730,3013.3 L 730,3252.7 L 440,3252.7 L 440,3268" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
+  <path id="e5-bridge-mask" data-graph-role="bridge-mask" data-owner="e5" d="M 449,2998 L 449,3018 L 150,3018 L 150,3134 L 440,3134 L 440,3192" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e5" data-graph-role="edge" data-edge-id="e5" data-source="cmd_region" data-target="regions_clear" data-edge-kind="flow" data-topic-id="" data-flow="read" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="3.857" data-bridges="449,3013.3" d="M 449,2998 L 449,3018 L 150,3018 L 150,3134 L 440,3134 L 440,3192" fill="none" stroke="#2563eb" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowC)"/>
+  <path id="e6" data-graph-role="edge" data-edge-id="e6" data-source="handle_line" data-target="cmd_frame" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.882" data-bridges="" d="M 422,2074 L 422,2094.4 L 754,2094.4 L 754,2752.7 L 440,2752.7 L 440,2768" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e7-bridge-mask" data-graph-role="bridge-mask" data-owner="e7" d="M 440,2074 L 440,2089.4 A 5 5 0 0 1 440,2099.4 L 440,2104.4 L 84,2104.4 L 84,2502.7 L 440,2502.7 L 440,2518" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e7" data-graph-role="edge" data-edge-id="e7" data-source="handle_line" data-target="cmd_meta" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="2.604" data-bridges="440,2094.4" d="M 440,2074 L 440,2089.4 A 5 5 0 0 1 440,2099.4 L 440,2104.4 L 84,2104.4 L 84,2502.7 L 440,2502.7 L 440,2518" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e8-bridge-mask" data-graph-role="bridge-mask" data-owner="e8" d="M 458,2074 L 445,2074 A 5 5 0 0 1 435,2074 L 427,2074 A 5 5 0 0 1 417,2074 L 76,2074 L 76,2634 L 440,2634 L 440,2692" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e8" data-graph-role="edge" data-edge-id="e8" data-source="handle_line" data-target="cmd_point_once" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="3" data-route-stretch="2.145" data-bridges="422,2074;440,2074" d="M 458,2074 L 445,2074 A 5 5 0 0 1 435,2074 L 427,2074 A 5 5 0 0 1 417,2074 L 76,2074 L 76,2634 L 440,2634 L 440,2692" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e9" data-graph-role="edge" data-edge-id="e9" data-source="handle_line" data-target="cmd_region" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.637" data-bridges="" d="M 476,2074 L 476,2084.4 L 764,2084.4 L 764,2921.6 L 440,2921.6 L 440,2942" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e10-bridge-mask" data-graph-role="bridge-mask" data-owner="e10" d="M 404,2074 L 404,2094.4 L 74,2094.4 L 74,2998 L 426,2998 A 5 5 0 0 0 436,2998 L 440,2998 L 440,3018" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e10" data-graph-role="edge" data-edge-id="e10" data-source="handle_line" data-target="cmd_sub" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.673" data-bridges="431,2998;440,3013.3;440,3018;404,2074;76,2094.4" d="M 404,2074 L 404,2094.4 L 74,2094.4 L 74,2998 L 426,2998 A 5 5 0 0 0 436,2998 L 440,2998 L 440,3018" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e11-bridge-mask" data-graph-role="bridge-mask" data-owner="e11" d="M 440,200 L 440,215.3 L 76,215.3 L 76,1622 L 440,1622 L 440,1680" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e11" data-graph-role="edge" data-edge-id="e11" data-source="outq_flush" data-target="drop_client" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.492" data-bridges="84,1622" d="M 440,200 L 440,215.3 L 76,215.3 L 76,1622 L 440,1622 L 440,1680" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e12" data-graph-role="edge" data-edge-id="e12" data-source="sha1_block" data-target="be32" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="3.857" data-bridges="" d="M 431,3498 L 431,3518.4 L 730,3518.4 L 730,3676.7 L 440,3676.7 L 440,3692" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e13-bridge-mask" data-graph-role="bridge-mask" data-owner="e13" d="M 449,3498 L 449,3513.4 A 5 5 0 0 1 449,3523.4 L 449,3557 L 440,3557 L 440,3616" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e13" data-graph-role="edge" data-edge-id="e13" data-source="sha1_block" data-target="rol32" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="2" data-route-stretch="1.0" data-bridges="449,3518.4" d="M 449,3498 L 449,3513.4 A 5 5 0 0 1 449,3523.4 L 449,3557 L 440,3557 L 440,3616" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e14-bridge-mask" data-graph-role="bridge-mask" data-owner="e14" d="M 440,1236 L 440,1251.3 L 749,1251.3 A 5 5 0 0 0 759,1251.3 L 774,1251.3 L 774,2171.6 L 759,2171.6 A 5 5 0 0 1 749,2171.6 L 431,2171.6 L 431,2192" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e14" data-graph-role="edge" data-edge-id="e14" data-source="sha1_final" data-target="sha1_update" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.692" data-bridges="754,1251.3;764,1251.3;754,2171.6;764,2171.6" d="M 440,1236 L 440,1251.3 L 749,1251.3 A 5 5 0 0 0 759,1251.3 L 774,1251.3 L 774,2171.6 L 759,2171.6 A 5 5 0 0 1 749,2171.6 L 431,2171.6 L 431,2192" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e15-bridge-mask" data-graph-role="bridge-mask" data-owner="e15" d="M 440,2248 L 440,2263.3 L 749,2263.3 A 5 5 0 0 0 759,2263.3 L 774,2263.3 L 774,3421.6 L 440,3421.6 L 440,3442" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e15" data-graph-role="edge" data-edge-id="e15" data-source="sha1_update" data-target="sha1_block" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.559" data-bridges="754,2263.3;764,2263.3" d="M 440,2248 L 440,2263.3 L 749,2263.3 A 5 5 0 0 0 759,2263.3 L 774,2263.3 L 774,3421.6 L 440,3421.6 L 440,3442" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e16-bridge-mask" data-graph-role="bridge-mask" data-owner="e16" d="M 730,516 L 754,516 L 754,86 L 74,86 L 74,1284 L 150,1284" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e16" data-graph-role="edge" data-edge-id="e16" data-source="websocket_handshake" data-target="base64" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.786" data-bridges="84,1284;76,1284" d="M 730,516 L 754,516 L 754,86 L 74,86 L 74,1284 L 150,1284" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e17-bridge-mask" data-graph-role="bridge-mask" data-owner="e17" d="M 395,562 L 395,582.4 L 784,582.4 L 784,1490.7 L 769,1490.7 A 5 5 0 0 1 759,1490.7 L 440,1490.7 L 440,1506" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e17" data-graph-role="edge" data-edge-id="e17" data-source="websocket_handshake" data-target="has_token" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.696" data-bridges="754,1490.7;764,1490.7;774,1490.7" d="M 395,562 L 395,582.4 L 784,582.4 L 784,1490.7 L 769,1490.7 A 5 5 0 0 1 759,1490.7 L 440,1490.7 L 440,1506" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e18-bridge-mask" data-graph-role="bridge-mask" data-owner="e18" d="M 413,562 L 764,562 L 764,76 L 66,76 L 66,1372 L 79,1372 A 5 5 0 0 0 89,1372 L 440,1372 L 440,1430" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e18" data-graph-role="edge" data-edge-id="e18" data-source="websocket_handshake" data-target="header_value" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="5" data-route-stretch="3.646" data-bridges="84,1372;76,1372" d="M 413,562 L 764,562 L 764,76 L 66,76 L 66,1372 L 79,1372 A 5 5 0 0 0 89,1372 L 440,1372 L 440,1430" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e19-bridge-mask" data-graph-role="bridge-mask" data-owner="e19" d="M 431,562 L 431,577.4 A 5 5 0 0 1 431,587.4 L 431,656 L 774,656 L 774,1159.6 L 759,1159.6 A 5 5 0 0 1 749,1159.6 L 440,1159.6 L 440,1180" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e19" data-graph-role="edge" data-edge-id="e19" data-source="websocket_handshake" data-target="sha1_final" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="2.065" data-bridges="754,1159.6;764,1159.6;431,582.4;431,562" d="M 431,562 L 431,577.4 A 5 5 0 0 1 431,587.4 L 431,656 L 774,656 L 774,1159.6 L 759,1159.6 A 5 5 0 0 1 749,1159.6 L 440,1159.6 L 440,1180" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e20-bridge-mask" data-graph-role="bridge-mask" data-owner="e20" d="M 449,562 L 449,577.4 A 5 5 0 0 1 449,587.4 L 449,592.4 L 436,592.4 A 5 5 0 0 1 426,592.4 L 84,592.4 L 84,732 L 86,732 L 86,872 L 264.44,872 L 264.44,930 L 435,930 A 5 5 0 0 0 445,930 L 730,930 L 730,990.7 L 440,990.7 L 440,1006" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e20" data-graph-role="edge" data-edge-id="e20" data-source="websocket_handshake" data-target="sha1_init" data-edge-kind="flow" data-topic-id="" data-flow="data" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="10" data-route-stretch="3.852" data-bridges="440,930;86,736;449,582.4;449,562;431,592.4" d="M 449,562 L 449,577.4 A 5 5 0 0 1 449,587.4 L 449,592.4 L 436,592.4 A 5 5 0 0 1 426,592.4 L 84,592.4 L 84,732 L 86,732 L 86,872 L 264.44,872 L 264.44,930 L 435,930 A 5 5 0 0 0 445,930 L 730,930 L 730,990.7 L 440,990.7 L 440,1006" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowE)"/>
+  <path id="e21-bridge-mask" data-graph-role="bridge-mask" data-owner="e21" d="M 467,562 L 467,572.4 L 794,572.4 L 794,2181.6 L 769,2181.6 A 5 5 0 0 1 759,2181.6 L 449,2181.6 L 449,2192" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e21" data-graph-role="edge" data-edge-id="e21" data-source="websocket_handshake" data-target="sha1_update" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.397" data-bridges="754,2181.6;764,2181.6;467,562" d="M 467,562 L 467,572.4 L 794,572.4 L 794,2181.6 L 769,2181.6 A 5 5 0 0 1 759,2181.6 L 449,2181.6 L 449,2192" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e22-bridge-mask" data-graph-role="bridge-mask" data-owner="e22" d="M 485,562 L 485,572 L 804,572 L 804,2248 L 769,2248 A 5 5 0 0 1 759,2248 L 445,2248 A 5 5 0 0 1 435,2248 L 431,2248 L 431,2268" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e22" data-graph-role="edge" data-edge-id="e22" data-source="websocket_handshake" data-target="write_full" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.363" data-bridges="754,2248;764,2248;440,2248;485,562" d="M 485,562 L 485,572 L 804,572 L 804,2248 L 769,2248 A 5 5 0 0 1 759,2248 L 445,2248 A 5 5 0 0 1 435,2248 L 431,2248 L 431,2268" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e23-bridge-mask" data-graph-role="bridge-mask" data-owner="e23" d="M 730,1958 L 750.4,1958 L 750.4,1862 L 89,1862 A 5 5 0 0 1 79,1862 L 66,1862 L 66,2470 L 79,2470 A 5 5 0 0 0 89,2470 L 150,2470" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e23" data-graph-role="edge" data-edge-id="e23" data-source="ws_next_frame" data-target="ws_peek_frame" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="1.367" data-bridges="84,1862;84,2470;76,2470;74,2470" d="M 730,1958 L 750.4,1958 L 750.4,1862 L 89,1862 A 5 5 0 0 1 79,1862 L 66,1862 L 66,2470 L 79,2470 A 5 5 0 0 0 89,2470 L 150,2470" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <path id="e24-bridge-mask" data-graph-role="bridge-mask" data-owner="e24" d="M 440,1812 L 440,1832.4 L 749,1832.4 A 5 5 0 0 0 759,1832.4 L 769,1832.4 A 5 5 0 0 0 779,1832.4 L 789,1832.4 A 5 5 0 0 0 799,1832.4 L 818.4,1832.4 L 818.4,2252.7 L 769,2252.7 A 5 5 0 0 1 759,2252.7 L 449,2252.7 L 449,2268" fill="none" stroke="#ffffff" stroke-width="6.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path id="e24" data-graph-role="edge" data-edge-id="e24" data-source="ws_send" data-target="write_full" data-edge-kind="flow" data-topic-id="" data-flow="control" data-motion-role="" data-motion-stage="" data-motion-order="" data-protocol="" data-via="" data-critical-path-id="" data-critical-hop="" data-critical-hops="" data-critical="false" data-bends="4" data-route-stretch="2.589" data-bridges="754,1832.4;754,2252.7;764,2252.7;774,1832.4;449,2263.3;794,1832.4;804,1832.4" d="M 440,1812 L 440,1832.4 L 749,1832.4 A 5 5 0 0 0 759,1832.4 L 769,1832.4 A 5 5 0 0 0 779,1832.4 L 789,1832.4 A 5 5 0 0 0 799,1832.4 L 818.4,1832.4 L 818.4,2252.7 L 769,2252.7 A 5 5 0 0 1 759,2252.7 L 449,2252.7 L 449,2268" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowA)"/>
+  <g id="node-outq_flush" data-graph-role="node" data-node-id="outq_flush" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,144,730,200">
+  <rect x="150.0" y="144.0" width="580.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
+  <text x="440.0" y="172.0" text-anchor="middle" class="node-title" font-size="18.0">outq_flush()</text>
+  <text x="440.0" y="194.0" text-anchor="middle" class="node-sub">socket 可写才写，写不完留到下次… · vt_queue.c:155</text>
+  </g>
+  <g id="node-ws_has_pending" data-graph-role="node" data-node-id="ws_has_pending" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,220,730,276">
+  <rect x="150.0" y="220.0" width="580.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
+  <text x="440.0" y="248.0" text-anchor="middle" class="node-title" font-size="18.0">ws_has_pending()</text>
+  <text x="440.0" y="270.0" text-anchor="middle" class="node-sub">WS 输入缓冲里是否还有没解析完的半包数据（主循环据此继续挂 P… · vt_ws.c:17</text>
+  </g>
+  <g id="node-ws_input_reset" data-graph-role="node" data-node-id="ws_input_reset" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,394,730,450">
+  <rect x="150.0" y="394.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="422.0" text-anchor="middle" class="node-title" font-size="18.0">ws_input_reset()</text>
+  <text x="440.0" y="444.0" text-anchor="middle" class="node-sub">复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包） · vt_ws.c:22</text>
+  </g>
+  <g id="node-websocket_handshake" data-graph-role="node" data-node-id="websocket_handshake" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,470,730,562">
+  <rect x="150.0" y="470.0" width="580.0" height="92.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="516.0" text-anchor="middle" class="node-title" font-size="18.0">websocket_handshake()</text>
+  <text x="440.0" y="538.0" text-anchor="middle" class="node-sub">读 HTTP 请求、校验 Upgrade 与 Sec-WebSo… · vt_ws.c:223</text>
+  </g>
+  <g id="node-client_frame" data-graph-role="node" data-node-id="client_frame" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,680,730,736">
+  <rect x="150.0" y="680.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="708.0" text-anchor="middle" class="node-title" font-size="18.0">client_frame()</text>
+  <text x="440.0" y="730.0" text-anchor="middle" class="node-sub">一轮最多 32 个帧，解帧 → handle_line → 响应… · vt_ws.c:384</text>
+  </g>
+  <g id="node-make_listen" data-graph-role="node" data-node-id="make_listen" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,756,730,812">
+  <rect x="150.0" y="756.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="784.0" text-anchor="middle" class="node-title" font-size="18.0">make_listen()</text>
+  <text x="440.0" y="806.0" text-anchor="middle" class="node-sub">建监听 socket，只绑 127.0.0.1（回环）… · vt_ws.c:422</text>
+  </g>
+  <g id="node-outq_push_text" data-graph-role="node" data-node-id="outq_push_text" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,930,730,986">
+  <rect x="150.0" y="930.0" width="580.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
+  <text x="440.0" y="958.0" text-anchor="middle" class="node-title" font-size="18.0">outq_push_text()</text>
+  <text x="440.0" y="980.0" text-anchor="middle" class="node-sub">把一行文本按 WS 文本帧（未加掩码）补齐帧头后入队 · vt_queue.c:134</text>
+  </g>
+  <g id="node-sha1_init" data-graph-role="node" data-node-id="sha1_init" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1006,730,1062">
+  <rect x="150.0" y="1006.0" width="580.0" height="56.0" rx="10.0" fill="#fff7ed" stroke="#f97316" stroke-width="1.8"/>
+  <text x="440.0" y="1034.0" text-anchor="middle" class="node-title" font-size="18.0">sha1_init()</text>
+  <text x="440.0" y="1056.0" text-anchor="middle" class="node-sub">SHA-1 初始化 · vt_ws.c:68</text>
+  </g>
+  <g id="node-sha1_final" data-graph-role="node" data-node-id="sha1_final" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1180,730,1236">
+  <rect x="150.0" y="1180.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1208.0" text-anchor="middle" class="node-title" font-size="18.0">sha1_final()</text>
+  <text x="440.0" y="1230.0" text-anchor="middle" class="node-sub">SHA-1 收尾，输出 20 字节摘要（WS 握手用） · vt_ws.c:96</text>
+  </g>
+  <g id="node-base64" data-graph-role="node" data-node-id="base64" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1256,730,1312">
+  <rect x="150.0" y="1256.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1284.0" text-anchor="middle" class="node-title" font-size="18.0">base64()</text>
+  <text x="440.0" y="1306.0" text-anchor="middle" class="node-sub">标准 Base64 编码 · vt_ws.c:120</text>
+  </g>
+  <g id="node-header_value" data-graph-role="node" data-node-id="header_value" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1430,730,1486">
+  <rect x="150.0" y="1430.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1458.0" text-anchor="middle" class="node-title" font-size="18.0">header_value()</text>
+  <text x="440.0" y="1480.0" text-anchor="middle" class="node-sub">从 HTTP 请求头里取某个头的值（头名大小写不敏感） · vt_ws.c:148</text>
+  </g>
+  <g id="node-has_token" data-graph-role="node" data-node-id="has_token" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1506,730,1562">
+  <rect x="150.0" y="1506.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1534.0" text-anchor="middle" class="node-title" font-size="18.0">has_token()</text>
+  <text x="440.0" y="1556.0" text-anchor="middle" class="node-sub">在请求头值里按逗号分词找 token（大小写不敏感… · vt_ws.c:172</text>
+  </g>
+  <g id="node-drop_client" data-graph-role="node" data-node-id="drop_client" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1680,730,1736">
+  <rect x="150.0" y="1680.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1708.0" text-anchor="middle" class="node-title" font-size="18.0">drop_client()</text>
+  <text x="440.0" y="1730.0" text-anchor="middle" class="node-sub">关连接 + 抬掉它的虚拟触点 + 清订阅位 + 清出站队列 · vt_ws.c:287</text>
+  </g>
+  <g id="node-ws_send" data-graph-role="node" data-node-id="ws_send" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1756,730,1812">
+  <rect x="150.0" y="1756.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1784.0" text-anchor="middle" class="node-title" font-size="18.0">ws_send()</text>
+  <text x="440.0" y="1806.0" text-anchor="middle" class="node-sub">直接发一个 WS 帧（控制帧 · vt_ws.c:269</text>
+  </g>
+  <g id="node-ws_next_frame" data-graph-role="node" data-node-id="ws_next_frame" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,1930,730,1986">
+  <rect x="150.0" y="1930.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="1958.0" text-anchor="middle" class="node-title" font-size="18.0">ws_next_frame()</text>
+  <text x="440.0" y="1980.0" text-anchor="middle" class="node-sub">取出一个完整帧的正文（必要时继续收） · vt_ws.c:346</text>
+  </g>
+  <g id="node-handle_line" data-graph-role="node" data-node-id="handle_line" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2006,730,2074">
+  <rect x="150.0" y="2006.0" width="580.0" height="68.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2040.0" text-anchor="middle" class="node-title" font-size="18.0">handle_line()</text>
+  <text x="440.0" y="2062.0" text-anchor="middle" class="node-sub">一行命令 → 一行回包 · vt_ws.c:646</text>
+  </g>
+  <g id="node-sha1_update" data-graph-role="node" data-node-id="sha1_update" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2192,730,2248">
+  <rect x="150.0" y="2192.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2220.0" text-anchor="middle" class="node-title" font-size="18.0">sha1_update()</text>
+  <text x="440.0" y="2242.0" text-anchor="middle" class="node-sub">SHA-1 追加数据 · vt_ws.c:80</text>
+  </g>
+  <g id="node-write_full" data-graph-role="node" data-node-id="write_full" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2268,730,2324">
+  <rect x="150.0" y="2268.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2296.0" text-anchor="middle" class="node-title" font-size="18.0">write_full()</text>
+  <text x="440.0" y="2318.0" text-anchor="middle" class="node-sub">把 len 字节写满（EINTR、短写自动续写） · vt_ws.c:196</text>
+  </g>
+  <g id="node-ws_peek_frame" data-graph-role="node" data-node-id="ws_peek_frame" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2442,730,2498">
+  <rect x="150.0" y="2442.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2470.0" text-anchor="middle" class="node-title" font-size="18.0">ws_peek_frame()</text>
+  <text x="440.0" y="2492.0" text-anchor="middle" class="node-sub">试着从接收缓冲里解析出一个完整帧的表头 · vt_ws.c:310</text>
+  </g>
+  <g id="node-cmd_meta" data-graph-role="node" data-node-id="cmd_meta" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2518,730,2574">
+  <rect x="150.0" y="2518.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2546.0" text-anchor="middle" class="node-title" font-size="18.0">cmd_meta()</text>
+  <text x="440.0" y="2568.0" text-anchor="middle" class="node-sub">ping / res / reset（不碰触点的元命令） · vt_ws.c:455</text>
+  </g>
+  <g id="node-cmd_point_once" data-graph-role="node" data-node-id="cmd_point_once" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2692,730,2748">
+  <rect x="150.0" y="2692.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2720.0" text-anchor="middle" class="node-title" font-size="18.0">cmd_point_once()</text>
+  <text x="440.0" y="2742.0" text-anchor="middle" class="node-sub">up / down / move —— 单点命令… · vt_ws.c:482</text>
+  </g>
+  <g id="node-cmd_frame" data-graph-role="node" data-node-id="cmd_frame" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2768,730,2824">
+  <rect x="150.0" y="2768.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2796.0" text-anchor="middle" class="node-title" font-size="18.0">cmd_frame()</text>
+  <text x="440.0" y="2818.0" text-anchor="middle" class="node-sub">begin_frame / point / end_frame … · vt_ws.c:520</text>
+  </g>
+  <g id="node-cmd_region" data-graph-role="node" data-node-id="cmd_region" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,2942,730,2998">
+  <rect x="150.0" y="2942.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="2970.0" text-anchor="middle" class="node-title" font-size="18.0">cmd_region()</text>
+  <text x="440.0" y="2992.0" text-anchor="middle" class="node-sub">region add | clear | list · vt_ws.c:563</text>
+  </g>
+  <g id="node-cmd_sub" data-graph-role="node" data-node-id="cmd_sub" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3018,730,3074">
+  <rect x="150.0" y="3018.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="3046.0" text-anchor="middle" class="node-title" font-size="18.0">cmd_sub()</text>
+  <text x="440.0" y="3068.0" text-anchor="middle" class="node-sub">sub [phys|region|all] / unsub（裸 … · vt_ws.c:619</text>
+  </g>
+  <g id="node-regions_clear" data-graph-role="node" data-node-id="regions_clear" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3192,730,3248">
+  <rect x="150.0" y="3192.0" width="580.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="440.0" y="3220.0" text-anchor="middle" class="node-title" font-size="18.0">regions_clear()</text>
+  <text x="440.0" y="3242.0" text-anchor="middle" class="node-sub">清空区域表，并把代次 +1（让区域线程重置它私有的状态表） · vt_region.c:14</text>
+  </g>
+  <g id="node-region_add" data-graph-role="node" data-node-id="region_add" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3268,730,3324">
+  <rect x="150.0" y="3268.0" width="580.0" height="56.0" rx="10.0" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <text x="440.0" y="3296.0" text-anchor="middle" class="node-title" font-size="18.0">region_add()</text>
+  <text x="440.0" y="3318.0" text-anchor="middle" class="node-sub">新增或覆盖一个区域（主线程持 region_lock 写表） · vt_region.c:35</text>
+  </g>
+  <g id="node-sha1_block" data-graph-role="node" data-node-id="sha1_block" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3442,730,3498">
+  <rect x="150.0" y="3442.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="3470.0" text-anchor="middle" class="node-title" font-size="18.0">sha1_block()</text>
+  <text x="440.0" y="3492.0" text-anchor="middle" class="node-sub">处理一个 64 字节块（SHA-1 内部） · vt_ws.c:47</text>
+  </g>
+  <g id="node-rol32" data-graph-role="node" data-node-id="rol32" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3616,730,3672">
+  <rect x="150.0" y="3616.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="3644.0" text-anchor="middle" class="node-title" font-size="18.0">rol32()</text>
+  <text x="440.0" y="3666.0" text-anchor="middle" class="node-sub">32 位循环左移（SHA-1 内部用） · vt_ws.c:30</text>
+  </g>
+  <g id="node-be32" data-graph-role="node" data-node-id="be32" data-semantic-role="rect" data-motion-role="" data-motion-stage="" data-motion-order="" data-parent="" data-deployment-id="" data-topic-id="" data-span-id="" data-station-order="" data-status="" data-start-ms="" data-duration-ms="" data-parent-span="" data-graph-bounds="150,3692,730,3748">
+  <rect x="150.0" y="3692.0" width="580.0" height="56.0" rx="10.0" fill="#faf5ff" stroke="#8b5cf6" stroke-width="1.8"/>
+  <text x="440.0" y="3720.0" text-anchor="middle" class="node-title" font-size="18.0">be32()</text>
+  <text x="440.0" y="3742.0" text-anchor="middle" class="node-sub">读 4 字节大端整数（SHA-1 内部用） · vt_ws.c:37</text>
+  </g>
+  <g id="legend" data-graph-role="legend">
+    <rect id="legend-zone" data-graph-role="reserved" data-reserved-kind="legend" x="90" y="3828" width="704.4" height="46" rx="10" fill="none" stroke="none"/>
+    <line data-graph-role="decoration" x1="100.0" y1="3842.0" x2="130.0" y2="3842.0" stroke="#2563eb" stroke-width="2.4" marker-end="url(#arrowC)"/>
+    <text data-graph-role="decoration" x="140.0" y="3846.0" class="legend">物理读取 / 区域判定</text>
+    <line data-graph-role="decoration" x1="279.6" y1="3842.0" x2="309.6" y2="3842.0" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#arrowA)"/>
+    <text data-graph-role="decoration" x="319.6" y="3846.0" class="legend">进程 / 协议控制</text>
+    <line data-graph-role="decoration" x1="435.20000000000005" y1="3842.0" x2="465.20000000000005" y2="3842.0" stroke="#10b981" stroke-width="2.4" marker-end="url(#arrowB)"/>
+    <text data-graph-role="decoration" x="475.20000000000005" y="3846.0" class="legend">组帧 / 发送</text>
+    <line data-graph-role="decoration" x1="566.8000000000001" y1="3842.0" x2="596.8000000000001" y2="3842.0" stroke="#f97316" stroke-width="2.4" marker-end="url(#arrowE)"/>
+    <text data-graph-role="decoration" x="606.8000000000001" y="3846.0" class="legend">队列 / 解帧</text>
+    <line data-graph-role="decoration" x1="698.4000000000001" y1="3842.0" x2="728.4000000000001" y2="3842.0" stroke="#6b7280" stroke-width="2.4" marker-end="url(#arrowH)"/>
+    <text data-graph-role="decoration" x="738.4000000000001" y="3846.0" class="legend">纯工具</text>
+  </g>
+  <g id="footer" data-graph-role="reserved" data-graph-bounds="100,3904,534,3920">
+  <text x="100.0" y="3916.0" class="footnote">源：src/*.c（函数与调用边现取）· 作用文案见 scripts/funcdoc_data.py · 带内顺序按重心法排</text>
+  </g>
+</svg>
