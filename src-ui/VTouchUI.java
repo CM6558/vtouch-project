@@ -23,6 +23,7 @@ public class VTouchUI {
     static Object sysCtx;
     static volatile long settleUntil = 0;
     static volatile boolean listenerOk = false;
+    static volatile Thread mainTh;      /* 主循环线程：事件到达时打断它的 sleep，检测延迟从"最多一个周期"降到 ~0 */
 
     static void startDisplayListener() {
         Thread th = new Thread(new Runnable() {
@@ -39,6 +40,11 @@ public class VTouchUI {
                             public Object invoke(Object p, java.lang.reflect.Method m, Object[] a2) {
                                 if ("onDisplayChanged".equals(m.getName())) {
                                     settleUntil = System.currentTimeMillis() + 500;
+                                    /* 立刻叫醒主循环（否则要等它睡满一个周期才发现，最坏 40ms 里
+                                     * 图层还是旧尺寸铺在新屏上 = 会被拉伸）。sleep 被打断抛异常，
+                                     * 主循环 catch 掉继续，等于"立刻醒来再看一次"。 */
+                                    Thread mt = mainTh;
+                                    if (mt != null) mt.interrupt();
                                     Log.i(TAG, "DisplayListener: onDisplayChanged（事件到达，开 500ms 观察窗）");
                                 }
                                 return null;
@@ -219,6 +225,7 @@ public class VTouchUI {
          *     观察窗（回调常早于状态更新，直接读会拿到旧值 → 白做一次换绑、还漏掉这次旋转）；
          *     注册失败回落 320ms 轮询，注册成功也留 2s 一次的漏事件保险。
          * 变化处理顺序：先遮挡 → 再改 buffer / 换新 Surface → native 首帧上屏 → 恢复。 */
+        mainTh = Thread.currentThread();
         boolean vis = true;          /* 逻辑可见性（native 说的要不要显示） */
         boolean guard = false;       /* 转屏遮挡中：此期间不碰 alpha（由遮挡逻辑管） */
         long guardT0 = 0;
