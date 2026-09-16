@@ -8,7 +8,7 @@
 | `vtouch-callgraph-phys` | 物理触摸链：物理帧 → 合帧 → 转发 → 入队 → 区域判定 → 出站 | 31 | 22 | 五道 + 版面三项全过 |
 | `vtouch-callgraph-proto` | WebSocket 协议链：握手 → SHA-1/Base64 → 发送 → 解帧 | 29 | 25 | 五道 + 版面三项全过 |
 | `vtouch-callgraph-ctrl` | 控制链：进程 / 主循环 / 注入 | 14 | 8 | 五道 + 版面三项全过 |
-| `vtouch-callgraph-interactive.html` | **全量交互版**：62 个函数 / 78 条调用边 | 62 | 78 | JS 语法 + 结构自检 |
+| `vtouch-callgraph-interactive.html` | **交互阅读版**：62 函数 / 78 边 + 6 条可播放链路（左树 / 中图 / 右文档） | 62 | 78 | JS 语法 + 链路断言 + 结构自检 |
 | `vtouch-callgraph.drawio` | **可编辑版（draw.io）**：同样 62 函数 / 78 边，Graphviz 自动布局 | 62 | 78 | `validate.py`：0 error · 0 穿节点 · 0 重叠（95 处交叉，score 950） |
 
 **三张静态图并集 = 全部 62 个函数、54/78 条调用边（69%）；剩下 24 条跨模块边只在交互版 HTML 里**（见文末补遗表）。
@@ -37,6 +37,31 @@ sh scripts/render_callgraph_drawio.sh   # 数据 → Graphviz 自动布局 → .
   PNG 只导出左上角一条（实测 2000×374）。所以流程里固定有一步 `scripts/fit_drawio_page.py` 把页面贴到内容外框。
 - **缩小的图不要给视觉模型看**：把 8300px 宽的图缩到 1400px 后，模型会**编造**函数名（实测读成 `s3fs_*` 之类完全不存在的名字）。
   复核文字要按 **1:1 原像素裁剪**再看（裁 1400×500 一块，字是可读的）；版面缺陷以 `validate.py` 的结构结论为准。
+
+## 交互阅读版怎么用（`vtouch-callgraph-interactive.html`）
+
+静态图一次给全部关系 → 看的人得自己在脑子里做过滤；这一版把「过滤」交给你点：
+
+- **左边**：按模块折叠的函数树。点函数名 = 选中；悬停 = 只点亮它的一跳；上方搜索框支持按函数名/作用关键词过滤（回车跳到第一个命中）。
+- **中间**：调用图（模块 = 列，列内按源码行号）。蓝线 = 它调用的，紫线 = 调用它的；`↓N ↑M` 是被调/调用条数。
+- **右边**：选中函数的完整文档（作用 / 参数 / 返回 / 注意 / 用到的系统调用）+ **调用它的人**、**它调用的人**两张可点列表 —— 想顺着代码走就直接点。
+- **底部「跟着链路读」**：6 条链路逐步播放，每步高亮一条边并说明这一步在干什么：
+
+  | 链路 | 路径 |
+  |---|---|
+  | ① 物理手指：读到一帧 → 写进 uinput | `physical_events → emit_frame → emit_iov_writev → uinput_writev_retry` |
+  | ② 帧边界：状态变化怎么入队 | `enqueue_phys_changes → vtq_push → queue_drop_log` |
+  | ③ 区域线程：取事件 → 五事件判定 → 推送 | `region_thread_main → region_apply → region_ev_send → outq_push_text → outq_push` |
+  | ④ 出站：刷给客户端 & 失败收摊 | `main → vtouch_poll_step → outq_flush → drop_client` |
+  | ⑤ 命令注入：一行命令 → 一帧进 uinput | `client_frame → handle_line → cmd_meta → owner_reset → emit_frame → emit_iov_writev → uinput_writev_retry` |
+  | ⑥ 区域订阅：region 命令 → 建表 | `client_frame → handle_line → cmd_region → region_add` |
+
+  链路不是手编的：`gen_callgraph_explorer.py` 在真实调用图上搜「起点 → 有意义的终点」的最长简单路径，
+  并**断言每一跳都是真实调用边**（搜不到就退化成单点，不会编出不存在的调用）。
+
+- 键盘：`←` `→` 换步，`/` 聚焦搜索，`Esc` 清除。顶栏还能按模块筛选、切换「只看选中一跳 / 只看当前链路」。
+
+重画：`python scripts/gen_callgraph_explorer.py`（版式与交互在 `scripts/callgraph_html_template.html`，改样式只改模板）。
 
 ## 每张图四件套
 
