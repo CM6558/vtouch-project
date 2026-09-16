@@ -27,7 +27,9 @@ tests/ws_smoke.py               主机侧 smoke（握手 + 注入命令链路）
 tests/ws_planb_regression.py    主机侧回归：命令面 / 订阅 / 五事件 / 回触不自激 / ws_kick
 docs/VTOUCH_ARCH_PLAN.md        本分支所依据的方案原文（§8 四步 = 本分支的四段改动）
 docs/                           VTOUCH_ARCH_PLAN.md（方案原文）+ CODE_WALKTHROUGH.md（完整版走查，可删）
-docs/diagrams/                  调用图图鉴：JSON 权威源 + SVG + PNG + 校验报告 + 交互版 HTML（见其 README）
+docs/diagrams/                  调用图图鉴：JSON 权威源 + SVG + PNG + 校验报告 + 交互版 HTML + 可编辑 .drawio（见其 README）
+scripts/gen_callgraph_drawio.py   draw.io 版调用图的图数据（同源提取，供 Graphviz 自动布局）
+scripts/render_callgraph_drawio.sh 一键重画 .drawio（数据 → 自动布局 → 校验 → PNG/SVG）
 ```
 
 ## 前提

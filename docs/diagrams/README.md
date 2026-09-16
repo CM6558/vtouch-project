@@ -9,9 +9,34 @@
 | `vtouch-callgraph-proto` | WebSocket 协议链：握手 → SHA-1/Base64 → 发送 → 解帧 | 29 | 25 | 五道 + 版面三项全过 |
 | `vtouch-callgraph-ctrl` | 控制链：进程 / 主循环 / 注入 | 14 | 8 | 五道 + 版面三项全过 |
 | `vtouch-callgraph-interactive.html` | **全量交互版**：62 个函数 / 78 条调用边 | 62 | 78 | JS 语法 + 结构自检 |
+| `vtouch-callgraph.drawio` | **可编辑版（draw.io）**：同样 62 函数 / 78 边，Graphviz 自动布局 | 62 | 78 | `validate.py`：0 error · 0 穿节点 · 0 重叠（95 处交叉，score 950） |
 
 **三张静态图并集 = 全部 62 个函数、54/78 条调用边（69%）；剩下 24 条跨模块边只在交互版 HTML 里**（见文末补遗表）。
 不是没画，是这套渲染器画不了：那 24 条边全是「主循环 / 命令族 → 各模块入口」的**纯扇出**，实测 7 源 → 17 目标时 `BRIDGE_BUDGET` 157~179（standard 档上限 8，本图档位放到 60 也过不去），窄走廊、宽走廊两版都试过。单张图放不下的另两个硬约束见下面"取舍"。
+
+## draw.io 可编辑版（draw.io / diagrams.net 打开即改）
+
+三件产物，同一份数据（`scripts/gen_callgraph_drawio.py` 用的提取器与静态图完全同一个）：
+
+- `vtouch-callgraph.drawio` —— **源文件**，在 draw.io 桌面版/网页版里可直接拖动重排、改色、加注释
+- `vtouch-callgraph.drawio.png` —— 导出图（**内嵌了 XML**，用 draw.io 打开这张 PNG 也能进编辑态）
+- `vtouch-callgraph.drawio.svg` —— 矢量导出（8300px 宽的图用矢量最实用，放大不糊）
+
+重画：
+
+```sh
+sh scripts/render_callgraph_drawio.sh   # 数据 → Graphviz 自动布局 → .drawio → 结构校验 → 页面贴合 → PNG + SVG
+```
+
+依赖两个外部程序（本机已装）：Graphviz `dot`（`winget install --id Graphviz.Graphviz -e`）、draw.io 桌面版 CLI
+（`C:\Program Files\draw.io\draw.io.exe`，用 `-x` 导出）。布局与校验脚本来自 `drawio-skill`，**不复制进本仓库**。
+
+两个坑写在这里省下次时间：
+
+- **draw.io CLI 按页面裁剪导出**：autolayout 产出的页面是 A4（850×1100），而这张图内容有 8294×1536，不贴合的话
+  PNG 只导出左上角一条（实测 2000×374）。所以流程里固定有一步 `scripts/fit_drawio_page.py` 把页面贴到内容外框。
+- **缩小的图不要给视觉模型看**：把 8300px 宽的图缩到 1400px 后，模型会**编造**函数名（实测读成 `s3fs_*` 之类完全不存在的名字）。
+  复核文字要按 **1:1 原像素裁剪**再看（裁 1400×500 一块，字是可读的）；版面缺陷以 `validate.py` 的结构结论为准。
 
 ## 每张图四件套
 
