@@ -1660,9 +1660,9 @@ static void draw_frame(int sw, int sh)
             ALOGE("eglSwapBuffers 失败 x%d (0x%x)", g_swap_fail, eglGetError());
     } else {
         g_swap_fail = 0;
-        if (g_swap_armed) {
-            g_swap_armed = 0; g_swap_done = 1;
-            ALOGI("换绑后首帧已提交上屏（Java 可恢复图层）t=+%.0fms", (double)t_since_start());
+        if (g_swap_armed > 0 && --g_swap_armed == 0) {
+            g_swap_done = 1;
+            ALOGI("换绑后连续两帧已提交上屏（Java 可恢复图层）t=+%.0fms", (double)t_since_start());
         }
     }
 }
@@ -1733,7 +1733,10 @@ static void *render_thread_fn(void *)
             if (g_win) ANativeWindow_release(g_win);
             g_win = g_win_new; g_win_new = 0;
             g_swap_win = 0;
-            g_swap_armed = 1;      /* 下一帧成功提交 = 新 surface 的首帧上屏 */
+            /* 要等**两帧**成功提交再让 Java 恢复 alpha：只等一帧的话，新 surface 的首个缓冲
+             * 可能还没被合成器取走，恢复后先显示一帧"未就绪"内容 —— 真机表现就是"窗口位置闪现"
+             * （日志证据：恢复到首帧提交只隔 5ms）。多花一帧 ≈8ms，换"恢复时屏幕上那帧一定画好了"。 */
+            g_swap_armed = 2;
             g_diag_frames = 8;     /* 接下来 8 帧逐帧打点（转屏定位用） */
             g_need = 1;
             g_force_frames = 4;
