@@ -24,6 +24,10 @@ public class VTouchUI {
     static volatile long settleUntil = 0;
     static volatile boolean listenerOk = false;
     static volatile Thread mainTh;      /* 主循环线程：事件到达时打断它的 sleep，检测延迟从"最多一个周期"降到 ~0 */
+    /* 事件回调里要用的：图层对象、最近一次已知显示状态、以及"回调已提前遮挡"的请求位 */
+    static volatile Object layerRef;
+    static volatile int[] dispNow = new int[]{1440, 3168, 0};
+    static volatile boolean guardPending;
 
     static void startDisplayListener() {
         Thread th = new Thread(new Runnable() {
@@ -40,9 +44,26 @@ public class VTouchUI {
                             public Object invoke(Object p, java.lang.reflect.Method m, Object[] a2) {
                                 if ("onDisplayChanged".equals(m.getName())) {
                                     settleUntil = System.currentTimeMillis() + 500;
-                                    /* 立刻叫醒主循环（否则要等它睡满一个周期才发现，最坏 40ms 里
-                                     * 图层还是旧尺寸铺在新屏上 = 会被拉伸）。sleep 被打断抛异常，
-                                     * 主循环 catch 掉继续，等于"立刻醒来再看一次"。 */
+                                    /* 这一步是"位置切换看起来自然"的关键：回调**早于**状态更新（实测），
+                                     * 等真值就要多等 5~40ms —— 那段时间面板还停在旧位置铺在新朝向里，
+                                     * 正是用户看到的"位置闪现"。所以：
+                                     *   ① 立刻把图层 alpha 归 0（此后任何错位帧都看不见）；
+                                     *   ② 立刻按**预测**朝向重排面板：90° 旋转时尺寸必然交换
+                                     *      (1440x3168 ↔ 3168x1440)，方向先猜 +1；
+                                     *   ③ 真值到了只做校正（猜错也在遮挡里，看不见）。
+                                     * 于是"屏幕转过去的那一刻"面板已经在新位置了。 */
+                                    int[] dn = dispNow;
+                                    try {
+                                        Object lr = layerRef;
+                                        if (lr != null) {
+                                            Object tt0 = txnNew();
+                                            txnCall(tt0, "setAlpha", new Class<?>[]{SCC, float.class}, lr, 0.0f);
+                                            TXN.getMethod("apply").invoke(tt0);
+                                            guardPending = true;
+                                        }
+                                    } catch (Throwable t2) { /* 失败就让主循环按老路处理 */ }
+                                    nativeOnDisplay(dn[1], dn[0], (dn[2] + 1) & 3);
+                                    /* 立刻叫醒主循环（否则要等它睡满一个周期才发现）。 */
                                     Thread mt = mainTh;
                                     if (mt != null) mt.interrupt();
                                     Log.i(TAG, "DisplayListener: onDisplayChanged（事件到达，开 500ms 观察窗）");
@@ -215,6 +236,8 @@ public class VTouchUI {
             layer = makeLayer("vtouch-ui", disp[0], disp[1]);
             nativeOnDisplay(disp[0], disp[1], disp[2]);
             nativeOnSurface(0, newSurface(layer));
+            layerRef = layer;          /* 事件回调里要立刻改它的 alpha / 落位 */
+            dispNow = disp;
             Log.i(TAG, "layer up " + disp[0] + "x" + disp[1] + " rot=" + disp[2]);
         } catch (Throwable t) { Log.e(TAG, "layer", t); System.exit(2); }
         /* 主循环三件事：
@@ -228,6 +251,7 @@ public class VTouchUI {
         mainTh = Thread.currentThread();
         boolean vis = true;          /* 逻辑可见性（native 说的要不要显示） */
         boolean guard = false;       /* 转屏遮挡中：此期间不碰 alpha（由遮挡逻辑管） */
+        boolean changedSeen = false; /* 本轮遮挡期间是否真的查到了变化（没有就是伪事件，要尽快恢复） */
         long guardT0 = 0;
         int tick = 0;
         long visWarn = 0, dispWarn = 0;   /* 各失败路径的限频时刻 */
@@ -235,17 +259,26 @@ public class VTouchUI {
             /* 平时 40ms（可见性判定跟手够了）；**转屏期间收紧到 5ms** ——
              * 这两段等待（观察窗内查值、遮挡期内等首帧）直接决定"屏幕上看不到面板"的时长：
              * 原来各要等最多一个 40ms 周期，收紧后各 ≤5ms。 */
-            boolean tight = guard || System.currentTimeMillis() < settleUntil;
+            boolean tight = guard || guardPending || System.currentTimeMillis() < settleUntil;
             try { Thread.sleep(tight ? 5 : 40); } catch (Throwable t) {}
+            /* 事件回调已经先遮挡 + 按预测朝向排好位置了：接管它的遮挡状态 */
+            if (guardPending) {
+                guardPending = false;
+                if (!guard) { guard = true; guardT0 = System.currentTimeMillis(); changedSeen = false; }
+            }
             /* ① 转屏遮挡收尾：越早恢复越好（此刻屏幕是隐的） */
             if (guard) {
                 boolean done = nativeTakeSwapDone() != 0;
-                if (done || System.currentTimeMillis() - guardT0 > 500) {
+                long gdt = System.currentTimeMillis() - guardT0;
+                /* 伪事件（回调到了但方向/尺寸没变）：60ms 内没查到变化就尽快恢复，
+                 * 不然每次无关的显示事件都会让面板黑 500ms。 */
+                if (!changedSeen && gdt > 60) done = true;
+                if (done || gdt > 500) {
                     try {
                         Object tt = txnNew();
                         txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layer, vis ? 1.0f : 0.0f);
                         TXN.getMethod("apply").invoke(tt);
-                        Log.i(TAG, "转屏遮挡结束（" + (done ? "首帧已上屏" : "500ms 兜底")
+                        Log.i(TAG, "转屏遮挡结束（" + (done ? "首帧已上屏" : "500ms 兜底/伪事件")
                                   + "，用时 " + (System.currentTimeMillis() - guardT0) + "ms）");
                         guard = false;
                     } catch (Throwable t) {
@@ -292,6 +325,7 @@ public class VTouchUI {
                 try {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                     if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
+                        changedSeen = true;
                         /* 先遮挡（这一帧起屏幕上看不到面板）→ 再改尺寸 / 换新 Surface → 等首帧上屏恢复。
                          * 诊断开关 VTOUCH_UI_NOGUARD=1：**不遮挡**，把平时只有 ~10ms 的错位状态
                          * 持续成整段换绑时间（~300ms），这样 9fps 的录屏也能拍下来看它到底什么样。 */
@@ -304,7 +338,8 @@ public class VTouchUI {
                         txnCall(tt, "setPosition", new Class<?>[]{SCC, float.class, float.class},
                                 layer, 0.0f, 0.0f);
                         TXN.getMethod("apply").invoke(tt);
-                        nativeOnDisplay(d2[0], d2[1], d2[2]);
+                        nativeOnDisplay(d2[0], d2[1], d2[2]);   /* 真值：校正回调里的预测 */
+                        dispNow = d2;
                         nativeOnSurface(0, newSurface(layer));
                         Log.i(TAG, "display " + d2[0] + "x" + d2[1] + " rot=" + d2[2]
                                   + "（图层已遮挡，等新 surface 首帧上屏）");

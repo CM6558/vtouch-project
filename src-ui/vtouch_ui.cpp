@@ -2014,17 +2014,18 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeOnSurface(JNIEnv *env, jclass, jint i
     ALOGI("surface ready t=+%.0fms", (double)t_since_start());
 }
 
-/* Java 轮询到方向/尺寸变化就调它（随后会再送一个新 Surface）。
+/* Java 检测到方向/尺寸变化就调它（随后会再送一个新 Surface）。
  *
- * **只暂存，不当场改面板落位**：Java 线程改落位、渲染线程画帧 —— 两者之间有个缝：
- * "新落位 + 旧尺寸缓冲"会被画出一帧（真机实测：那一帧面板形状正常、位置不对，就是用户看到的
- * "窗口位置闪现"；平时被 alpha 遮挡挡住，边界上会漏）。所以落位改成**在渲染线程接手新窗口的
- * 那一刻一起生效**，让"换尺寸/换 surface/换落位"在时间上不可分割。 */
+ * **立刻生效**（不延迟到换绑）：Java 的 DisplayListener 回调早于真实状态更新，所以回调里会先用
+ * 预测值调一次这里（尺寸交换、方向 +1），让"屏幕转过去的那一刻"面板已经在新落位 —— 用户要的
+ * "位置切换自然"就是这么来的；真值到了再调一次做校正（猜错也在遮挡里，看不见）。
+ * 这里的直接后果是：换绑前可能存在"新落位 + 旧尺寸缓冲"的帧 —— 那一帧由 Java 侧的 alpha=0
+ * 遮挡（回调里先遮挡、再调这里）保证不可见；真机实测过它的样子：形状正常、位置不对。 */
 JNIEXPORT void JNICALL Java_VTouchUI_nativeOnDisplay(JNIEnv *, jclass, jint w, jint h, jint rot)
 {
-    g_pend_w = w; g_pend_h = h; g_pend_rot = rot;
-    __sync_synchronize();
-    g_pend_disp = 1;
+    pthread_mutex_lock(&g_mu);
+    on_display(w, h, rot);
+    pthread_mutex_unlock(&g_mu);
 }
 
 JNIEXPORT void JNICALL Java_VTouchUI_nativeDestroy(JNIEnv *, jclass)
