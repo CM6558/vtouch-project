@@ -132,13 +132,12 @@ D.nodes.forEach(n => {
   const tip = el('title', {}); tip.textContent = n.id + '()\n' + n.brief + '\n' + n.mod + ':' + n.line;
   g.append(tip);
   g.addEventListener('mouseenter', () => { if (!state.sel) hover(n.id); });
-  g.addEventListener('mouseleave', () => { if (!state.sel) clearHot(); });
+  g.addEventListener('mouseleave', () => { if (!state.sel) clearHotAll(); });
   g.addEventListener('click', () => select(n.id));
   nodeEl[n.id] = g; gNode.append(g);
 });
 
 // ---------- 高亮/选择 ----------
-function clearHot(){ edges.forEach(e => { const p = edgeEl[e.id]; p.classList.remove('hot'); p.classList.toggle('out', e.a && true); p.classList.remove('in'); }); }
 function applyHi(nodeIds, edgeIds){
   D.nodes.forEach(n => nodeEl[n.id].classList.toggle('dim', nodeIds && !nodeIds.has(n.id)));
   edges.forEach(e => { const p = edgeEl[e.id]; const on = !edgeIds || edgeIds.has(e.id); p.classList.toggle('hot', !!edgeIds && edgeIds.has(e.id));
