@@ -21,7 +21,82 @@
 #ifndef VT_UI_PANEL
 
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+
+/* ===== B 方案：面板三件套**嵌进核心**，启动时自解包 =====
+ *
+ * 设备上因此只需要**一个文件**（vtouchd_ui）：不用再推 classes.dex / libtestimgui.so /
+ * libc++_shared.so，也就不存在"面板是旧的那一版"这类不一致 —— 版本永远来自同一个二进制。
+ *
+ * 打包方式（scripts/build.sh 的 ui 目标）：用 llvm-objcopy -I binary 把三个文件变成 .rodata
+ * 里的符号对（`_binary_<名>_start/_end`），链接进核心；这里的表把它们写给面板目录。
+ * 未链接时（-DVT_UI_NO_EMBED 或没走 ui 目标）符号为 NULL → 自动退回"用设备上已有的面板文件"。
+ */
+#ifndef VT_UI_NO_EMBED
+extern const unsigned char _binary_classes_dex_start[] __attribute__((weak));
+extern const unsigned char _binary_classes_dex_end[] __attribute__((weak));
+extern const unsigned char _binary_libtestimgui_so_start[] __attribute__((weak));
+extern const unsigned char _binary_libtestimgui_so_end[] __attribute__((weak));
+extern const unsigned char _binary_libcxx_shared_so_start[] __attribute__((weak));
+extern const unsigned char _binary_libcxx_shared_so_end[] __attribute__((weak));
+
+static const struct {
+    const unsigned char *s, *e;
+    const char *name;
+} S_emb[] = {
+    { _binary_classes_dex_start,      _binary_classes_dex_end,      "classes.dex" },
+    { _binary_libtestimgui_so_start,  _binary_libtestimgui_so_end,  "libtestimgui.so" },
+    { _binary_libcxx_shared_so_start, _binary_libcxx_shared_so_end, "libc++_shared.so" },
+};
+
+/* 32 位 FNV-1a：只用来在日志里给出"这一版面板"的指纹（对账用，不做安全用途）。 */
+static uint32_t fnv1a(const unsigned char *p, size_t n)
+{
+    uint32_t h = 2166136261u;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+/**
+ * (vtouch-doc: vt_embed_materialize)
+ * @brief 把嵌进核心的面板文件写到面板目录（先写 .tmp 再 rename，避免半截文件被加载）。
+ * @param   dir      面板目录（如 /data/local/tmp/vtouch-ui）
+ * @return  0 写了至少一个文件；-1 没得写（未链接）或写失败。
+ * @note    无条件覆盖：宁可每次多写 ~2.8MB（约几十毫秒），也不留"设备上是旧面板"的可能。
+ */
+static int vt_embed_materialize(const char *dir)
+{
+    size_t i;
+    int wrote = 0;
+    if (!S_emb[0].s) return -1;                    /* 未链接：用设备上已有的 */
+    for (i = 0; i < sizeof S_emb / sizeof S_emb[0]; i++) {
+        char tmp[PATH_MAX], dst[PATH_MAX];
+        size_t n;
+        FILE *f;
+        if (!S_emb[i].s || !S_emb[i].e) continue;
+        n = (size_t)(S_emb[i].e - S_emb[i].s);
+        if (n == 0) continue;
+        snprintf(tmp, sizeof tmp, "%s/.%s.tmp", dir, S_emb[i].name);
+        snprintf(dst, sizeof dst, "%s/%s", dir, S_emb[i].name);
+        f = fopen(tmp, "wb");
+        if (!f) { fprintf(stderr, "vtouchd: 面板自解包写 %s 失败: %s\n", tmp, strerror(errno)); return -1; }
+        if (fwrite(S_emb[i].s, 1, n, f) != n) {
+            fprintf(stderr, "vtouchd: 面板自解包 %s 写不全\n", tmp);
+            fclose(f); unlink(tmp); return -1;
+        }
+        if (fclose(f) != 0 || rename(tmp, dst) != 0) {
+            fprintf(stderr, "vtouchd: 面板自解包 rename %s 失败: %s\n", dst, strerror(errno));
+            unlink(tmp); return -1;
+        }
+        chmod(dst, 0644);
+        fprintf(stderr, "vtouchd: 面板自解包 %-16s %7zu 字节 fnv=%08x\n", S_emb[i].name, n, fnv1a(S_emb[i].s, n));
+        wrote = 1;
+    }
+    return wrote ? 0 : -1;
+}
+#endif /* !VT_UI_NO_EMBED */
 
 extern char **environ;
 
@@ -96,6 +171,11 @@ int vt_panel_start(int shm_fd)
     if (shm_fd < 0) return -1;
     if (!dir || !*dir) dir = VT_PANEL_DIR_DEFAULT;
     snprintf(S_dir, sizeof S_dir, "%s", dir);
+    mkdir(S_dir, 0755);                            /* 目录可能还不存在（B 方案：设备上只有核心一个文件） */
+#ifndef VT_UI_NO_EMBED
+    if (vt_embed_materialize(S_dir) != 0)
+        fprintf(stderr, "vtouchd: 核心未内嵌面板 → 用 %s 里已有的文件\n", S_dir);
+#endif
     snprintf(S_dex, sizeof S_dex, "%s/classes.dex", S_dir);
     if (stat(S_dex, &st) != 0) {
         fprintf(stderr, "vtouchd: 面板未就绪（缺 %s）→ 以无 UI 模式继续\n", S_dex);

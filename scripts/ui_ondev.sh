@@ -37,6 +37,8 @@ do_status() {
         echo "  指向触摸设备的 fd 数 = $(ls -l /proc/$UP/fd 2>/dev/null | grep -cE '/dev/input/event|/dev/uinput')   （必须 0）"
         echo "  共享内存 fd 数       = $(ls -l /proc/$UP/fd 2>/dev/null | grep -c 'memfd:vtouch-shm')   （必须 ≥1）"
     fi
+    echo "--- 面板目录（B 方案：核心启动时自解包出来的）---"
+    ls -l /data/local/tmp/vtouch-ui/ 2>/dev/null | grep -E 'classes.dex|lib'
 }
 
 do_start() {
