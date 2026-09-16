@@ -87,9 +87,9 @@ DOCS = {
     note="只改来源状态，不写身份字段（身份发射时按下标算）。"),
 "owner_reset": dict(brief="客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。",
     note="少了这段，客户端在 begin_frame..end_frame 中间断开会把虚拟手指永久粘在设备上。"),
-"broadcast_phys": dict(brief="物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。",
+"enqueue_phys_changes": dict(brief="物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。",
     note="推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。"),
-"broadcast_virt": dict(brief="虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。",
+"enqueue_virt_changes": dict(brief="虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。",
     note="「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。"),
 
 # ---------------- §10 WebSocket ----------------

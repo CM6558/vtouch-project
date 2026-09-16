@@ -188,10 +188,10 @@ int emit_frame(void);
 int set_virtual(struct contact *state, int slot, const char *name, int x, int y);
 /* 客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。 (vtouch-doc: owner_reset) */
 void owner_reset(void);
-/* 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。 (vtouch-doc: broadcast_phys) */
-void broadcast_phys(void);
-/* 虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。 (vtouch-doc: broadcast_virt) */
-void broadcast_virt(void);
+/* 物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。 (vtouch-doc: enqueue_phys_changes) */
+void enqueue_phys_changes(void);
+/* 虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。 (vtouch-doc: enqueue_virt_changes) */
+void enqueue_virt_changes(void);
 
 /* ---- vt_ws.c ---- */
 /* 32 位循环左移（SHA-1 内部用）。 (vtouch-doc: rol32) */

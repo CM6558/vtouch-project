@@ -174,8 +174,8 @@ void physical_events(void)
             if (emit_frame() < 0) g.g_emit_fail++;
             else g.g_emit_fail = 0;
             /* §4.1 时机：帧边界、emit_frame() 之后入队（快照 = 完整帧状态）。
-             * 完整版是「有订阅才广播」；现在广播还负责喂区域线程，所以每帧都跑（纯内存比较）。 */
-            broadcast_phys();
+             * 入队只喂区域线程（不再推客户端），所以每帧都跑（纯内存比较）。 */
+            enqueue_phys_changes();
         }
     }
     if (n < 0 && (errno == ENODEV || errno == EIO)) {

@@ -167,7 +167,7 @@ int emit_frame(void)
     /* 身份不再在帧末释放（静态两段，§5 改）——上面两行清 pending_up 就够了。 */
     /* §4.1：虚拟状态变化也入队（消费者按 g.virt 位自己过滤）——这样「注入不会自激」是可断言的，
      * 而不是靠「反正没把虚拟触点喂回去」的口头保证。 */
-    broadcast_virt();
+    enqueue_virt_changes();
     return 0;
 }
 /**
@@ -218,15 +218,15 @@ void owner_reset(void)
     if (emit_frame() < 0) g.g_reemit = 1;
 }
 /**
- * (vtouch-doc: broadcast_phys)
- * @brief 物理帧边界之后转发物理变化：每槽比快照判 down/up/move，入 region_q 喂区域线程。
+ * (vtouch-doc: enqueue_phys_changes)
+ * @brief 物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。
  * @note    推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
  *   只推状态变化（down/up/move），静止不刷屏（纯内存比较，不进热路径的写）。
  */
-void broadcast_phys(void)
+void enqueue_phys_changes(void)
 {
     int i, lx, ly, action;
     struct vt_ev ev;
@@ -244,11 +244,11 @@ void broadcast_phys(void)
     }
 }
 /**
- * (vtouch-doc: broadcast_virt)
- * @brief 虚拟触点的状态变化也入队（带 virt=1），消费者按位过滤。
+ * (vtouch-doc: enqueue_virt_changes)
+ * @brief 虚拟触点的状态变化也入 region_q（带 virt=1），消费者按位过滤。
  * @note    「回触不自激」可断言的那一半：虚拟事件照样入队，区域线程遇到 virt=1 直接跳过（§4.1）。
  */
-void broadcast_virt(void)
+void enqueue_virt_changes(void)
 {
     int i, lx, ly, action;
     struct vt_ev ev;

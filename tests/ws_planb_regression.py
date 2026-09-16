@@ -304,7 +304,7 @@ def main():
         rline, seen6 = wait_for(ws, lambda l: l.startswith("region_ev ") and l.split()[2] == "up")
         check(rline is not None, "抬起 → region_ev up", seen6)
 
-        # 区域外按下：广播照跑（喂区域线程），但不该产生任何推送
+        # 区域外按下：入队照跑（喂区域线程），但不该产生任何推送
         phys.down(slot, 5, 5)
         got = drain(ws, 0.4, keep=True)
         phys.up(slot)
