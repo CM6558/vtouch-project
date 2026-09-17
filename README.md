@@ -124,9 +124,17 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `region add <id> <0矩形\|1圆形> <a1..a4> <0\|1>` | `ok <总数>` / `err region` | rect: `x1 y1 x2 y2`；circle: `cx cy r 0` |
 | `region list` | 每行 `region <id> <type> <a1..a4> <en>` + `end <n>` | 表很小（≤32），一次回全量 |
 | `region clear` | `ok 0` | 清空 |
-| `sub [region]` / `unsub` | `ok` / `err sub` | 订阅区域通道（只有这一条推送） |
+| `sub [phys\|region\|all]` / `unsub` | `ok` / `err sub` | 订阅通道：裸 `sub` = 区域通道（与改动前一致）；`sub phys` = 物理触摸流；`sub all` = 两条 |
 
-推送（单向，混在同一条 WS 里）：`region_ev <id> <ev> <slot> <x> <y> <ms>`，`ev` ∈ `down/enter/move/exit/up`：
+推送（单向，混在同一条 WS 里），两条通道：
+
+- `region_ev <id> <ev> <slot> <x> <y> <ms>`（订 `region`）—— 区域事件，`ev` ∈ `down/enter/move/exit/up`：
+- `phys_ev <ev> <slot> <x> <y> <ms>`（订 `phys`）—— **物理触摸流**：按 slot 报 `down/move/up`，
+  不按区域过滤。想「某手指在区域内按下 → 跟它到抬起」就用它：记住 `down` 的 slot，
+  之后按 slot 过滤这条流（区域流做不到 —— 手指出了区域就只有 `exit` 了）。
+  只报物理手指（虚拟触点不进这条流，所以一边跟一边注入不会自激）。
+
+`region_ev` 说明：
 
 - 末尾 `<ms>` 是**事件发生的墙钟毫秒**（与脚本的 `Date.now()` 同基准，可直接做差）；
   它由事件自己的时间戳换算而来，是「手指那一刻」而不是「脚本收到那一刻」，

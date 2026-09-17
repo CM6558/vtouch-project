@@ -606,7 +606,7 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
 }
 /**
  * (vtouch-doc: cmd_sub)
- * @brief 命令族：sub [phys|region|all] / unsub（裸 sub = 两个通道都订）。
+ * @brief 命令族：sub [phys|region|all] / unsub（裸 sub = 只订区域通道，与改动前一致）。
  * @param   t        命令词
  * @param   stp      strtok_r 状态
  * @param   resp     响应缓冲
@@ -620,8 +620,13 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
 {
     if (!strcmp(t, "sub")) {
         char *ch = strtok_r(NULL, " \t", stp);
-        int want = SUB_REGION;                       /* 只有区域通道；裸 sub 与 sub region 等价 */
-        if (ch && strcmp(ch, "region")) { snprintf(resp, cap, "err sub"); return -1; }
+        int want = SUB_REGION;                       /* 裸 sub = 区域通道（与改动前一致，老脚本行为不变） */
+        if (ch) {
+            if (!strcmp(ch, "region"))      want = SUB_REGION;
+            else if (!strcmp(ch, "phys"))   want = SUB_PHYS;
+            else if (!strcmp(ch, "all"))    want = SUB_PHYS | SUB_REGION;
+            else { snprintf(resp, cap, "err sub"); return -1; }
+        }
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
         g.sub_mask = want; snprintf(resp, cap, "ok"); return 0;
     }

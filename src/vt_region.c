@@ -191,8 +191,28 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, ui
     }
 }
 /**
+ * (vtouch-doc: phys_ev_send)
+ * @brief 物理触摸流（sub phys）：按 slot 报 down/move/up，不按区域过滤。
+ * @param   ev       来自 region_q 的事件（带逻辑坐标与时间戳）
+ * @note    「按下之后一路跟到抬起」的底座：区域事件出了区域就断了，这条流不断。只订 SUB_PHYS 才发；只报物理手指，虚拟触点不进（防自激）。
+ */
+void phys_ev_send(const struct vt_ev *ev)
+{
+    char msg[96];
+    const char *act;
+    int n;
+    if (!(g.sub_mask & SUB_PHYS)) return;
+    act = (ev->action == VT_DOWN) ? "down" : (ev->action == VT_UP) ? "up" : "move";
+    n = snprintf(msg, sizeof msg, "phys_ev %s %d %d %d %llu", act, ev->slot, ev->x, ev->y,
+                 (unsigned long long)wall_ms_from_mono(ev->ts));
+    if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
+    fprintf(stderr, "vtouchd: phys %s slot%d %d,%d t=%llu\n", act, ev->slot, ev->x, ev->y,
+            (unsigned long long)wall_ms_from_mono(ev->ts));
+}
+
+/**
  * (vtouch-doc: region_apply)
- * @brief 五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。
+ * @brief 处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。
  * @param   ev       来自 region_q 的事件
  * @note    三张状态表是线程私有的，只在 region_lock 里读区域表。
  *
@@ -215,7 +235,8 @@ void region_apply(const struct vt_ev *ev)
 {
     int rid, hit, lx = ev->x, ly = ev->y, slot = ev->slot;
     if (slot < 0 || slot >= MAX_PHYS) return;
-    pthread_mutex_lock(&g.region_lock);
+    phys_ev_send(ev);                                /* ① 物理触摸流：按 slot 报，与区域无关 */
+    pthread_mutex_lock(&g.region_lock);              /* ② 区域五事件判定 */
     if (r_seen_gen != region_gen) {                 /* region clear/add：重置本线程私有状态 */
         r_seen_gen = region_gen;
         memset(r_slot_in, 0, sizeof r_slot_in);

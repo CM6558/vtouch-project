@@ -13,7 +13,9 @@
  *   vt.finger() / vt.finger(3)        拿一根手指（省略 slot = 自动挑空闲的 0~9）
  *     .down(x,y) .move(x,y) .up() .tap(x,y[,ms]) .swipe(x1,y1,x2,y2[,ms])
  *   vt.frame([{slot,state,x,y}...])   多指合并进同一帧（state = down/move/up）
- *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y}
+ *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y,t}
+ *   vt.onTouch([slot,] 回调)           **物理触摸流**：不按区域过滤，按下→移动→抬起一路跟；
+ *                                     h={ev,slot,x,y,t}；vt.follow(slot,cb) 是它的简写
  *   vt.res()                          逻辑尺寸 + raw 量程（字符串）
  *   vt.keepRunning(true) / vt.stop() / vt.alive() / vt.startedByUs()
  */
@@ -63,6 +65,26 @@ var handle = vt.onRegion(REGION_ID, "*", function (h) {
  *   c.cmd("region list");                            // 看当前表（每行 region … + 末行 end N）
  * 想停监听又不关面板：handle.stop();
  */
+
+/* ---------- 3.5 追踪一根手指：按下在区域内 → 一路跟到抬起 ---------- */
+/* 区域事件只覆盖"区域内"：手指一旦滑出去，区域流就只剩一个 exit，后面没有 move 了。
+ * 要跟着这根手指走，用**物理触摸流** onTouch —— 它按 slot 报 down/move/up，不受区域限制。 */
+var tracked = null;
+var watch = vt.onRegion(REGION_ID, "down", function (h) {     // 和上面的订阅并存，互不干扰
+    if (tracked) tracked.handle.stop();                       // 只跟最新那根（要多根就各个存一份）
+    var t = { slot: h.slot, handle: null, n: 1 };
+    tracked = t;
+    log("开始追踪 slot" + h.slot + "（从 " + h.x + "," + h.y + " 起）");
+    t.handle = vt.onTouch(h.slot, function (e) {               // 只跟这根手指
+        t.n++;
+        if (e.ev === "up") {
+            log("追踪结束：沿途 " + t.n + " 个点，终点 " + e.x + "," + e.y
+                + "，历时 " + (e.t - h.t) + " ms");
+            t.handle.stop();
+            if (tracked === t) tracked = null;
+        }
+    });
+});
 
 /* ---------- 4. 生命周期（默认已经替你管好了，这里只是把开关列出来） ---------- */
 // vt.keepRunning(true);   // 脚本退出时不要停核心（长驻、别的脚本还要用）

@@ -45,7 +45,8 @@
 #define HTTP_MAX 4096
 #define CAP_LONGS(n) (((n) + 1 + 8 * (int)sizeof(unsigned long) - 1) / (8 * (int)sizeof(unsigned long)))
 #define WS_IN_MAX (MAX_PAYLOAD + 14)     /* 单帧上限 + 头（2 + 8 扩展长 + 4 掩码） */
-#define SUB_REGION 2      /* 订阅位：只有区域通道 */
+#define SUB_PHYS   1      /* 订阅位：物理触摸流（按 slot 报 down/move/up，与区域无关） */
+#define SUB_REGION 2      /* 订阅位：区域事件（五事件，按区域过滤） */
 #define VT_UP   0
 #define VT_DOWN 1
 #define VT_MOVE 2
@@ -184,7 +185,9 @@ int region_rename(const char *old_id, const char *new_id);
 int region_hit(const struct region *rg, int lx, int ly);
 /* 发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。 (vtouch-doc: region_ev_send) */
 void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, uint64_t ts_mono);
-/* 五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。 (vtouch-doc: region_apply) */
+/* 物理触摸流（sub phys）：按 slot 报 down/move/up，不按区域过滤。 (vtouch-doc: phys_ev_send) */
+void phys_ev_send(const struct vt_ev *ev);
+/* 处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。 (vtouch-doc: region_apply) */
 void region_apply(const struct vt_ev *ev);
 /* 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。 (vtouch-doc: region_thread_main) */
 void *region_thread_main(void *arg);

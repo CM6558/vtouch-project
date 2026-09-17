@@ -32,6 +32,7 @@
  */
 "use strict";
 var HOST = "127.0.0.1", PORT = 27183;
+var MAX_SLOT = 9;                /* 客户端可用槽 0~9（物理段之外） */
 var BIN = "/data/local/tmp/vtouchd_ui", PROC = "vtouchd_ui";
 var LOG = "/data/local/tmp/vt_ui_core.log";      /* daemon 日志（面板日志在 logcat tag VTouchUI） */
 var SEND_LOCK = threads.lock();
@@ -323,6 +324,9 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
  *   vt.onRegion(cb)                    所有区域 + down/up/enter/exit（默认不含 move）
  *   vt.onRegion(cb, "up")              所有区域 + 只要抬起
  *   vt.onRegion("c1", "down,move", cb) 指定区域 + 指定事件
+ *   vt.onTouch(cb)                     物理触摸流：任何手指的 down/move/up（不按区域过滤）
+ *   vt.onTouch(3, cb) / vt.follow(3,cb) 只跟 slot 3 这根手指 —— 它移到哪、何时抬起都拿得到
+ *                                      （区域事件只覆盖"区域内"，追手指要用这条流）
  * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
  * 回调收到 h = { id, ev, slot, x, y, t }，跑在子线程里（里面可以直接 sleep / 做动作）。
  *   t 是**事件发生的墙钟毫秒**（与 Date.now() 同基准）：算按压时长用 up.t - down.t、
@@ -343,69 +347,140 @@ function parseEvents(evs) {
 function warn(msg) {
     if (typeof toastLog === "function") toastLog(msg); else log("[vtouch] " + msg);
 }
-/* 取区域表（region list 会回 N 行 region ... + 一行 end N）；id 是否在表里用它判 */
-function listRegions(conn) {
+/* ---------- 单一读取线程 ----------
+ * 区域事件(region_ev) 与物理触摸流(phys_ev) 走的是**同一条 socket**，各起一个读线程会互相抢消息
+ * （谁先 read 到就是谁的）。所以这里只有一个读取者，按前缀分派给各个注册的回调。 */
+var g_reader = null;              /* 读线程（只起一个） */
+var g_subbed = {};                /* 已订阅的通道（幂等，避免重复发 sub） */
+var g_regionHandlers = [];        /* {id, want, cb} */
+var g_touchHandlers = [];         /* {slot, cb} */
+var g_listCollector = null;       /* 正在等 region list 回包时，把 region/end 行收进这个数组 */
+
+function fire(cb, h) {            /* 回调丢子线程：业务里可以 sleep / 再注入 */
+    threads.start(function () { try { cb(h); } catch (e) { warn("回调出错：" + e); } });
+}
+function dispatchRegion(s) {
+    var p = s.split(" ");
+    var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10),
+              t: p.length > 6 ? parseInt(p[6], 10) : null };
+    for (var i = 0; i < g_regionHandlers.length; i++) {
+        var H = g_regionHandlers[i];
+        if (H.id && H.id !== h.id) continue;
+        if (!H.want[h.ev]) continue;
+        fire(H.cb, h);
+    }
+}
+function dispatchTouch(s) {
+    var p = s.split(" ");
+    var h = { ev: p[1], slot: parseInt(p[2], 10), x: parseInt(p[3], 10), y: parseInt(p[4], 10),
+              t: p.length > 5 ? parseInt(p[5], 10) : null };
+    for (var i = 0; i < g_touchHandlers.length; i++) {
+        var H = g_touchHandlers[i];
+        if (H.slot !== null && H.slot !== h.slot) continue;
+        fire(H.cb, h);
+    }
+}
+function startReader() {
+    if (g_reader) return;
+    g_reader = threads.start(function () {
+        while (true) {
+            var s = null;
+            try { s = g_conn ? g_conn.recv() : null; } catch (e) { return; }
+            if (s === null || s === undefined) { sleep(10); continue; }
+            if (s.indexOf("region_ev ") === 0) { dispatchRegion(s); continue; }
+            if (s.indexOf("phys_ev ") === 0) { dispatchTouch(s); continue; }
+            if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
+                if (s.indexOf("end ") === 0) g_listCollector = null;   /* 收完 → 唤醒等它的人 */
+                else g_listCollector.push(s);
+            }
+        }
+    });
+}
+/* 订阅一个通道（幂等） */
+function subscribe(ch) {
+    var conn = g_conn || connect();
+    if (!g_subbed[ch]) { conn.send("sub " + ch); g_subbed[ch] = 1; }
+    return conn;
+}
+/* 取区域表（region list 回 N 行 region ... + 一行 end N）。读线程已在跑时走收集器，不抢消息。 */
+function listRegions(arg) {
+    var conn = (arg && arg.recv) ? arg : (g_conn || connect());
+    var out = [], dl, s;
+    if (g_reader) {
+        g_listCollector = out;
+        conn.send("region list");
+        dl = Date.now() + 1000;
+        while (g_listCollector !== null && Date.now() < dl) sleep(5);
+        g_listCollector = null;
+        return out;
+    }
     conn.drain();
     conn.send("region list");
-    var out = [], dl = Date.now() + 1000;
+    dl = Date.now() + 1000;
     for (;;) {
-        var s = conn.recv();
+        s = conn.recv();
         if (s) { if (s.indexOf("end ") === 0) break; out.push(s); }
         else if (Date.now() > dl) break;
         else sleep(5);
     }
     return out;
 }
+/* 主线程保活：AutoJs6 里主线程一结束脚本就退，事件还没来就白等。最后一个订阅停掉时关掉它。 */
+var g_keepAlive = null;      /* 保活定时器（注意别和 keepRunning 的 g_keep 混了） */
+function keepAlive() { if (!g_keepAlive) g_keepAlive = setInterval(function () {}, 1000); }
+function dropHandler(arr, H) {
+    for (var i = 0; i < arr.length; i++) if (arr[i] === H) { arr.splice(i, 1); break; }
+    if (!g_regionHandlers.length && !g_touchHandlers.length && g_keepAlive) {
+        try { clearInterval(g_keepAlive); } catch (e) {}
+        g_keepAlive = null;
+    }
+}
+/* onRegion([id,] [事件,] cb)：区域事件（五事件，按区域过滤）。 */
 function onRegion(a, b, c) {
     var id = null, evs = null, cb;
     if (typeof a === "function") cb = a;
     else if (typeof a === "string" && typeof b === "function") { id = a; cb = b; }
     else { id = a; evs = b; cb = c; }
     if (typeof cb !== "function") throw new Error("onRegion 需要一个回调函数");
-    var want = parseEvents(evs);
-    var conn = connect();
-    if (id) {                                   /* 先查表：写错立刻提示（读者线程还没起，可以安全读） */
-        var rows = listRegions(conn), hit = false, i;
+    var H = { id: id, want: parseEvents(evs), cb: cb };
+    subscribe("region");
+    startReader();
+    if (id) {                                   /* 查表：id 写错/被停用立刻提示，不让你干等到怀疑人生 */
+        var rows = listRegions(), hit = false, i;
         for (i = 0; i < rows.length; i++) {
             var p = rows[i].split(" ");
             if (p[1] === id) { hit = true; if (p[p.length - 1] === "0") warn("区域 " + id + " 目前是停用状态"); }
         }
         if (!hit) warn("面板里没有区域 " + id + "（现有：" + (rows.length ? rows.join(" | ") : "无") + "）");
     }
-    conn.send("sub region");
-    var stopped = false;
-    var reader = threads.start(function () {
-        while (!stopped) {
-            var s = null;
-            try { s = conn.recv(); } catch (e) { break; }
-            if (s === null || s === undefined) { sleep(10); continue; }
-            if (s.indexOf("region_ev ") !== 0) continue;
-            var p = s.split(" ");
-            /* 第 6 个字段是事件发生的**墙钟毫秒**（核心按事件自己的时间戳换算过，
-             * 和 Date.now() 同基准，可直接比大小/做差）。老核心不发这个字段时是 null。 */
-            var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10),
-                      t: p.length > 6 ? parseInt(p[6], 10) : null };
-            if (id && h.id !== id) continue;
-            if (!want[h.ev]) continue;
-            threads.start(function () {              /* 回调丢子线程：业务里可以 sleep / 注入 */
-                try { cb(h); } catch (e) { warn("onRegion 回调出错：" + e); }
-            });
-        }
-    });
-    var keep = setInterval(function () {}, 1000);    /* 主线程保活：AutoJs6 里主线程一结束脚本就退 */
-    return {
-        stop: function () {
-            stopped = true;
-            try { clearInterval(keep); } catch (e) {}
-            try { reader.interrupt(); } catch (e) {}
-        }
-    };
+    g_regionHandlers.push(H);
+    keepAlive();
+    return { stop: function () { dropHandler(g_regionHandlers, H); } };
 }
+/* onTouch([slot,] cb)：**物理触摸流** —— 不按区域过滤，按下之后一路跟到抬起。
+ * 典型用法：在 onRegion 里收到 down → 记住 h.slot → 之后用 onTouch(slot, cb) 跟这根手指，
+ * 它移到哪、什么时候抬起都拿得到（哪怕早就滑出了那个区域）。
+ * 回调收到 h = { ev, slot, x, y, t }，ev ∈ down/move/up（move 只在位置变化时报）。 */
+function onTouch(a, b) {
+    var slot = null, cb;
+    if (typeof a === "function") { cb = a; }
+    else { slot = (a === undefined || a === null) ? null : Math.round(a); cb = b; }
+    if (typeof cb !== "function") throw new Error("onTouch 需要一个回调函数");
+    if (slot !== null && (slot < 0 || slot > MAX_SLOT)) throw new Error("slot 0~" + MAX_SLOT);
+    var H = { slot: slot, cb: cb };
+    subscribe("phys");
+    startReader();
+    g_touchHandlers.push(H);
+    keepAlive();
+    return { stop: function () { dropHandler(g_touchHandlers, H); } };
+}
+/* follow(slot)：只跟一根手指的便捷写法（等价 onTouch(slot, cb)） */
+function follow(slot, cb) { return onTouch(slot, cb); }
 
 module.exports = {
     start: start, stop: stop, alive: alive, ensure: ensure,
     keepRunning: keepRunning, startedByUs: startedByUs,
     connect: connect, finger: finger, frame: frame, res: res,
-    onRegion: onRegion, listRegions: listRegions,
+    onRegion: onRegion, listRegions: listRegions, onTouch: onTouch, follow: follow,
     BIN: BIN, HOST: HOST, PORT: PORT
 };
