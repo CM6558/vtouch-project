@@ -1,0 +1,99 @@
+name: build
+
+# 一条流水线产出三样东西，且都**来自本次提交**：
+#   ① build/vtouchd        —— 默认核心（不带面板）
+#   ② build/vtouchd_ui     —— 带面板的核心（面板三件套内嵌在 .rodata 里）
+#   ③ build/vtouch_onefile.js —— **SDK**：单文件 AutoJs6 客户端（内嵌 ②），配 clients/example.js 示例
+# scripts/ci_check.py 是硬门：它把 SDK 用"当前源码 + 本次构建的核心"重新生成一遍逐字节比对，
+# 对不上就让构建失败 —— 所以 artifact 里不可能混进旧副本。
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 核心 + 面板 + 单文件 SDK
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+
+      - name: JDK 17（面板要 javac）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK（build-tools 34.0.0 + platforms;android-24）
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;34.0.0 platforms;android-24'
+
+      - name: Android NDK r27d
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+
+      - name: ImGui（不入库：按 build_ui.sh 指定的版本自拉）
+        run: git clone --depth 1 -b v1.91.8 https://github.com/ocornut/imgui thirdparty/imgui
+
+      - name: 编面板（javac + d8 + NDK clang）
+        env:
+          NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/build_ui.sh
+
+      - name: 编带面板的核心（面板三件套内嵌）
+        env:
+          NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/build.sh ui
+
+      - name: 编默认核心
+        env:
+          NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/build.sh
+
+      - name: 打成 SDK（单文件 AutoJs6 客户端，内嵌核心）
+        run: python3 scripts/pack_client.py
+
+      - name: 一致性门 + 产物清单
+        run: |
+          mkdir -p build
+          set -o pipefail
+          python3 scripts/ci_check.py 2>&1 | tee build/ci_check.txt
+
+      - name: 写 job summary
+        if: always()
+        run: |
+          {
+            echo "## vtouch 构建产物（来自 ${{ github.sha }}）"
+            echo
+            echo '```'
+            [ -f build/ci_check.txt ] && cat build/ci_check.txt || echo "(门没跑到，看上面的步骤日志)"
+            echo '```'
+            echo
+            echo "**SDK**：\`vtouch_onefile.js\` —— 推到手机 \`/sdcard/vtouch.js\`，AutoJs6 里 require 即用"
+            echo "（会自检设备上核心的 md5，不一致就用内嵌这份覆盖并复验）。示例见 \`clients/example.js\`。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtouch-sdk
+          if-no-files-found: error
+          path: |
+            build/vtouch_onefile.js
+            clients/example.js
+            build/vtouchd
+            build/vtouchd_ui
+            build/ci_check.txt
