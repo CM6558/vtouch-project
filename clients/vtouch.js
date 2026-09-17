@@ -23,6 +23,11 @@
  *
  * 前置：设备已 root；`/data/local/tmp/vtouchd_ui` 存在（主机侧 `sh scripts/ui-deploy.sh deploy` 推一次即可，
  * 那是设备上的唯一文件；面板三件套由核心启动时自解包）。
+ *
+ * 自包含版（可选）：`python scripts/pack_client.py` 会把核心二进制 base64 内嵌进本文件
+ * （产出 `build/vtouch_onefile.js`）。那种版本的 require 会在设备上没有该二进制、或版本不对时，
+ * 自己把它写进去并校验 md5 —— 于是 AutoJs6 侧真正只有一个文件，设备上也不需要事先推任何东西。
+ *
  * 坐标：daemon 用**竖屏逻辑坐标**（固定，不随旋转变）；本 SDK 不做旋转换算。
  */
 "use strict";
@@ -34,6 +39,12 @@ var SEND_LOCK = threads.lock();
 var g_startedByUs = false;     /* daemon 是这次脚本起的吗（决定退出时要不要关） */
 var g_keep = false;            /* vt.keepRunning(true) 后退出不关 */
 var g_conn = null;             /* 当前连接（退出时先关） */
+
+/* ---------- 自包含：内嵌核心二进制（源码态为 null；由 scripts/pack_client.py 填） ---------- */
+var PAYLOAD = null;              /* <<PAYLOAD>> */
+var PAYLOAD_MD5 = null;          /* <<PAYLOAD_MD5>> */
+var PAYLOAD_SIZE = 0;            /* <<PAYLOAD_SIZE>> */
+var PAYLOAD_TMP = "/sdcard/vtouchd_ui";   /* 先落共享存储，再 su 搬走（应用侧写不进 /data/local/tmp） */
 
 function sh(cmd) { return shell(cmd, true); }
 function trim(s) { return String(s == null ? "" : s).replace(/^\s+|\s+$/g, ""); }
@@ -71,8 +82,33 @@ function stop() {
     return ok;
 }
 
+/* 设备上那个二进制的 md5（读不到返回空串） */
+function deviceMd5(path) {
+    var r = sh("md5sum " + path + " 2>/dev/null");
+    var s = trim(r && r.result);
+    return s ? s.split(/\s+/)[0] : "";
+}
+
+/* 自包含版专用：设备上没有该二进制、或版本不对时，用内嵌内容装上去并校验 md5。
+ * 非内嵌（源码态）直接返回 —— 那时按老规矩用设备上已有的那份。 */
+function installBinary() {
+    if (!PAYLOAD) return;
+    if (deviceMd5(BIN) === PAYLOAD_MD5) return;          /* 已经是这一版 → 只花一条命令 */
+    say("设备上的核心不是这一版 → 从内嵌内容安装（" + PAYLOAD_SIZE + " 字节）");
+    if (alive()) stop();                                  /* 正在跑就先停，否则覆盖会 Text file busy */
+    var bytes = android.util.Base64.decode(PAYLOAD, android.util.Base64.DEFAULT);
+    var fos = new java.io.FileOutputStream(PAYLOAD_TMP);
+    try { fos.write(bytes); fos.flush(); } finally { try { fos.close(); } catch (e) {} }
+    var r = sh("cp " + PAYLOAD_TMP + " " + BIN + " && chmod 755 " + BIN + " && rm -f " + PAYLOAD_TMP
+             + " && md5sum " + BIN);
+    var got = trim(r && r.result).split(/\s+/)[0];
+    if (got !== PAYLOAD_MD5) throw new Error("安装校验失败：期望 " + PAYLOAD_MD5 + "，设备上得到 " + got);
+    say("安装完成，md5 校验通过（" + got + "）");
+}
+
 /* 确保可用（require 与 connect 都会调，幂等） */
 function ensure() {
+    installBinary();
     if (alive()) return;
     start();
     g_startedByUs = true;      /* 只有"我们起的"才在退出时关掉 */

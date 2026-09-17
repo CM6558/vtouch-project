@@ -43,18 +43,23 @@ su -c 'cd /data/local/tmp && nohup ./vtouchd_ui >/data/local/tmp/vt_ui_core.log 
 
 停：`sh scripts/ui-deploy.sh stop`（先停面板、再放 `EVIOCGRAB`，物理触摸立刻回系统）。
 
-AutoJs6 侧：
+AutoJs6 侧（`clients/vtouch.js`：**引用即用** —— require 时自动确保 daemon 在跑，
+脚本退出（`events.on("exit")`）自动停掉并释放 EVIOCGRAB；daemon 本来就在跑则复用、退出不动它）：
 
 ```js
 var vt = require("/sdcard/vtouch.js");
-vt.start();
-var c = vt.connect();
+var c = vt.connect();                              // 连上就能用
 vt.finger().tap(540, 1200);                        // 自动挑空闲 slot
-vt.finger(1).down(100, 200).move(140, 240).up();   // 显式 slot
+vt.finger(1).down(100, 200).move(140, 240).up();   // 显式 slot（finger()/finger(3)/finger(conn,3) 都吃）
 vt.frame([{slot:0,state:"down",x:100,y:200},       // 多指合并进同一帧
           {slot:1,state:"down",x:300,y:200}]);
-c.close(); vt.stop();                              // 收尾（务必：否则一直抓着物理触摸）
+// 走到结尾 / 按停止 → 自动收尾，不需要你调 vt.stop()
+// 需要保留时：vt.keepRunning(true)；不想自动起：require 前 global.VTOUCH_NO_AUTOSTART = true
 ```
+
+**单文件自包含版**（设备上什么都不用先放）：`python scripts/pack_client.py` 把核心二进制
+base64 内嵌进 `build/vtouch_onefile.js`（~3.6MB），推到 `/sdcard/vtouch.js` 后 require 即可 ——
+设备上没有该二进制或版本不对时，它会自己写进去并用 md5 校验（当前手机里放的就是这一版）。
 
 ## 逻辑尺寸：启动时自动获取
 
