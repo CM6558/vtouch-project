@@ -179,6 +179,25 @@ printf 'res\n' | nc -q1 127.0.0.1 27183        # 应回：res 1440 3168 raw 0 23
 su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：memfd:vtouch-shm 有、/dev/input/event* 没有
 ```
 
+## CI（GitHub Actions）
+
+`.github/workflows/build.yml`：push 到 `master`（或打 `v*` tag）时在 `ubuntu-latest` 上构建 ——
+JDK 17 + build-tools 34.0.0 + platforms;android-24 + NDK r27d + 自拉 imgui v1.91.8，
+产出三样并作为 artifact 上传：
+
+| 产物 | 说明 |
+|---|---|
+| `build/vtouch_onefile.js` | **SDK**：单文件 AutoJs6 客户端（核心二进制内嵌其中），推 `/sdcard/vtouch.js` 即用 |
+| `clients/example.js` | 调用示例（用到的 API 必须都在 SDK 里导出，由 CI 断言） |
+| `build/vtouchd` / `build/vtouchd_ui` | 默认核心 / 带面板核心 |
+
+`scripts/ci_check.py` 是硬门（本地也能跑）：它把 SDK 用「当前源码 + 本次构建的核心」**重新生成一遍
+逐字节比对**，并断言面板是 **real 模式**（不是 `ui_stubs.c` 的桩版）、示例的 require 与每个 API 都在 SDK 里。
+所以 artifact 里不可能混进旧副本或桩版面板 —— 这也确实抓住过一次：workflow 漏 `VTOUCH_UI_CORE=real`
+时发出去的就是"面板不接核心"的桩版，现在有门挡着了。
+
+（CI 与本机构建只在 `.comment` 段（编译器版本串）不同，代码各节逐字节一致。）
+
 ## 已知边界
 
 - **单客户端**：新连接踢掉旧连接；被踢的一方要自己发现。
