@@ -14,7 +14,7 @@ src/vt_shm.{h,c}        共享内存契约（单 memfd 三区：状态只读 · 
 src/vt_panel.c          拉起/看护面板子进程（fork+exec app_process），内嵌面板三件套的自解包
 src-ui/                 ImGui 面板（C++）+ JNI 胶水 + 图层/转屏 Java 壳 + 构建入口
 clients/vtouch.js       AutoJs6 客户端（Finger API：down/move/up/tap/swipe/frame）
-clients/*_demo.js       示例：画圆 / 区域五事件 / 命中区域回触
+clients/example.js      调用示例（注入 / 多指同帧 / 区域订阅 / 生命周期开关）
 scripts/build.sh        交叉编译核心（`ui` 目标出带面板的 vtouchd_ui）
 scripts/build_ui.sh     编译面板（classes.dex + libtestimgui.so + libc++_shared.so）
 scripts/ui-deploy.sh    主机侧一键：build / deploy / start / stop / status（含 md5 对账）
