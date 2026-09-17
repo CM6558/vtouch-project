@@ -457,8 +457,10 @@ int cmd_meta(char *t, char **stp, char *resp, size_t cap)
     (void)stp;                                          /* 元命令不带参数（签名与其它族保持一致，便于分派） */
     if (!strcmp(t, "ping")) { snprintf(resp, cap, "pong"); return 0; }
     if (!strcmp(t, "res")) {
-        snprintf(resp, cap, "res %d %d raw %d %d %d %d", g.logical_width, g.logical_height,
-                 g.axmin[0], g.axmax[0], g.axmin[1], g.axmax[1]);
+        snprintf(resp, cap, "res %d %d raw %d %d %d %d phys %d",
+                 g.logical_width, g.logical_height,
+                 g.axmin[0], g.axmax[0], g.axmin[1], g.axmax[1],
+                 g.phys_slots);
         return 0;
     }
     if (!strcmp(t, "reset")) {
@@ -628,7 +630,7 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             else { snprintf(resp, cap, "err sub"); return -1; }
         }
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
-        g.sub_mask = want; snprintf(resp, cap, "ok"); return 0;
+        g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0;   /* 累加而非赋值：SDK 分两次 sub region / sub phys 不能互相覆盖（Bug 8） */
     }
     if (!strcmp(t, "unsub")) {
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
