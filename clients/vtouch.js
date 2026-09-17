@@ -48,9 +48,11 @@
 "use strict";
 var HOST = "127.0.0.1", PORT = 27183;
 var MAX_SLOT = 9;                /* 客户端可用槽 0~9（物理段之外） */
+var g_physSlots = 64;            /* 物理槽上限（onTouch/follow 校验用，从 res 命令更新） */
 var BIN = "/data/local/tmp/vtouchd_ui", PROC = "vtouchd_ui";
 var LOG = "/data/local/tmp/vt_ui_core.log";      /* daemon 日志（面板日志在 logcat tag VTouchUI） */
 var SEND_LOCK = threads.lock();
+var g_handlersLock = threads.lock();
 
 var g_startedByUs = false;     /* daemon 是这次脚本起的吗（决定退出时要不要关） */
 var g_keep = false;            /* vt.keepRunning(true) 后退出不关 */
@@ -194,7 +196,18 @@ function connect(timeout) {
     if (!alive()) ensure();
     var t0 = Date.now(), last = null;
     for (;;) {
-        try { g_conn = attach(connectOnce(timeout)); return g_conn; }
+        try {
+            g_conn = attach(connectOnce(timeout));
+            if (!g_reader) startReader();    /* 断连后重连：reader 没在跑就重启 */
+            /* 重连后核心的 sub_mask 已被 drop_client 清零，重新订阅 */
+            var oldSubs = Object.keys(g_subbed);
+            g_subbed = {};
+            for (var i = 0; i < oldSubs.length; i++) {
+                g_conn.send("sub " + oldSubs[i]);
+                g_subbed[oldSubs[i]] = 1;
+            }
+            return g_conn;
+        }
         catch (e) {
             last = e;
             if (Date.now() - t0 > timeout) throw new Error("连不上 daemon(127.0.0.1:" + PORT + "): " + last);
@@ -315,7 +328,10 @@ function frame(pts, conn) {
 /* 逻辑尺寸与 raw 量程（返回 "res 1440 3168 raw 0 23040 0 50688" 这样的字符串） */
 function res() {
     var c = g_conn || connect();
-    return c.cmd("res");
+    var s = c.cmd("res");
+    var m = s.match(/phys\s+(\d+)/);
+    if (m) g_physSlots = parseInt(m[1], 10);
+    return s;
 }
 
 /* ---------- 退出收尾：脚本结束自动关（只关"这次脚本起的"那个） ---------- */
@@ -369,6 +385,7 @@ var g_reader = null;              /* 读线程（只起一个） */
 var g_subbed = {};                /* 已订阅的通道（幂等，避免重复发 sub） */
 var g_regionHandlers = [];        /* {id, want, cb} */
 var g_touchHandlers = [];         /* {slot, cb} */
+var g_lastPhysDown = {};           /* { slot: { ev, slot, x, y, t } } — 缓存最近一次 phys_ev down */
 var g_listCollector = null;       /* 正在等 region list 回包时，把 region/end 行收进这个数组 */
 
 function fire(cb, h) {            /* 回调丢子线程：业务里可以 sleep / 再注入 */
@@ -378,8 +395,11 @@ function dispatchRegion(s) {
     var p = s.split(" ");
     var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10),
               t: p.length > 6 ? parseInt(p[6], 10) : null };
-    for (var i = 0; i < g_regionHandlers.length; i++) {
-        var H = g_regionHandlers[i];
+    g_handlersLock.lock();
+    var snapshot;
+    try { snapshot = g_regionHandlers.slice(); } finally { g_handlersLock.unlock(); }
+    for (var i = 0; i < snapshot.length; i++) {
+        var H = snapshot[i];
         if (H.id && H.id !== h.id) continue;
         if (!H.want[h.ev]) continue;
         fire(H.cb, h);
@@ -389,8 +409,13 @@ function dispatchTouch(s) {
     var p = s.split(" ");
     var h = { ev: p[1], slot: parseInt(p[2], 10), x: parseInt(p[3], 10), y: parseInt(p[4], 10),
               t: p.length > 5 ? parseInt(p[5], 10) : null };
-    for (var i = 0; i < g_touchHandlers.length; i++) {
-        var H = g_touchHandlers[i];
+    if (h.ev === "down") g_lastPhysDown[h.slot] = h;   /* 缓存 down，供新注册的 handler 补收 */
+    if (h.ev === "up") delete g_lastPhysDown[h.slot];   /* 抬起后清缓存 */
+    g_handlersLock.lock();
+    var snapshot;
+    try { snapshot = g_touchHandlers.slice(); } finally { g_handlersLock.unlock(); }
+    for (var i = 0; i < snapshot.length; i++) {
+        var H = snapshot[i];
         if (H.slot !== null && H.slot !== h.slot) continue;
         fire(H.cb, h);
     }
@@ -398,16 +423,21 @@ function dispatchTouch(s) {
 function startReader() {
     if (g_reader) return;
     g_reader = threads.start(function () {
-        while (true) {
-            var s = null;
-            try { s = g_conn ? g_conn.recv() : null; } catch (e) { return; }
-            if (s === null || s === undefined) { sleep(10); continue; }
-            if (s.indexOf("region_ev ") === 0) { dispatchRegion(s); continue; }
-            if (s.indexOf("phys_ev ") === 0) { dispatchTouch(s); continue; }
-            if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
-                if (s.indexOf("end ") === 0) g_listCollector = null;   /* 收完 → 唤醒等它的人 */
-                else g_listCollector.push(s);
+        try {
+            while (true) {
+                var s = null;
+                try { s = g_conn ? g_conn.recv() : null; } catch (e) { break; }
+                if (s === null || s === undefined) { sleep(10); continue; }
+                if (s.indexOf("region_ev ") === 0) { dispatchRegion(s); continue; }
+                if (s.indexOf("phys_ev ") === 0) { dispatchTouch(s); continue; }
+                if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
+                    if (s.indexOf("end ") === 0) g_listCollector = null;   /* 收完 → 唤醒等它的人 */
+                    else g_listCollector.push(s);
+                }
             }
+        } finally {
+            g_reader = null;    /* 线程退出（断连）→ 允许下次 startReader 重启 */
+            g_lastPhysDown = {}; /* 清缓存：重连后不会补发断连前的 down */
         }
     });
 }
@@ -444,7 +474,10 @@ function listRegions(arg) {
 var g_keepAlive = null;      /* 保活定时器（注意别和 keepRunning 的 g_keep 混了） */
 function keepAlive() { if (!g_keepAlive) g_keepAlive = setInterval(function () {}, 1000); }
 function dropHandler(arr, H) {
-    for (var i = 0; i < arr.length; i++) if (arr[i] === H) { arr.splice(i, 1); break; }
+    g_handlersLock.lock();
+    try {
+        for (var i = 0; i < arr.length; i++) if (arr[i] === H) { arr.splice(i, 1); break; }
+    } finally { g_handlersLock.unlock(); }
     if (!g_regionHandlers.length && !g_touchHandlers.length && g_keepAlive) {
         try { clearInterval(g_keepAlive); } catch (e) {}
         g_keepAlive = null;
@@ -468,7 +501,8 @@ function onRegion(a, b, c) {
         }
         if (!hit) warn("面板里没有区域 " + id + "（现有：" + (rows.length ? rows.join(" | ") : "无") + "）");
     }
-    g_regionHandlers.push(H);
+    g_handlersLock.lock();
+    try { g_regionHandlers.push(H); } finally { g_handlersLock.unlock(); }
     keepAlive();
     return { stop: function () { dropHandler(g_regionHandlers, H); } };
 }
@@ -481,12 +515,28 @@ function onTouch(a, b) {
     if (typeof a === "function") { cb = a; }
     else { slot = (a === undefined || a === null) ? null : Math.round(a); cb = b; }
     if (typeof cb !== "function") throw new Error("onTouch 需要一个回调函数");
-    if (slot !== null && (slot < 0 || slot > MAX_SLOT)) throw new Error("slot 0~" + MAX_SLOT);
+    if (slot !== null && (slot < 0 || slot >= g_physSlots)) throw new Error("slot 0~" + (g_physSlots - 1));
     var H = { slot: slot, cb: cb };
     subscribe("phys");
     startReader();
-    g_touchHandlers.push(H);
+    /* 同 slot 已有 handler → 先停掉旧的，避免同一 up 被两个 handler 各收到一次 */
+    g_handlersLock.lock();
+    try {
+        if (slot !== null) {
+            for (var i = g_touchHandlers.length - 1; i >= 0; i--) {
+                if (g_touchHandlers[i].slot === slot) {
+                    g_touchHandlers.splice(i, 1);
+                    break;
+                }
+            }
+        }
+        g_touchHandlers.push(H);
+    } finally { g_handlersLock.unlock(); }
     keepAlive();
+    /* 补发缓存的 down：如果该 slot 刚按下但 follow 注册晚了，补一条 down */
+    if (slot !== null && g_lastPhysDown[slot]) {
+        fire(cb, g_lastPhysDown[slot]);
+    }
     return { stop: function () { dropHandler(g_touchHandlers, H); } };
 }
 /* follow(slot)：只跟一根手指的便捷写法（等价 onTouch(slot, cb)） */
