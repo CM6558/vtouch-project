@@ -48,12 +48,27 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
             last->x = ev->x; last->y = ev->y; last->ts = ev->ts;
             return;
         }
-        for (i = 0; i < 4; i++) {
+        /* down/up: more CAS rounds; move: 4 rounds */
+        unsigned tries = (ev->action != VT_MOVE) ? 16 : 4;
+        for (i = 0; i < tries; i++) {
             if (__atomic_compare_exchange_n(&q->head, &head, head + 1u, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) { queue_drop_log("事件", ++q->drops); break; }
             if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head < VTQ_CAP) break;   /* 消费者已腾出格子 */
         }
-        if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head >= VTQ_CAP) { queue_drop_log("事件", ++q->drops); return; }
+        if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head >= VTQ_CAP) {
+            /* still full: down/up can overwrite an old move (from head+1, not head) */
+            if (ev->action != VT_MOVE) {
+                for (i = 1; i < VTQ_CAP; i++) {
+                    unsigned idx = (head + i) % VTQ_CAP;
+                    if (q->buf[idx].action == VT_MOVE) {
+                        q->buf[idx] = *ev;
+                        queue_drop_log("事件(覆盖move)", ++q->drops);
+                        return;
+                    }
+                }
+            }
+            queue_drop_log("事件", ++q->drops); return;
+        }
     }
     q->buf[tail % VTQ_CAP] = *ev;
     __atomic_store_n(&q->tail, tail + 1u, __ATOMIC_RELEASE);
