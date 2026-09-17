@@ -1,44 +1,86 @@
 /**
- * vtouch.js —— 最小版 AutoJs6 客户端（只做「虚拟触摸注入」；物理触摸由 daemon 合并转发）。
+ * vtouch.js —— AutoJs6 客户端 SDK（**引用即用，全程一个文件**）
  *
- * 前置：/data/local/tmp/vtouchd 已在跑（vt.start() 会起）。
- * 用法：
  *   var vt = require("/sdcard/vtouch.js");
- *   vt.start();                                     // 起 daemon（root；已在跑则复用）
- *   var c = vt.connect();                           // 连接 + WS 握手
- *   vt.finger().tap(540, 1200);                     // 自动分配空闲槽
- *   vt.finger(3).down(100, 200).move(120, 240).up();// 显式槽
- *   vt.frame([{slot:0,state:"down",x:100,y:200},    // 多指合并进同一帧
+ *   var c = vt.connect();                            // 连上就能用；daemon 会自己起
+ *   vt.finger().tap(540, 1200);                      // 自动挑空闲 slot
+ *   vt.finger(3).down(100, 200).move(120, 240).up(); // 显式 slot
+ *   vt.frame([{slot:0,state:"down",x:100,y:200},     // 多指合并进同一帧
  *             {slot:1,state:"down",x:300,y:200}]);
- *   c.close(); vt.stop();                           // 收尾：停 daemon（释放 EVIOCGRAB）
+ *   // 脚本结束（AutoJs6 停止按钮 / 跑到结尾）→ 自动停 daemon、释放 EVIOCGRAB。
  *
- * 坐标：daemon 的坐标系是**竖屏逻辑坐标**（启动时用 wm size 归一化）。
- * 本最小版不做旋转换算：横屏时请自行把 device.width/height 与竖屏坐标换算好再传。
+ * 生命周期（都是幂等的，你不需要手动管）：
+ *   - require 时：若 daemon 没在跑 → 用 root 起它（`/data/local/tmp/vtouchd_ui`，不带尺寸参数：
+ *     核心自己问框架 `wm size` 取逻辑尺寸）；已 在跑则复用，不重复起。
+ *   - connect() 时再兜一次（防止 daemon 中途被杀）。
+ *   - 脚本退出（events.on("exit")）→ 自动停：**先 SIGTERM**（核心自己收尾：停面板 → 放 grab），
+ *     最多等 2s，仍在才 SIGKILL。强杀（长按停止/系统回收）不会走 exit 回调，
+ *     那种情况下 daemon 会留着 —— 用 vt.stop() 兜或重跑一次脚本即可。
+ *
+ * 不需要自动起停的场合：
+ *   global.VTOUCH_NO_AUTOSTART = true;   // 写在 require 之前
+ *   vt.keepRunning(true);                // 或退出时不想关（长驻 / 被别的脚本共用）
+ *
+ * 前置：设备已 root；`/data/local/tmp/vtouchd_ui` 存在（主机侧 `sh scripts/ui-deploy.sh deploy` 推一次即可，
+ * 那是设备上的唯一文件；面板三件套由核心启动时自解包）。
+ * 坐标：daemon 用**竖屏逻辑坐标**（固定，不随旋转变）；本 SDK 不做旋转换算。
  */
 "use strict";
-var HOST = "127.0.0.1", PORT = 27183, BIN = "/data/local/tmp/vtouchd";
+var HOST = "127.0.0.1", PORT = 27183;
+var BIN = "/data/local/tmp/vtouchd_ui", PROC = "vtouchd_ui";
+var LOG = "/data/local/tmp/vt_ui_core.log";      /* daemon 日志（面板日志在 logcat tag VTouchUI） */
 var SEND_LOCK = threads.lock();
+
+var g_startedByUs = false;     /* daemon 是这次脚本起的吗（决定退出时要不要关） */
+var g_keep = false;            /* vt.keepRunning(true) 后退出不关 */
+var g_conn = null;             /* 当前连接（退出时先关） */
 
 function sh(cmd) { return shell(cmd, true); }
 function trim(s) { return String(s == null ? "" : s).replace(/^\s+|\s+$/g, ""); }
+function say(msg) { log("[vtouch] " + msg); }
 
-/* 起 daemon：与设备侧一次性 root shell 里干完（pidof 判活 → wm size 归一化竖屏 → nohup 起） */
+function alive() {
+    var r = sh("pidof " + PROC);
+    return !!(r && trim(r.result));
+}
+
+/* 起 daemon：不在跑才起（root）。**不传 -w/-h** —— 核心自己问框架拿逻辑尺寸。 */
 function start() {
     if (alive()) return true;
     var cmd = "D=" + BIN + ";[ -f $D ]||exit 11;"
-        + "S=$(wm size 2>/dev/null);S=${S##*Physical size: };W=${S%%x*};H=${S##*x};"
-        + "if [ $W -gt $H ];then T=$W;W=$H;H=$T;fi;"
-        + "kill -9 $(pidof vtouchd) 2>/dev/null;"
-        + "nohup $D -w $W -h $H -p " + PORT + " >/data/local/tmp/vtouchd.log 2>&1 </dev/null & echo $!";
+        + "cd /data/local/tmp || exit 12;"
+        + "nohup ./" + PROC + " -p " + PORT + " >" + LOG + " 2>&1 </dev/null & echo started";
     var r = sh(cmd);
-    if (r && r.code === 11) throw new Error("设备上缺 " + BIN + " —— 先 adb push 并 chmod 755（或跑 scripts/deploy.sh）");
-    for (var i = 0; i < 20 && !alive(); i++) sleep(150);
-    if (!alive()) throw new Error("vtouchd 没起来，看 /data/local/tmp/vtouchd.log");
+    if (r && r.code === 11) {
+        throw new Error("设备上缺 " + BIN + " —— 主机侧跑一次：sh scripts/ui-deploy.sh deploy");
+    }
+    for (var i = 0; i < 30 && !alive(); i++) sleep(100);
+    if (!alive()) throw new Error("daemon 没起来，看 " + LOG);
     return true;
 }
-function alive() { var r = sh("pidof vtouchd"); return !!(r && trim(r.result)); }
-/* 停 daemon：进程一退，内核自动解 EVIOCGRAB，物理触摸回到系统直读 */
-function stop() { sh("kill -9 $(pidof vtouchd)"); return !alive(); }
+
+/* 停 daemon：SIGTERM 让核心自己收尾（先停面板、再放 EVIOCGRAB），超时才 SIGKILL。
+ * 进程一退内核自动解 grab，物理触摸回系统直读。 */
+function stop() {
+    if (!alive()) return true;
+    sh("kill -TERM $(pidof " + PROC + ") 2>/dev/null");
+    for (var i = 0; i < 20 && alive(); i++) sleep(100);
+    if (alive()) sh("kill -9 $(pidof " + PROC + ") 2>/dev/null");
+    var ok = !alive();
+    if (!ok) say("停不掉 " + PROC + "（可能要手动：su -c 'kill -9 $(pidof " + PROC + ")'）");
+    return ok;
+}
+
+/* 确保可用（require 与 connect 都会调，幂等） */
+function ensure() {
+    if (alive()) return;
+    start();
+    g_startedByUs = true;      /* 只有"我们起的"才在退出时关掉 */
+    say("daemon 已启动（pid " + trim(sh("pidof " + PROC).result) + "）");
+}
+
+function keepRunning(b) { g_keep = (b !== false); return g_keep; }
+function startedByUs() { return g_startedByUs; }
 
 function wsKey() {
     var b = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 16);
@@ -94,19 +136,21 @@ function connectOnce(timeout) {
     if (!ok) { try { sock.close(); } catch (e) {} throw new Error("握手 accept 不匹配"); }
     return { sock: sock, out: out, ins: ins, mask: new java.util.Random() };
 }
+/* 连上（必要时先把 daemon 拉起来；连不上会在 timeout 内重试） */
 function connect(timeout) {
     timeout = timeout || 10000;
+    if (!alive()) ensure();
     var t0 = Date.now(), last = null;
     for (;;) {
-        try { return attach(connectOnce(timeout)); }
+        try { g_conn = attach(connectOnce(timeout)); return g_conn; }
         catch (e) {
             last = e;
-            if (Date.now() - t0 > timeout) throw new Error("连不上 vtouchd: " + last);
+            if (Date.now() - t0 > timeout) throw new Error("连不上 daemon(127.0.0.1:" + PORT + "): " + last);
             sleep(300);
         }
     }
 }
-/* 给裸 socket 挂上 send/recv/drain/close（客户端帧必须掩码） */
+/* 给裸 socket 挂上 send/recv/drain/close/cmd（客户端帧必须掩码） */
 function attach(conn) {
     conn.send = function (text) {
         SEND_LOCK.lock();
@@ -181,7 +225,14 @@ Finger.prototype.swipe = function (x1, y1, x2, y2, ms) {
     return this.up();
 };
 Finger.prototype.state = function () { return this.downState ? "down" : "up"; };
-function finger(conn, slot) {
+
+/* finger([conn], [slot])：三种写法都吃 —— finger() / finger(3) / finger(conn, 3)。
+ * （早期版本只接受 finger(conn, slot)，写成 finger(3) 不报错却会发出 "down NaN …"，这里兼容掉。） */
+function finger(a, b) {
+    var conn, slot;
+    if (a && typeof a === "object" && a.send) { conn = a; slot = b; }
+    else { conn = g_conn; slot = (a === undefined ? b : a); }
+    if (!conn) conn = connect();
     if (!conn.fingers) conn.fingers = {};
     if (slot === undefined || slot === null) {
         for (var i = 0; i <= 9; i++) if (!conn.fingers[i] || !conn.fingers[i].downState) { slot = i; break; }
@@ -194,22 +245,47 @@ function finger(conn, slot) {
     return conn.fingers[slot];
 }
 /* 多指合并进同一帧（begin_frame → point×N → end_frame） */
-function frame(conn, pts) {
+function frame(pts, conn) {
+    if (!conn) conn = g_conn || connect();
+    if (!conn.fingers) conn.fingers = {};
     var i, p;
     conn.send("begin_frame");
     try {
         for (i = 0; i < pts.length; i++) {
             p = pts[i];
             conn.send("point " + p.slot + " " + p.state + " " + Math.round(p.x) + " " + Math.round(p.y));
-            if (conn.fingers && conn.fingers[p.slot]) conn.fingers[p.slot].downState = p.state !== "up";
+            if (conn.fingers[p.slot]) conn.fingers[p.slot].downState = p.state !== "up";
         }
     } finally {
         conn.send("end_frame");
     }
 }
+/* 逻辑尺寸与 raw 量程（返回 "res 1440 3168 raw 0 23040 0 50688" 这样的字符串） */
+function res() {
+    var c = g_conn || connect();
+    return c.cmd("res");
+}
+
+/* ---------- 退出收尾：脚本结束自动关（只关"这次脚本起的"那个） ---------- */
+events.on("exit", function () {
+    try { if (g_conn) g_conn.close(); } catch (e) {}
+    if (g_keep) { say("退出：keepRunning 生效，daemon 留着"); return; }
+    if (g_startedByUs) {
+        var ok = stop();
+        say(ok ? "退出：daemon 已停（EVIOCGRAB 已释放）" : "退出：daemon 没停掉");
+    }
+});
+
+/* require 即就绪：不在跑就起（可用 global.VTOUCH_NO_AUTOSTART = true 跳过） */
+if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
+    say("VTOUCH_NO_AUTOSTART：不自动起，用 vt.start() 手动起");
+} else {
+    try { ensure(); } catch (e) { say("自动启动失败：" + e); throw e; }
+}
 
 module.exports = {
-    start: start, stop: stop, alive: alive,
-    connect: connect, finger: finger, frame: frame,
+    start: start, stop: stop, alive: alive, ensure: ensure,
+    keepRunning: keepRunning, startedByUs: startedByUs,
+    connect: connect, finger: finger, frame: frame, res: res,
     BIN: BIN, HOST: HOST, PORT: PORT
 };
