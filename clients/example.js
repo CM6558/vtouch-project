@@ -1,0 +1,68 @@
+/**
+ * vtouch 调用示例 —— AutoJs6，手机端直接跑（只 require 一个文件）。
+ *
+ * 前置：什么都不用做。下面这一行 require 会把设备上的核心装好（版本不对就用内嵌的覆盖）、
+ *       起好；脚本结束（停止按钮 / 跑到结尾）会自动停掉核心并释放 EVIOCGRAB。
+ *       想在退出后留着核心：vt.keepRunning(true)。
+ *
+ * 坐标：核心用**竖屏逻辑坐标**（固定，不随屏幕旋转变）。device.width/height 在横屏时会是
+ *       转过来的尺寸，要自己换算回竖屏；vt.res() 能拿到核心当前的逻辑尺寸与 raw 量程。
+ *
+ * API 一览：
+ *   vt.connect()                      连上核心（已连则复用）
+ *   vt.finger() / vt.finger(3)        拿一根手指（省略 slot = 自动挑空闲的 0~9）
+ *     .down(x,y) .move(x,y) .up() .tap(x,y[,ms]) .swipe(x1,y1,x2,y2[,ms])
+ *   vt.frame([{slot,state,x,y}...])   多指合并进同一帧（state = down/move/up）
+ *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y}
+ *   vt.res()                          逻辑尺寸 + raw 量程（字符串）
+ *   vt.keepRunning(true) / vt.stop() / vt.alive() / vt.startedByUs()
+ */
+"use strict";
+var vt = require("/sdcard/vtouch.js");
+
+var W = device.width, H = device.height;   // 逻辑坐标（竖屏；横屏时记得换算）
+
+/* ---------- 1. 先看一眼坐标空间 ---------- */
+log("核心: " + vt.res());                  // 例：res 1440 3168 raw 0 23040 0 50688
+
+/* ---------- 2. 直接注入 ---------- */
+vt.finger().tap(W * 0.5, H * 0.5);                          // 自动挑空闲 slot
+vt.finger(3).down(100, 200).move(140, 240).up();            // 显式 slot（0~9）
+vt.finger().swipe(W * 0.30, H * 0.80, W * 0.70, H * 0.30, 400);   // 按住时长自己给
+
+vt.frame([                                                  // 多指同一帧按下
+    { slot: 0, state: "down", x: W * 0.30, y: H * 0.50 },
+    { slot: 1, state: "down", x: W * 0.70, y: H * 0.50 }
+]);
+sleep(150);                                                 // 想按住就自己 sleep
+vt.frame([                                                  // 同一帧抬起
+    { slot: 0, state: "up", x: W * 0.30, y: H * 0.50 },
+    { slot: 1, state: "up", x: W * 0.70, y: H * 0.50 }
+]);
+
+/* ---------- 3. 区域事件：面板里画好的区域，按 id 订阅 ---------- */
+/* 事件第二参省略 = down/up/enter/exit（默认不含高频的 move）；"*" = 全部含 move。
+ * 回调在子线程里跑，里面可以直接 sleep / 再注入（长按、拖拽都行）。 */
+/* ev 语义：down = 按下就命中；enter/exit = 跨越边界；move = 区内移动且位置变了；
+ *          up = 抬起时此刻在区域内（从区域外滑进来再抬起也算，配 enter 用）。 */
+var REGION_ID = "c1";                                       // ← 面板卡片上的那个 id
+var handle = vt.onRegion(REGION_ID, "*", function (h) {
+    log(h.id + " " + h.ev + "  slot=" + h.slot + "  @" + h.x + "," + h.y);
+    if (h.ev === "down") vt.finger().tap(100, h.y);          // 例：按到区域就点别处
+});
+
+/* 不用面板手画也行，同一套协议直接下命令：
+ *   var c = vt.connect();
+ *   c.cmd("region add c1 0 200 400 1200 1400 1");    // 矩形：<id> 0 x1 y1 x2 y2 启用
+ *   c.cmd("region add c2 1 720 2300 260 0 1");       // 圆形：<id> 1 cx cy r 0 启用
+ *   c.cmd("region list");                            // 看当前表（每行 region … + 末行 end N）
+ * 想停监听又不关面板：handle.stop();
+ */
+
+/* ---------- 4. 生命周期（默认已经替你管好了，这里只是把开关列出来） ---------- */
+// vt.keepRunning(true);   // 脚本退出时不要停核心（长驻、别的脚本还要用）
+// vt.stop();              // 显式停：SIGTERM → 核心自己收尾（先停面板、再放 EVIOCGRAB）
+
+toastLog("vtouch 示例在跑：面板里按一下区域 " + REGION_ID + " 看日志");
+/* 走到这里脚本不会立刻结束（onRegion 起了保活定时器，等手指按）。收尾用 AutoJs6 的停止按钮，
+ * 退出钩子会自动停核心 —— 物理触摸立刻回到系统。 */

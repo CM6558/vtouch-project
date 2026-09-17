@@ -6,7 +6,8 @@ static unsigned region_gen;
 static unsigned r_seen_gen;
 static unsigned char r_slot_in[MAX_PHYS][MAX_REGIONS];
 static unsigned char r_slot_hit[MAX_PHYS][MAX_REGIONS];
-static int r_slot_last_x[MAX_PHYS], r_slot_last_y[MAX_PHYS];
+/* move 去重基准按 [slot][region] 分开存：多个区域重叠时，同一个 move 要给每个命中的区域各报一条 */
+static int r_slot_last_x[MAX_PHYS][MAX_REGIONS], r_slot_last_y[MAX_PHYS][MAX_REGIONS];
 /**
  * (vtouch-doc: regions_clear)
  * @brief 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。
@@ -195,9 +196,13 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
  *   （完整版：`if (g.phys.down) { if (!g.ps_down) {...} }`）
  *   MOVE → 先用「上一事件的 slot_in」比 enter/exit，再在「此前已在区域内且位置变化」时报 move
  *   （完整版：`if (hit && !slot_in) enter; else if (!hit && slot_in) exit;` + move 条件）
- *   UP   → slot_hit && 命中 → 报 up，随后清 slot_hit
+ *   UP   → (slot_hit || 上一事件还在区域内) && 命中 → 报 up，随后清 slot_hit
  *   （完整版在「该槽空闲后的下一帧」清；事件模型里没有空闲帧，就地在抬起事件清 ——
  *   up 的判定还要 g.ps_down（只有抬起事件才进这分支），清早了不会误报）
+ *   为什么 up 还认「上一事件还在区域内」：这样"从区域外滑进来、在里面抬起"也能收到收尾事件
+ *   （enter → move… → up）。那种 up 没有配对的 down，业务要配对就用 enter ↔ up。
+ *   move 去重基准与 enter/exit 状态一样按 [slot][region] 分开存：区域重叠时，
+ *   同一个 move 要给每个命中的区域各报一条（旧版按 slot 共享，只有第一个区域收得到）。
  *   每事件末 slot_in = (down && hit)，与完整版每帧末的赋值一致。
  */
 void region_apply(const struct vt_ev *ev)
@@ -219,16 +224,16 @@ void region_apply(const struct vt_ev *ev)
         hit = region_hit(rg, lx, ly);
         if (ev->action == VT_DOWN) {
             if (hit) { r_slot_hit[slot][rid] = 1; region_ev_send(rg->id, "down", slot, lx, ly); }
-            r_slot_last_x[slot] = lx; r_slot_last_y[slot] = ly;
+            r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
         } else if (ev->action == VT_MOVE) {
             if (hit && !was_in) region_ev_send(rg->id, "enter", slot, lx, ly);
             else if (!hit && was_in) region_ev_send(rg->id, "exit", slot, lx, ly);
-            if (hit && was_in && (r_slot_last_x[slot] != lx || r_slot_last_y[slot] != ly)) {
-                r_slot_last_x[slot] = lx; r_slot_last_y[slot] = ly;
+            if (hit && was_in && (r_slot_last_x[slot][rid] != lx || r_slot_last_y[slot][rid] != ly)) {
+                r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
                 region_ev_send(rg->id, "move", slot, lx, ly);
             }
         } else {
-            if (r_slot_hit[slot][rid] && hit) region_ev_send(rg->id, "up", slot, lx, ly);
+            if ((r_slot_hit[slot][rid] || was_in) && hit) region_ev_send(rg->id, "up", slot, lx, ly);
             r_slot_hit[slot][rid] = 0;
         }
         r_slot_in[slot][rid] = (ev->action != VT_UP && hit) ? 1 : 0;

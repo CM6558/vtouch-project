@@ -126,8 +126,15 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `region clear` | `ok 0` | 清空 |
 | `sub [region]` / `unsub` | `ok` / `err sub` | 订阅区域通道（只有这一条推送） |
 
-推送（单向，混在同一条 WS 里）：`region_ev <id> <ev> <slot> <x> <y>`，`ev` ∈ `down/enter/move/exit/up`。
+推送（单向，混在同一条 WS 里）：`region_ev <id> <ev> <slot> <x> <y>`，`ev` ∈ `down/enter/move/exit/up`：
+
+- `down` 只在**按下那一刻就命中**时发；`enter`/`exit` 是跨边界；`move` 是区内移动且位置变了；
+- `up` 在**抬起时此刻在区域内**就发 —— 包括"从区域外滑进来再抬起"（这种 `up` 没有配对的 `down`，
+  要配对就用 `enter` ↔ `up`）；滑进来又滑出去在外面抬起时只有 `exit`，没有 `up`。
+
 它**只由物理手指产生** —— 虚拟触点不进转发队列，这就是"回触不会自己触发自己"的保证。
+另外：**起手那一下落在面板矩形里**的手会被锁存吞掉（核心日志打 `面板吞掉 slotN @x,y`），
+整段手势不进区域判定 —— 所以"贴着面板起手再滑进区域"不会有任何区域事件。
 
 ## 坐标与身份
 
