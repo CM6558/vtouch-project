@@ -79,6 +79,10 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   问框架（`wm size` → 归一化竖屏）；`wm` 拿不到就**报错退出**，不用内核 sysfs 兜底
   （实测 `/sys/class/drm/card0-DP-1` 会报 2560x5120，拿它当坐标空间会全线错位）。
 - **以核心为准**：引擎（设备/grab/uinput/监听/区域线程）全部就绪后才拉面板；面板崩了不影响注入。
+- **面板看门狗**（`src/vt_panel.c`）：面板不在时**每 ~3 秒重试拉起一次**（单调钟判据，不是循环拍数）；
+  心跳停滞 ~3 秒则杀掉并按策略重启；**1 分钟窗口内最多 3 次**（`VT_PANEL_MAX_RESTART` / `VT_PANEL_RESTART_WIN`）；
+  共享内存没建成（`S_shm_ok` 为假）时**不重试** —— 重试只会沿用同一个坏 fd。
+  面板**永远起不来**时不会放弃：稳定态是每 ~60s 再来 3 次（代价只是每轮两条日志，注入不受影响）。
 
 ## 坑
 
@@ -102,6 +106,12 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 - **AutoJs6**：`sleep()` 在主线程会堵住 WebSocket 回调（用 `setInterval` 或 `threads.start()`）；
   `new Shell(true)` 初始化慢（~2s），一次性 root 命令用 `shell(cmd, true)`；
   `events.on("exit")` 里要 `stopService()`，强杀不会走退出回调。
+- **AutoJs6 脚本不会「跑到结尾」就结束**：只要**还有子线程**或**建过 `setInterval`**，引擎就继续跑
+  （实测：30s 定时器被子线程 `clearInterval` 后 40s 仍不结束；子线程全结束才结束）⇒ 收尾要真正结束脚本
+  必须显式 `exit()`（它会**照常触发** `events.on("exit")` 钩子，钩子里的写盘/收尾不会丢）。
+- **客户端收包不能用 `available()` 判「没数据」**：对端 `close()` 时 Java 的 `available()` 返回 0 而不抛异常
+  ⇒ 永远察觉不到掉线（脚本照旧「活着」但事件永不来）。必须**阻塞读 + 读超时**：超时 = 本轮无数据、
+  `read()` 返回 -1 = 对端已关（EOF 判据）。
 - **单文件新鲜度**：设备上只推 `vtouchd_ui`，面板三件套由核心自解包 —— 版本一致性由
   "同一个二进制"保证，`ui-deploy.sh` 会回读 md5 对账，别手工替换设备上的面板文件。
 
@@ -110,6 +120,6 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 ```sh
 sh scripts/ui-deploy.sh status                 # 核心/面板 pid、面板 fd 卫生、日志尾
 adb forward tcp:27183 tcp:27183
-printf 'res\n' | nc -q1 127.0.0.1 27183        # 期望：res 1440 3168 raw 0 23040 0 50688
+printf 'res\n' | nc -q1 127.0.0.1 27183        # 期望：res 1440 3168 raw 0 23040 0 50688 phys 10
 su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：有 memfd:vtouch-shm，无 /dev/input/event*
 ```

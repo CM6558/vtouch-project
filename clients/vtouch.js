@@ -47,16 +47,28 @@
  */
 "use strict";
 var HOST = "127.0.0.1", PORT = 27183;
-var MAX_SLOT = 9;                /* 客户端可用槽 0~9（物理段之外） */
+/* 客户端可用槽 `0..vslots-1`（服务端校验，默认 10；物理段在其之上） */
 var g_physSlots = 64;            /* 物理槽上限（onTouch/follow 校验用，从 res 命令更新） */
 var BIN = "/data/local/tmp/vtouchd_ui", PROC = "vtouchd_ui";
 var LOG = "/data/local/tmp/vt_ui_core.log";      /* daemon 日志（面板日志在 logcat tag VTouchUI） */
+/* 数据流读超时（毫秒，SO_MS）：**握手之后**每一轮读最多等这么久。它只描述「**整帧起点**没数据」
+ * 这一件事（recv 读第一字节超时 → 返回 null = 本轮无数据），**不是掉线的判据** —— 掉线是对端
+ * close 让 read() 返回 -1。帧**里面**迟到（一帧被 TCP 切开、后半段晚到）不在这道门限的语义里：
+ * recv 读第一字节之后的部分走 FRAME_MS 的容错循环，单次超时只是继续等，不当掉线（I1）。
+ * 别拿它当握手超时：握手用的是**调用方给的 timeout**（connect() 默认 10s；只有直接调
+ * connectOnce() 且不传 timeout 时才落回 5s 兜底），握完立刻切到这个值。 */
+var SO_MS = 200;
+/* 一帧的「补齐总预算」（毫秒，FRAME_MS）：从读到帧第一字节算起，帧头剩余 + 帧体的补齐最多花这么久。
+ * 期间每次读超时（SO_MS）都只是「这一小段还没到」→ 接着读；累计超过总预算才抛
+ * 「半帧超时（连接可能已错位）」（那才是连接真不对了，按断开收尾）。见 recv / readFullTolerant。 */
+var FRAME_MS = 5000;
 var SEND_LOCK = threads.lock();
 var g_handlersLock = threads.lock();
 
 var g_startedByUs = false;     /* daemon 是这次脚本起的吗（决定退出时要不要关） */
 var g_keep = false;            /* vt.keepRunning(true) 后退出不关 */
 var g_conn = null;             /* 当前连接（退出时先关） */
+var g_closing = false;         /* 我们自己正在收尾（exit 钩子 / vt.stop()）→ 读线程退出算正常收尾，只记日志不弹提示（F3） */
 
 /* ---------- 自包含：内嵌核心二进制（源码态为 null；由 scripts/pack_client.py 填） ---------- */
 var PAYLOAD = null;              /* <<PAYLOAD>> */
@@ -92,6 +104,7 @@ function start() {
  * 进程一退内核自动解 grab，物理触摸回系统直读。 */
 function stop() {
     if (!alive()) return true;
+    g_closing = true;          /* 是我们自己要停核心：随后的事件通道关闭是**预期**的，不当掉线报（F3） */
     sh("kill -TERM $(pidof " + PROC + ") 2>/dev/null");
     for (var i = 0; i < 20 && alive(); i++) sleep(100);
     if (alive()) sh("kill -9 $(pidof " + PROC + ") 2>/dev/null");
@@ -156,11 +169,53 @@ function readLine(ins) {
     }
     return sb.toString();
 }
+/* 严格定长读：任何一次读超时都直接抛（非容错版）。**帧体的读取一律走下面的 readFullTolerant**
+ * （帧内迟到不许当掉线，I1）—— 这个函数保留给「不允许迟到」的场合（握手侧的定长读要用它，别改成容错版）。 */
 function readFull(ins, n) {
     var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n), off = 0;
     while (off < n) {
         var k = ins.read(buf, off, n - off);
         if (k < 0) throw new Error("连接断开");
+        off += k;
+    }
+    return buf;
+}
+/* 是不是「读超时」（SO_TIMEOUT 到点）：recv 只认这一种异常当「本轮无数据」，别的原样往外抛。
+ * Java 的异常对象在 Rhino 里拿不到 instanceof（不同 classloader），所以按名字/文案认。 */
+function isReadTimeout(e) {
+    var nm = "";
+    try { nm = String((e && e.name) || "") + " " + String((e && e.message) || "") + " " + String(e); } catch (e2) {}
+    return nm.indexOf("SocketTimeout") >= 0;
+}
+/* 帧**内**容错读（I1）：第一字节之后的部分一律走这两个 —— 单次读超时只说明「这一小段还没到」
+ * （一帧被 TCP 切开、后半段迟到 >SO_MS 很常见），继续读；累计超过 deadline（帧第一字节时算的
+ * now + FRAME_MS）才抛「半帧超时（连接可能已错位）」当断开收尾。
+ * 为什么要这样：以前这里直接用 readFull，抛出的 SocketTimeout 会被读线程当成掉线 → toast +
+ * exit()，一次网络抖动就升级成「整个脚本被杀」。SO_MS 只描述整帧起点没数据，帧内迟到不是掉线。
+ * 节奏由 SO_TIMEOUT 自己给（每次超时要等满 SO_MS 才回来），所以这个循环不会忙等。 */
+function readByteTolerant(ins, deadline) {
+    for (;;) {
+        try { return ins.read(); }
+        catch (te) {
+            if (!isReadTimeout(te)) throw te;
+            if (Date.now() >= deadline) throw new Error("半帧超时（连接可能已错位）");
+        }
+    }
+}
+function readFullTolerant(ins, n, deadline) {
+    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n), off = 0, k;
+    while (off < n) {
+        try { k = ins.read(buf, off, n - off); }
+        catch (te) {
+            if (!isReadTimeout(te)) throw te;
+            if (Date.now() >= deadline) throw new Error("半帧超时（连接可能已错位）");
+            continue;
+        }
+        if (k < 0) throw new Error("连接断开");
+        if (k === 0) {           /* 真实 socket 上不会返回 0（off<len）；真遇上就等预算到点 */
+            if (Date.now() >= deadline) throw new Error("半帧超时（连接可能已错位）");
+            continue;
+        }
         off += k;
     }
     return buf;
@@ -188,6 +243,10 @@ function connectOnce(timeout) {
         if (line.toLowerCase().indexOf("sec-websocket-accept") === 0 && line.indexOf(want) >= 0) ok = true;
     }
     if (!ok) { try { sock.close(); } catch (e) {} throw new Error("握手 accept 不匹配"); }
+    /* 握手完了：socket 超时从「握手那个值（调用方给的 timeout，connect() 默认 10s；connectOnce
+     * 直接调且不传才是 5000 兜底）」换成 SO_MS —— 之后每轮读最多等 200ms，**整帧起点**读超时代表
+     * 本轮无数据（recv 返回 null），不是掉线；帧内迟到由 FRAME_MS 的容错循环兜住。见 recv 的注释。 */
+    sock.setSoTimeout(SO_MS);
     return { sock: sock, out: out, ins: ins, mask: new java.util.Random() };
 }
 /* 连上（必要时先把 daemon 拉起来；连不上会在 timeout 内重试） */
@@ -198,6 +257,7 @@ function connect(timeout) {
     for (;;) {
         try {
             g_conn = attach(connectOnce(timeout));
+            g_closing = false;               /* 新连接已建立 → 上一次「主动收尾」翻篇（F3 标志只描述当前连接） */
             if (!g_reader) startReader();    /* 断连后重连：reader 没在跑就重启 */
             /* 重连后核心的 sub_mask 已被 drop_client 清零，重新订阅 */
             var oldSubs = Object.keys(g_subbed);
@@ -235,30 +295,63 @@ function attach(conn) {
             conn.out.flush();
         } finally { SEND_LOCK.unlock(); }
     };
-    /* 非阻塞取一条文本消息；没数据返回 null（不要用长 sleep 轮询，会积压） */
+    /* 取一条文本消息。对外语义只有三种：有帧 → 返回字符串；**本轮无数据** → null；
+     * 连接断开 → 抛异常。上游（startReader / drain / listRegions）就是按这三种写的，逻辑不用改。
+     *
+     * 实现是**阻塞读 + 读超时当「本轮无数据」**（F4），不再拿 `ins.available()` 判有没有数据：
+     * available() **看不见对端 close** —— 对端关连接时它返回 0 而不抛异常（真机实测），于是
+     * 「掉线」永远读不出来：读线程察觉不到、A2 的提示与收尾一次都不会触发（脚本一直当僵尸）。
+     * 只有 read() 才有 EOF 判据：
+     *   read() 抛 SocketTimeout → **整帧起点**本轮无数据 → return null（门限 SO_MS=200，见 connectOnce）；
+     *   read() 返回 -1 → 对端关连接（EOF）→ 抛「连接断开」。
+     * 所以这一层**不要再退回 available() 轮询**。
+     * read() 抛其它异常（例如自己这边已经 close 掉的 socket）原样往外抛 —— 同样按断开收尾。
+     *
+     * I1：上面那条「读超时 = 本轮无数据」**只覆盖第一字节**（整帧起点）。第一字节之后的部分
+     * （帧头剩余 + 帧体）走 readByteTolerant / readFullTolerant：帧内单次读超时（一帧被 TCP 切开、
+     * 后半段迟到）只是继续等，累计超过 FRAME_MS 才抛「半帧超时（连接可能已错位）」。 */
     conn.recv = function () {
-        if (conn.ins.available() < 2) return null;
-        var h = readFull(conn.ins, 2);
-        var len = h[1] & 127, i;
-        if (len === 126) { var e = readFull(conn.ins, 2); len = ((e[0] & 255) << 8) | (e[1] & 255); }
+        var b0;
+        try { b0 = conn.ins.read(); }
+        catch (te) {
+            if (isReadTimeout(te)) return null;                   /* 整帧起点本轮无数据，不是掉线 */
+            throw te;
+        }
+        if (b0 < 0) throw new Error("连接断开");                  /* 读到 -1 = 对端关了（EOF） */
+        /* 第一字节已到手 → 这一帧的补齐总预算开算；后面每一段迟到都从这里扣（I1） */
+        var dl = Date.now() + FRAME_MS;
+        var b1 = readByteTolerant(conn.ins, dl);
+        if (b1 < 0) throw new Error("连接断开");
+        var len = b1 & 127, i;
+        if (len === 126) { var e = readFullTolerant(conn.ins, 2, dl); len = ((e[0] & 255) << 8) | (e[1] & 255); }
         else if (len === 127) throw new Error("帧过大");
-        if ((h[0] & 15) === 8) { try { conn.sock.close(); } catch (e2) {} throw new Error("服务端关闭"); }
-        var p = readFull(conn.ins, len), cs = [];
+        if ((b0 & 15) === 8) { try { conn.sock.close(); } catch (e2) {} throw new Error("服务端关闭"); }
+        var p = readFullTolerant(conn.ins, len, dl), cs = [];
         for (i = 0; i < len; i++) cs.push(String.fromCharCode(p[i] & 255));
         return decodeURIComponent(escape(cs.join("")));
     };
-    conn.drain = function () { try { while (conn.recv() !== null) {} } catch (e) {} };
+    conn.drain = function () {
+        if (g_reader) return;             /* 读线程在跑时别自己读：抢帧会丢事件、还会把帧读散 */
+        try { while (conn.recv() !== null) {} } catch (e) {}
+    };
     conn.close = function () { try { conn.sock.close(); } catch (e) {} };
-    conn.cmd = function (line) {          /* 发一条命令并等一行回包（调试用） */
-        conn.drain();
-        conn.send(line);
-        var dl = Date.now() + 500;
-        for (;;) {
-            var s = conn.recv();
-            if (s) return s;
-            if (Date.now() > dl) return null;
-            sleep(5);
-        }
+    /* 发一条命令并等一行回包（调试用小工具）。
+     * **回包必须由读线程转交**：连上之后这条 socket 只有一个读者（startReader），
+     * 再自己 recv 就是两个读者抢帧 —— 抢输的那次拿不到回包，500ms 后返回 null。
+     * 所以这里只往 g_reply 投一个盒子，读线程把"没人认领"的行投进来。
+     * 同一时刻只支持一个等待者（并发调用会互相覆盖，先来那个照旧超时返回 null）。 */
+    conn.cmd = function (line) {
+        var box = { line: null };
+        g_reply = box;                    /* 先挂盒子再发：回包可能比 send 返回还快 */
+        try {
+            conn.send(line);
+            var dl = Date.now() + 500;
+            for (;;) {
+                if (box.line !== null) return box.line;
+                if (Date.now() > dl) return null;
+                sleep(5);
+            }
+        } finally { if (g_reply === box) g_reply = null; }
     };
     conn.fingers = {};
     return conn;
@@ -329,6 +422,7 @@ function frame(pts, conn) {
 function res() {
     var c = g_conn || connect();
     var s = c.cmd("res");
+    if (!s) { warn("res 没拿到回包（500ms 超时）—— 连接可能已断"); return s; }
     var m = s.match(/phys\s+(\d+)/);
     if (m) g_physSlots = parseInt(m[1], 10);
     return s;
@@ -336,6 +430,7 @@ function res() {
 
 /* ---------- 退出收尾：脚本结束自动关（只关"这次脚本起的"那个） ---------- */
 events.on("exit", function () {
+    g_closing = true;          /* 先置位再关：随后读线程因连接关闭而退出 = 正常收尾，不是掉线（F3） */
     try { if (g_conn) g_conn.close(); } catch (e) {}
     if (g_keep) { say("退出：keepRunning 生效，daemon 留着"); return; }
     if (g_startedByUs) {
@@ -359,10 +454,14 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
  *   vt.onTouch(3, cb) / vt.follow(3,cb) 只跟 slot 3 这根手指 —— 它移到哪、何时抬起都拿得到
  *                                      （区域事件只覆盖"区域内"，追手指要用这条流）
  * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
- * 回调收到 h = { id, ev, slot, x, y, t }，跑在子线程里（里面可以直接 sleep / 做动作）。
+ * 回调收到 h = { id, ev, slot, x, y, t }，跑在**分发线程**里，**串行**执行（事件到达顺序 == 回调
+ * 顺序，不并发）：回调里长 sleep 会**推迟后面的每一条事件** —— 要慢动作/长动作请自己在回调里
+ * threads.start(...)。掉线（面板退出 / 被新实例顶掉）会自动提示 + 摘掉全部 handler，脚本可正常结束。
  *   t 是**事件发生的墙钟毫秒**（与 Date.now() 同基准）：算按压时长用 up.t - down.t、
  *   做防抖/节流、量「手指按下到脚本收到」的延迟都能用（h.t 是手指那一刻，不是回调那一刻）。
  * 返回 { stop() }：停监听（不关面板；面板归脚本退出时的 exit 钩子收）。
+ * 掉线收尾（清保活定时器 + 摘 handler + 停分发线程）在 vt.keepRunning(true) 时不做，只提示 ——
+ * 那种场合收尾归脚本自己管。
  * 区域 id 写错 / 被禁用会在启动时提示，不会让你干等到怀疑人生。 */
 function parseEvents(evs) {
     if (evs === undefined || evs === null) return { down: 1, up: 1, enter: 1, exit: 1 };
@@ -382,14 +481,82 @@ function warn(msg) {
  * 区域事件(region_ev) 与物理触摸流(phys_ev) 走的是**同一条 socket**，各起一个读线程会互相抢消息
  * （谁先 read 到就是谁的）。所以这里只有一个读取者，按前缀分派给各个注册的回调。 */
 var g_reader = null;              /* 读线程（只起一个） */
+var g_reply = null;               /* { line } 正在等命令回包的人；读线程把没人认领的行投进来（cmd 用） */
+var g_listSawEnd = 0;             /* 这次 region list 有没有见到末行 end N（0 = 超时/被截断） */
+var g_listEndN = -1;              /* 末行 `end N` 里声明的行数（-1 = 没见到末行 / N 没解析出来） */
 var g_subbed = {};                /* 已订阅的通道（幂等，避免重复发 sub） */
 var g_regionHandlers = [];        /* {id, want, cb} */
 var g_touchHandlers = [];         /* {slot, cb} */
 var g_lastPhysDown = {};           /* { slot: { ev, slot, x, y, t } } — 缓存最近一次 phys_ev down */
 var g_listCollector = null;       /* 正在等 region list 回包时，把 region/end 行收进这个数组 */
 
-function fire(cb, h) {            /* 回调丢子线程：业务里可以 sleep / 再注入 */
-    threads.start(function () { try { cb(h); } catch (e) { warn("回调出错：" + e); } });
+/* ---------- 事件队列：有界 FIFO(256) + 一条常驻分发线程 ----------
+ * 读线程只做「解析 + 入队」，回调由**分发线程串行**执行：
+ *   - 事件到达顺序 == 回调顺序（FIFO，不重排、不并发）；
+ *   - 回调里长 sleep 会**推迟后面的每一条事件** —— 要慢动作/长动作请自己在回调里
+ *     threads.start(...)，别在回调里干等；
+ *   - 队列满（>=256）时**优先保住非 move 事件**（down/up 被丢了，这根手指在脚本侧就
+ *     永远抬不起来）：新事件是 move → 静默丢（只计数）；新事件非 move 且队里有 move →
+ *     踢掉队里**最早的一条 move**（其余相对顺序不变）后照常入队；队里没有 move 可牺牲 →
+ *     丢新事件。非 move 的这两种丢弃都会限频 warn（≥1000ms 一次，文案带累计丢弃数）。
+ * 实现用 JS 数组 + threads.lock() 守护（不用 java.util.concurrent：Rhino 往 Java 集合里
+ * 塞 JS 对象有边界问题）。分发线程惰性起、幂等：offer() 发现它不在就起一条，
+ * 掉线收尾置停止标志让它退出，之后再次 offer() 会重新起一条。 */
+var Q_CAP = 256;                  /* 队列上限（满了丢新事件） */
+var g_queue = [];                 /* 待分发 { cb, h }，FIFO */
+var g_queueLock = threads.lock();
+var g_queueDropped = 0;           /* 累计丢弃条数（含静默丢的 move） */
+var g_lastDropWarn = 0;           /* 上次「队列已满」warn 的墙钟毫秒（限频用） */
+var g_dispatchRunning = false;    /* 分发线程在跑吗 */
+var g_dispatchStop = false;       /* 让分发线程退出（掉线收尾置位） */
+
+/* 分发线程主体：串行取队首 → 同步调用 cb(h)。队列空了且被要求停 → 退（不留空转线程）。 */
+function dispatchLoop() {
+    try {
+        for (;;) {
+            var job = null;
+            g_queueLock.lock();
+            try { if (g_queue.length) job = g_queue.shift(); } finally { g_queueLock.unlock(); }
+            if (job) {
+                try { job.cb(job.h); } catch (e) { warn("回调出错：" + e); }
+                continue;
+            }
+            if (g_dispatchStop) break;   /* 已入队的发完才退 */
+            sleep(5);                    /* 空队列让位（与读线程 sleep(10) 同一风格，别忙等） */
+        }
+    } finally { g_dispatchRunning = false; }
+}
+/* 入队（取代原来的 fire()）：只入队，**绝不** threads.start —— 每条事件起一条线程会
+ * 线程风暴且不保序（up 可能被 move 压后）。串行语义见上面的队列注释。 */
+function offer(h, cb) {
+    var start = false, isMove = !!(h && h.ev === "move"), take = true;
+    g_queueLock.lock();
+    try {
+        if (g_queue.length >= Q_CAP) {
+            /* 队列满 —— 取舍：move 静默丢；非 move 优先牺牲队里**最早的一条 move** 腾位置，
+             * 只有队里一条 move 都没有时才丢这条新事件（这样 down/up 进得去、配对不断）。
+             * 每来一条满队列事件计数 +1（丢的是这条新事件，或那条被牺牲的 move）。 */
+            g_queueDropped++;
+            take = false;
+            if (!isMove) {
+                var vi = -1, i;
+                for (i = 0; i < g_queue.length; i++) {
+                    if (g_queue[i].h && g_queue[i].h.ev === "move") { vi = i; break; }  /* 最早的一条 move */
+                }
+                if (vi >= 0) { g_queue.splice(vi, 1); take = true; }                    /* 牺牲它，保住这条非 move */
+                var now = Date.now();                                                   /* 非 move 才提示（move 静默丢） */
+                if (now - g_lastDropWarn >= 1000) {
+                    g_lastDropWarn = now;
+                    warn("事件队列已满（" + Q_CAP + "），丢弃 " + g_queueDropped + " 条");
+                }
+            }
+            if (!take) return false;
+        }
+        g_queue.push({ cb: cb, h: h });
+        if (!g_dispatchRunning) { g_dispatchRunning = true; g_dispatchStop = false; start = true; }
+    } finally { g_queueLock.unlock(); }
+    if (start) threads.start(dispatchLoop);
+    return true;
 }
 function dispatchRegion(s) {
     var p = s.split(" ");
@@ -402,7 +569,7 @@ function dispatchRegion(s) {
         var H = snapshot[i];
         if (H.id && H.id !== h.id) continue;
         if (!H.want[h.ev]) continue;
-        fire(H.cb, h);
+        offer(h, H.cb);
     }
 }
 function dispatchTouch(s) {
@@ -417,7 +584,7 @@ function dispatchTouch(s) {
     for (var i = 0; i < snapshot.length; i++) {
         var H = snapshot[i];
         if (H.slot !== null && H.slot !== h.slot) continue;
-        fire(H.cb, h);
+        offer(h, H.cb);
     }
 }
 function startReader() {
@@ -428,16 +595,109 @@ function startReader() {
                 var s = null;
                 try { s = g_conn ? g_conn.recv() : null; } catch (e) { break; }
                 if (s === null || s === undefined) { sleep(10); continue; }
-                if (s.indexOf("region_ev ") === 0) { dispatchRegion(s); continue; }
-                if (s.indexOf("phys_ev ") === 0) { dispatchTouch(s); continue; }
-                if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
-                    if (s.indexOf("end ") === 0) g_listCollector = null;   /* 收完 → 唤醒等它的人 */
-                    else g_listCollector.push(s);
+                /* 帧先按**类**分派，事件/表回包再按**行**切：现核心的 `region list` 是**一区一帧**
+                 * （src/vt_ws.c 逐行 outq_push_text），事件也是一帧一行；逐行处理留着是因为**旧核心
+                 * 会把整表拼成一个帧**发回来（兼容老固件）。不按行切的话，旧核心那帧的末行 end
+                 * 永远走不到「收尾」分支，收集器要等满 1000ms 超时才返回，还会把整块塞进数组第 1 个
+                 * 元素；反过来按「整块」写新代码也是错的（一区一帧 ⇒ 一次只回第一行）。 */
+                var lines = String(s).split(/\r?\n/), li, ln;
+                if (s.indexOf("region_ev ") === 0) {
+                    for (li = 0; li < lines.length; li++) if (lines[li]) dispatchRegion(lines[li]);
+                    continue;
                 }
+                if (s.indexOf("phys_ev ") === 0) {
+                    for (li = 0; li < lines.length; li++) if (lines[li]) dispatchTouch(lines[li]);
+                    continue;
+                }
+                if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
+                    for (li = 0; li < lines.length; li++) {
+                        ln = lines[li];
+                        if (!ln) continue;
+                        /* 末行 end N：N 是**表里声明的条数**，收完唤醒等它的人（I2 靠它对账行数） */
+                        if (ln.indexOf("end ") === 0) { g_listSawEnd = 1; g_listEndN = endCount(ln); g_listCollector = null; break; }
+                        if (g_listCollector) g_listCollector.push(ln);
+                    }
+                    continue;
+                }
+                /* 命令回包：**整帧原文**交给等它的人 —— 注意这条路径**一次只回一帧**：`region list`
+                 * 一区一帧，所以 cmd("region list") 拿到的只是第一行、也拿不到 end N；整表用
+                 * listRegions()（它按行收 + 拿 end N 对账）。 */
+                if (g_reply) { g_reply.line = s; continue; }
             }
         } finally {
             g_reader = null;    /* 线程退出（断连）→ 允许下次 startReader 重启 */
             g_lastPhysDown = {}; /* 清缓存：重连后不会补发断连前的 down */
+            /* 读线程为什么退出？先分「是不是我们自己主动收尾」这一档（F3）：
+             *   g_closing（exit 钩子 / vt.stop() 置位）→ **正常收尾**：只打一条普通日志，
+             *     绝不弹「事件通道已断开」——脚本一切正常却报错就是假警报（A2 的回归）；
+             *   否则才是掉线（以前只清 g_reader，脚本照旧「活着」但事件永不来）：判因看
+             *     **两条进程** —— `pidof vtouchd_ui`（核心）与 `pidof vtouch-ui`（面板），
+             *     只有两个都还在才说明是「被新实例顶掉」，否则取「面板退出」（核心没了也
+             *     算这一档：面板按退出是先让核心退，见下面 else 分支的注释，I6）→ toast 提示。
+             * 标志一次性消费（下一条读线程由 connect() 建新连接时归零）。
+             * 下面这段收尾**两条路完全一样**（逃生门 g_keep 除外）：保活定时器、handler 表、
+             * 分发线程都要拆干净 —— 自己关的那次也不能留假活状态；只有判因那两条 root 命令
+             * （pidof）在掉线段才花。唯一的分歧在**结束脚本**那一步（见下面的 F5：只有真掉线
+             * 且非逃生门才调 exit()）。g_listCollector 保持现有语义（等它的人自己有 1000ms
+             * 超时；读线程不等它，不会被卡住）。
+             *
+             * F5：这段收尾**每一步各自 try/catch**，任何一步炸掉都不许吃掉提示、也不许挡住
+             * 后面的步骤 —— 收尾只跑一半 = 脚本半死（定时器还在 / handler 还挂着 / 分发线程
+             * 还转着），AutoJs6 就永远不会结束。判因那条 root 命令单独包（`pidof vtouch-ui`
+             * 探不到就按「面板还在」取文案）：绝不允许因为一条 shell 抛错而一句提示都没有。
+             *
+             * F5 为什么必须在末尾显式 `exit()`（A2 的「本脚本可正常结束」要真的成立）：
+             *   AutoJs6 只要**建过 interval 或还有子线程**，收尾后引擎就不会自行结束。真机实测：
+             *   · 30s 定时器被（子线程里）clearInterval 之后，脚本 40s 仍不结束（30s 期间唤醒也不结束）；
+             *   · 2s 定时器清了 → 11ms 就结束（复现两次）；
+             *   · 子线程全部结束 → 脚本结束。
+             *   ⇒ 光把定时器 / handler / 分发线程拆干净**还不够**，收尾末尾必须显式 `exit()` 让
+             *     脚本真的结束（否则「本脚本可正常结束」是句空话）。
+             *   `exit()` **会照常触发 `events.on("exit")` 钩子**（真机实测：11ms 后触发，钩子里的
+             *     写盘正常完成）⇒ 用户挂在退出钩子上的收尾不会因为这次 exit() 丢。
+             *   只有这一档（真掉线且非逃生门）调它：
+             *   · `closing`（g_closing 真）= **脚本自己在收尾**（exit 钩子里再 exit 是自己套自己；
+             *     vt.stop() 之后脚本还有事要做）→ 只记日志，不替它决定结束；
+             *   · 逃生门 `g_keep`（vt.keepRunning(true)）→ 收尾整个归脚本自己管，更不调 exit()。
+             *   非 AutoJs6 环境（离线 harness / 别的 JS 宿主）根本没有 `exit` 这个全局：调用会抛
+             *   ReferenceError，被这一层的 catch 吃掉，收尾的其余部分照常完成、也不许抛出去。 */
+            var closing = g_closing;
+            g_closing = false;
+            if (closing) {
+                try { say("脚本收尾：事件通道已关闭（不再收事件）"); } catch (e) {}
+            } else {
+                /* 判因（I6）：**核心与面板一起看**。只有「核心还在 + 面板还在」才可能是被新实例顶掉
+                 * （新客户端连上会踢掉旧连接，核心与面板都活着）；否则一律取「面板退出」——
+                 * 面板按「退出」是**先给核心 SIGTERM、核心先退**，面板要等自己下一拍（~5-40ms）
+                 * 才消失，只看面板会把这一档误报成「被新实例顶掉」，让人去找并不存在的第二个实例。
+                 * 两条探不到（shell 抛错 / pidof 不可用）都按「还在」处理，保持原本文案。
+                 * 两步各自 try/catch：判因炸了也绝不许吞掉提示（F5）。 */
+                var coreUp = true, uiUp = true;
+                try { coreUp = !!(trim(sh("pidof " + PROC).result)); } catch (e) {}
+                try { uiUp = !!(trim(sh("pidof vtouch-ui").result)); } catch (e) {}
+                try {
+                    warn((coreUp && uiUp) ? "事件通道已断开（被新实例顶掉）→ 停止监听，本脚本可正常结束"
+                                          : "事件通道已断开（面板退出）→ 停止监听，本脚本可正常结束");
+                } catch (e) {}
+            }
+            if (g_keep) {
+                /* 逃生门 vt.keepRunning(true)：只提示，定时器/handler/分发线程/exit 全归脚本自己管 */
+            } else {
+                if (g_keepAlive) { try { clearInterval(g_keepAlive); } catch (e) {} g_keepAlive = null; }
+                try {
+                    g_handlersLock.lock();
+                    try { g_regionHandlers = []; g_touchHandlers = []; } finally { g_handlersLock.unlock(); }
+                } catch (e) {}
+                /* 让分发线程「把已入队的发完就退」，不留空转线程。注意：**下面掉线档那句 exit() 不会
+                 * 等它** —— exit() 当场结束整个脚本，队列里还没轮到的（最多 Q_CAP=256 条）事件就
+                 * 永远发不出去了。要「尾部事件也发完」就不能在这条路上 exit()（这行本身只表达
+                 * 「分发线程不空转」，不是「队列一定发得完」）。 */
+                try { g_dispatchStop = true; } catch (e) {}
+                /* **最后**一步：上面的清理都做完了才结束脚本（放在前面会把收尾砍掉一半）。
+                 * closing 为真 = 是我们自己要收尾，不替脚本决定结束（理由见上面的注释块）；
+                 * 掉线档调它 = 丢弃队列里剩下的事件、当场结束脚本（见上一段的取舍）。 */
+                if (!closing) { try { exit(); } catch (e) {} }
+            }
         }
     });
 }
@@ -447,16 +707,34 @@ function subscribe(ch) {
     if (!g_subbed[ch]) { conn.send("sub " + ch); g_subbed[ch] = 1; }
     return conn;
 }
+/* 末行 `end N` 里的 N（表里声明的条数）；取不到数字返回 -1（那就只按「见过末行」判完整性）。 */
+function endCount(line) {
+    var m = String(line).match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : -1;
+}
+/* region list 回包对账（I2）：光看「见过 end N」不够。核心的 N+1 帧现在是**解锁后**逐条入出站队列
+ * （64 格；满时丢**这一帧**、不挤已排队的旧数据 —— src/vt_queue.c 的 outq_push_text_keep），而 poll 线程
+ * 一轮内没有排空机会 ⇒ 队满时常见是**后缀连同 end N 一起丢**，此时走「没见过末行」那条判据；
+ * 若 end N 恰好发出去、前面的行被丢，就用它声明的 N 与实收行数对账。两条路都报，不静默给半张表。 */
+function listReconcile(out) {
+    if (!g_listSawEnd) { warn("region list 回包不完整（超时或被截断）—— 只拿到 " + out.length + " 条"); return; }
+    if (g_listEndN >= 0 && g_listEndN !== out.length) {
+        warn("region list 回包不完整：收到 " + out.length + " 行，表里声明 " + g_listEndN + " 条");
+    }
+}
 /* 取区域表（region list 回 N 行 region ... + 一行 end N）。读线程已在跑时走收集器，不抢消息。 */
 function listRegions(arg) {
     var conn = (arg && arg.recv) ? arg : (g_conn || connect());
-    var out = [], dl, s;
+    var out = [], dl, s, ls, i;
+    g_listSawEnd = 0;
+    g_listEndN = -1;
     if (g_reader) {
         g_listCollector = out;
         conn.send("region list");
         dl = Date.now() + 1000;
         while (g_listCollector !== null && Date.now() < dl) sleep(5);
         g_listCollector = null;
+        listReconcile(out);
         return out;
     }
     conn.drain();
@@ -464,15 +742,25 @@ function listRegions(arg) {
     dl = Date.now() + 1000;
     for (;;) {
         s = conn.recv();
-        if (s) { if (s.indexOf("end ") === 0) break; out.push(s); }
-        else if (Date.now() > dl) break;
+        if (s) {
+            ls = String(s).split(/\r?\n/);          /* 一帧可能是多行（旧核心整块发） */
+            for (i = 0; i < ls.length; i++) {
+                if (!ls[i]) continue;
+                if (ls[i].indexOf("end ") === 0) { g_listSawEnd = 1; g_listEndN = endCount(ls[i]); break; }
+                out.push(ls[i]);
+            }
+            if (g_listSawEnd) break;
+        } else if (Date.now() > dl) break;
         else sleep(5);
     }
+    listReconcile(out);
     return out;
 }
-/* 主线程保活：AutoJs6 里主线程一结束脚本就退，事件还没来就白等。最后一个订阅停掉时关掉它。 */
+/* 主线程保活：AutoJs6 里主线程一结束脚本就退，事件还没来就白等。最后一个订阅停掉时关掉它。
+ * tick 间隔 30s（原来是 1000）：主线程 = AutoJs6 应用的 UI 线程，每次 tick 都要抢 JS 引擎锁；
+ * 保活只需要「主线程别退出」，不需要秒级心跳 —— 历史上每秒空 tick 就是「每 1~2 秒卡一下」的成因。 */
 var g_keepAlive = null;      /* 保活定时器（注意别和 keepRunning 的 g_keep 混了） */
-function keepAlive() { if (!g_keepAlive) g_keepAlive = setInterval(function () {}, 1000); }
+function keepAlive() { if (!g_keepAlive) g_keepAlive = setInterval(function () {}, 30000); }
 function dropHandler(arr, H) {
     g_handlersLock.lock();
     try {
@@ -494,12 +782,19 @@ function onRegion(a, b, c) {
     subscribe("region");
     startReader();
     if (id) {                                   /* 查表：id 写错/被停用立刻提示，不让你干等到怀疑人生 */
-        var rows = listRegions(), hit = false, i;
+        var rows = listRegions(), hit = false, i, tries = 0;
+        /* 区域表是**面板**起来后从 regions.conf 载进核心的，而核心的监听早于面板
+         * ⇒ require 后立刻 onRegion 可能问到空表。空表不能当成「id 写错了」，
+         * 否则每次开机第一跑都会误报「面板里没有区域 x」（真机撞过）。 */
+        while (!rows.length && tries < 4) { sleep(300); rows = listRegions(); tries++; }
         for (i = 0; i < rows.length; i++) {
             var p = rows[i].split(" ");
             if (p[1] === id) { hit = true; if (p[p.length - 1] === "0") warn("区域 " + id + " 目前是停用状态"); }
         }
-        if (!hit) warn("面板里没有区域 " + id + "（现有：" + (rows.length ? rows.join(" | ") : "无") + "）");
+        if (!hit) {
+            if (!rows.length) warn("区域表还是空的（面板可能还在载入）——暂时没看到区域 " + id + "，稍后可再试");
+            else warn("面板里没有区域 " + id + "（现有：" + rows.join(" | ") + "）");
+        }
     }
     g_handlersLock.lock();
     try { g_regionHandlers.push(H); } finally { g_handlersLock.unlock(); }
@@ -535,7 +830,7 @@ function onTouch(a, b) {
     keepAlive();
     /* 补发缓存的 down：如果该 slot 刚按下但 follow 注册晚了，补一条 down */
     if (slot !== null && g_lastPhysDown[slot]) {
-        fire(cb, g_lastPhysDown[slot]);
+        offer(g_lastPhysDown[slot], cb);
     }
     return { stop: function () { dropHandler(g_touchHandlers, H); } };
 }

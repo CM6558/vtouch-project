@@ -90,10 +90,15 @@ base64 内嵌进 `build/vtouch_onefile.js`（~3.6MB），推到 `/sdcard/vtouch.
 
 ```
 /data/local/tmp/vtouchd_ui     3.0MB  必需的唯一文件（引擎 + 内嵌面板三件套）
-/data/local/tmp/ui_ondev.sh           可选：起停/自检便利脚本
-/data/local/tmp/vtouch-ui/*           核心每次启动自己解包，不用手推
+/data/local/tmp/vtouch-ui/            classes.dex + libtestimgui.so + libc++_shared.so —— 核心每次启动自己解包，不用手推
 /data/local/vtouch-runtime/regions.conf  区域表落盘，重启保留
+/data/local/tmp/ui_ondev.sh           （可选）设备侧 start / stop / status 的入口 —— 由主机侧
+                                      scripts/ui-deploy.sh 推上去（`scripts/ui-deploy.sh:54` push →
+                                      `:56` 安装到该路径 → `:70` 调它）；不推它也不影响已启动的核心
 ```
+
+设备侧**必需**的只有 `vtouchd_ui`（面板三件套在它里面）；`ui_ondev.sh` 是**可选**的起停/自检入口
+（`sh scripts/ui-deploy.sh start|stop|status` 就是调它），手工起核心时不需要它。
 
 ## 生命周期（谁拉起谁）
 
@@ -105,7 +110,8 @@ vtouchd_ui(root)
     → ⑤ 主循环 8ms：读触摸 → 合帧注入 → 吃面板编辑邮箱 → 心跳/看门狗
 ```
 
-- **以核心为准**：引擎全部就绪后才拉面板；面板崩了不影响注入（看门狗按 3 次/分钟上限重启）。
+- **以核心为准**：引擎全部就绪后才拉面板；面板崩了不影响注入（看门狗按 3 次/分钟上限重启）。面板**一直**起不来也
+  **不会最终放弃**：稳定态是每 ~60s 再来 3 次（每次间隔 ~3s），一直重试下去 —— 细节见 `docs/CODE_WALKTHROUGH.md` 的看门狗一节。
 - **无命令通道**：核心与面板之间只有共享内存（状态只读段 / 双向编辑段 / 事件环），
   唯一的"请求"是面板停引擎（写 `stop_req` + 给校验过的 `core_pid` 发 `SIGTERM`）。
 - **fd 卫生是硬性项**：面板绝不继承带 `EVIOCGRAB` 的 fd（`FD_CLOEXEC`；子进程里显式清共享内存
@@ -122,17 +128,30 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | 命令 | 应答 | 说明 |
 |---|---|---|
 | `ping` | `pong` | 探活 |
-| `res` | `res <宽> <高> raw <xmin> <xmax> <ymin> <ymax>` | 逻辑尺寸与内核轴量程 |
+| `res` | `res <宽> <高> raw <xmin> <xmax> <ymin> <ymax> phys <物理槽数>` | 逻辑尺寸、内核轴量程与物理槽数。末段 `phys <n>` 给客户端定**物理槽**的槽数（`src/vt_ws.c:462`）：`onTouch(slot, …)` 的合法 `slot` 就是 `0..n-1`，物理触摸流 `phys_ev` 也只报这一段 |
 | `reset` | `ok` / `err frame` | 抬掉全部虚拟触点（帧中途拒绝） |
 | `down <slot> <x> <y>` | `ok` / `err point` | 按下（各自成一帧） |
 | `move <slot> <x> <y>` | `ok` / `err point` | 移动（各自成一帧） |
 | `up <slot>` | `ok` / `err point` | 抬起（各自成一帧） |
 | `begin_frame` / `point <slot> <down\|move\|up> <x> <y>` / `end_frame` | `ok` / `err frame` `err point` | 一帧多指 |
 | `region add <id> <0矩形\|1圆形> <a1..a4> <0\|1>` | `ok <总数>` / `err region` | rect: `x1 y1 x2 y2`；circle: `cx cy r 0` |
-| `region list` | 每行 `region <id> <type> <a1..a4> <en>` + `end <n>` | 表很小（≤32），一次回全量 |
+| `region list` | 每行 `region <id> <type> <a1..a4> <en>` + 末行 `end <n>` | **一条区域一帧**，末行单独一帧（见下方口径） |
 | `region clear` | `ok 0` | 清空 |
 | `sub [phys\|region\|all]` / `unsub` | `ok` / `err sub` | 订阅通道：裸 `sub` = 区域通道（与改动前一致）；`sub phys` = 物理触摸流；`sub all` = 两条 |
 | `phys_ev <ev> <slot> <x> <y> <ms>`（推送） | — | 物理触摸流：按 slot 的 `down/move/up`，不按区域过滤；追手指用它 |
+
+`region list` 的**分帧口径**（现役）：
+
+- **一条区域一帧**，末行 `end <n>` **单独一帧** —— 客户端按行解析即可（逐帧读、按 `\n` 切行）。
+- 行格式逐字不变：`region <id> <type> <a1> <a2> <a3> <a4> <en>`；`end <n>` 里的 `n` 是区域总数。
+- **长度口径**：单帧不再受旧的 1024 字节上限影响（一条一行、各自成帧），32 条满表也不会丢表尾；
+  `region add` 的 resp 仍是**单行** `ok <总数>` / `err region`。
+- **队列满时的口径**：这一族走「**满了就丢这一帧**」（`outq_push_text_keep`）、**不挤掉已排队的数据**
+  （事件流的策略相反：满时丢最旧、保新鲜）。所以出站队列真满时回包**可能少行、也可能连 `end <n>` 一起丢**
+  （核心同时打一条 `region list 有 N 行因出站队列满被丢弃`）——客户端拿 `end`/行数或超时对账即可发现
+  （本仓 SDK 会 `warn("region list 回包不完整 …")`，不会静默给半张表）。
+- **没有 WS `region del` / `region rename`**：单条区域的删/改名在**面板**上做（面板把编辑投进共享内存
+  邮箱，核心主循环这一轮就吃掉）；脚本侧要改就 `region clear` 清空重加，或 `region add` 同 id 覆盖。
 
 推送（单向，混在同一条 WS 里），两条通道：
 
@@ -195,7 +214,7 @@ python scripts/apply_funcdoc.py           # 幂等写入；再来一遍必须"�
 ```sh
 sh scripts/ui-deploy.sh status                 # 核心/面板 pid、面板 fd 卫生（触摸设备 fd 必须 0）、日志尾
 adb forward tcp:27183 tcp:27183
-printf 'res\n' | nc -q1 127.0.0.1 27183        # 应回：res 1440 3168 raw 0 23040 0 50688
+printf 'res\n' | nc -q1 127.0.0.1 27183        # 应回：res 1440 3168 raw 0 23040 0 50688 phys 10（末段 = 本机物理槽数）
 su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：memfd:vtouch-shm 有、/dev/input/event* 没有
 ```
 
@@ -217,6 +236,25 @@ JDK 17 + build-tools 34.0.0 + platforms;android-24 + NDK r27d + 自拉 imgui v1.
 时发出去的就是"面板不接核心"的桩版，现在有门挡着了。
 
 （CI 与本机构建只在 `.comment` 段（编译器版本串）不同，代码各节逐字节一致。）
+
+## 本机产物与 CI 门的口径
+
+`build/vtouch_onefile.js` 里内嵌的是**打包那一刻用的那份核心** —— 即 `python scripts/pack_client.py`
+的默认输入 `build/vtouchd_ui`（换核心就重跑它，或 `python scripts/pack_client.py <核心> <输出路径>`）。
+
+`scripts/ci_check.py` 的 ② 门会拿「当前源码 + `--core` 指定的核心」**逐字节重生成**一遍 SDK 与磁盘上
+的 SDK 比对，所以**只要内嵌的不是 `--core` 那份就会判红** —— 这时 ①c 会先把「内嵌负载 md5」与
+「`--core` 的 md5」摆在一起给你看：
+
+```sh
+python scripts/ci_check.py --core build/vtouchd_ui     # 内嵌的就是 build/vtouchd_ui → 全绿
+python scripts/ci_check.py --core build/vtouchd_ui \
+    --allow-core build/device-core/vtouchd_ui          # 内嵌的是「设备上那一份」时：显式放行
+```
+
+**判红 ≠ 代码坏了，而是产物与声明的核心不是同一份**：要么重跑 `scripts/pack_client.py` 让产物跟上声明的
+核心，要么用 `--allow-core <路径>`（可重复）说明「内嵌的就是这一份」。不传 `--allow-core` 时行为与以前
+完全一致（只看 `--core`）。
 
 ## 已知边界
 

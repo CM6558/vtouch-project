@@ -179,7 +179,8 @@ static int g_scr_moved = 0;
 static int save_regions(void);   /* 定义见下：WS 线程只置位，实际写盘在渲染线程。返回 0=已落盘 */
 static volatile int g_save_pending = 0;
 static long g_save_retry_t = 0;   /* 落盘失败后的下次重试时刻（0=可立即尝试） */
-/* 面板状态里引用了「已不存在的区域 id」要清理（脚本经 WS 删/改名之后）：WS 线程只置请求，
+/* 面板状态里引用了「已不存在的区域 id」要清理（面板自身改表：单条删/改名是面板自带能力，
+ * WS 命令族只有 clear/list/add）：WS 线程只置请求，
  * 真正的清理放渲染线程做 —— g_hidden/g_sel_id 归它管，跨线程改同一份数组才是新问题。 */
 static volatile int g_prune_req = 0;
 static void ui_region_changed(void) { g_prune_req = 1; g_need = 1; g_force_frames = 2; g_save_pending = 1; }
@@ -365,7 +366,13 @@ static void load_regions(void)
     while (fgets(line, sizeof line, f)) {
         char id[16]; int t, a1, a2, a3, a4, en;
         if (sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
-            vtouch_region_add(id, t, a1, a2, a3, a4, en);
+            /* 判返回值：!= 0 有**两种**来源 —— ① 核心拒（非法 id：字符集/长度见 src/vt_region.c 的
+             * id_ok；或表满）；② glue_post 的 edit_applied 1s 超时（返回 -1，胶水层自己会打一条
+             * 「编辑 seq=… 超时未生效」在前面）。文案两种都提，别把超时误报成「核心拒绝」。
+             * 两种都跳过这一条、继续载入其余条目（一条坏记录不该带走整张表，更不许崩）。 */
+            if (vtouch_region_add(id, t, a1, a2, a3, a4, en) != 0)
+                ALOGW("regions.conf 跳过 %s（核心拒绝或编辑超时，见上一行 glue 日志, type%d %d,%d,%d,%d en%d）",
+                      id, t, a1, a2, a3, a4, en);
         } else if (sscanf(line, "hide %15s", id) == 1) {
             if (g_nhide < 32 && !is_hidden(id)) snprintf(g_hidden[g_nhide++], 16, "%s", id);
         }
@@ -1679,7 +1686,8 @@ static void draw_frame(int sw, int sh)
     }
 }
 
-/* 面板侧是否还有这个 id（区域表被脚本改过之后用来清理悬空引用）。
+/* 面板侧是否还有这个 id（区域表被改过之后用来清理悬空引用 —— 改表的入口是面板自身：
+ * 删/改名走共享内存编辑邮箱；WS 命令族只有 clear/list/add）。
  * 调用点：渲染线程（经 g_prune_req）—— 此时不持有 region 锁（region_changed 在锁外调），
  * 所以这里再进 vtouch_get_region 取锁是安全的。 */
 static int region_id_exists(const char *id)
@@ -1717,12 +1725,13 @@ static void *render_thread_fn(void *)
     while (g_running) {
         int sw = 0, sh = 0, go = 0, i;
         long t0 = now_ms();
-        /* 区域表被改过（含脚本经 WS 删/改名）→ 清掉引用了「已不存在 id」的面板状态。
+        /* 区域表被改过（含面板自身改表：删/改名 —— WS 命令族只有 clear/list/add）→
+         * 清掉引用了「已不存在 id」的面板状态。
          * 不做的话：gen_id 会自动复用被删掉的 r1/c1，而 g_hidden 里还留着旧 id ⇒ 新框出来的
          * 区域「生下来就是已隐藏」，而且 hide 行会被写进 regions.conf 一直带下去。 */
         if (g_prune_req) { g_prune_req = 0; prune_panel_refs(); }
         /* 落盘必须在这里（不在 draw_frame 里）：UI 关闭时下面会 continue，draw_frame 根本不跑，
-         * 隐藏期间脚本经 WS 改的区域就永远不落盘了。渲染线程是唯一写者；
+         * 隐藏期间面板自身改的区域（WS 命令族只有 clear/list/add）就永远不落盘了。渲染线程是唯一写者；
          * 失败的重挂/退避在 save_regions() 内部统一处理（所有调用点一致）。 */
         if (g_save_pending && (g_save_retry_t == 0 || now_ms() >= g_save_retry_t)) {
             save_regions();

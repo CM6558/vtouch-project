@@ -133,6 +133,36 @@ void outq_push(const char *p, size_t n)
     outq_tail = next;
     pthread_mutex_unlock(&outq_lock);
 }
+/* outq_push 的「不驱逐」版：队列无空位就一格不动地返回 -1（不推进 head、不覆盖旧格）。 */
+static int outq_push_keep(const char *p, size_t n)
+{
+    int next;
+    if (g.client_fd < 0 || n == 0 || n >= (size_t)OUTQ_MSG) return -1;
+    pthread_mutex_lock(&outq_lock);
+    next = (outq_tail + 1) % OUTQ_CAP;
+    if (next == outq_head) { pthread_mutex_unlock(&outq_lock); return -1; }   /* 满：这一帧不写，旧数据一格不动 */
+    outq[outq_tail].len = (int)n;
+    outq[outq_tail].sent = 0;
+    memcpy(outq[outq_tail].buf, p, n);
+    outq_tail = next;
+    pthread_mutex_unlock(&outq_lock);
+    return 0;
+}
+/* 两个文本推入接口共用的「成帧 + 入队」核：成帧只写一份，只把「满队列怎么办」参数化。
+   满时策略：evict=1 丢最旧（事件帧的有意设计，见 outq_push_text）；evict=0 不写这一帧（见 outq_push_text_keep）。 */
+static int outq_push_text_core(const char *s, size_t n, int evict)
+{
+    char buf[OUTQ_MSG];
+    size_t hl;
+    if (!s || n == 0) return -1;
+    buf[0] = (char)0x81;                       /* FIN + opcode=1（text） */
+    if (n < 126) { buf[1] = (char)n; hl = 2; }
+    else { buf[1] = 126; buf[2] = (char)((n >> 8) & 0xff); buf[3] = (char)(n & 0xff); hl = 4; }
+    if (hl + n >= sizeof buf) { fprintf(stderr, "vtouchd: 出站帧过长 %zu 字节 → 丢弃\n", n); return -1; }
+    memcpy(buf + hl, s, n);
+    if (evict) { outq_push(buf, hl + n); return 0; }
+    return outq_push_keep(buf, hl + n);
+}
 /**
  * (vtouch-doc: outq_push_text)
  * @brief 把一行文本按 WS 文本帧（未加掩码）补齐帧头后入队。
@@ -148,15 +178,26 @@ void outq_push(const char *p, size_t n)
  */
 void outq_push_text(const char *s, size_t n)
 {
-    char buf[OUTQ_MSG];
-    size_t hl;
-    if (!s || n == 0) return;
-    buf[0] = (char)0x81;                       /* FIN + opcode=1（text） */
-    if (n < 126) { buf[1] = (char)n; hl = 2; }
-    else { buf[1] = 126; buf[2] = (char)((n >> 8) & 0xff); buf[3] = (char)(n & 0xff); hl = 4; }
-    if (hl + n >= sizeof buf) { fprintf(stderr, "vtouchd: 出站帧过长 %zu 字节 → 丢弃\n", n); return; }
-    memcpy(buf + hl, s, n);
-    outq_push(buf, hl + n);
+    (void)outq_push_text_core(s, n, 1);        /* 行为与改动前逐字一致：满时丢最旧（保新鲜的有意设计） */
+}
+/**
+ * (vtouch-doc: outq_push_text_keep)
+ * @brief 把一行文本按 WS 文本帧（未加掩码）补齐帧头后入队；**队满就不写这一帧**（丢新、不丢旧）。
+ * @param   s        文本
+ * @param   n        长度
+ * @return  0 已入队；-1 没写进去（队满 / 无客户端 / 空串 / 单帧超长）。
+ * @note    成帧与 outq_push_text 共用同一份实现，只有「满时策略」不同；调用方据此数被丢的行数并自己告警。
+ */
+int outq_push_text_keep(const char *s, size_t n)
+{
+    /* 为什么要有这个接口（而不是直接用 outq_push_text）：
+     *   事件帧满时丢最旧是**有意**设计（保新鲜：旧事件比新事件没用）。但一张带自证末行的表不能这么丢：
+     *   丢最旧会挤掉队列里**已经排着**的数据（很可能是客户端还没读走的事件帧），而末行 end N 照发
+     *   ⇒ 客户端拿到「少几行、却自称 N 条」的半张表，而且被挤掉的事件帧还是静默丢的（I2 的另一半）。
+     *   这里改成「队满就不写这一帧」：表可能不完整，但 ① 客户端不会静默接受半张表 —— 它按行数与
+     *   末行 end N 对账，末行自己也被丢时走它既有的「没见过末行 → 回包不完整」那条老判据，
+     *   ② 这次推表一条已排队的事件帧都不会挤掉。 */
+    return outq_push_text_core(s, n, 0);
 }
 /**
  * (vtouch-doc: outq_flush)

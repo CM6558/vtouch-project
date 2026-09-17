@@ -104,11 +104,14 @@ extern char **environ;
 #define VT_PANEL_APP_PROCESS "/system/bin/app_process"
 #define VT_PANEL_MAX_RESTART 3        /* 1 分钟窗口内最多重启次数 */
 #define VT_PANEL_RESTART_WIN 60
+#define VT_PANEL_ABSENT_RETRY_MS 3000  /* 面板不在时距上次尝试 ≥3 秒才重试（单调时间，见 vt_panel_watchdog） */
 
 static pid_t S_pid = -1;
 static int   S_shm_fd = -1;
 static int   S_restarts;
 static long  S_win_start;
+static int   S_shm_ok;          /* 共享内存检查已过（重启复用的就是同一个 fd；没有 shm 时重试没有意义） */
+static long  S_absent_t0;       /* 进入“面板不在”态的时刻（单调毫秒，0 = 面板在）；见 vt_panel_watchdog */
 static char  S_dir[PATH_MAX];
 static char  S_dex[PATH_MAX + 32];
 static char  S_clspath[PATH_MAX + 32];
@@ -169,6 +172,7 @@ int vt_panel_start(int shm_fd)
     pid_t pid;
 
     if (shm_fd < 0) return -1;
+    S_shm_ok = 1;                          /* 过了这关才值得重启：重启走的就是这个 fd（见看门狗） */
     if (!dir || !*dir) dir = VT_PANEL_DIR_DEFAULT;
     snprintf(S_dir, sizeof S_dir, "%s", dir);
     mkdir(S_dir, 0755);                            /* 目录可能还不存在（B 方案：设备上只有核心一个文件） */
@@ -259,7 +263,29 @@ void vt_panel_watchdog(void)
         }
         stall_ticks = 0;
     }
-    if (S_pid <= 0) { if (stall_ticks > 300) vt_panel_restart(); return; }
+    /* “面板不在”独立成一支：stall_ticks 在上面那个 tick 里刚被清 0（进过 `> 300` 那一支就归零），
+     * 再拿它判断等于恒假 —— 面板**首次**没起来（缺 classes.dex / shm fd 无效，vt_panel_start 返回 -1
+     * 且 S_pid 停在 -1）时就永不重试。所以这里用只在本分支维护的 S_absent_t0（进入“面板不在”态的时刻）。
+     *
+     * 判据是**单调时间**，不是循环拍数：主循环的 poll 会因任何可读事件提前返回，负载下一拍远快于
+     * 8ms（千拍/秒量级），「300 拍」可能在几十~几百毫秒内走完 ⇒ 1 分钟 3 次的预算被瞬间烧掉、
+     * 随后整分钟不再重试（与 AGENTS.md / docs/CODE_WALKTHROUGH.md 的「每 ~3 秒重试一次」不符）。
+     * 所以这里记「上次尝试重试的时刻」，距上次 ≥ VT_PANEL_ABSENT_RETRY_MS 才再试一次；
+     * 面板在时把计时重置。心跳停滞的 stall_ticks 是另一套逻辑，不动。
+     * 没拿到 shm 时不重试（重试只会沿用同一个坏 fd），S_shm_ok 在 vt_panel_start 过了 fd 检查后置位。 */
+    if (S_pid <= 0) {
+        struct timespec ts;
+        long now;
+        clock_gettime(CLOCK_MONOTONIC, &ts);                 /* 照抄 vt_panel_restart 的取时方式 */
+        now = (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (S_absent_t0 == 0) S_absent_t0 = now;             /* 刚进入“面板不在”态 → 记起点 */
+        if (now - S_absent_t0 >= VT_PANEL_ABSENT_RETRY_MS) { /* ~3s 还没面板 → 再拉一次 */
+            S_absent_t0 = now;                               /* 记下这次尝试，下一次最早 +3s */
+            if (S_shm_ok) vt_panel_restart();
+        }
+        return;
+    }
+    S_absent_t0 = 0;                        /* 面板在 → 重新计时（下次“面板不在”从头算 3s） */
     if (waitpid(S_pid, &st, WNOHANG) == S_pid) {
         fprintf(stderr, "vtouchd: 面板已退出 status=0x%x（核心继续跑，注入不受影响）\n", st);
         S_pid = -1;

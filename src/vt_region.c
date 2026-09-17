@@ -20,6 +20,22 @@ void regions_clear(void)
     region_gen++;                    /* 区域线程看到代次变化会自己清私有状态 */
     pthread_mutex_unlock(&g.region_lock);
 }
+/* 区域 id 合法性：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX。
+ * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致 —— 核心是**单点校验**：脚本经 WS 推的 id
+ * 与面板经共享内存邮箱推的 id 都从这里过。核心放行而面板字形表里没有的字符（CJK / `!` 之流）
+ * 只会被画成方框，所以这道门必须守在核心侧。
+ */
+static int id_ok(const char *id, size_t n)
+{
+    size_t i;
+    if (n < 1 || n > REGION_ID_MAX) return 0;
+    for (i = 0; i < n; i++) {
+        char ch = id[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 0;
+    }
+    return 1;
+}
 /**
  * (vtouch-doc: region_add)
  * @brief 新增或覆盖一个区域（主线程持 region_lock 写表）。
@@ -40,7 +56,9 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
     int i, rc = 0;
     if (!id) return -1;
     n = strlen(id);
-    if (n == 0 || n > REGION_ID_MAX) return -1;
+    /* 单点校验（见 id_ok）：字符集 [A-Za-z0-9_-] + 长度 1..REGION_ID_MAX ⇒ 非法一律 -1，
+     * WS 侧据此自动回 err region（cmd_region 不用改）。 */
+    if (!id_ok(id, n)) return -1;
     if (type != 0 && type != 1) return -1;
     if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
     if (a1 >= g.logical_width || a2 >= g.logical_height) return -1;
@@ -114,7 +132,9 @@ int region_rename(const char *old_id, const char *new_id)
     int i;
     if (!old_id || !new_id) return -1;
     n = strlen(new_id);
-    if (n == 0 || n > REGION_ID_MAX) return -1;
+    /* 同一把尺子（见 id_ok）：字符集/长度非法直接拒。
+     * 「改成同名」不走重名分支 —— 先比 old/new 再查重的顺序在下面，原样保留。 */
+    if (!id_ok(new_id, n)) return -1;
     pthread_mutex_lock(&g.region_lock);
     if (strcmp(old_id, new_id) != 0) {
         for (i = 0; i < g.region_count; i++) {
@@ -210,6 +230,15 @@ void phys_ev_send(const struct vt_ev *ev)
             (unsigned long long)wall_ms_from_mono(ev->ts));
 }
 
+/* region_apply 攒事件的本地槽位：id **必须拷进本地缓冲** —— region_ev_send 收的是 rg->id
+ * 指针，而解锁后区域表可能已被改名/删除/清空。事件名是静态字面量，不必拷；坐标/slot/
+ * 时间戳一并攒起来。 */
+struct region_pend_ev {
+    char id[REGION_ID_MAX + 1];
+    const char *name;
+    int slot, lx, ly;
+    uint64_t ts;
+};
 /**
  * (vtouch-doc: region_apply)
  * @brief 处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。
@@ -233,8 +262,29 @@ void phys_ev_send(const struct vt_ev *ev)
  */
 void region_apply(const struct vt_ev *ev)
 {
-    int rid, hit, lx = ev->x, ly = ev->y, slot = ev->slot;
+    /* B2：锁内**只判定**，事件攒进 pend[]，pthread_mutex_unlock() 之后再逐条 region_ev_send()。
+     * region_ev_send 里有同步 fprintf + 面板 shm 环 push + 出站队列 push，全在 I/O 路径上；
+     * 以前在 region_lock 里发 ⇒ 区域线程写日志时会挡住 poll 线程的
+     * vt_shm_edit_apply → region_add（src/vtouchd.c:194）与 region list（src/vt_ws.c:576）。
+     * pend[] 按 MAX_REGIONS * 2 预留：一次 region_apply 里每个区域最多 2 条（MOVE 时
+     * enter|exit 与 move 可能同时成立）。
+     * 判定顺序与发事件的相对顺序逐字不变；**唯一语义变化**是「事件在解锁后才投递」：判定与投递
+     * 之间表可能已被 clear/删除/改名，事件仍按**判定时**的 id 投递（id 已拷进 pend[].id，读不到被
+     * 改写的缓冲）⇒ 「该区域在表里已不存在了，还收到它的 up/exit」这种交错在改动前不可能出现、
+     * 现在可能（顺序/内容判定仍用当拍锁内读到的表）。 */
+    struct region_pend_ev pend[MAX_REGIONS * 2];
+    int np = 0, rid, hit, i, lx = ev->x, ly = ev->y, slot = ev->slot;
     if (slot < 0 || slot >= MAX_PHYS) return;
+/* 攒一条待发事件（只在锁内调用）；满了丢最末这条（新的），绝不越界。 */
+#define PEND(_id, _name) do {                                                \
+        if (np < (int)(sizeof pend / sizeof pend[0])) {                      \
+            memcpy(pend[np].id, (_id), strlen(_id) + 1);                     \
+            pend[np].name = (_name);                                         \
+            pend[np].slot = slot; pend[np].lx = lx; pend[np].ly = ly;        \
+            pend[np].ts = ev->ts;                                            \
+            np++;                                                            \
+        }                                                                    \
+    } while (0)
     phys_ev_send(ev);                                /* ① 物理触摸流：按 slot 报，与区域无关 */
     pthread_mutex_lock(&g.region_lock);              /* ② 区域五事件判定 */
     if (r_seen_gen != region_gen) {                 /* region clear/add：重置本线程私有状态 */
@@ -250,22 +300,27 @@ void region_apply(const struct vt_ev *ev)
         if (!rg->enabled) { r_slot_in[slot][rid] = 0; continue; }
         hit = region_hit(rg, lx, ly);
         if (ev->action == VT_DOWN) {
-            if (hit) { r_slot_hit[slot][rid] = 1; region_ev_send(rg->id, "down", slot, lx, ly, ev->ts); }
+            if (hit) { r_slot_hit[slot][rid] = 1; PEND(rg->id, "down"); }
             r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
         } else if (ev->action == VT_MOVE) {
-            if (hit && !was_in) region_ev_send(rg->id, "enter", slot, lx, ly, ev->ts);
-            else if (!hit && was_in) region_ev_send(rg->id, "exit", slot, lx, ly, ev->ts);
+            if (hit && !was_in) PEND(rg->id, "enter");
+            else if (!hit && was_in) PEND(rg->id, "exit");
             if (hit && was_in && (r_slot_last_x[slot][rid] != lx || r_slot_last_y[slot][rid] != ly)) {
                 r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
-                region_ev_send(rg->id, "move", slot, lx, ly, ev->ts);
+                PEND(rg->id, "move");
             }
         } else {
-            if ((r_slot_hit[slot][rid] || was_in) && hit) region_ev_send(rg->id, "up", slot, lx, ly, ev->ts);
+            if ((r_slot_hit[slot][rid] || was_in) && hit) PEND(rg->id, "up");
             r_slot_hit[slot][rid] = 0;
         }
         r_slot_in[slot][rid] = (ev->action != VT_UP && hit) ? 1 : 0;
     }
     pthread_mutex_unlock(&g.region_lock);
+    /* ③ 解锁后再发（不再占着 region_lock 做 I/O）：顺序与原来的锁内调用顺序逐字一致 ——
+     * 按 rid 升序，每个区域内先 down / enter|exit，后 move / up。 */
+    for (i = 0; i < np; i++)
+        region_ev_send(pend[i].id, pend[i].name, pend[i].slot, pend[i].lx, pend[i].ly, pend[i].ts);
+#undef PEND
 }
 /**
  * (vtouch-doc: region_thread_main)

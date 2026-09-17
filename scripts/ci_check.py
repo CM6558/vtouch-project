@@ -4,9 +4,12 @@
 用法:
     python3 scripts/ci_check.py [--core build/vtouchd_ui] [--sdk build/vtouch_onefile.js]
                                 [--example clients/example.js] [--source clients/vtouch.js]
+                                [--allow-core <别的核心，可重复>]
 
 检查内容：
   ① SDK 是自包含的（内嵌负载非空）；
+  ①c **内嵌负载的 md5 必须等于 --core 那份**；不等时可以显式 --allow-core <路径> 放行，
+     放行后 ② 门的重生成基准换成**那一份**（默认行为不变：不传 --allow-core 时只看 --core）；
   ② **把 SDK 按 pack_client.py 的规则从当前源码 + 本次构建的核心重新生成一遍，与磁盘上的 SDK 逐字节比对**
      —— 通过就说明"这份 SDK = 这份源码 + 这个二进制"，不存在旧副本混充；
   ③ 示例里的 require 指向单文件客户端，且示例用到的每个 vt.<名字> 都存在于 SDK 导出的 API 里；
@@ -48,6 +51,9 @@ def main():
     ap.add_argument("--sdk", default="build/vtouch_onefile.js")
     ap.add_argument("--example", default="clients/example.js")
     ap.add_argument("--source", default="clients/vtouch.js")
+    ap.add_argument("--allow-core", action="append", default=[], metavar="PATH",
+                    help="额外允许的核心（可重复）：SDK 内嵌负载的 md5 命中它时不算错，"
+                         "且 ② 门的逐字节重生成以**那一份**做基准（默认只用 --core）")
     a = ap.parse_args()
 
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -76,12 +82,50 @@ def main():
 
     print("\n== ① SDK 自包含 ==")
     m = re.search(r'var PAYLOAD = (null|"([A-Za-z0-9+/=]*)")', sdk_text)
+    payload_md5 = None
     if not m:
         bad("SDK 里找不到 PAYLOAD（不是 pack_client.py 的产物？）")
     elif m.group(1) == "null":
         bad("SDK 的 PAYLOAD 是 null —— 这是源码态，不是自包含单文件")
     else:
         ok("内嵌负载非空（%d 字符 base64）" % len(m.group(2)))
+        try:
+            payload_md5 = hashlib.md5(base64.b64decode(m.group(2))).hexdigest()
+        except Exception:
+            payload_md5 = None
+        if payload_md5 is None:
+            bad("内嵌负载不是合法 base64")
+        else:
+            ok("内嵌负载 md5=%s" % payload_md5)
+
+    # ①c：内嵌负载到底是不是「声明的核心」那一份。对不上 = 产物与声明不符（不是代码坏了），
+    #      要么重跑 scripts/pack_client.py，要么显式 --allow-core <路径> 放行。
+    #      命中 allow-core 时，② 门的逐字节重生成用**那一份**做基准。
+    basis, basis_data, basis_md5 = core, data, core_md5
+    if payload_md5 is not None:
+        if payload_md5 == core_md5:
+            ok("内嵌负载 == --core %s（md5=%s）" % (a.core, core_md5))
+        else:
+            hit = None
+            for extra in a.allow_core:
+                p = root / extra
+                if not p.is_file():
+                    print("  --    允许核心 %s 不存在" % extra)
+                elif md5_of(p) == payload_md5:
+                    hit = p
+                    break
+                else:
+                    print("  --    允许核心 %s 对不上（md5=%s）" % (extra, md5_of(p)))
+            if hit is None:
+                bad("SDK 内嵌负载 md5=%s 既不是 --core %s（md5=%s），也不在 --allow-core 列表里 "
+                    "—— 磁盘上的 SDK 内嵌的不是声明的核心（判红 ≠ 代码坏了）"
+                    % (payload_md5, a.core, core_md5))
+            else:
+                basis = hit
+                basis_data = hit.read_bytes()
+                basis_md5 = payload_md5
+                ok("内嵌负载命中 --allow-core %s（md5=%s）→ ② 门以它为基准"
+                   % (hit.relative_to(root).as_posix(), basis_md5))
 
     print("\n== ①b 面板必须是「接核心」模式（real），不能是 stub ==")
     panel = root / "build/ui/libtestimgui.so"
@@ -99,14 +143,14 @@ def main():
 
     print("\n== ② SDK = 当前源码 + 本次构建的核心（逐字节重生成比对）==")
     want = source.read_text(encoding="utf-8")
-    b64 = base64.b64encode(data).decode("ascii")
+    b64 = base64.b64encode(basis_data).decode("ascii")
     subs = [
         (r'var PAYLOAD = null;[ \t]*/\* <<PAYLOAD>> \*/',
          'var PAYLOAD = "%s";   /* <<PAYLOAD>> 内嵌核心 base64（pack_client.py 填） */' % b64),
         (r'var PAYLOAD_MD5 = null;[ \t]*/\* <<PAYLOAD_MD5>> \*/',
-         'var PAYLOAD_MD5 = "%s";   /* <<PAYLOAD_MD5>> */' % core_md5),
+         'var PAYLOAD_MD5 = "%s";   /* <<PAYLOAD_MD5>> */' % basis_md5),
         (r'var PAYLOAD_SIZE = 0;[ \t]*/\* <<PAYLOAD_SIZE>> \*/',
-         'var PAYLOAD_SIZE = %d;   /* <<PAYLOAD_SIZE>> */' % len(data)),
+         'var PAYLOAD_SIZE = %d;   /* <<PAYLOAD_SIZE>> */' % len(basis_data)),
     ]
     for pat, rep in subs:
         want, n = re.subn(pat, lambda _m: rep, want, count=1)
@@ -144,7 +188,7 @@ def main():
         ok("示例用到的 %d 个 API 全部存在：%s" % (len(used), ", ".join(sorted(used))))
 
     print("\n== ④ 清单 ==")
-    for p in (sdk, example, core):
+    for p in (sdk, example, basis):
         print("  %s  %s  %d" % (md5_of(p), p.relative_to(root).as_posix(), p.stat().st_size))
 
     print("\n结果：通过 %d，失败 %d" % (len(OKS), len(FAILS)))

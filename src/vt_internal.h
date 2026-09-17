@@ -167,6 +167,8 @@ int outq_pending(void);
 void outq_push(const char *p, size_t n);
 /* 把一行文本按 WS 文本帧（未加掩码）补齐帧头后入队。 (vtouch-doc: outq_push_text) */
 void outq_push_text(const char *s, size_t n);
+/* 把一行文本按 WS 文本帧补齐帧头后入队；队满就不写这一帧（丢新、不丢旧）。 (vtouch-doc: outq_push_text_keep) */
+int outq_push_text_keep(const char *s, size_t n);
 /* 主循环唯一的刷出点：socket 可写才写，写不完留到下次；真错（EPIPE/ECONNRESET）才踢客户端。 (vtouch-doc: outq_flush) */
 void outq_flush(void);
 

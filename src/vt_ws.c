@@ -410,7 +410,9 @@ int client_frame(void)
         memcpy(line, payload, len); line[len] = 0;
         handle_line(line, resp, sizeof resp);
         /* §4.5：响应进发送队列，主线程只在主循环里刷 —— socket 慢不再卡住注入热路径 */
-        outq_push_text(resp, strlen(resp));
+        /* B3：region list 分帧时已由 cmd_region 自己逐行发过（resp[0]=0），这里别再发一个空帧；
+         * 其余命令族照旧 —— 每条路径都会把完整回包写进 resp，行为零变化。 */
+        if (resp[0]) outq_push_text(resp, strlen(resp));
     }
     return 0;
 }
@@ -572,20 +574,49 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
         regions_clear(); snprintf(resp, cap, "ok %d", g.region_count); return 0;
     }
     if (op && !strcmp(op, "list")) {
-        size_t used = 0;
-        int i, n;
+        char line[128];
+        char rows[MAX_REGIONS][128];            /* 锁内只**格式化**到这里，解锁后再逐条入队（见下） */
+        int i, n, nrow = 0, w, ndrop = 0;
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err region"); return -1; }
+        /* ── B3 + I2：一条区域一帧，且**锁内只格式化** ────────────────────
+         * 以前把整表拼进一个 resp（上限 MAX_LINE=1024）当**一个帧**发：最坏 32 条 × ~50B = 1600
+         * ⇒ ~20 条以上开始丢表尾（连末行 end N 一起没了，客户端只能等到超时）。现在每条
+         * 各一次入队（自己组 WS 文本帧），末行 end N 也单独一帧 —— 行格式逐字不变。
+         * resp[0] = 0 表示“本族已经自己发过了”，client_frame 据此不再重发（见那里的 if）。
+         *
+         * 但「逐条入队」不能放在 region_lock 里：持 region_lock 抢 outq 锁会把这条 I/O 入锁路径
+         * 带回来（B2 刚把 I/O 移出锁），而且区域线程的 region_ev 入队要排在 poll 线程这 N+1 次
+         * push 后面。所以锁内**只格式化**每行到本地 rows[]（nrow < MAX_REGIONS 边界保护），
+         * 解锁后逐条入队 —— 与 B2 同款：锁内只碰区域表，I/O 一律在锁外。
+         *
+         * 入队走 outq_push_text_keep（**队满就不写这一帧**，不是事件帧那条「丢最旧」）：
+         * outq 只有 OUTQ_CAP=64 格、满了丢最旧（src/vt_queue.c）本身是「事件保新鲜」的有意设计，
+         * 但一张**带自证末行**的表不能这么丢 —— 丢最旧会先挤掉队列里已排队的数据（很可能是客户端
+         * 还没读走的事件帧），而末行 end N 照发 ⇒ 客户端拿到「少几行却自称 N 条」的半张表，被挤掉的
+         * 事件帧还是静默丢的（I2 的另一半）。现在丢的是这一帧本身：表可能不完整，但客户端能靠行数与
+         * end N 对账报出「收到 X 行，表里声明 N 条」；若队列到末行时仍然满（队满后再无空间可腾，本命令
+         * 期间出站队列不会排空），末行自己也会被丢 ⇒ 客户端走它既有的「没见过末行 → 回包不完整（超时或
+         * 被截断）」判据 —— 两条路都会报，不会静默接受半张表。且一条已排队的事件帧都不会被这次推表挤掉。
+         * 被丢的行数只在**锁外**打一条 stderr 日志（不逐行打）。 */
+        resp[0] = 0;
         pthread_mutex_lock(&g.region_lock);
         n = g.region_count;
-        for (i = 0; i < g.region_count && used + 1 < cap; i++) {
-            int w = snprintf(resp + used, cap - used, "region %s %d %d %d %d %d %d\n", g.regions[i].id,
-                             g.regions[i].type, g.regions[i].a1, g.regions[i].a2, g.regions[i].a3, g.regions[i].a4,
-                             g.regions[i].enabled);
-            if (w <= 0 || (size_t)w >= cap - used) break;   /* 放不下就截断：客户端以末行 end 兜底 */
-            used += (size_t)w;
+        for (i = 0; i < n; i++) {              /* 锁内只读表 + 格式化到本地缓冲（不碰 outq/stderr）*/
+            if (nrow >= MAX_REGIONS) break;    /* 边界保护：表最多 MAX_REGIONS 条（不该发生） */
+            w = snprintf(rows[nrow], sizeof rows[0], "region %s %d %d %d %d %d %d\n", g.regions[i].id,
+                         g.regions[i].type, g.regions[i].a1, g.regions[i].a2, g.regions[i].a3, g.regions[i].a4,
+                         g.regions[i].enabled);
+            if (w <= 0 || (size_t)w >= sizeof rows[0]) continue;   /* 单行放不下（不该发生）→ 跳过该条，不越界 */
+            nrow++;
         }
         pthread_mutex_unlock(&g.region_lock);
-        snprintf(resp + used, cap - used, "end %d", n);
+        for (i = 0; i < nrow; i++)             /* 解锁后逐条入队（此时才碰 outq 锁）；满了就丢这一帧 */
+            if (outq_push_text_keep(rows[i], strlen(rows[i])) != 0) ndrop++;
+        w = snprintf(line, sizeof line, "end %d", n);
+        if (w > 0 && (size_t)w < sizeof line &&                /* 末行单独一帧：内容/口径不变，同样走 keep */
+            outq_push_text_keep(line, (size_t)w) != 0) ndrop++;   /* 它也可能入不了队 → 计进被丢行数 */
+        if (ndrop)                             /* 一条日志，**锁外**；带被丢行数（客户端靠行数对账会报出来） */
+            fprintf(stderr, "vtouchd: region list 有 %d 行因出站队列满被丢弃（客户端会报不完整）\n", ndrop);
         return 0;
     }
     if (op && !strcmp(op, "add")) {

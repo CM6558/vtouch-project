@@ -62,7 +62,9 @@ var handle = vt.onRegion(REGION_ID, "*", function (h) {
  *   var c = vt.connect();
  *   c.cmd("region add c1 0 200 400 1200 1400 1");    // 矩形：<id> 0 x1 y1 x2 y2 启用
  *   c.cmd("region add c2 1 720 2300 260 0 1");       // 圆形：<id> 1 cx cy r 0 启用
- *   c.cmd("region list");                            // 看当前表（每行 region … + 末行 end N）
+ *   vt.listRegions();                               // 看当前表：返回 region 行的数组（按行给）
+ * 看表**别用** c.cmd("region list")：表是一区一帧发回来的，而 cmd 一次只回一帧 ——
+ * 它只拿到第一行、也拿不到末行 end N；要整表就用 vt.listRegions()（它按行收齐并对账）。
  * 想停监听又不关面板：handle.stop();
  */
 
