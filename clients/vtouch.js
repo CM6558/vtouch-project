@@ -319,9 +319,88 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
     try { ensure(); } catch (e) { say("自动启动失败：" + e); throw e; }
 }
 
+/* ---------- 区域事件订阅（高层 API，与原 bundle 的 vt.onRegion 同语义） ----------
+ *   vt.onRegion(cb)                    所有区域 + down/up/enter/exit（默认不含 move）
+ *   vt.onRegion(cb, "up")              所有区域 + 只要抬起
+ *   vt.onRegion("c1", "down,move", cb) 指定区域 + 指定事件
+ * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
+ * 回调收到 h = { id, ev, slot, x, y }，跑在子线程里（里面可以直接 sleep / 做动作）。
+ * 返回 { stop() }：停监听（不关面板；面板归脚本退出时的 exit 钩子收）。
+ * 区域 id 写错 / 被禁用会在启动时提示，不会让你干等到怀疑人生。 */
+function parseEvents(evs) {
+    if (evs === undefined || evs === null) return { down: 1, up: 1, enter: 1, exit: 1 };
+    var arr = (typeof evs === "string") ? evs.split(",") : evs, m = {}, i;
+    if (!arr || !arr.length) return { down: 1, up: 1, enter: 1, exit: 1 };
+    for (i = 0; i < arr.length; i++) {
+        var e = trim(String(arr[i]));
+        if (e === "" || e === "*" || e === "any") return { down: 1, up: 1, enter: 1, exit: 1, move: 1 };
+        m[e] = 1;
+    }
+    return m;
+}
+function warn(msg) {
+    if (typeof toastLog === "function") toastLog(msg); else log("[vtouch] " + msg);
+}
+/* 取区域表（region list 会回 N 行 region ... + 一行 end N）；id 是否在表里用它判 */
+function listRegions(conn) {
+    conn.drain();
+    conn.send("region list");
+    var out = [], dl = Date.now() + 1000;
+    for (;;) {
+        var s = conn.recv();
+        if (s) { if (s.indexOf("end ") === 0) break; out.push(s); }
+        else if (Date.now() > dl) break;
+        else sleep(5);
+    }
+    return out;
+}
+function onRegion(a, b, c) {
+    var id = null, evs = null, cb;
+    if (typeof a === "function") cb = a;
+    else if (typeof a === "string" && typeof b === "function") { id = a; cb = b; }
+    else { id = a; evs = b; cb = c; }
+    if (typeof cb !== "function") throw new Error("onRegion 需要一个回调函数");
+    var want = parseEvents(evs);
+    var conn = connect();
+    if (id) {                                   /* 先查表：写错立刻提示（读者线程还没起，可以安全读） */
+        var rows = listRegions(conn), hit = false, i;
+        for (i = 0; i < rows.length; i++) {
+            var p = rows[i].split(" ");
+            if (p[1] === id) { hit = true; if (p[p.length - 1] === "0") warn("区域 " + id + " 目前是停用状态"); }
+        }
+        if (!hit) warn("面板里没有区域 " + id + "（现有：" + (rows.length ? rows.join(" | ") : "无") + "）");
+    }
+    conn.send("sub region");
+    var stopped = false;
+    var reader = threads.start(function () {
+        while (!stopped) {
+            var s = null;
+            try { s = conn.recv(); } catch (e) { break; }
+            if (s === null || s === undefined) { sleep(10); continue; }
+            if (s.indexOf("region_ev ") !== 0) continue;
+            var p = s.split(" ");
+            var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10) };
+            if (id && h.id !== id) continue;
+            if (!want[h.ev]) continue;
+            threads.start(function () {              /* 回调丢子线程：业务里可以 sleep / 注入 */
+                try { cb(h); } catch (e) { warn("onRegion 回调出错：" + e); }
+            });
+        }
+    });
+    var keep = setInterval(function () {}, 1000);    /* 主线程保活：AutoJs6 里主线程一结束脚本就退 */
+    return {
+        stop: function () {
+            stopped = true;
+            try { clearInterval(keep); } catch (e) {}
+            try { reader.interrupt(); } catch (e) {}
+        }
+    };
+}
+
 module.exports = {
     start: start, stop: stop, alive: alive, ensure: ensure,
     keepRunning: keepRunning, startedByUs: startedByUs,
     connect: connect, finger: finger, frame: frame, res: res,
+    onRegion: onRegion, listRegions: listRegions,
     BIN: BIN, HOST: HOST, PORT: PORT
 };

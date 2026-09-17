@@ -55,6 +55,10 @@ vt.frame([{slot:0,state:"down",x:100,y:200},       // 多指合并进同一帧
           {slot:1,state:"down",x:300,y:200}]);
 // 走到结尾 / 按停止 → 自动收尾，不需要你调 vt.stop()
 // 需要保留时：vt.keepRunning(true)；不想自动起：require 前 global.VTOUCH_NO_AUTOSTART = true
+
+vt.onRegion("c1", "down", function (h) {           // 区域事件（只由物理手指产生；回调跑在子线程）
+    toastLog(h.id + " 被 slot" + h.slot + " 按下 @" + h.x + "," + h.y);
+});                                                // 省略事件 = down/up/enter/exit；"*" = 含 move
 ```
 
 **单文件自包含版**（设备上什么都不用先放）：`python scripts/pack_client.py` 把核心二进制
