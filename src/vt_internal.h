@@ -144,6 +144,10 @@ int logical_to_raw(int logical, int axis, int *raw);
 int raw_to_logical(int raw, int axis, int *logical);
 /* 单调时钟（纳秒），事件时间戳用。 (vtouch-doc: now_ns) */
 uint64_t now_ns(void);
+/* 锚定「单调钟 ↔ 墙钟」偏移（启动时调一次）。 (vtouch-doc: wall_clock_anchor) */
+void wall_clock_anchor(void);
+/* 单调钟纳秒 → 墙钟毫秒（与脚本的 Date.now() 同基准）。 (vtouch-doc: wall_ms_from_mono) */
+uint64_t wall_ms_from_mono(uint64_t mono_ns);
 /* 自动探测逻辑尺寸（框架 wm size 优先、内核模式兜底；不传 -w/-h 时用）。 (vtouch-doc: detect_logical_size) */
 int detect_logical_size(int *w, int *h, const char **src);
 
@@ -179,7 +183,7 @@ int region_rename(const char *old_id, const char *new_id);
 /* 点是否落在区域内（矩形含边界；圆按半径平方比较）。 (vtouch-doc: region_hit) */
 int region_hit(const struct region *rg, int lx, int ly);
 /* 发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。 (vtouch-doc: region_ev_send) */
-void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly);
+void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, uint64_t ts_mono);
 /* 五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。 (vtouch-doc: region_apply) */
 void region_apply(const struct vt_ev *ev);
 /* 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。 (vtouch-doc: region_thread_main) */
@@ -268,9 +272,9 @@ void vt_panel_stop(void);
 #endif
 
 /* ---- vtouchd.c ---- */
-/* 解析命令行：-w 宽 -h 高（必需，逻辑尺寸）、-p 端口、-v 虚拟槽数。 (vtouch-doc: apply_args) */
+/* 解析命令行：-w 宽 -h 高（可选，不给就自动探测）、-p 端口、-v 虚拟槽数。 (vtouch-doc: apply_args) */
 void apply_args(int argc, char **argv);
-/* 初始化：尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。 (vtouch-doc: vtouch_init) */
+/* 初始化：锚墙钟 → 尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。 (vtouch-doc: vtouch_init) */
 int vtouch_init(int argc, char **argv);
 /* 主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。 (vtouch-doc: vtouch_poll_step) */
 int vtouch_poll_step(void);

@@ -46,7 +46,9 @@ DOCS = {
     params=[("rg", "区域"), ("lx", "逻辑 x"), ("ly", "逻辑 y")], ret="1 命中；0 未命中。"),
 "region_ev_send": dict(brief="发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。",
     params=[("id", "区域名"), ("ev", "down/enter/move/exit/up"), ("slot", "物理槽号"),
-            ("lx", "逻辑 x"), ("ly", "逻辑 y")], note="低频事件；只报物理手指。"),
+            ("lx", "逻辑 x"), ("ly", "逻辑 y"),
+            ("ts_mono", "事件时间戳（单调钟纳秒；发出去时换算成墙钟毫秒）")],
+    note="低频事件；只报物理手指。报文末尾带 <ms>：事件发生的墙钟毫秒（与脚本 Date.now() 同基准），由 ts_mono 换算而来 —— 脚本算按压时长/防抖/看延迟用它。"),
 "region_apply": dict(brief="五事件判定（区域线程）：按本轮事件更新 slot_in/slot_hit/slot_last，并决定发哪条事件。",
     params=[("ev", "来自 region_q 的事件")],
     note="三张状态表是线程私有的，只在 region_lock 里读区域表。"),
@@ -143,9 +145,9 @@ DOCS = {
     note="响应文本拼进 resp，由调用方（client_frame）入出站队列。"),
 
 # ---------------- §11 进程 ----------------
-"apply_args": dict(brief="解析命令行：-w 宽 -h 高（必需，逻辑尺寸）、-p 端口、-v 虚拟槽数。",
+"apply_args": dict(brief="解析命令行：-w 宽 -h 高（可选，不给就自动探测）、-p 端口、-v 虚拟槽数。",
     params=[("argc", "参数个数"), ("argv", "参数数组")], note="取值越界会打日志并保留默认值。"),
-"vtouch_init": dict(brief="初始化：尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。",
+"vtouch_init": dict(brief="初始化：锚墙钟 → 尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。",
     params=[("argc", "参数个数"), ("argv", "参数数组")], ret="0 成功；负数 = 失败阶段（-2..-7），main 直接拿它当退出码。",
     note="这个顺序是有意的：任何失败路径都不会留下「抓着触摸却没人能控制」的状态。"),
 "vtouch_poll_step": dict(brief="主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。",

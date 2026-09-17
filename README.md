@@ -126,7 +126,11 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `region clear` | `ok 0` | 清空 |
 | `sub [region]` / `unsub` | `ok` / `err sub` | 订阅区域通道（只有这一条推送） |
 
-推送（单向，混在同一条 WS 里）：`region_ev <id> <ev> <slot> <x> <y>`，`ev` ∈ `down/enter/move/exit/up`：
+推送（单向，混在同一条 WS 里）：`region_ev <id> <ev> <slot> <x> <y> <ms>`，`ev` ∈ `down/enter/move/exit/up`：
+
+- 末尾 `<ms>` 是**事件发生的墙钟毫秒**（与脚本的 `Date.now()` 同基准，可直接做差）；
+  它由事件自己的时间戳换算而来，是「手指那一刻」而不是「脚本收到那一刻」，
+  所以 `up - down` 就是真实按压时长，`Date.now() - t` 是送达延迟。SDK 里对应 `h.t`。
 
 - `down` 只在**按下那一刻就命中**时发；`enter`/`exit` 是跨边界；`move` 是区内移动且位置变了；
 - `up` 在**抬起时此刻在区域内**就发 —— 包括"从区域外滑进来再抬起"（这种 `up` 没有配对的 `down`，

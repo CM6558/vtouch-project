@@ -92,7 +92,7 @@ void apply_args(int argc, char **argv)
 }
 /**
  * (vtouch-doc: vtouch_init)
- * @brief 初始化：尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。
+ * @brief 初始化：锚墙钟 → 尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。
  * @param   argc     参数个数
  * @param   argv     参数数组
  * @return  0 成功；负数 = 失败阶段（-2..-7），main 直接拿它当退出码。
@@ -105,6 +105,7 @@ int vtouch_init(int argc, char **argv)
     int shm_fd = -1;
 #endif
     setvbuf(stderr, NULL, _IONBF, 0);   /* 日志实时落盘，别被全缓冲吞掉 */
+    wall_clock_anchor();               /* 事件要带墙钟时间给脚本看，先把两套钟的偏移钉住 */
     apply_args(argc, argv);
     if (g.logical_width < 2 || g.logical_height < 2) {
         int dw = 0, dh = 0;

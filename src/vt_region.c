@@ -163,25 +163,31 @@ int region_hit(const struct region *rg, int lx, int ly)
  * @param   slot     物理槽号
  * @param   lx       逻辑 x
  * @param   ly       逻辑 y
- * @note    低频事件；只报物理手指。
+ * @param   ts_mono  事件时间戳（单调钟纳秒；发出去时换算成墙钟毫秒）
+ * @note    低频事件；只报物理手指。报文末尾带 <ms>：事件发生的墙钟毫秒（与脚本 Date.now() 同基准），由 ts_mono 换算而来 —— 脚本算按压时长/防抖/看延迟用它。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
  *   没订区域通道就不白推 region_ev（判定的账照记，只打日志）。
  */
-void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly)
+void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, uint64_t ts_mono)
 {
-    char msg[96];
-    int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    char msg[128];
+    /* 末尾这个 <ms> 是**事件发生的墙钟毫秒**（与脚本的 Date.now() 同基准），
+     * 由事件自带的单调时间戳换算而来 —— 用它算按压时长/做防抖/看延迟都够。 */
+    int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d %llu",
+                     id, ev, slot, lx, ly, (unsigned long long)wall_ms_from_mono(ts_mono));
 #ifdef VT_UI
     /* 面板的事件环：独立通道，和「脚本有没有订阅」无关（面板不该因为没脚本就看不到事件）。 */
     if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
 #endif
     if (g.sub_mask & SUB_REGION) {
         if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
-        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d\n", id, ev, slot, lx, ly);
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d t=%llu\n", id, ev, slot, lx, ly,
+                (unsigned long long)wall_ms_from_mono(ts_mono));
     } else {
-        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (UNSUB)\n", id, ev, slot, lx, ly);
+        fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d (UNSUB) t=%llu\n", id, ev, slot, lx, ly,
+                (unsigned long long)wall_ms_from_mono(ts_mono));
     }
 }
 /**
@@ -223,17 +229,17 @@ void region_apply(const struct vt_ev *ev)
         if (!rg->enabled) { r_slot_in[slot][rid] = 0; continue; }
         hit = region_hit(rg, lx, ly);
         if (ev->action == VT_DOWN) {
-            if (hit) { r_slot_hit[slot][rid] = 1; region_ev_send(rg->id, "down", slot, lx, ly); }
+            if (hit) { r_slot_hit[slot][rid] = 1; region_ev_send(rg->id, "down", slot, lx, ly, ev->ts); }
             r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
         } else if (ev->action == VT_MOVE) {
-            if (hit && !was_in) region_ev_send(rg->id, "enter", slot, lx, ly);
-            else if (!hit && was_in) region_ev_send(rg->id, "exit", slot, lx, ly);
+            if (hit && !was_in) region_ev_send(rg->id, "enter", slot, lx, ly, ev->ts);
+            else if (!hit && was_in) region_ev_send(rg->id, "exit", slot, lx, ly, ev->ts);
             if (hit && was_in && (r_slot_last_x[slot][rid] != lx || r_slot_last_y[slot][rid] != ly)) {
                 r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
-                region_ev_send(rg->id, "move", slot, lx, ly);
+                region_ev_send(rg->id, "move", slot, lx, ly, ev->ts);
             }
         } else {
-            if ((r_slot_hit[slot][rid] || was_in) && hit) region_ev_send(rg->id, "up", slot, lx, ly);
+            if ((r_slot_hit[slot][rid] || was_in) && hit) region_ev_send(rg->id, "up", slot, lx, ly, ev->ts);
             r_slot_hit[slot][rid] = 0;
         }
         r_slot_in[slot][rid] = (ev->action != VT_UP && hit) ? 1 : 0;

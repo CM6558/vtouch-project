@@ -324,7 +324,9 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
  *   vt.onRegion(cb, "up")              所有区域 + 只要抬起
  *   vt.onRegion("c1", "down,move", cb) 指定区域 + 指定事件
  * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
- * 回调收到 h = { id, ev, slot, x, y }，跑在子线程里（里面可以直接 sleep / 做动作）。
+ * 回调收到 h = { id, ev, slot, x, y, t }，跑在子线程里（里面可以直接 sleep / 做动作）。
+ *   t 是**事件发生的墙钟毫秒**（与 Date.now() 同基准）：算按压时长用 up.t - down.t、
+ *   做防抖/节流、量「手指按下到脚本收到」的延迟都能用（h.t 是手指那一刻，不是回调那一刻）。
  * 返回 { stop() }：停监听（不关面板；面板归脚本退出时的 exit 钩子收）。
  * 区域 id 写错 / 被禁用会在启动时提示，不会让你干等到怀疑人生。 */
 function parseEvents(evs) {
@@ -379,7 +381,10 @@ function onRegion(a, b, c) {
             if (s === null || s === undefined) { sleep(10); continue; }
             if (s.indexOf("region_ev ") !== 0) continue;
             var p = s.split(" ");
-            var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10) };
+            /* 第 6 个字段是事件发生的**墙钟毫秒**（核心按事件自己的时间戳换算过，
+             * 和 Date.now() 同基准，可直接比大小/做差）。老核心不发这个字段时是 null。 */
+            var h = { id: p[1], ev: p[2], slot: parseInt(p[3], 10), x: parseInt(p[4], 10), y: parseInt(p[5], 10),
+                      t: p.length > 6 ? parseInt(p[6], 10) : null };
             if (id && h.id !== id) continue;
             if (!want[h.ev]) continue;
             threads.start(function () {              /* 回调丢子线程：业务里可以 sleep / 注入 */

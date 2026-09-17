@@ -1,6 +1,9 @@
 /* vt_util.c（§2 小工具） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
 #include <signal.h>
+
+/* 墙钟换算的锚点（纳米整数；wall_clock_anchor 写、wall_ms_from_mono 读；启动后不再变） */
+static uint64_t g_mono0 = 0, g_real0 = 0;
 /**
  * (vtouch-doc: detect_logical_size)
  * @brief 自动探测"逻辑坐标空间"尺寸 —— 问框架（`wm size`）；不传 -w/-h 时用。
@@ -145,6 +148,33 @@ int raw_to_logical(int raw, int axis, int *logical)
  * 热路径只剩两件事：合成帧写 uinput（writev）+ push 队列（微秒级、永不阻塞、永不碰 socket）。
  */
 
+/**
+ * (vtouch-doc: wall_clock_anchor)
+ * @brief 锚定「单调钟 ↔ 墙钟」的偏移（启动时调一次，供 wall_ms_from_mono 换算）。
+ * @note  为什么要两套钟：事件时间戳必须用单调钟（CLOCK_MONOTONIC 不会被 NTP/时区调整拽回去），
+ *        但脚本那边要的是能和 Date.now() 直接比的墙钟。锚一次偏移就能同时满足两边，
+ *        而且换出来的是**事件本身**发生的时刻（不是「谁处理它的时刻」，队列延迟不算进去）。
+ */
+void wall_clock_anchor(void)
+{
+    struct timespec m, r;
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    clock_gettime(CLOCK_REALTIME, &r);
+    g_mono0 = (uint64_t)m.tv_sec * 1000000000ull + (uint64_t)m.tv_nsec;
+    g_real0 = (uint64_t)r.tv_sec * 1000000000ull + (uint64_t)r.tv_nsec;
+}
+/**
+ * (vtouch-doc: wall_ms_from_mono)
+ * @brief 把单调钟纳秒换成墙钟毫秒（与 Date.now() 同基准，可直接比大小/做差）。
+ * @param   mono_ns  事件时间戳（now_ns() / 按下时刻那种）
+ * @return  自 epoch 起的墙钟毫秒。
+ * @note    前提是 wall_clock_anchor() 已在启动时调过；事件时间戳总是晚于锚点，
+ *          所以这里的减法不会下溢。
+ */
+uint64_t wall_ms_from_mono(uint64_t mono_ns)
+{
+    return (g_real0 + (mono_ns - g_mono0)) / 1000000ull;
+}
 /**
  * (vtouch-doc: now_ns)
  * @brief 单调时钟（纳秒），事件时间戳用。

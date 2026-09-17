@@ -46,8 +46,13 @@ vt.frame([                                                  // 同一帧抬起
 /* ev 语义：down = 按下就命中；enter/exit = 跨越边界；move = 区内移动且位置变了；
  *          up = 抬起时此刻在区域内（从区域外滑进来再抬起也算，配 enter 用）。 */
 var REGION_ID = "c1";                                       // ← 面板卡片上的那个 id
+var downAt = null;                                          // 记一下按下时刻，用来算按压时长
 var handle = vt.onRegion(REGION_ID, "*", function (h) {
-    log(h.id + " " + h.ev + "  slot=" + h.slot + "  @" + h.x + "," + h.y);
+    /* h.t = 事件发生的墙钟毫秒（跟 Date.now() 同基准）。注意是**手指那一刻**的时间，
+     * 所以 up.t - down.t 就是真实按压时长；Date.now() - h.t 则是这段的送达延迟。 */
+    log(h.id + " " + h.ev + "  slot=" + h.slot + "  @" + h.x + "," + h.y + "  t=" + h.t);
+    if (h.ev === "down" || h.ev === "enter") downAt = h.t;
+    if (h.ev === "up" && downAt) log("  → 按压时长 " + (h.t - downAt) + " ms");
     if (h.ev === "down") vt.finger().tap(100, h.y);          // 例：按到区域就点别处
 });
 
