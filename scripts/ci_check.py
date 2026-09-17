@@ -83,6 +83,20 @@ def main():
     else:
         ok("内嵌负载非空（%d 字符 base64）" % len(m.group(2)))
 
+    print("\n== ①b 面板必须是「接核心」模式（real），不能是 stub ==")
+    panel = root / "build/ui/libtestimgui.so"
+    if not panel.is_file():
+        bad("缺 %s（先跑 VTOUCH_UI_CORE=real scripts/build_ui.sh）" % panel.relative_to(root).as_posix())
+    else:
+        blob = panel.read_bytes()
+        real_mark = "已接核心".encode("utf-8")
+        stub_mark = "demo_rect".encode("utf-8")          # ui_stubs.c 里的桩数据，real 模式不该有
+        if real_mark in blob and stub_mark not in blob:
+            ok("%s 是 real 模式（含「已接核心」、不含桩数据）" % panel.name)
+        else:
+            bad("%s 是 stub 模式（VTOUCH_UI_CORE=real 没生效）—— 这种 SDK 的面板不接核心、看不到真实状态"
+                % panel.name)
+
     print("\n== ② SDK = 当前源码 + 本次构建的核心（逐字节重生成比对）==")
     want = source.read_text(encoding="utf-8")
     b64 = base64.b64encode(data).decode("ascii")

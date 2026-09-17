@@ -48,9 +48,10 @@ jobs:
       - name: ImGui（不入库：按 build_ui.sh 指定的版本自拉）
         run: git clone --depth 1 -b v1.91.8 https://github.com/ocornut/imgui thirdparty/imgui
 
-      - name: 编面板（javac + d8 + NDK clang）
+      - name: 编面板（javac + d8 + NDK clang；**必须 real 模式：接核心**）
         env:
           NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          VTOUCH_UI_CORE: real          # 默认是 stub（面板单跑用的桩）——漏了这个就会发出「面板不接核心」的 SDK
         run: bash scripts/build_ui.sh
 
       - name: 编带面板的核心（面板三件套内嵌）
