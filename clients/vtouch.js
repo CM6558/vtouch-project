@@ -28,6 +28,21 @@
  * （产出 `build/vtouch_onefile.js`）。那种版本的 require 会在设备上没有该二进制、或版本不对时，
  * 自己把它写进去并校验 md5 —— 于是 AutoJs6 侧真正只有一个文件，设备上也不需要事先推任何东西。
  *
+ * 两条推送（都是单向；回调跑在子线程，h 里都带 t = **事件发生的墙钟毫秒**，与 Date.now() 同基准）：
+ *   vt.onRegion([id,] [事件,] cb)   区域事件 down/enter/move/exit/up —— **按区域过滤**：手指滑出
+ *                                   区域后就只剩一个 exit 了，所以要「追手指」得用下面这条。
+ *   vt.onTouch([slot,] cb)          **物理触摸流**：任何物理手指的 down/move/up，不按区域过滤；
+ *                                   vt.follow(slot, cb) 是它的简写（只跟一根手指）。
+ *   两条流只报**物理**手指 —— 脚本自己注入的虚拟触点不会回流（防自激）。
+ *
+ * 典型用法「某手指在区域内按下 → 一路跟到抬起」：
+ *   vt.onRegion("c1", "down", function (h) {
+ *       var t = vt.follow(h.slot, function (e) {              // 只跟按下那根
+ *           log(e.ev + " @" + e.x + "," + e.y);               // 移到哪都收得到（区域外也算）
+ *           if (e.ev === "up") { log("历时 " + (e.t - h.t) + " ms"); t.stop(); }
+ *       });
+ *   });
+ *
  * 坐标：daemon 用**竖屏逻辑坐标**（固定，不随旋转变）；本 SDK 不做旋转换算。
  */
 "use strict";

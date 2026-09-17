@@ -59,6 +59,13 @@ vt.frame([{slot:0,state:"down",x:100,y:200},       // 多指合并进同一帧
 vt.onRegion("c1", "down", function (h) {           // 区域事件（只由物理手指产生；回调跑在子线程）
     toastLog(h.id + " 被 slot" + h.slot + " 按下 @" + h.x + "," + h.y);
 });                                                // 省略事件 = down/up/enter/exit；"*" = 含 move
+
+// 追一根手指：在区域内按下 → 跟到抬起（区域流出了区域就断，所以用物理触摸流 onTouch）
+vt.onRegion("c1", "down", function (h) {
+    var t = vt.follow(h.slot, function (e) {       // 只跟这根手指；e = {ev,slot,x,y,t}
+        if (e.ev === "up") { log("历时 " + (e.t - h.t) + " ms"); t.stop(); }
+    });
+});
 ```
 
 **单文件自包含版**（设备上什么都不用先放）：`python scripts/pack_client.py` 把核心二进制
@@ -125,6 +132,7 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `region list` | 每行 `region <id> <type> <a1..a4> <en>` + `end <n>` | 表很小（≤32），一次回全量 |
 | `region clear` | `ok 0` | 清空 |
 | `sub [phys\|region\|all]` / `unsub` | `ok` / `err sub` | 订阅通道：裸 `sub` = 区域通道（与改动前一致）；`sub phys` = 物理触摸流；`sub all` = 两条 |
+| `phys_ev <ev> <slot> <x> <y> <ms>`（推送） | — | 物理触摸流：按 slot 的 `down/move/up`，不按区域过滤；追手指用它 |
 
 推送（单向，混在同一条 WS 里），两条通道：
 
