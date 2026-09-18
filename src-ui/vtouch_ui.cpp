@@ -248,28 +248,32 @@ static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的�
 static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
 static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
 static int g_rr_off = -1;
-/* 把一条区域的竖屏几何映射成「当前屏」下的竖屏几何（位置按比例、尺寸不变、起点钳进表允许范围） */
-static int region_rot_map(int type, int a1, int a2, int a3, int a4, int *o1, int *o2, int *o3, int *o4)
+/* 把一条区域几何从「base 屏帧」映射到「target 屏帧」下的竖屏几何：
+ * 位置按比例、尺寸不变、起点钳进表允许范围（越界不裁剪）。base/target 都由调用方给 ——
+ * 转屏批次用 (上一屏 → 当前屏)，落盘用 (当前屏 → 竖屏规范帧)。 */
+static int region_rot_map(int br, int bw, int bh, int tr, int tw, int th,
+                          int type, int a1, int a2, int a3, int a4,
+                          int *o1, int *o2, int *o3, int *o4)
 {
     int x1, y1, x2, y2, cxf, cyf, hwf, hhf, nx, ny, t;
-    if (g_rr_base_w <= 0 || g_rr_base_h <= 0 || g_scr_w <= 0 || g_scr_h <= 0) return -1;
+    if (bw <= 0 || bh <= 0 || tw <= 0 || th <= 0) return -1;
     if (type == 1) {                     /* 圆：只搬圆心，半径不变（p2c/c2p 都是等距映射 ⇒ 半径同值） */
-        p2c_rot(g_rr_base_rot, a1, a2, &x1, &y1);
-        nx = (int)((double)x1 * g_scr_w / g_rr_base_w + 0.5);
-        ny = (int)((double)y1 * g_scr_h / g_rr_base_h + 0.5);
-        c2p_rot(g_rot, nx, ny, o1, o2);
+        p2c_rot(br, a1, a2, &x1, &y1);
+        nx = (int)((double)x1 * tw / bw + 0.5);
+        ny = (int)((double)y1 * th / bh + 0.5);
+        c2p_rot(tr, nx, ny, o1, o2);
         *o3 = (a3 > 0) ? a3 : 1; *o4 = 0;
     } else {                             /* 矩形：中心按比例搬，屏上的宽高（像素）不变 */
-        p2c_rot(g_rr_base_rot, a1, a2, &x1, &y1);
-        p2c_rot(g_rr_base_rot, a3, a4, &x2, &y2);
+        p2c_rot(br, a1, a2, &x1, &y1);
+        p2c_rot(br, a3, a4, &x2, &y2);
         if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
         if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
         cxf = (x1 + x2) / 2; cyf = (y1 + y2) / 2;
         hwf = (x2 - x1) / 2; hhf = (y2 - y1) / 2;
-        nx = (int)((double)cxf * g_scr_w / g_rr_base_w + 0.5);
-        ny = (int)((double)cyf * g_scr_h / g_rr_base_h + 0.5);
-        c2p_rot(g_rot, nx - hwf, ny - hhf, &x1, &y1);
-        c2p_rot(g_rot, nx + hwf, ny + hhf, &x2, &y2);
+        nx = (int)((double)cxf * tw / bw + 0.5);
+        ny = (int)((double)cyf * th / bh + 0.5);
+        c2p_rot(tr, nx - hwf, ny - hhf, &x1, &y1);
+        c2p_rot(tr, nx + hwf, ny + hhf, &x2, &y2);
         *o1 = x1 < x2 ? x1 : x2; *o2 = y1 < y2 ? y1 : y2;
         *o3 = x1 < x2 ? x2 : x1; *o4 = y1 < y2 ? y2 : y1;
     }
@@ -283,47 +287,41 @@ static int region_rot_map(int type, int a1, int a2, int a3, int a4, int *o1, int
     else { if (*o3 < *o1) *o3 = *o1; if (*o4 < *o2) *o4 = *o2; }
     return 0;
 }
-/* 显示状态变了：与「区域几何对应的屏」不一致 → 开一批重算（首批只记基准，不动表） */
-static void region_rot_begin(void)
+/* 每帧调一次（几个整数比较，极便宜）：把「区域几何所对应的屏」推进到当前屏。
+ * ⚠️ 基准必须固定成**竖屏帧**（区域表 / regions.conf 的规范坐标系，也是旧文件的约定），
+ * **不能**记成「面板启动时看到的方向」—— 否则启动方向不同，同一份表会被解释成不同的相对位置
+ * （真机报过：同一批区域，横屏启动与竖屏启动显示在不同的相对位置）。
+ * 表还空时不推进基准（区域可能还没载入完），等有区域了下一帧再转。 */
+static void region_rot_step(void)
 {
+    char id[16];
+    int type, a1, a2, a3, a4, en, n1, n2, n3, n4, n;
     if (g_rr_off < 0) {
         const char *v = getenv("VTOUCH_REGION_ROT");
         g_rr_off = (v && !strcmp(v, "off")) ? 1 : 0;
         if (g_rr_off) ALOGI("区域跟随旋转：关闭（VTOUCH_REGION_ROT=off）");
     }
-    if (g_rr_off || g_scr_w <= 0 || g_scr_h <= 0) return;
-    if (g_rr_base_w <= 0) {
-        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
-        return;
+    if (g_rr_off || g_w <= 0 || g_h <= 0 || g_scr_w <= 0 || g_scr_h <= 0) return;
+    if (g_rr_base_w <= 0) { g_rr_base_rot = 0; g_rr_base_w = g_w; g_rr_base_h = g_h; }  /* 基准 = 竖屏帧 */
+    if (!g_rr_active) {
+        if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
+        n = vtouch_region_count();
+        if (n <= 0) return;                            /* 表还空 → 基准保持竖屏，等有区域再转 */
+        g_rr_n = n; g_rr_i = 0; g_rr_fail = 0; g_rr_active = 1;
+        ALOGI("区域跟随旋转：屏 %dx%d rot%d → %dx%d rot%d，重算 %d 条（每帧一条）",
+              g_rr_base_w, g_rr_base_h, g_rr_base_rot, g_scr_w, g_scr_h, g_rot, g_rr_n);
     }
-    if (g_rr_active) return;              /* 批次进行中：目标读实时值，收尾时会自动再开一批 */
-    if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
-    g_rr_n = vtouch_region_count(); g_rr_i = 0; g_rr_fail = 0;
-    if (g_rr_n <= 0) {
-        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
-        return;
-    }
-    g_rr_active = 1;
-    ALOGI("区域跟随旋转：屏 %dx%d rot%d → %dx%d rot%d，重算 %d 条（每帧一条）",
-          g_rr_base_w, g_rr_base_h, g_rr_base_rot, g_scr_w, g_scr_h, g_rot, g_rr_n);
-}
-/* 每帧一条：算出新几何就写回核心（同 id 原地更新，不等回执） */
-static void region_rot_step(void)
-{
-    char id[16];
-    int type, a1, a2, a3, a4, en, n1, n2, n3, n4;
-    if (!g_rr_active) return;
-    if (g_rr_i >= g_rr_n) {
+    if (g_rr_i >= g_rr_n) {                /* 收尾：基准挪到当前屏 */
         g_rr_active = 0;
         g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
         g_rr_done++;
-        ui_region_changed();              /* 几何变了：置落盘 + 重画 */
+        ui_region_changed();               /* 几何变了：置落盘 + 重画 */
         ALOGI("区域跟随旋转：第 %d 批完成（失败 %d 条）", g_rr_done, g_rr_fail);
-        region_rot_begin();               /* 批次期间又转过 → 立刻补一批 */
         return;
     }
     if (vtouch_get_region(g_rr_i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) == 0 &&
-        region_rot_map(type, a1, a2, a3, a4, &n1, &n2, &n3, &n4) == 0 &&
+        region_rot_map(g_rr_base_rot, g_rr_base_w, g_rr_base_h, g_rot, g_scr_w, g_scr_h,
+                       type, a1, a2, a3, a4, &n1, &n2, &n3, &n4) == 0 &&
         (n1 != a1 || n2 != a2 || n3 != a3 || n4 != a4)) {
         if (vtouch_region_add(id, type, n1, n2, n3, n4, en) != 0) g_rr_fail++;
     }
@@ -352,7 +350,8 @@ static void on_display(int w, int h, int rot)
     g_force_frames = 4;
     g_need = 1;
     if (changed) ALOGI("display %dx%d rot=%d (竖屏逻辑 %dx%d)", w, h, rot, g_w, g_h);
-    region_rot_begin();   /* 区域跟随当前方向：与「区域几何对应的屏」不一致就开一批重算 */
+    /* 区域跟随当前方向的推进放在渲染循环里每帧自查（region_rot_step）：这样即使区域表比显示状态晚
+     * 载入（regions.conf 在面板初始化早期才 import 完），也能在下一帧补上，不依赖「显示变化」事件。 */
 }
 
 /* 瞬态视觉 */
@@ -431,7 +430,10 @@ static int save_failed(void)
 static int save_regions(void)
 {
     char tmppath[128];
-    int i, n;
+    int i, n, live_is_current;
+    /* 转屏批次进行中：表是混合态（部分区域已换算、部分没有）→ 推迟到收尾后再写。
+     * 不清 g_save_pending，渲染线程下一帧会再来一次（收尾时 ui_region_changed 也会再置位）。 */
+    if (g_rr_active) { g_save_pending = 1; return 0; }
     region_conf_dir();
     snprintf(tmppath, sizeof tmppath, "%s.tmp", REGION_CONF_NEW);
     /* 先写 .tmp 再 rename：掉电/被杀不会留下半截文件（半截文件会被版本门整份丢弃 = 区域全丢） */
@@ -439,10 +441,22 @@ static int save_regions(void)
     if (!f) { ALOGE("regions.conf 写入失败 %s: %s", tmppath, strerror(errno)); return save_failed(); }
     fprintf(f, "#vtouch-regions v%d\n", REGION_CONF_VER);
     n = vtouch_region_count();
+    /* 落盘写**竖屏规范帧**口径：文件里的数字与「脚本坐标 / 核心判定」同一套，且**与启动方向无关**
+     * —— 每次启动读回来都能还原成「当次的屏幕相对位置」。只有表当前确实是「当前屏」口径时才换算
+     * （g_rr_base_w 为 0 = 跟随关闭或显示还没就绪 → 表本来就是规范口径，原样写）。 */
+    live_is_current = (g_rr_base_w > 0 && g_rr_base_rot == g_rot &&
+                       g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h);
     for (i = 0; i < n; i++) {
-        char id[16]; int t, a1, a2, a3, a4, en;
+        char id[16]; int t, a1, a2, a3, a4, en, c1, c2, c3, c4;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
-        fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, a1, a2, a3, a4, en);
+        c1 = a1; c2 = a2; c3 = a3; c4 = a4;
+        if (live_is_current && g_scr_w > 0 && g_scr_h > 0 &&
+            region_rot_map(g_rot, g_scr_w, g_scr_h, 0, g_w, g_h, t, a1, a2, a3, a4, &c1, &c2, &c3, &c4) == 0) {
+            /* 已换成规范帧的值（越界只挪起点，见 region_rot_map） */
+        } else {
+            c1 = a1; c2 = a2; c3 = a3; c4 = a4;
+        }
+        fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, c1, c2, c3, c4, en);
     }
     for (i = 0; i < g_nhide; i++) fprintf(f, "hide %s\n", g_hidden[i]);
     if (fclose(f) != 0) { ALOGE("regions.conf 落盘失败: %s", strerror(errno)); return save_failed(); }
