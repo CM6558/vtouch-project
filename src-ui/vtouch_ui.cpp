@@ -121,6 +121,36 @@ static float panel_h(void) { return (float)(g_min ? MINI_H : WIN_H); }
 /* 触摸快照 */
 struct Dot { int on, x, y, tx[12], ty[12], tn; };
 static Dot g_dots[64];
+/* 触摸标记（每根手指的蓝点+轨迹、抬起扩散圈、面板触摸绿点）默认**关**：脚本注入时它会一直在
+ * 屏幕上画圈，很吵。要临时打开：核心侧 env `VTOUCH_UI_MARK=1`，或面板侧边栏里的「触摸标记」按钮
+ * （按钮的取值落盘到 /data/local/vtouch-runtime/ui.conf，重启保留）。 */
+static int g_show_mark = 0;
+static int g_uiconf_loaded = 0;
+#define UI_CONF_PATH "/data/local/vtouch-runtime/ui.conf"
+static void ui_conf_load_once(void)
+{
+    FILE *f;
+    const char *e;
+    if (g_uiconf_loaded) return;
+    g_uiconf_loaded = 1;
+    e = getenv("VTOUCH_UI_MARK");
+    if (e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O')) { g_show_mark = 1; return; }
+    f = fopen(UI_CONF_PATH, "r");
+    if (!f) return;
+    {
+        char b[32] = {0};
+        size_t n = fread(b, 1, sizeof b - 1, f);
+        fclose(f);
+        if (n > 0 && (b[0] == '1' || b[0] == 'o' || b[0] == 'O')) g_show_mark = 1;
+    }
+}
+static void ui_conf_save(void)
+{
+    FILE *f = fopen(UI_CONF_PATH, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", g_show_mark);
+    fclose(f);
+}
 static int g_prev_on[64];
 static int g_mdown = 0, g_mslot = -1, g_mup_pend = 0;
 static float g_mx = -1, g_my = -1;
@@ -1127,6 +1157,8 @@ static void build_overlay(int sw, int sh)
                                         : "\xE6\x8B\x96\xE6\x8B\xBD\xE5\x9C\x86\xE5\xBF\x83\xE6\x8B\x96\xE5\x8D\x8A\xE5\xBE\x84");
         }
         /* 轨迹 + 蓝点（面板内手指不画蓝点，绿点另画）。点/轨迹存竖屏坐标，画前换算 */
+        ui_conf_load_once();
+        if (g_show_mark) {
         for (int di = 0; di < 64; di++) {
             if (!g_dots[di].on) continue;
             int dxs, dys;
@@ -1166,6 +1198,7 @@ static void build_overlay(int sw, int sh)
         if (g_mdown) {
             dl->AddCircleFilled(ImVec2(g_mx, g_my), 18.0f, IM_COL32(0, 200, 0, 255));
         }
+        }   /* end if (g_show_mark)：触摸标记全在这里面 */
     }
     ImGui::End();
 }
@@ -1519,6 +1552,11 @@ static void build_sidebar(void)
             if (btn_dark("显隐：显", ImVec2(bw, 76))) { g_ov_show = 0; g_force_frames = 3; }
         } else {
             if (btn_light("显隐：隐", ImVec2(bw, 76))) { g_ov_show = 1; g_force_frames = 3; }
+        }
+        if (g_show_mark) {
+            if (btn_dark("触摸标记：显", ImVec2(bw, 76))) { g_show_mark = 0; g_need = 1; ui_conf_save(); }
+        } else {
+            if (btn_light("触摸标记：隐", ImVec2(bw, 76))) { g_show_mark = 1; g_need = 1; ui_conf_save(); }
         }
         if (btn_light("关闭 UI", ImVec2(bw, 76))) ui_show_cb(0);
         if (btn_red("退出", ImVec2(bw, 76))) { vtouch_cleanup(); _exit(0); }

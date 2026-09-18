@@ -92,6 +92,12 @@ var press = vt.onRegionPress(REGION_ID, function (g) {
 });
 // press.stop();                                   // 不要了就停（还没抬起的追踪也一起收掉）
 
+/* ---------- 3.6 开关/激活型区域（要就取消注释） ---------- */
+/* 按 s1 一下 = 开，再按一下 = 关；别的动作里直接读 auto.on 判断。
+ * 回调在独立线程里跑，所以可以在里面直接 sleep / 注入。 */
+// var auto = vt.toggle("s1", { toast: true, onChange: function (on) { log("自动模式 " + (on ? "开" : "关")); } });
+// if (auto.on) { … }                              // 例：其它回调里判断是否激活
+
 /* ---------- 4. 生命周期（默认已经替你管好了，这里只是把开关列出来） ---------- */
 // vt.keepRunning(true);   // 脚本退出时不要停核心（长驻、别的脚本还要用）
 // vt.stop();              // 显式停：SIGTERM → 核心自己收尾（先停面板、再放 EVIOCGRAB）

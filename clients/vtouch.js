@@ -31,6 +31,8 @@
  * 两条推送（都是单向；回调跑在子线程，h 里都带 t = **事件发生的墙钟毫秒**，与 Date.now() 同基准）：
  *   vt.onRegion([id,] [事件,] cb)   区域事件 down/enter/move/exit/up —— **按区域过滤**：手指滑出
  *                                   区域后就只剩一个 exit 了，所以要「追手指」得用下面这条。
+ *   vt.toggle([id,] [选项,] [回调])     **开关/激活型区域**：区域内一次完整按压翻转一次，
+ *                                   脚本在别处 if (sw.on) 判断；返回 { on, value(), set, flip, stop }
  *   vt.onRegionPress([id,] [选项,] cb)  **一次完整按压 = 一次回调**（推荐）：区域内按下 → 同一手指抬起，
  *                                   回调恰好一次、跑在独立线程（里面可以直接 sleep/注入）；选项 {insideUp:true} 要求抬起仍在区域内
  *   vt.onTouch([slot,] cb [, 事件])  **物理触摸流**：按槽订阅（只发你订的那根手指），不按区域过滤；
@@ -1058,6 +1060,36 @@ function onRegionPress(a, b, c) {
         }
     };
 }
+/* toggle([区域id,] [选项,] [回调])：把一个区域当**开关/激活区**用。
+ * 区域内每完成一次「完整按压」（按下 → 同一手指抬起）就翻转一次；脚本在别处读 sw.on 判断开/关。
+ * 选项：{ on: 初始值(默认 false), toast: 翻转时提示(默认 false), onChange: fn(on, g) }
+ * 返回：{ on, value(), set(v), flip(), stop() }  —— sw.on 每次翻转后都是最新值，可直接 if (sw.on)。
+ * 回调（onChange / 第三个参数）在**独立线程**里跑，里面可以放心 sleep / 注入。
+ * 例：
+ *   var auto = vt.toggle("s3", { toast: true });        // 按 s3 一下 = 开/关
+ *   if (auto.on) { … }                                   // 别的动作里判断
+ */
+function toggle(a, b, c) {
+    var id = null, opt = {}, cb;
+    if (typeof a === "function") cb = a;
+    else if (typeof b === "function") { id = a; cb = b; }
+    else { id = a; opt = b || {}; cb = c; }
+    var handler = null;
+    function fire(g) {
+        if (opt.toast) say("开关 " + (id === null ? "" : id + " ") + "→ " + (sw.on ? "开" : "关"));
+        try { if (opt.onChange) opt.onChange(sw.on, g); } catch (e) { warn("toggle onChange 出错：" + e); }
+        try { if (cb) cb(sw.on, g); } catch (e) { warn("toggle 回调出错：" + e); }
+    }
+    var sw = {
+        on: !!opt.on,
+        value: function () { return sw.on; },
+        set: function (v) { sw.on = !!v; fire(null); },
+        flip: function () { sw.on = !sw.on; fire(null); },
+        stop: function () { if (handler) handler.stop(); }
+    };
+    handler = onRegionPress(id, function (g) { sw.on = !sw.on; fire(g); });
+    return sw;
+}
 /* follow(slot, cb [, 事件])：只跟一根手指的便捷写法（等价 onTouch(slot, cb, 事件)）。
  * 要轨迹别忘了第三个参数："down,move,up"。 */
 function follow(slot, cb, evs) { return onTouch(slot, cb, evs); }
@@ -1067,6 +1099,6 @@ module.exports = {
     keepRunning: keepRunning, startedByUs: startedByUs,
     connect: connect, finger: finger, frame: frame, res: res,
     onRegion: onRegion, listRegions: listRegions, onTouch: onTouch, follow: follow,
-    onRegionPress: onRegionPress,
+    onRegionPress: onRegionPress, toggle: toggle,
     BIN: BIN, HOST: HOST, PORT: PORT
 };
