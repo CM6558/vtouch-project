@@ -43,19 +43,23 @@ vt.frame([                                                  // 同一帧抬起
 ]);
 
 /* ---------- 3. 区域事件：面板里画好的区域，按 id 订阅 ---------- */
-/* 事件第二参省略 = down/up/enter/exit（默认不含高频的 move）；"*" = 全部含 move。
- * 回调在子线程里跑，里面可以直接 sleep / 再注入（长按、拖拽都行）。 */
+/* 事件第二参省略 = down/up/enter/exit（默认不含高频的 move）；要 move 得显式写 "*" 或 "down,move"。
+ * 回调跑在**唯一那条分发线程**上、**串行**执行：里面长 sleep / 同步注入会**推迟后面每一条事件**
+ * （要慢动作、要注入，请自己 `threads.start(...)` 丢到别的线程去）。
+ * move 是「状态」不是消息：同一 (区域, 手指) 只保留**最新一条**（后到的原地覆盖），别指望每条采样都送到。 */
 /* ev 语义：down = 按下就命中；enter/exit = 跨越边界；move = 区内移动且位置变了；
  *          up = 抬起时此刻在区域内（从区域外滑进来再抬起也算，配 enter 用）。 */
 var REGION_ID = "c1";                                       // ← 面板卡片上的那个 id
 var downAt = null;                                          // 记一下按下时刻，用来算按压时长
-var handle = vt.onRegion(REGION_ID, "*", function (h) {
+var handle = vt.onRegion(REGION_ID, function (h) {           // 省略事件 = down/up/enter/exit（不含 move）
     /* h.t = 事件发生的墙钟毫秒（跟 Date.now() 同基准）。注意是**手指那一刻**的时间，
      * 所以 up.t - down.t 就是真实按压时长；Date.now() - h.t 则是这段的送达延迟。 */
     log(h.id + " " + h.ev + "  slot=" + h.slot + "  @" + h.x + "," + h.y + "  t=" + h.t);
     if (h.ev === "down" || h.ev === "enter") downAt = h.t;
     if (h.ev === "up" && downAt) log("  → 按压时长 " + (h.t - downAt) + " ms");
-    if (h.ev === "down") vt.finger().tap(100, h.y);          // 例：按到区域就点别处
+    if (h.ev === "down") {                                    // 例：按到区域就点别处
+        threads.start(function () { vt.finger().tap(100, h.y); });   // ← 注入别堵在回调里（它会推迟后面每一条事件）
+    }
 });
 
 /* 不用面板手画也行，同一套协议直接下命令：

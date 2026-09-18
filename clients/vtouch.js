@@ -456,7 +456,9 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
  * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
  * 回调收到 h = { id, ev, slot, x, y, t }，跑在**分发线程**里，**串行**执行（事件到达顺序 == 回调
  * 顺序，不并发）：回调里长 sleep 会**推迟后面的每一条事件** —— 要慢动作/长动作请自己在回调里
- * threads.start(...)。掉线（面板退出 / 被新实例顶掉）会自动提示 + 摘掉全部 handler，脚本可正常结束。
+ * threads.start(...)。move 是「状态」不是消息：同一 (区域, 槽) 只保留**最新一条**（后到的原地
+ * 覆盖先前那条，简报一条不丢、队列不会积压）；要完整轨迹就自己按 h.t 记点，别指望每条采样都送到。
+ * 掉线（面板退出 / 被新实例顶掉）会自动提示 + 摘掉全部 handler，脚本可正常结束。
  *   t 是**事件发生的墙钟毫秒**（与 Date.now() 同基准）：算按压时长用 up.t - down.t、
  *   做防抖/节流、量「手指按下到脚本收到」的延迟都能用（h.t 是手指那一刻，不是回调那一刻）。
  * 返回 { stop() }：停监听（不关面板；面板归脚本退出时的 exit 钩子收）。
@@ -490,71 +492,106 @@ var g_touchHandlers = [];         /* {slot, cb} */
 var g_lastPhysDown = {};           /* { slot: { ev, slot, x, y, t } } — 缓存最近一次 phys_ev down */
 var g_listCollector = null;       /* 正在等 region list 回包时，把 region/end 行收进这个数组 */
 
-/* ---------- 事件队列：有界 FIFO(256) + 一条常驻分发线程 ----------
- * 读线程只做「解析 + 入队」，回调由**分发线程串行**执行：
- *   - 事件到达顺序 == 回调顺序（FIFO，不重排、不并发）；
- *   - 回调里长 sleep 会**推迟后面的每一条事件** —— 要慢动作/长动作请自己在回调里
- *     threads.start(...)，别在回调里干等；
- *   - 队列满（>=256）时**优先保住非 move 事件**（down/up 被丢了，这根手指在脚本侧就
- *     永远抬不起来）：新事件是 move → 静默丢（只计数）；新事件非 move 且队里有 move →
- *     踢掉队里**最早的一条 move**（其余相对顺序不变）后照常入队；队里没有 move 可牺牲 →
- *     丢新事件。非 move 的这两种丢弃都会限频 warn（≥1000ms 一次，文案带累计丢弃数）。
+/* ---------- 事件派发：一条常驻分发线程 + 「位置只留最新」的合并表 ----------
+ * 读线程只做「解析 + 入队」，回调由**分发线程串行**执行（事件到达顺序 == 回调顺序，不重排、不并发）。
+ *
+ * 入队分两类处理（本文件唯一的取舍点）：
+ *   · **简报** down/up/enter/exit：少、且一条都不能丢（丢一条脚本状态就错）⇒ 逐条入队，永不丢弃；
+ *   · **位置** move：极多（真机实测平均 198 条/s、峰值 634 条/s）⇒ 同一 (回调, 区域/槽) 只保留
+ *     **最新一条**，新到的**原地覆盖**旧的那条 —— 位置不变 ⇒ 与简报的相对顺序不变。
+ * 为什么这么做：move 是**状态**不是消息（脚本要的是「手指现在在哪」，不是「8ms 前在哪」）。
+ * 以前按 FIFO 逐条排队、队列只有 256 格 ⇒ 回调一旦阻塞（长 sleep / 同步注入）0.5~1.3 s 就栽满，
+ * 于是开始丢事件 + 每秒一次「队列已满」；而那条提示是**攥着 g_queueLock** 弹 Toast 的
+ * （AutoJs6 的 Toast 要回主线程弹并同步等，最多 1 s）⇒ 读线程一起停，越堵越堵。
+ * 改成合并后，队列长度只由「订阅者 × (区域/槽) 组合数」决定，与事件速率无关 ⇒ 结构上不会满。
+ * 覆盖的判据见 mergeMove()：跨过简报（enter/exit/down/up）不许合并 —— 否则「离开又进入」之后的
+ * 位置会顶到 exit 前面，顺序就错了。
  * 实现用 JS 数组 + threads.lock() 守护（不用 java.util.concurrent：Rhino 往 Java 集合里
  * 塞 JS 对象有边界问题）。分发线程惰性起、幂等：offer() 发现它不在就起一条，
  * 掉线收尾置停止标志让它退出，之后再次 offer() 会重新起一条。 */
-var Q_CAP = 256;                  /* 队列上限（满了丢新事件） */
-var g_queue = [];                 /* 待分发 { cb, h }，FIFO */
+var Q_SOFT = 512;                 /* 积压告警阈值（只记日志、不丢；结构上到不了） */
+var Q_HARD = 4096;                /* 兜底上限（破了丢最旧一条并计数；结构上不该发生） */
+var g_queue = [];                 /* 待分发 { cb, h }：数组顺序 == 回调顺序 */
 var g_queueLock = threads.lock();
-var g_queueDropped = 0;           /* 累计丢弃条数（含静默丢的 move） */
-var g_lastDropWarn = 0;           /* 上次「队列已满」warn 的墙钟毫秒（限频用） */
+/* 空闲唤醒用（**AutoJs6 真机已验证可用**：`lock.newCondition()` / `await(ms, TimeUnit.MILLISECONDS)` /
+ * `signal()` / `signalAll()` 全通，且 await 期间锁是释放的 ⇒ 入队方能照常 push+signal，不会丢唤醒）。
+ * 判据脚本见 build/_dev/vt_cond_probe.js（探针输出：T1 超时 201ms、T2 signal 300ms 唤醒、T3 等待期取锁成功）。 */
+var g_queueCond = g_queueLock.newCondition();
+var g_queueDropped = 0;           /* 兜底丢弃条数（正常恒为 0：简报不丢、move 合并） */
+var g_lastDropWarn = 0;           /* 上次积压/丢弃日志的墙钟毫秒（限频用） */
 var g_dispatchRunning = false;    /* 分发线程在跑吗 */
 var g_dispatchStop = false;       /* 让分发线程退出（掉线收尾置位） */
 
-/* 分发线程主体：串行取队首 → 同步调用 cb(h)。队列空了且被要求停 → 退（不留空转线程）。 */
+/* 分发线程主体：串行取队首 → 同步调用 cb(h)。队列空 → 在条件变量上等 signal（**不轮询**）；
+ * 被要求停且队空 → 退（不留空转线程）。
+ * 为什么用条件变量：原来空队列 `sleep(5)` = 空闲 **200 次/秒**唤醒 JS 引擎（主线程=应用 UI 线程，
+ * 长期挤占）。`await()` 期间线程阻塞在 Java 层，不执行任何脚本。保留 1000ms 超时兜底：万一漏一次
+ * signal 或 await 被中断，最多 1 秒后自己重查队列 ⇒ 空闲 1 次/秒（原 1/200），换来「永不死等」。 */
 function dispatchLoop() {
     try {
         for (;;) {
             var job = null;
             g_queueLock.lock();
-            try { if (g_queue.length) job = g_queue.shift(); } finally { g_queueLock.unlock(); }
+            try {
+                if (g_queue.length) job = g_queue.shift();
+                else if (g_dispatchStop) break;                                              /* 已入队的发完才退 */
+                else g_queueCond.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS);     /* 等 signal；超时只是兜底 */
+            } finally { g_queueLock.unlock(); }
             if (job) {
                 try { job.cb(job.h); } catch (e) { warn("回调出错：" + e); }
-                continue;
             }
-            if (g_dispatchStop) break;   /* 已入队的发完才退 */
-            sleep(5);                    /* 空队列让位（与读线程 sleep(10) 同一风格，别忙等） */
         }
     } finally { g_dispatchRunning = false; }
 }
-/* 入队（取代原来的 fire()）：只入队，**绝不** threads.start —— 每条事件起一条线程会
- * 线程风暴且不保序（up 可能被 move 压后）。串行语义见上面的队列注释。 */
+/* 合并判据（**必须在 g_queueLock 里调**：只读数组、不做任何 I/O）：
+ * 从队尾往前找同一 (回调, 区域, 槽) 的那一条 —— 找到的是 move 就原位覆盖并返回 1；
+ * 找到的是简报（enter/exit/down/up）说明中间隔着事件，**不许跨过去合并**（返回 0，照常入队）。
+ * 键：区域事件 = cb + h.id + h.slot；物理流事件 = cb + h.slot（phys_ev 没有 id 字段）。
+ * 把 cb 算进键是为了**多订阅者隔离**：两个 handler 订同一个区域时，各自拿到自己的那条 move。 */
+function mergeMove(h, cb) {
+    var key = (h.id === undefined ? "" : h.id) + "|" + h.slot, q, i;
+    for (i = g_queue.length - 1; i >= 0; i--) {
+        q = g_queue[i];
+        if (q.cb !== cb || !q.h) continue;
+        if (((q.h.id === undefined ? "" : q.h.id) + "|" + q.h.slot) !== key) continue;
+        if (q.h.ev !== "move") return 0;      /* 中间隔了简报 → 不许跨过去合并（顺序会错） */
+        q.h = h;                              /* 原地替换：位置不变（顺序不变），数据是最新的 */
+        return 1;
+    }
+    return 0;
+}
+/* 入队（取代原来的 fire()）：只入队，**绝不** threads.start —— 每条事件起一条线程会线程风暴且不保序。
+ * 简报逐条入队；move 先试合并（见 mergeMove）⇒ 队列不再有「满了丢」这条路径。
+ * 所有提示/日志一律**在锁外**、且用 log（不是 toastLog —— AutoJs6 的 Toast 要回主线程弹并同步
+ * 等待，攥着 g_queueLock 弹就会把读线程一起停住，那是「越堵越堵」的正反馈）。 */
 function offer(h, cb) {
-    var start = false, isMove = !!(h && h.ev === "move"), take = true;
+    var start = false, note = null, now;
     g_queueLock.lock();
     try {
-        if (g_queue.length >= Q_CAP) {
-            /* 队列满 —— 取舍：move 静默丢；非 move 优先牺牲队里**最早的一条 move** 腾位置，
-             * 只有队里一条 move 都没有时才丢这条新事件（这样 down/up 进得去、配对不断）。
-             * 每来一条满队列事件计数 +1（丢的是这条新事件，或那条被牺牲的 move）。 */
+        if (h && h.ev === "move" && mergeMove(h, cb)) return true;   /* 合并成功：不占新格子 */
+        if (g_queue.length >= Q_HARD) {                              /* 兜底：结构上不该发生 */
+            g_queue.shift();
             g_queueDropped++;
-            take = false;
-            if (!isMove) {
-                var vi = -1, i;
-                for (i = 0; i < g_queue.length; i++) {
-                    if (g_queue[i].h && g_queue[i].h.ev === "move") { vi = i; break; }  /* 最早的一条 move */
-                }
-                if (vi >= 0) { g_queue.splice(vi, 1); take = true; }                    /* 牺牲它，保住这条非 move */
-                var now = Date.now();                                                   /* 非 move 才提示（move 静默丢） */
-                if (now - g_lastDropWarn >= 1000) {
-                    g_lastDropWarn = now;
-                    warn("事件队列已满（" + Q_CAP + "），丢弃 " + g_queueDropped + " 条");
-                }
+            now = Date.now();
+            if (now - g_lastDropWarn >= 1000) {
+                g_lastDropWarn = now;
+                note = "事件积压超过兜底上限（" + Q_HARD + "）—— 丢弃最旧一条，累计 " + g_queueDropped + " 条";
             }
-            if (!take) return false;
+        } else if (g_queue.length >= Q_SOFT) {                       /* 只诊断：回调太慢，延迟在涨 */
+            now = Date.now();
+            if (now - g_lastDropWarn >= 1000) {
+                g_lastDropWarn = now;
+                note = "事件积压 " + g_queue.length + " 条（回调太慢：回调里别 sleep/注入，长活请 threads.start）";
+            }
         }
         g_queue.push({ cb: cb, h: h });
+        /* 唤醒可能在 await 的派发线程：push 与 signal 在同一把锁里 ⇒ 不会丢唤醒。
+         * 合并路径提前 return、不 signal 也是安全的：能合并说明队里已有格子 ⇒ 派发线程要么正在处理、
+         * 要么已被上一次 signal 唤醒，此时没有等待者。 */
+        g_queueCond.signal();
         if (!g_dispatchRunning) { g_dispatchRunning = true; g_dispatchStop = false; start = true; }
     } finally { g_queueLock.unlock(); }
+    if (note) say(note);
     if (start) threads.start(dispatchLoop);
     return true;
 }
@@ -689,10 +726,15 @@ function startReader() {
                     try { g_regionHandlers = []; g_touchHandlers = []; } finally { g_handlersLock.unlock(); }
                 } catch (e) {}
                 /* 让分发线程「把已入队的发完就退」，不留空转线程。注意：**下面掉线档那句 exit() 不会
-                 * 等它** —— exit() 当场结束整个脚本，队列里还没轮到的（最多 Q_CAP=256 条）事件就
-                 * 永远发不出去了。要「尾部事件也发完」就不能在这条路上 exit()（这行本身只表达
-                 * 「分发线程不空转」，不是「队列一定发得完」）。 */
-                try { g_dispatchStop = true; } catch (e) {}
+                 * 等它** —— exit() 当场结束整个脚本，队列里还没轮到的那些（简报 + 每 (区域/槽) 一条
+                 * move）就永远发不出去了。要「尾部事件也发完」就不能在这条路上 exit()（这行本身只表达
+                 * 「分发线程不空转」，不是「队列一定发得完」）。
+                 * 置位**要持锁 + signal**：等待中的派发线程正在 `await()`，不唤醒它就得等满 1000ms 超时
+                 * （signal 必须在持锁时调，否则抛 IllegalMonitorStateException）。 */
+                try {
+                    g_queueLock.lock();
+                    try { g_dispatchStop = true; g_queueCond.signal(); } finally { g_queueLock.unlock(); }
+                } catch (e) {}
                 /* **最后**一步：上面的清理都做完了才结束脚本（放在前面会把收尾砍掉一半）。
                  * closing 为真 = 是我们自己要收尾，不替脚本决定结束（理由见上面的注释块）；
                  * 掉线档调它 = 丢弃队列里剩下的事件、当场结束脚本（见上一段的取舍）。 */

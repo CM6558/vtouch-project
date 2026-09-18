@@ -212,14 +212,122 @@ static volatile int g_rot = 0;        /* 0/1/2/3：Java 线程写、poll 线程�
 static volatile int g_scr_w = 0, g_scr_h = 0;  /* 当前方向屏幕尺寸（= 图层 buffer 尺寸） */
 static volatile long g_rot_settle_t = 0;       /* 转屏后「不吞触摸」的稳定窗口截止时刻 */
 static int g_pan_moved = 0;           /* 用户拖过面板：换方向时不再自动回右上角 */
-static void p2c(int x, int y, int *ox, int *oy)      /* 竖屏逻辑 → 当前屏 */
+static void p2c_rot(int r, int x, int y, int *ox, int *oy)   /* 竖屏逻辑 → 指定方向的屏坐标 */
 {
-    switch (g_rot) {
+    switch (r) {
     case 1:  *ox = y;           *oy = g_w - 1 - x; break;
     case 3:  *ox = g_h - 1 - y; *oy = x;           break;
     case 2:  *ox = g_w - 1 - x; *oy = g_h - 1 - y; break;
     default: *ox = x;           *oy = y;           break;
     }
+}
+static void p2c(int x, int y, int *ox, int *oy)      /* 竖屏逻辑 → 当前屏 */
+{
+    p2c_rot(g_rot, x, y, ox, oy);
+}
+static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的屏坐标 → 竖屏逻辑（p2c_rot 的逆） */
+{
+    switch (r) {
+    case 1:  *ox = g_w - 1 - y; *oy = x;           break;
+    case 3:  *ox = y;           *oy = g_h - 1 - x; break;
+    case 2:  *ox = g_w - 1 - x; *oy = g_h - 1 - y; break;
+    default: *ox = x;           *oy = y;           break;
+    }
+}
+
+/* ---- 区域跟随屏幕方向（用户口径）------------------------------------------------
+ * 「区域在屏幕上看到的位置不随转屏改变」：右下角的区域，哪个方向都显示在右下角；
+ * 尺寸按**屏上的像素**不缩放（圆圈半径、按钮大小不变）；越出屏幕不裁剪（屏外部分自然看不到）。
+ *
+ * 实现：不改核心、不改协议、不轮询（面板本来就由 Java 的 DisplayListener 事件驱动）。转屏时把每条
+ * 区域的**屏坐标位置**保持不变，换算回竖屏坐标写回核心 —— 核心照旧用竖屏几何判定，于是「手指碰哪块」
+ * 与「屏幕上看到哪块」同时跟着新方向走。
+ * 节奏：**每帧一条**。编辑邮箱是单槽覆盖式，连投多条会互相覆盖（本项目实测丢 2/3），所以按帧切片，
+ * 3 条区域 ≈ 3 帧（~50ms），32 条 ≈ 0.5s 渐进完成，渲染线程一秒都不卡。
+ * 关闭：环境变量 VTOUCH_REGION_ROT=off（回到旧的「区域粘在玻璃上」）。 */
+static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
+static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
+static int g_rr_off = -1;
+/* 把一条区域的竖屏几何映射成「当前屏」下的竖屏几何（位置按比例、尺寸不变、起点钳进表允许范围） */
+static int region_rot_map(int type, int a1, int a2, int a3, int a4, int *o1, int *o2, int *o3, int *o4)
+{
+    int x1, y1, x2, y2, cxf, cyf, hwf, hhf, nx, ny, t;
+    if (g_rr_base_w <= 0 || g_rr_base_h <= 0 || g_scr_w <= 0 || g_scr_h <= 0) return -1;
+    if (type == 1) {                     /* 圆：只搬圆心，半径不变（p2c/c2p 都是等距映射 ⇒ 半径同值） */
+        p2c_rot(g_rr_base_rot, a1, a2, &x1, &y1);
+        nx = (int)((double)x1 * g_scr_w / g_rr_base_w + 0.5);
+        ny = (int)((double)y1 * g_scr_h / g_rr_base_h + 0.5);
+        c2p_rot(g_rot, nx, ny, o1, o2);
+        *o3 = (a3 > 0) ? a3 : 1; *o4 = 0;
+    } else {                             /* 矩形：中心按比例搬，屏上的宽高（像素）不变 */
+        p2c_rot(g_rr_base_rot, a1, a2, &x1, &y1);
+        p2c_rot(g_rr_base_rot, a3, a4, &x2, &y2);
+        if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
+        if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
+        cxf = (x1 + x2) / 2; cyf = (y1 + y2) / 2;
+        hwf = (x2 - x1) / 2; hhf = (y2 - y1) / 2;
+        nx = (int)((double)cxf * g_scr_w / g_rr_base_w + 0.5);
+        ny = (int)((double)cyf * g_scr_h / g_rr_base_h + 0.5);
+        c2p_rot(g_rot, nx - hwf, ny - hhf, &x1, &y1);
+        c2p_rot(g_rot, nx + hwf, ny + hhf, &x2, &y2);
+        *o1 = x1 < x2 ? x1 : x2; *o2 = y1 < y2 ? y1 : y2;
+        *o3 = x1 < x2 ? x2 : x1; *o4 = y1 < y2 ? y2 : y1;
+    }
+    /* 只在「核心会拒」时做最小钳制：它要求起点（圆心/矩形最小角）落在竖屏范围内、尺寸非负。
+     * 越界显示是允许的（用户口径），所以这里不裁剪、只挪起点。 */
+    if (*o1 < 0) *o1 = 0;
+    if (*o2 < 0) *o2 = 0;
+    if (*o1 > g_w - 1) *o1 = g_w - 1;
+    if (*o2 > g_h - 1) *o2 = g_h - 1;
+    if (type == 1) { if (*o3 < 1) *o3 = 1; }
+    else { if (*o3 < *o1) *o3 = *o1; if (*o4 < *o2) *o4 = *o2; }
+    return 0;
+}
+/* 显示状态变了：与「区域几何对应的屏」不一致 → 开一批重算（首批只记基准，不动表） */
+static void region_rot_begin(void)
+{
+    if (g_rr_off < 0) {
+        const char *v = getenv("VTOUCH_REGION_ROT");
+        g_rr_off = (v && !strcmp(v, "off")) ? 1 : 0;
+        if (g_rr_off) ALOGI("区域跟随旋转：关闭（VTOUCH_REGION_ROT=off）");
+    }
+    if (g_rr_off || g_scr_w <= 0 || g_scr_h <= 0) return;
+    if (g_rr_base_w <= 0) {
+        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
+        return;
+    }
+    if (g_rr_active) return;              /* 批次进行中：目标读实时值，收尾时会自动再开一批 */
+    if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
+    g_rr_n = vtouch_region_count(); g_rr_i = 0; g_rr_fail = 0;
+    if (g_rr_n <= 0) {
+        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
+        return;
+    }
+    g_rr_active = 1;
+    ALOGI("区域跟随旋转：屏 %dx%d rot%d → %dx%d rot%d，重算 %d 条（每帧一条）",
+          g_rr_base_w, g_rr_base_h, g_rr_base_rot, g_scr_w, g_scr_h, g_rot, g_rr_n);
+}
+/* 每帧一条：算出新几何就写回核心（同 id 原地更新，不等回执） */
+static void region_rot_step(void)
+{
+    char id[16];
+    int type, a1, a2, a3, a4, en, n1, n2, n3, n4;
+    if (!g_rr_active) return;
+    if (g_rr_i >= g_rr_n) {
+        g_rr_active = 0;
+        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
+        g_rr_done++;
+        ui_region_changed();              /* 几何变了：置落盘 + 重画 */
+        ALOGI("区域跟随旋转：第 %d 批完成（失败 %d 条）", g_rr_done, g_rr_fail);
+        region_rot_begin();               /* 批次期间又转过 → 立刻补一批 */
+        return;
+    }
+    if (vtouch_get_region(g_rr_i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) == 0 &&
+        region_rot_map(type, a1, a2, a3, a4, &n1, &n2, &n3, &n4) == 0 &&
+        (n1 != a1 || n2 != a2 || n3 != a3 || n4 != a4)) {
+        if (vtouch_region_add(id, type, n1, n2, n3, n4, en) != 0) g_rr_fail++;
+    }
+    g_rr_i++;
 }
 /* 显示方向/尺寸变化（Java 轮询到就调，随后会再送一个新 Surface）：
  * 面板按新屏重新落位（没被拖过就回右上角，同 nativeInit 公式）、强制连画几帧。 */
@@ -244,6 +352,7 @@ static void on_display(int w, int h, int rot)
     g_force_frames = 4;
     g_need = 1;
     if (changed) ALOGI("display %dx%d rot=%d (竖屏逻辑 %dx%d)", w, h, rot, g_w, g_h);
+    region_rot_begin();   /* 区域跟随当前方向：与「区域几何对应的屏」不一致就开一批重算 */
 }
 
 /* 瞬态视觉 */
@@ -1790,6 +1899,7 @@ static void *render_thread_fn(void *)
             ALOGI("surface swapped t=+%.0fms", (double)t_since_start());
         }
         snapshot_touches();
+        region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
         int need_draw = g_need;   /* 显式请求的重画：不被下面的静止门吞掉 */
         go = g_need || g_ov_need;
         if (g_force_frames > 0) go = 1;
