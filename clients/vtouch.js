@@ -31,6 +31,8 @@
  * 两条推送（都是单向；回调跑在子线程，h 里都带 t = **事件发生的墙钟毫秒**，与 Date.now() 同基准）：
  *   vt.onRegion([id,] [事件,] cb)   区域事件 down/enter/move/exit/up —— **按区域过滤**：手指滑出
  *                                   区域后就只剩一个 exit 了，所以要「追手指」得用下面这条。
+ *   vt.onRegionPress([id,] [选项,] cb)  **一次完整按压 = 一次回调**（推荐）：区域内按下 → 同一手指抬起，
+ *                                   回调恰好一次、跑在独立线程（里面可以直接 sleep/注入）；选项 {insideUp:true} 要求抬起仍在区域内
  *   vt.onTouch([slot,] cb [, 事件])  **物理触摸流**：按槽订阅（只发你订的那根手指），不按区域过滤；
  *                                   **默认只报 down/up**；要轨迹写 "down,move,up" 或 "*"
  *                                   （move 是实测 97% 的行量，默认开着等于白烧 CPU）；
@@ -1000,6 +1002,62 @@ function onTouch(a, b, c) {
     }
     return { stop: function () { dropHandler(g_touchHandlers, H); } };
 }
+/* onRegionPress([区域id,] [选项,] 回调)：**一次完整按压 = 一次回调**（推荐用它，别再手搓 onRegion+onTouch）。
+ *
+ * 语义：手指在区域内**按下** → 同一根手指**抬起** → 回调**恰好一次**（选项 {insideUp:true} 要求抬起时仍在区域内）。
+ * 回调收到 g = { id, slot, down:{x,y,t}, up:{x,y,t}, ms }；回调在**独立线程**里跑
+ * ⇒ 里面可以放心 sleep / 注入，不会堵住事件分发，也不会把后面的事件挤进队列。
+ *
+ * 脚本不用管的四件事（都在这里做掉）：① 只跟"本次按压"（按槽建追踪，抬起即摘）；
+ * ② 一次性关闭（队列里排队的旧 up 不再重复触发）；③ 先摘 handler 再干慢活（不会被新 up 追上）；
+ * ④ 慢活自动丢到后台线程。stop() 会连**尚未抬起的**追踪一起收掉。
+ *
+ * 用法：
+ *   var h = vt.onRegionPress("s3", function (g) {
+ *       log("按压 " + g.ms + "ms，抬起于 " + g.up.x + "," + g.up.y);
+ *       sleep(2300);                       // 直接写慢活，不用 threads.start
+ *       vt.finger().tap(151, 2251);
+ *   });
+ *   h.stop();                              // 不想要了就停
+ */
+function onRegionPress(a, b, c) {
+    var id = null, opt = {}, cb, open = [], outer;
+    if (typeof a === "function") cb = a;
+    else if (typeof b === "function") { id = a; cb = b; }
+    else { id = a; opt = b || {}; cb = c; }
+    if (typeof cb !== "function") throw new Error("onRegionPress 需要回调函数");
+    function inner(h) {
+        var g = { id: h.id, slot: h.slot, down: { x: h.x, y: h.y, t: h.t }, up: null, ms: 0, closed: false, handle: null };
+        open.push(g);
+        function finish(e) {
+            if (g.closed) return;                              /* ② 一次性：队列里旧 up 直接忽略 */
+            g.closed = true;
+            if (g.handle) g.handle.stop();                     /* ③ 先摘自己，再干慢活 */
+            var k = open.indexOf(g); if (k >= 0) open.splice(k, 1);
+            g.up = { x: e.x, y: e.y, t: e.t };
+            g.ms = (e.t || 0) - (h.t || 0);
+            threads.start(function () {                        /* ④ 慢活丢后台：不堵分发线程 */
+                try { cb(g); } catch (err) { warn("onRegionPress 回调出错：" + err); }
+            });
+        }
+        if (opt.insideUp) {
+            /* 要求"抬起时仍在区域内"：直接用区域自己的 up（它的语义就是抬起时此刻在区域内），不必算几何 */
+            g.handle = onRegion(h.id, "up", function (u) { if (u.slot === h.slot) finish(u); });
+        } else {
+            /* 默认：跟同一根手指到抬起，**不要求**还在区域内（滑出去也算这次按压的收尾） */
+            g.handle = onTouch(h.slot, function (e) { if (e.ev === "up") finish(e); });
+        }
+        return g;
+    }
+    outer = onRegion(id, "down", inner);
+    return {
+        stop: function () {
+            outer.stop();
+            for (var i = 0; i < open.length; i++) if (open[i].handle) open[i].handle.stop();
+            open = [];
+        }
+    };
+}
 /* follow(slot, cb [, 事件])：只跟一根手指的便捷写法（等价 onTouch(slot, cb, 事件)）。
  * 要轨迹别忘了第三个参数："down,move,up"。 */
 function follow(slot, cb, evs) { return onTouch(slot, cb, evs); }
@@ -1009,5 +1067,6 @@ module.exports = {
     keepRunning: keepRunning, startedByUs: startedByUs,
     connect: connect, finger: finger, frame: frame, res: res,
     onRegion: onRegion, listRegions: listRegions, onTouch: onTouch, follow: follow,
+    onRegionPress: onRegionPress,
     BIN: BIN, HOST: HOST, PORT: PORT
 };
