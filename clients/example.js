@@ -14,6 +14,8 @@
  *     .down(x,y) .move(x,y) .up() .tap(x,y[,ms]) .swipe(x1,y1,x2,y2[,ms])
  *   vt.frame([{slot,state,x,y}...])   多指合并进同一帧（state = down/move/up）
  *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y,t}
+ *   vt.onRegionPress([id,] [选项,] 回调) **一次完整按压 = 一次回调**（推荐）：区域内按下 → 同一手指抬起，
+ *                                     回调恰好一次、跑在独立线程（里面可直接 sleep/注入）；返回 { stop }
  *   vt.onTouch([slot,] 回调 [, 事件])  **物理触摸流**：按槽订阅、不按区域过滤，按下→抬起一路跟；
  *                                     **默认只报 down/up**，要移动轨迹写 "down,move,up"；
  *                                     事件**默认带时间戳** h.t（核心采集的时刻），要省流量写 "nots"；
@@ -51,7 +53,7 @@ vt.frame([                                                  // 同一帧抬起
  * move 是「状态」不是消息：同一 (区域, 手指) 只保留**最新一条**（后到的原地覆盖），别指望每条采样都送到。 */
 /* ev 语义：down = 按下就命中；enter/exit = 跨越边界；move = 区内移动且位置变了；
  *          up = 抬起时此刻在区域内（从区域外滑进来再抬起也算，配 enter 用）。 */
-var REGION_ID = "c1";                                       // ← 面板卡片上的那个 id
+var REGION_ID = "s3";                                       // ← 面板卡片上的那个 id（你的面板里是 s1/s2/s3）
 var downAt = null;                                          // 记一下按下时刻，用来算按压时长
 var handle = vt.onRegion(REGION_ID, function (h) {           // 省略事件 = down/up/enter/exit（不含 move）
     /* h.t = 事件发生的墙钟毫秒（跟 Date.now() 同基准）。注意是**手指那一刻**的时间，
@@ -74,30 +76,21 @@ var handle = vt.onRegion(REGION_ID, function (h) {           // 省略事件 = d
  * 想停监听又不关面板：handle.stop();
  */
 
-/* ---------- 3.5 追踪一根手指：按下在区域内 → 一路跟到抬起 ---------- */
-/* 区域事件只覆盖"区域内"：手指一旦滑出去，区域流就只剩一个 exit，后面没有 move 了。
- * 要跟着这根手指走，用**物理触摸流** onTouch —— 它按 slot 报 down/move/up，不受区域限制。 */
-var tracked = null;
-var watch = vt.onRegion(REGION_ID, "down", function (h) {     // 和上面的订阅并存，互不干扰
-    if (tracked) tracked.handle.stop();                       // 只跟最新那根（要多根就各个存一份）
-    var t = { slot: h.slot, handle: null, n: 1 };
-    tracked = t;
-    log("开始追踪 slot" + h.slot + "（从 " + h.x + "," + h.y + " 起）");
-    t.handle = vt.onTouch(h.slot, function (e) {               // 只跟这根手指
-        t.n++;
-        if (e.ev === "up") {
-            log("追踪结束：沿途 " + t.n + " 个点，终点 " + e.x + "," + e.y
-                + "，历时 " + (e.t - h.t) + " ms");
-            /* 回调里可以直接 sleep + 再注入（长按、连点都行）：按住抬起后停 2.3 秒再点两下。
-             * 注意分发是**串行**的 —— 这段时间里后面的事件会排队等，要紧的收尾请自己 threads.start。 */
-            sleep(2300);
-            vt.finger().tap(151, 2251);
-            vt.finger().tap(149, 2001);
-            t.handle.stop();
-            if (tracked === t) tracked = null;
-        }
-    });
+/* ---------- 3.5 一次完整按压 = 一次回调（推荐：onRegionPress） ---------- */
+/* 需求原型：手指在区域内按下 → **同一根手指抬起**（滑出区域也算这次按压的收尾）→ 做一次动作。
+ * onRegionPress 把「只跟本次按压 / 一次性（队列里排队的旧 up 不再触发）/ 先摘 handler 再干慢活 /
+ * 慢活丢后台线程」四件事都收进 SDK；回调跑在**独立线程**，所以里面可以直接 sleep、直接注入，
+ * 不会堵住事件分发，也不会因为慢动作被重复触发（手搓 onRegion+onTouch 时这几条都得自己记）。
+ *   要求"抬起时仍必须在区域内"：vt.onRegionPress(REGION_ID, { insideUp: true }, cb)
+ *   需要低层控制（自己管槽位/事件类型/物理流）：仍可用 vt.onRegion(…) + vt.onTouch(…) 组合。 */
+var press = vt.onRegionPress(REGION_ID, function (g) {
+    log("完整按压：slot" + g.slot + " 从 " + g.down.x + "," + g.down.y
+        + " 抬到 " + g.up.x + "," + g.up.y + "，历时 " + g.ms + " ms");
+    sleep(2300);                                   // 慢活直接写（回调本来就在独立线程里）
+    vt.finger().tap(151, 2251);                    // ← 换成你要点的坐标
+    vt.finger().tap(149, 2001);
 });
+// press.stop();                                   // 不要了就停（还没抬起的追踪也一起收掉）
 
 /* ---------- 4. 生命周期（默认已经替你管好了，这里只是把开关列出来） ---------- */
 // vt.keepRunning(true);   // 脚本退出时不要停核心（长驻、别的脚本还要用）
