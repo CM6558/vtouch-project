@@ -247,6 +247,16 @@ static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的�
  * 关闭：环境变量 VTOUCH_REGION_ROT=off（回到旧的「区域粘在玻璃上」）。 */
 static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
 static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
+/* 批次状态机（评审 2026-09-18 修）：批首**锁存目标帧**并对整表**快照**，批内一律从快照重算。
+ * 为什么必须这样：旧实现批内读活表、目标帧取当帧 ⇒ ①批中转屏（含转回）会把前半批映射到中间帧、
+ * 后半批到最终帧，收尾只把基准记成最终帧 ⇒ 前半批永久错位**且随 #frame 落盘**（重启不自愈）；
+ * ②批内写回失败/删除条目时按索引推进会漏算或错位。快照 + 按 id 定位 + 失败重跑，三条一起封住。 */
+/* 快照容量：与核心侧 MAX_REGIONS（src/vt_internal.h:56）对齐 —— 面板不 include 核心头，这里独立定义。 */
+#define RR_MAX_SNAP 32
+static int g_rr_tgt_rot = 0, g_rr_tgt_w = 0, g_rr_tgt_h = 0;      /* 本批锁存的目标屏帧 */
+static int g_rr_retry = 0;                                        /* 本批已重跑次数（上限 2） */
+struct rr_snap { char id[16]; int type, a1, a2, a3, a4, en; };
+static struct rr_snap g_rr_snap[RR_MAX_SNAP];                     /* 批首快照（id + 几何 + en） */
 static int g_rr_off = -1;
 static int g_rr_insane = 0;               /* 见过的「不自洽屏帧」次数（只用于限频日志） */
 static int g_rr_env = -1;                 /* VTOUCH_REGION_BASE 是否已读 */
@@ -339,25 +349,52 @@ static void region_rot_step(void)
     if (g_rr_base_w <= 0) { g_rr_base_rot = 0; g_rr_base_w = g_w; g_rr_base_h = g_h; }  /* 基准 = 竖屏帧 */
     if (!g_rr_active) {
         if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
+        int si;
         n = vtouch_region_count();
         if (n <= 0) return;                            /* 表还空 → 基准保持竖屏，等有区域再转 */
-        g_rr_n = n; g_rr_i = 0; g_rr_fail = 0; g_rr_active = 1;
-        ALOGI("区域跟随旋转：屏 %dx%d rot%d → %dx%d rot%d，重算 %d 条（每帧一条）",
-              g_rr_base_w, g_rr_base_h, g_rr_base_rot, g_scr_w, g_scr_h, g_rot, g_rr_n);
+        if (n > RR_MAX_SNAP) n = RR_MAX_SNAP;          /* 核心表上限就是 RR_MAX_SNAP */
+        /* 批首：① 锁存目标帧（批内不再看当帧）② 整表快照（id + 几何 + en）。
+         * 之后一律从快照取源、按 id 在活表里定位 —— 批中转屏/删除/改名都不会让条目错位或二次换算。 */
+        for (si = 0; si < n; si++) {
+            if (vtouch_get_region(si, g_rr_snap[si].id, sizeof g_rr_snap[si].id, &g_rr_snap[si].type,
+                                  &g_rr_snap[si].a1, &g_rr_snap[si].a2, &g_rr_snap[si].a3,
+                                  &g_rr_snap[si].a4, &g_rr_snap[si].en) != 0) g_rr_snap[si].id[0] = 0;
+        }
+        g_rr_n = n; g_rr_i = 0; g_rr_fail = 0; g_rr_retry = 0; g_rr_active = 1;
+        g_rr_tgt_rot = g_rot; g_rr_tgt_w = g_scr_w; g_rr_tgt_h = g_scr_h;
+        ALOGI("区域跟随旋转：屏 %dx%d rot%d → %dx%d rot%d，重算 %d 条（每帧一条，目标帧已锁存）",
+              g_rr_base_w, g_rr_base_h, g_rr_base_rot, g_rr_tgt_w, g_rr_tgt_h, g_rr_tgt_rot, g_rr_n);
     }
-    if (g_rr_i >= g_rr_n) {                /* 收尾：基准挪到当前屏 */
+    if (g_rr_i >= g_rr_n) {                /* 收尾 */
+        if (g_rr_fail > 0 && g_rr_retry < 2) {
+            g_rr_retry++; g_rr_i = 0; g_rr_fail = 0;
+            ALOGW("区域跟随旋转：本批有写回失败 → 用批首快照重跑（第 %d 次）", g_rr_retry);
+            return;                        /* 基准不推进：表里还有条目停在旧屏 */
+        }
+        if (g_rr_fail > 0)
+            ALOGW("区域跟随旋转：重跑后仍有 %d 条写回失败（这些条目停在旧屏，下次转屏会再算一次）", g_rr_fail);
         g_rr_active = 0;
-        g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
+        /* 基准 = **锁存的目标帧**（不是当帧）：若批中又转过，下一帧 base≠当前屏 ⇒ 自动开新批补算 */
+        g_rr_base_rot = g_rr_tgt_rot; g_rr_base_w = g_rr_tgt_w; g_rr_base_h = g_rr_tgt_h;
         g_rr_done++;
         ui_region_changed();               /* 几何变了：置落盘 + 重画 */
         ALOGI("区域跟随旋转：第 %d 批完成（失败 %d 条）", g_rr_done, g_rr_fail);
         return;
     }
-    if (vtouch_get_region(g_rr_i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) == 0 &&
-        region_rot_map(g_rr_base_rot, g_rr_base_w, g_rr_base_h, g_rot, g_scr_w, g_scr_h,
-                       type, a1, a2, a3, a4, &n1, &n2, &n3, &n4) == 0 &&
-        (n1 != a1 || n2 != a2 || n3 != a3 || n4 != a4)) {
-        if (vtouch_region_add(id, type, n1, n2, n3, n4, en) != 0) g_rr_fail++;
+    if (g_rr_snap[g_rr_i].id[0]) {
+        int j, ln = vtouch_region_count(), live = -1, lt, l1, l2, l3, l4, len;
+        for (j = 0; j < ln; j++) {         /* 按 id 定位活表条目（索引会因删除左移，不能按索引认） */
+            if (vtouch_get_region(j, id, sizeof id, &lt, &l1, &l2, &l3, &l4, &len) == 0 &&
+                !strcmp(id, g_rr_snap[g_rr_i].id)) { live = j; break; }
+        }
+        if (live >= 0 &&
+            region_rot_map(g_rr_base_rot, g_rr_base_w, g_rr_base_h, g_rr_tgt_rot, g_rr_tgt_w, g_rr_tgt_h,
+                           g_rr_snap[g_rr_i].type, g_rr_snap[g_rr_i].a1, g_rr_snap[g_rr_i].a2,
+                           g_rr_snap[g_rr_i].a3, g_rr_snap[g_rr_i].a4, &n1, &n2, &n3, &n4) == 0 &&
+            (n1 != l1 || n2 != l2 || n3 != l3 || n4 != l4)) {   /* 与活值比 ⇒ 重跑幂等（已算好的跳过） */
+            if (vtouch_region_add(g_rr_snap[g_rr_i].id, g_rr_snap[g_rr_i].type, n1, n2, n3, n4,
+                                  g_rr_snap[g_rr_i].en) != 0) g_rr_fail++;
+        }
     }
     g_rr_i++;
 }

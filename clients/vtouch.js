@@ -284,14 +284,18 @@ function attach(conn) {
             var n = data.length, i;
             var m = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 4);
             conn.mask.nextBytes(m);
-            var h = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n < 126 ? 2 : 4);
-            h[0] = jb(0x81);
-            if (n < 126) h[1] = jb(0x80 | n);
-            else { h[1] = jb(0x80 | 126); h[2] = jb(n >> 8); h[3] = jb(n); }
-            conn.out.write(h); conn.out.write(m);
-            var masked = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n);
-            for (i = 0; i < n; i++) masked[i] = jb(data[i] ^ m[i & 3]);
-            conn.out.write(masked);
+            var hl = (n < 126) ? 2 : 4;
+            /* 一次写：帧头 + 掩码 + 正文拼成一个数组再 write。
+             * 旧实现 write(h) + write(m) + write(masked) = 3 次系统调用，而两端都开了 TCP_NODELAY
+             * （clients/vtouch.js 的 setTcpNoDelay / src/vtouchd.c 的 TCP_NODELAY）⇒ 每条命令 3 个 TCP 段。
+             * 注入风暴时（每秒上千条命令）这就是每秒几千个包 + 三次唤醒对端。 */
+            var f = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, hl + 4 + n);
+            f[0] = jb(0x81);
+            if (n < 126) f[1] = jb(0x80 | n);
+            else { f[1] = jb(0x80 | 126); f[2] = jb(n >> 8); f[3] = jb(n); }
+            for (i = 0; i < 4; i++) f[hl + i] = m[i];
+            for (i = 0; i < n; i++) f[hl + 4 + i] = jb(data[i] ^ m[i & 3]);
+            conn.out.write(f);
             conn.out.flush();
         } finally { SEND_LOCK.unlock(); }
     };
@@ -326,9 +330,14 @@ function attach(conn) {
         if (len === 126) { var e = readFullTolerant(conn.ins, 2, dl); len = ((e[0] & 255) << 8) | (e[1] & 255); }
         else if (len === 127) throw new Error("帧过大");
         if ((b0 & 15) === 8) { try { conn.sock.close(); } catch (e2) {} throw new Error("服务端关闭"); }
-        var p = readFullTolerant(conn.ins, len, dl), cs = [];
-        for (i = 0; i < len; i++) cs.push(String.fromCharCode(p[i] & 255));
-        return decodeURIComponent(escape(cs.join("")));
+        var p = readFullTolerant(conn.ins, len, dl);
+        /* 一行一次「Java 侧解码」（评审 2026-09-18）：旧实现逐字节 fromCharCode 建数组、再 escape、
+         * 再 decodeURIComponent —— 三段整串复制 + N 次单字符分配，是 Rhino 读路径的最大头。
+         * 这里一次调用拿到字符串：ASCII（核心发的行全是）行为完全一致；非法 UTF-8 旧实现会 throw
+         * （被当掉线收尾），新实现按 Java 规则替换成 U+FFFD —— 更宽容，不影响正常路径。 */
+        return new java.lang.String(p, 0, len, "UTF-8").toString();   /* 必须 .toString()：否则返回 Java
+                                                                      * String 对象（真机探针实测 typeof=object、
+                                                                      * .length 是方法），调用方会走 Java 互操作。 */
     };
     conn.drain = function () {
         if (g_reader) return;             /* 读线程在跑时别自己读：抢帧会丢事件、还会把帧读散 */
@@ -518,7 +527,9 @@ var g_queueLock = threads.lock();
  * 判据脚本见 build/_dev/vt_cond_probe.js（探针输出：T1 超时 201ms、T2 signal 300ms 唤醒、T3 等待期取锁成功）。 */
 var g_queueCond = g_queueLock.newCondition();
 var g_queueDropped = 0;           /* 兜底丢弃条数（正常恒为 0：简报不丢、move 合并） */
+var g_queueBriefDropped = 0;      /* 其中**简报**被丢的条数（优先牺牲 move，正常恒为 0） */
 var g_lastDropWarn = 0;           /* 上次积压/丢弃日志的墙钟毫秒（限频用） */
+var g_lastErrWarn = 0;            /* 上次「核心拒绝命令」提示的墙钟毫秒（限频用） */
 var g_dispatchRunning = false;    /* 分发线程在跑吗 */
 var g_dispatchStop = false;       /* 让分发线程退出（掉线收尾置位） */
 
@@ -549,11 +560,12 @@ function dispatchLoop() {
  * 键：区域事件 = cb + h.id + h.slot；物理流事件 = cb + h.slot（phys_ev 没有 id 字段）。
  * 把 cb 算进键是为了**多订阅者隔离**：两个 handler 订同一个区域时，各自拿到自己的那条 move。 */
 function mergeMove(h, cb) {
-    var key = (h.id === undefined ? "" : h.id) + "|" + h.slot, q, i;
+    var q, i;
     for (i = g_queue.length - 1; i >= 0; i--) {
         q = g_queue[i];
         if (q.cb !== cb || !q.h) continue;
-        if (((q.h.id === undefined ? "" : q.h.id) + "|" + q.h.slot) !== key) continue;
+        if (q.h.slot !== h.slot) continue;
+        if ((q.h.id === undefined ? "" : q.h.id) !== (h.id === undefined ? "" : h.id)) continue;
         if (q.h.ev !== "move") return 0;      /* 中间隔了简报 → 不许跨过去合并（顺序会错） */
         q.h = h;                              /* 原地替换：位置不变（顺序不变），数据是最新的 */
         return 1;
@@ -570,12 +582,20 @@ function offer(h, cb) {
     try {
         if (h && h.ev === "move" && mergeMove(h, cb)) return true;   /* 合并成功：不占新格子 */
         if (g_queue.length >= Q_HARD) {                              /* 兜底：结构上不该发生 */
-            g_queue.shift();
+            /* 优先级（评审 2026-09-18 修：旧实现在这里无条件丢队首，可能丢简报，与「简报逐条不丢」相悖）：
+             * 先牺牲**队里最旧的一条 move**（位置是状态，丢了不影响配对与顺序）；
+             * 队里一条 move 都没有时才丢队首，并单独计数 —— 那是真的异常，日志要能看出来。 */
+            var mi = -1, k;
+            for (k = 0; k < g_queue.length; k++) {
+                if (g_queue[k].h && g_queue[k].h.ev === "move") { mi = k; break; }
+            }
+            if (mi >= 0) g_queue.splice(mi, 1); else { g_queue.shift(); g_queueBriefDropped++; }
             g_queueDropped++;
             now = Date.now();
             if (now - g_lastDropWarn >= 1000) {
                 g_lastDropWarn = now;
-                note = "事件积压超过兜底上限（" + Q_HARD + "）—— 丢弃最旧一条，累计 " + g_queueDropped + " 条";
+                note = "事件积压超过兜底上限（" + Q_HARD + "）—— 丢弃一条（优先 move），累计 " + g_queueDropped +
+                       " 条，其中简报 " + g_queueBriefDropped + " 条";
             }
         } else if (g_queue.length >= Q_SOFT) {                       /* 只诊断：回调太慢，延迟在涨 */
             now = Date.now();
@@ -637,7 +657,10 @@ function startReader() {
                  * 会把整表拼成一个帧**发回来（兼容老固件）。不按行切的话，旧核心那帧的末行 end
                  * 永远走不到「收尾」分支，收集器要等满 1000ms 超时才返回，还会把整块塞进数组第 1 个
                  * 元素；反过来按「整块」写新代码也是错的（一区一帧 ⇒ 一次只回第一行）。 */
-                var lines = String(s).split(/\r?\n/), li, ln;
+                var one = String(s), lines, li, ln;
+                /* 快路径：核心现在一帧一行，单行帧不必跑正则 split（评审：每帧都跑 split 是固定成本之一）；
+                 * 旧核心/整表回包那种多行帧才走 split，行为不变。 */
+                lines = (one.indexOf("\n") < 0) ? [one] : one.split(/\r?\n/);
                 if (s.indexOf("region_ev ") === 0) {
                     for (li = 0; li < lines.length; li++) if (lines[li]) dispatchRegion(lines[li]);
                     continue;
@@ -660,6 +683,15 @@ function startReader() {
                  * 一区一帧，所以 cmd("region list") 拿到的只是第一行、也拿不到 end N；整表用
                  * listRegions()（它按行收 + 拿 end N 对账）。 */
                 if (g_reply) { g_reply.line = s; continue; }
+                /* 没人认领的 `err …` = 注入/命令被核心拒了（坐标越界、未按下就 move、id 非法…）。
+                 * 以前这里直接丢弃 ⇒ 一次失败没有任何痕迹（评审 L1）。限频喊一声。 */
+                if (s.indexOf("err ") === 0) {
+                    var nowE = Date.now();
+                    if (nowE - g_lastErrWarn >= 1000) {
+                        g_lastErrWarn = nowE;
+                        say("核心拒绝了一条命令：" + trim(String(s).split(/\r?\n/)[0]));
+                    }
+                }
             }
         } finally {
             g_reader = null;    /* 线程退出（断连）→ 允许下次 startReader 重启 */
@@ -738,7 +770,17 @@ function startReader() {
                 /* **最后**一步：上面的清理都做完了才结束脚本（放在前面会把收尾砍掉一半）。
                  * closing 为真 = 是我们自己要收尾，不替脚本决定结束（理由见上面的注释块）；
                  * 掉线档调它 = 丢弃队列里剩下的事件、当场结束脚本（见上一段的取舍）。 */
-                if (!closing) { try { exit(); } catch (e) {} }
+                /* **限时排空**（评审 L5）：分发线程是串行的，队列里可能还压着简报（down/up/enter/exit）。
+                 * exit() 当场结束脚本 ⇒ 它们永远发不出去（旧注释自己也承认）。给它 ≤200ms 发完；回调慢就兜底走。 */
+                if (!closing) {
+                    var dlq = Date.now() + 200, qleft = 1;
+                    while (Date.now() < dlq && qleft) {
+                        g_queueLock.lock();
+                        try { qleft = g_queue.length; } finally { g_queueLock.unlock(); }
+                        if (qleft) sleep(5);
+                    }
+                    try { exit(); } catch (e) {}
+                }
             }
         }
     });
@@ -823,6 +865,10 @@ function onRegion(a, b, c) {
     var H = { id: id, want: parseEvents(evs), cb: cb };
     subscribe("region");
     startReader();
+    /* **先挂 handler 再查表**（评审 L6）：下面这段查询是同步的，表空时最多 4×300ms 再叠 listRegions 自身
+     * 1s 超时；旧顺序在这段窗口里把到达的事件投递给 **0 个 handler** ⇒ 「脚本开头那几步的动作不触发」。 */
+    g_handlersLock.lock();
+    try { g_regionHandlers.push(H); } finally { g_handlersLock.unlock(); }
     if (id) {                                   /* 查表：id 写错/被停用立刻提示，不让你干等到怀疑人生 */
         var rows = listRegions(), hit = false, i, tries = 0;
         /* 区域表是**面板**起来后从 regions.conf 载进核心的，而核心的监听早于面板
@@ -838,8 +884,6 @@ function onRegion(a, b, c) {
             else warn("面板里没有区域 " + id + "（现有：" + rows.join(" | ") + "）");
         }
     }
-    g_handlersLock.lock();
-    try { g_regionHandlers.push(H); } finally { g_handlersLock.unlock(); }
     keepAlive();
     return { stop: function () { dropHandler(g_regionHandlers, H); } };
 }
