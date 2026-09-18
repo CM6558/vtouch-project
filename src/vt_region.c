@@ -200,7 +200,8 @@ unsigned vt_subev_bit(const char *ev)
     if (!strcmp(ev, "move"))  return SUBEV_MOVE;
     if (!strcmp(ev, "exit"))  return SUBEV_EXIT;
     if (!strcmp(ev, "up"))    return SUBEV_UP;
-    if (!strcmp(ev, "ts"))    return SUBEV_TS;   /* 伪事件：只决定事件行要不要带墙钟毫秒 */
+    if (!strcmp(ev, "ts"))    return SUBEV_TS;     /* 伪事件：显式要时间戳（本来就是默认） */
+    if (!strcmp(ev, "nots"))  return SUBEV_NOTS;   /* 伪事件：显式不要时间戳 */
     return 0;
 }
 static int subev_want(unsigned mask, const char *ev)

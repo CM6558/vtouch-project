@@ -187,6 +187,23 @@ def main():
     else:
         ok("示例用到的 %d 个 API 全部存在：%s" % (len(used), ", ".join(sorted(used))))
 
+    print("\n== ⑤ 客户端顶层函数完整性（防误删：一次边界手术把 startReader 整段删掉过）==")
+    # 基线就是本文件里这份名单：只允许**新增**函数，不允许悄悄少一个 ——
+    # 少了就是有代码被误删（node --check 只查语法、导出名检查只查 public API，都拦不住）。
+    baseline = set("""Finger alive attach connect connectOnce deviceMd5 dispatchLoop dispatchRegion dispatchTouch dropHandler endCount ensure evListOf finger follow frame installBinary isReadTimeout jb keepAlive keepRunning keysOf listReconcile listRegions mergeMove offer onRegion onTouch parseEvents readByteTolerant readFull readFullTolerant readLine refreshSub res say sh start startReader startedByUs stop subscribe trim unsubscribe warn wsAccept wsKey""".split())
+    defined = set(re.findall(r'^function\s+([A-Za-z_]\w*)', source.read_text(encoding="utf-8"), re.M))
+    missing = sorted(baseline - defined)
+    if missing:
+        bad("客户端顶层函数缺失 %d 个：%s（有代码被误删）" % (len(missing), ", ".join(missing)))
+    else:
+        ok("基线 %d 个顶层函数全部存在" % len(baseline))
+    sdk_fn = set(re.findall(r'^function\s+([A-Za-z_]\w*)', sdk_text, re.M))
+    miss2 = sorted(baseline - sdk_fn)
+    if miss2:
+        bad("发出去的 SDK 里缺函数：%s" % ", ".join(miss2))
+    else:
+        ok("打包产物里同样一个不少（%d 个）" % len(baseline))
+
     print("\n== ④ 清单 ==")
     for p in (sdk, example, basis):
         print("  %s  %s  %d" % (md5_of(p), p.relative_to(root).as_posix(), p.stat().st_size))

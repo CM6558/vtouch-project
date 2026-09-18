@@ -748,7 +748,8 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_UP) : 0;
             g.sub_phys_mask = m; g.sub_phys_ev = e;
-            g.sub_phys_ts = (e & SUBEV_TS) ? 1 : 0;    /* 带参数订阅默认不发时间戳：要就写 down,up,ts */
+            /* 时间戳**默认带上**（脚本要靠它算按压时长/送达延迟）；只有显式写 nots 才省掉。 */
+            g.sub_phys_ts = (e & SUBEV_NOTS) ? 0 : 1;
             fprintf(stderr, "vtouchd: 订阅 phys 槽=%s ev=%s ts=%d 线路=phys_ev <ev> <slot> <x> <y>%s\n",
                     m ? (sel ? sel : "0") : "全部", evs ? evs : "(默认)", g.sub_phys_ts, g.sub_phys_ts ? " <t>" : "");
         } else if (want == SUB_REGION) {
@@ -759,7 +760,7 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_ENTER | SUBEV_EXIT | SUBEV_UP) : 0;
             g.sub_region_ev = e;
-            g.sub_region_ts = (e & SUBEV_TS) ? 1 : 0;
+            g.sub_region_ts = (e & SUBEV_NOTS) ? 0 : 1;      /* 同上：默认带时间戳 */
             /* 线路格式写进日志，省得对着抓包猜（只订一个区域 ⇒ 不再重复发 id） */
             fprintf(stderr, "vtouchd: 订阅 region id=%s ev=%s ts=%d 线路=<%s> <ev> <slot> <x> <y>%s\n",
                     g.sub_region_id[0] ? g.sub_region_id : "*", evs ? evs : "(默认)", g.sub_region_ts,

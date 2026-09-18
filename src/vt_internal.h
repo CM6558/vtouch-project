@@ -53,7 +53,8 @@
 #define SUBEV_MOVE  4u
 #define SUBEV_EXIT  8u
 #define SUBEV_UP    16u
-#define SUBEV_TS    32u   /* 伪事件：随事件带墙钟毫秒（默认不发；注入族回包同理可关） */
+#define SUBEV_TS    32u   /* 伪事件：随事件带墙钟毫秒（**默认带**，用户 2026-09-18 口径） */
+#define SUBEV_NOTS  64u   /* 伪事件：显式**不要**时间戳（省流量时才写） */
 #define VT_UP   0
 #define VT_DOWN 1
 #define VT_MOVE 2

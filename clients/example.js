@@ -16,6 +16,7 @@
  *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y,t}
  *   vt.onTouch([slot,] 回调 [, 事件])  **物理触摸流**：按槽订阅、不按区域过滤，按下→抬起一路跟；
  *                                     **默认只报 down/up**，要移动轨迹写 "down,move,up"；
+ *                                     事件**默认带时间戳** h.t（核心采集的时刻），要省流量写 "nots"；
  *                                     h={ev,slot,x,y,t}；vt.follow(slot,cb,事件) 是它的简写
  *   vt.res()                          逻辑尺寸 + raw 量程（字符串）
  *   vt.keepRunning(true) / vt.stop() / vt.alive() / vt.startedByUs()
@@ -87,6 +88,11 @@ var watch = vt.onRegion(REGION_ID, "down", function (h) {     // 和上面的订
         if (e.ev === "up") {
             log("追踪结束：沿途 " + t.n + " 个点，终点 " + e.x + "," + e.y
                 + "，历时 " + (e.t - h.t) + " ms");
+            /* 回调里可以直接 sleep + 再注入（长按、连点都行）：按住抬起后停 2.3 秒再点两下。
+             * 注意分发是**串行**的 —— 这段时间里后面的事件会排队等，要紧的收尾请自己 threads.start。 */
+            sleep(2300);
+            vt.finger().tap(151, 2251);
+            vt.finger().tap(149, 2001);
             t.handle.stop();
             if (tracked === t) tracked = null;
         }

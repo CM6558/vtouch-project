@@ -657,6 +657,148 @@ function dispatchTouch(s) {
     }
 }
 /* 对象键列表（不依赖 Object.keys，Rhino 老版本也稳） */
+function startReader() {
+    if (g_reader) return;
+    g_reader = threads.start(function () {
+        try {
+            while (true) {
+                var s = null;
+                try { s = g_conn ? g_conn.recv() : null; } catch (e) { break; }
+                if (s === null || s === undefined) { sleep(10); continue; }
+                /* 帧先按**类**分派，事件/表回包再按**行**切：现核心的 `region list` 是**一区一帧**
+                 * （src/vt_ws.c 逐行 outq_push_text），事件也是一帧一行；逐行处理留着是因为**旧核心
+                 * 会把整表拼成一个帧**发回来（兼容老固件）。不按行切的话，旧核心那帧的末行 end
+                 * 永远走不到「收尾」分支，收集器要等满 1000ms 超时才返回，还会把整块塞进数组第 1 个
+                 * 元素；反过来按「整块」写新代码也是错的（一区一帧 ⇒ 一次只回第一行）。 */
+                var one = String(s), lines, li, ln;
+                /* 快路径：核心现在一帧一行，单行帧不必跑正则 split（评审：每帧都跑 split 是固定成本之一）；
+                 * 旧核心/整表回包那种多行帧才走 split，行为不变。 */
+                lines = (one.indexOf("\n") < 0) ? [one] : one.split(/\r?\n/);
+                if (s.indexOf("region_ev ") === 0) {
+                    for (li = 0; li < lines.length; li++) if (lines[li]) dispatchRegion(lines[li]);
+                    continue;
+                }
+                if (s.indexOf("phys_ev ") === 0) {
+                    for (li = 0; li < lines.length; li++) if (lines[li]) dispatchTouch(lines[li]);
+                    continue;
+                }
+                if (g_listCollector && (s.indexOf("region ") === 0 || s.indexOf("end ") === 0)) {
+                    for (li = 0; li < lines.length; li++) {
+                        ln = lines[li];
+                        if (!ln) continue;
+                        /* 末行 end N：N 是**表里声明的条数**，收完唤醒等它的人（I2 靠它对账行数） */
+                        if (ln.indexOf("end ") === 0) { g_listSawEnd = 1; g_listEndN = endCount(ln); g_listCollector = null; break; }
+                        if (g_listCollector) g_listCollector.push(ln);
+                    }
+                    continue;
+                }
+                /* 命令回包：**整帧原文**交给等它的人 —— 注意这条路径**一次只回一帧**：`region list`
+                 * 一区一帧，所以 cmd("region list") 拿到的只是第一行、也拿不到 end N；整表用
+                 * listRegions()（它按行收 + 拿 end N 对账）。 */
+                if (g_reply) { g_reply.line = s; continue; }
+                /* 没人认领的 `err …` = 注入/命令被核心拒了（坐标越界、未按下就 move、id 非法…）。
+                 * 以前这里直接丢弃 ⇒ 一次失败没有任何痕迹（评审 L1）。限频喊一声。 */
+                if (s.indexOf("err ") === 0) {
+                    var nowE = Date.now();
+                    if (nowE - g_lastErrWarn >= 1000) {
+                        g_lastErrWarn = nowE;
+                        say("核心拒绝了一条命令：" + trim(String(s).split(/\r?\n/)[0]));
+                    }
+                }
+            }
+        } finally {
+            g_reader = null;    /* 线程退出（断连）→ 允许下次 startReader 重启 */
+            g_lastPhysDown = {}; /* 清缓存：重连后不会补发断连前的 down */
+            /* 读线程为什么退出？先分「是不是我们自己主动收尾」这一档（F3）：
+             *   g_closing（exit 钩子 / vt.stop() 置位）→ **正常收尾**：只打一条普通日志，
+             *     绝不弹「事件通道已断开」——脚本一切正常却报错就是假警报（A2 的回归）；
+             *   否则才是掉线（以前只清 g_reader，脚本照旧「活着」但事件永不来）：判因看
+             *     **两条进程** —— `pidof vtouchd_ui`（核心）与 `pidof vtouch-ui`（面板），
+             *     只有两个都还在才说明是「被新实例顶掉」，否则取「面板退出」（核心没了也
+             *     算这一档：面板按退出是先让核心退，见下面 else 分支的注释，I6）→ toast 提示。
+             * 标志一次性消费（下一条读线程由 connect() 建新连接时归零）。
+             * 下面这段收尾**两条路完全一样**（逃生门 g_keep 除外）：保活定时器、handler 表、
+             * 分发线程都要拆干净 —— 自己关的那次也不能留假活状态；只有判因那两条 root 命令
+             * （pidof）在掉线段才花。唯一的分歧在**结束脚本**那一步（见下面的 F5：只有真掉线
+             * 且非逃生门才调 exit()）。g_listCollector 保持现有语义（等它的人自己有 1000ms
+             * 超时；读线程不等它，不会被卡住）。
+             *
+             * F5：这段收尾**每一步各自 try/catch**，任何一步炸掉都不许吃掉提示、也不许挡住
+             * 后面的步骤 —— 收尾只跑一半 = 脚本半死（定时器还在 / handler 还挂着 / 分发线程
+             * 还转着），AutoJs6 就永远不会结束。判因那条 root 命令单独包（`pidof vtouch-ui`
+             * 探不到就按「面板还在」取文案）：绝不允许因为一条 shell 抛错而一句提示都没有。
+             *
+             * F5 为什么必须在末尾显式 `exit()`（A2 的「本脚本可正常结束」要真的成立）：
+             *   AutoJs6 只要**建过 interval 或还有子线程**，收尾后引擎就不会自行结束。真机实测：
+             *   · 30s 定时器被（子线程里）clearInterval 之后，脚本 40s 仍不结束（30s 期间唤醒也不结束）；
+             *   · 2s 定时器清了 → 11ms 就结束（复现两次）；
+             *   · 子线程全部结束 → 脚本结束。
+             *   ⇒ 光把定时器 / handler / 分发线程拆干净**还不够**，收尾末尾必须显式 `exit()` 让
+             *     脚本真的结束（否则「本脚本可正常结束」是句空话）。
+             *   `exit()` **会照常触发 `events.on("exit")` 钩子**（真机实测：11ms 后触发，钩子里的
+             *     写盘正常完成）⇒ 用户挂在退出钩子上的收尾不会因为这次 exit() 丢。
+             *   只有这一档（真掉线且非逃生门）调它：
+             *   · `closing`（g_closing 真）= **脚本自己在收尾**（exit 钩子里再 exit 是自己套自己；
+             *     vt.stop() 之后脚本还有事要做）→ 只记日志，不替它决定结束；
+             *   · 逃生门 `g_keep`（vt.keepRunning(true)）→ 收尾整个归脚本自己管，更不调 exit()。
+             *   非 AutoJs6 环境（离线 harness / 别的 JS 宿主）根本没有 `exit` 这个全局：调用会抛
+             *   ReferenceError，被这一层的 catch 吃掉，收尾的其余部分照常完成、也不许抛出去。 */
+            var closing = g_closing;
+            g_closing = false;
+            if (closing) {
+                try { say("脚本收尾：事件通道已关闭（不再收事件）"); } catch (e) {}
+            } else {
+                /* 判因（I6）：**核心与面板一起看**。只有「核心还在 + 面板还在」才可能是被新实例顶掉
+                 * （新客户端连上会踢掉旧连接，核心与面板都活着）；否则一律取「面板退出」——
+                 * 面板按「退出」是**先给核心 SIGTERM、核心先退**，面板要等自己下一拍（~5-40ms）
+                 * 才消失，只看面板会把这一档误报成「被新实例顶掉」，让人去找并不存在的第二个实例。
+                 * 两条探不到（shell 抛错 / pidof 不可用）都按「还在」处理，保持原本文案。
+                 * 两步各自 try/catch：判因炸了也绝不许吞掉提示（F5）。 */
+                var coreUp = true, uiUp = true;
+                try { coreUp = !!(trim(sh("pidof " + PROC).result)); } catch (e) {}
+                try { uiUp = !!(trim(sh("pidof vtouch-ui").result)); } catch (e) {}
+                try {
+                    warn((coreUp && uiUp) ? "事件通道已断开（被新实例顶掉）→ 停止监听，本脚本可正常结束"
+                                          : "事件通道已断开（面板退出）→ 停止监听，本脚本可正常结束");
+                } catch (e) {}
+            }
+            if (g_keep) {
+                /* 逃生门 vt.keepRunning(true)：只提示，定时器/handler/分发线程/exit 全归脚本自己管 */
+            } else {
+                if (g_keepAlive) { try { clearInterval(g_keepAlive); } catch (e) {} g_keepAlive = null; }
+                try {
+                    g_handlersLock.lock();
+                    try { g_regionHandlers = []; g_touchHandlers = []; } finally { g_handlersLock.unlock(); }
+                } catch (e) {}
+                /* 让分发线程「把已入队的发完就退」，不留空转线程。注意：**下面掉线档那句 exit() 不会
+                 * 等它** —— exit() 当场结束整个脚本，队列里还没轮到的那些（简报 + 每 (区域/槽) 一条
+                 * move）就永远发不出去了。要「尾部事件也发完」就不能在这条路上 exit()（这行本身只表达
+                 * 「分发线程不空转」，不是「队列一定发得完」）。
+                 * 置位**要持锁 + signal**：等待中的派发线程正在 `await()`，不唤醒它就得等满 1000ms 超时
+                 * （signal 必须在持锁时调，否则抛 IllegalMonitorStateException）。 */
+                try {
+                    g_queueLock.lock();
+                    try { g_dispatchStop = true; g_queueCond.signal(); } finally { g_queueLock.unlock(); }
+                } catch (e) {}
+                /* **最后**一步：上面的清理都做完了才结束脚本（放在前面会把收尾砍掉一半）。
+                 * closing 为真 = 是我们自己要收尾，不替脚本决定结束（理由见上面的注释块）；
+                 * 掉线档调它 = 丢弃队列里剩下的事件、当场结束脚本（见上一段的取舍）。 */
+                /* **限时排空**（评审 L5）：分发线程是串行的，队列里可能还压着简报（down/up/enter/exit）。
+                 * exit() 当场结束脚本 ⇒ 它们永远发不出去（旧注释自己也承认）。给它 ≤200ms 发完；回调慢就兜底走。 */
+                if (!closing) {
+                    var dlq = Date.now() + 200, qleft = 1;
+                    while (Date.now() < dlq && qleft) {
+                        g_queueLock.lock();
+                        try { qleft = g_queue.length; } finally { g_queueLock.unlock(); }
+                        if (qleft) sleep(5);
+                    }
+                    try { exit(); } catch (e) {}
+                }
+            }
+        }
+    });
+}
+/* 对象键列表（不依赖 Object.keys，Rhino 老版本也稳） */
 function keysOf(m) {
     var out = [], k;
     for (k in m) if (Object.prototype.hasOwnProperty.call(m, k)) out.push(k);
@@ -664,7 +806,7 @@ function keysOf(m) {
 }
 /* 事件的**去重**判断（下发给核心的过滤器用；按固定顺序拼，便于幂等比较） */
 function evListOf(want) {
-    var all = ["down", "enter", "move", "exit", "up", "ts"], out = [], i;
+    var all = ["down", "enter", "move", "exit", "up", "ts", "nots"], out = [], i;
     for (i = 0; i < all.length; i++) if (want[all[i]]) out.push(all[i]);
     return out.join(",");
 }
@@ -701,7 +843,7 @@ function refreshSub() {
         evs = evListOf(want);
         /* 事件列表为空时退回老语义（= 全事件，含 move）会白烧 CPU ⇒ 空就只订简报。 */
         subscribe("phys", list + " " + (evs || "down,up"));
-        g_wire.physTs = !!want.ts;                 /* 没订 ts ⇒ 核心不发时间戳字段 */
+        g_wire.physTs = !want.nots;                /* 核心默认带时间戳；handler 写了 nots 才没有 */
     }
     /* --- 区域事件 --- */
     ids = {}; anyAll = false; want = {};
@@ -716,7 +858,7 @@ function refreshSub() {
         list = (anyAll || idArr.length !== 1) ? "*" : idArr[0];   /* 核心的 region 选择只支持单 id 或 * */
         evs = evListOf(want);
         subscribe("region", list + " " + (evs || "down,up,enter,exit"));
-        g_wire.regionTs = !!want.ts;
+        g_wire.regionTs = !want.nots;
         g_wire.regionId = (list === "*");          /* 单 id ⇒ 核心省略 id 字段，解析时用 idVal 补 */
         g_wire.regionIdVal = (list === "*") ? null : list;
     }
