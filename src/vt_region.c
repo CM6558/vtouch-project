@@ -8,6 +8,9 @@ static unsigned char r_slot_in[MAX_PHYS][MAX_REGIONS];
 static unsigned char r_slot_hit[MAX_PHYS][MAX_REGIONS];
 /* move 去重基准按 [slot][region] 分开存：多个区域重叠时，同一个 move 要给每个命中的区域各报一条 */
 static int r_slot_last_x[MAX_PHYS][MAX_REGIONS], r_slot_last_y[MAX_PHYS][MAX_REGIONS];
+/* 区域几何的宽松量程（见 region_add 里的说明）：面板「视口坐标不变」语义下，区域在某方向落屏外时
+ * 竖屏坐标就是负数/超界 —— 合法；这里只挡住会让 dx*dx+dy*dy 溢出的离谱值。 */
+#define VT_REGION_COORD_MAX 4096
 /**
  * (vtouch-doc: regions_clear)
  * @brief 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。
@@ -47,7 +50,7 @@ static int id_ok(const char *id, size_t n)
  * @param   a4       矩形 y2
  * @param   enabled  1 启用 0 禁用
  * @return  0 成功；-1 参数非法、id 去重失败或表满。
- * @note    几何合法性（是否超出逻辑尺寸等）也在这里判。
+ * @note    几何只做宽松量程检查（±4096，防判定里 dx*dx 溢出）：区域跟着屏幕方向走时可以落在屏外，此时竖屏坐标允许负数/超界（面板「视口坐标不变」语义）；越界区域在核心侧天然不可命中（手指原生坐标恒在框内），除非半径探进可见区。
  */
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
@@ -60,8 +63,16 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
      * WS 侧据此自动回 err region（cmd_region 不用改）。 */
     if (!id_ok(id, n)) return -1;
     if (type != 0 && type != 1) return -1;
-    if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) return -1;
-    if (a1 >= g.logical_width || a2 >= g.logical_height) return -1;
+    /* 几何范围：**不再要求落在竖屏框内、也不再要求非负**（2026-09-18）。面板的「跟随屏幕方向」语义是
+     * 「视口坐标不变」（以当前方向左上角为原点的坐标原样保留），区域在某个方向下可以落在屏外 ——
+     * 用户口径：**屏外允许、屏幕自己裁就行**。这种点换算成竖屏坐标就是负数或超出逻辑尺寸，属合法状态。
+     * 这里只留一个宽松量程（±4096），防的是判定里 dx*dx + dy*dy 溢出。
+     * 顺带：越界区域在核心侧**天然不可命中** —— 手指原生坐标恒在 [0,W)×[0,H)，够不到框外的圆心
+     * （除非圆的半径探进可见区，那正是「部分可见就部分可命中」想要的行为）。 */
+    if (a1 < -VT_REGION_COORD_MAX || a1 > VT_REGION_COORD_MAX ||
+        a2 < -VT_REGION_COORD_MAX || a2 > VT_REGION_COORD_MAX ||
+        a3 < -VT_REGION_COORD_MAX || a3 > VT_REGION_COORD_MAX ||
+        a4 < -VT_REGION_COORD_MAX || a4 > VT_REGION_COORD_MAX) return -1;
     pthread_mutex_lock(&g.region_lock);
     /* 同 id 查重：存在则原地更新（开关/挪区域只改属性，不新增） */
     for (i = 0; i < g.region_count; i++) {
