@@ -42,6 +42,7 @@ int vtouch_region_count(void);
 int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);
 int vtouch_region_del(const char *id);                      /* 单条删（不整表重写） */
 int vtouch_region_rename(const char *old_id, const char *new_id);   /* 原地改名（位置不变） */
+int vtouch_region_mark(int i);
 int vtouch_get_region(int i, char *id, int idn, int *type,
                       int *a1, int *a2, int *a3, int *a4, int *enabled);
 /* 接核心时代新增：把面板矩形推给核心（核心据此吞触摸）。入参是**当前屏坐标**，
@@ -1105,6 +1106,16 @@ static void build_overlay(int sw, int sh)
                                    : ImVec2((float)a1, (float)a2));
             ImVec2 p1 = (type == 1 ? ImVec2((float)(a1 + a3), (float)(a2 + a3))
                                    : ImVec2((float)a3, (float)a4));
+            /* 「开关样式」：脚本 vt.mark(id,1) / vt.toggle 打开时整块高亮（半透明绿底 + 粗绿边 + 标签加 ●开）。
+             * 标记存在核心的共享内存里（struct region.mark），面板直接读同一份 ⇒ 没有额外通道、没有轮询。 */
+            int mk = vtouch_region_mark(i);
+            if (mk) {
+                ImU32 mkfill = IM_COL32(0, 200, 0, 56);
+                if (type == 1) dl->AddCircleFilled(ImVec2((float)a1, (float)a2), (float)a3, mkfill);
+                else dl->AddRectFilled(p0, p1, mkfill);
+                col = IM_COL32(0, 180, 0, 255);
+                lw = 8.0f;
+            }
             if (is_flash) {
                 ImU32 fill = IM_COL32(0, 255, 0, (int)(90 * (400 - (t - g_flash_t)) / 400));
                 if (type == 1) dl->AddCircleFilled(ImVec2((float)a1, (float)a2), (float)a3, fill);
@@ -1129,7 +1140,11 @@ static void build_overlay(int sw, int sh)
                                           IM_COL32(255, 200, 0, 255));
                 }
             }
-            dl->AddText(ImVec2((float)(type == 1 ? a1 : a1), (float)(type == 1 ? a2 - a3 - 34 : a2 - 34)), col, id);
+            {
+                char lbl[24];
+                snprintf(lbl, sizeof lbl, mk ? "%s \xE2\x97\x8F\xE5\xBC\x80" : "%s", id);   /* "id ●开" */
+                dl->AddText(ImVec2((float)a1, (float)(type == 1 ? a2 - a3 - 34 : a2 - 34)), col, lbl);
+            }
         }
         /* 框选橡皮筋 + 提示（手势坐标是竖屏的，画之前换算） */
         if (g_cap_mode && g_cap_slot >= 0) {

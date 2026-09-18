@@ -31,20 +31,19 @@ var W = device.width, H = device.height;   // 逻辑坐标（竖屏；横屏时�
 /* ---------- 1. 先看一眼坐标空间 ---------- */
 log("核心: " + vt.res());                  // 例：res 1440 3168 raw 0 23040 0 50688
 
-/* ---------- 2. 直接注入 ---------- */
-vt.finger().tap(W * 0.5, H * 0.5);                          // 自动挑空闲 slot
-vt.finger(3).down(100, 200).move(140, 240).up();            // 显式 slot（0~9）
-vt.finger().swipe(W * 0.30, H * 0.80, W * 0.70, H * 0.30, 400);   // 按住时长自己给
-
-vt.frame([                                                  // 多指同一帧按下
-    { slot: 0, state: "down", x: W * 0.30, y: H * 0.50 },
-    { slot: 1, state: "down", x: W * 0.70, y: H * 0.50 }
-]);
-sleep(150);                                                 // 想按住就自己 sleep
-vt.frame([                                                  // 同一帧抬起
-    { slot: 0, state: "up", x: W * 0.30, y: H * 0.50 },
-    { slot: 1, state: "up", x: W * 0.70, y: H * 0.50 }
-]);
+/* ---------- 2. 直接注入（先注释掉：脚本一跑就往屏幕上点，调试期容易误触） ---------- */
+// vt.finger().tap(W * 0.5, H * 0.5);                       // 自动挑空闲 slot
+// vt.finger(3).down(100, 200).move(140, 240).up();         // 显式 slot（0~9）
+// vt.finger().swipe(W * 0.30, H * 0.80, W * 0.70, H * 0.30, 400);   // 按住时长自己给
+// vt.frame([                                               // 多指同一帧按下
+//     { slot: 0, state: "down", x: W * 0.30, y: H * 0.50 },
+//     { slot: 1, state: "down", x: W * 0.70, y: H * 0.50 }
+// ]);
+// sleep(150);                                              // 想按住就自己 sleep
+// vt.frame([                                               // 同一帧抬起
+//     { slot: 0, state: "up", x: W * 0.30, y: H * 0.50 },
+//     { slot: 1, state: "up", x: W * 0.70, y: H * 0.50 }
+// ]);
 
 /* ---------- 3. 区域事件：面板里画好的区域，按 id 订阅 ---------- */
 /* 事件第二参省略 = down/up/enter/exit（默认不含高频的 move）；要 move 得显式写 "*" 或 "down,move"。

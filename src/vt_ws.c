@@ -596,6 +596,21 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err region"); return -1; }
         regions_clear(); snprintf(resp, cap, "ok %d", g.region_count); return 0;
     }
+    if (op && !strcmp(op, "mark")) {           /* region mark <id> <0|1>：脚本置"开关样式"，面板照着高亮 */
+        char *sid = strtok_r(NULL, " \t", stp), *sv = strtok_r(NULL, " \t", stp), *e = NULL;
+        long v;
+        int i, hit = -1;
+        if (!sid || !sv || strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err region"); return -1; }
+        v = strtol(sv, &e, 10);
+        if (e == sv || *e || (v != 0 && v != 1)) { snprintf(resp, cap, "err region"); return -1; }
+        pthread_mutex_lock(&g.region_lock);
+        for (i = 0; i < g.region_count; i++)
+            if (!strcmp(g.regions[i].id, sid)) { hit = i; break; }
+        if (hit >= 0) g.regions[hit].mark = (int)v;
+        pthread_mutex_unlock(&g.region_lock);
+        if (hit < 0) { snprintf(resp, cap, "err region"); return -1; }   /* 没这个 id 就明确报错，不静默 */
+        snprintf(resp, cap, "ok"); return 0;
+    }
     if (op && !strcmp(op, "list")) {
         char line[128];
         char rows[MAX_REGIONS][128];            /* 锁内只**格式化**到这里，解锁后再逐条入队（见下） */

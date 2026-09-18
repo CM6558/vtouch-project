@@ -1060,6 +1060,14 @@ function onRegionPress(a, b, c) {
         }
     };
 }
+/* mark(区域id, on)：给区域打/清「开关样式」标记 —— 面板会把该区域整块高亮
+ * （半透明绿底 + 粗绿边 + 标签「id ●开」）。用它把脚本里的状态"画"到面板上。
+ * vt.toggle 会自动调它（开=标记，关=清标记），所以用 toggle 时不用手动调。
+ * 注意：id 必须**已经存在于核心的区域表**里（面板里画过），否则核心回 err region。 */
+function mark(id, on) {
+    var conn = g_conn || connect();
+    conn.send("region mark " + id + " " + (on ? 1 : 0));
+}
 /* toggle([区域id,] [选项,] [回调])：把一个区域当**开关/激活区**用。
  * 区域内每完成一次「完整按压」（按下 → 同一手指抬起）就翻转一次；脚本在别处读 sw.on 判断开/关。
  * 选项：{ on: 初始值(默认 false), toast: 翻转时提示(默认 false), onChange: fn(on, g) }
@@ -1076,6 +1084,7 @@ function toggle(a, b, c) {
     else { id = a; opt = b || {}; cb = c; }
     var handler = null;
     function fire(g) {
+        if (id !== null) { try { mark(id, sw.on); } catch (e) {} }   /* 同步面板高亮（开关样式） */
         if (opt.toast) say("开关 " + (id === null ? "" : id + " ") + "→ " + (sw.on ? "开" : "关"));
         try { if (opt.onChange) opt.onChange(sw.on, g); } catch (e) { warn("toggle onChange 出错：" + e); }
         try { if (cb) cb(sw.on, g); } catch (e) { warn("toggle 回调出错：" + e); }
@@ -1099,6 +1108,6 @@ module.exports = {
     keepRunning: keepRunning, startedByUs: startedByUs,
     connect: connect, finger: finger, frame: frame, res: res,
     onRegion: onRegion, listRegions: listRegions, onTouch: onTouch, follow: follow,
-    onRegionPress: onRegionPress, toggle: toggle,
+    onRegionPress: onRegionPress, toggle: toggle, mark: mark,
     BIN: BIN, HOST: HOST, PORT: PORT
 };

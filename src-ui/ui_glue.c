@@ -250,6 +250,14 @@ int vtouch_get_region(int i, char *id, int idn, int *type, int *a1, int *a2, int
     return 0;
 }
 
+/* 区域的"开关样式"标记（核心侧 region mark <id> 1 设置；面板据此高亮——直接读共享内存里的同一份结构）。
+ * 为什么单独一个取数口：vtouch_get_region 的签名被 6 处调用，为一个显示字段改签名不划算。 */
+int vtouch_region_mark(int i)
+{
+    if (!S || i < 0 || i >= S->region_count) return 0;
+    return S->regions[i].mark;
+}
+
 int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
     return glue_post(VT_EDIT_ADD, id, NULL, type, a1, a2, a3, a4, enabled);

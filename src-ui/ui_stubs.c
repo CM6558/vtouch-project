@@ -71,6 +71,8 @@ void vtouch_region_clear(void) { RN = 0; }
 
 int vtouch_region_count(void) { seed(); return RN; }
 
+int vtouch_region_mark(int i) { (void)i; return 0; }   /* stub 模式：没有核心，恒 0 */
+
 int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
     int i;

@@ -22,7 +22,8 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  1u            /* 布局语义版本：不匹配就拒绝启动面板 */
+#define VT_SHM_VERSION  2u            /* 布局语义版本：不匹配就拒绝启动面板。
+                                       * 2 = struct region 增加 mark（脚本"开关样式"）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0

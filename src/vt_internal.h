@@ -91,6 +91,8 @@ struct region {
     int type;              /* 0=rect 1=circle */
     int enabled;
     int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
+    int mark;              /* 脚本侧"开关样式"标记（0=无 1=开）：核心存，面板**直接读共享内存**照着高亮。
+                            * 由 WS 命令 `region mark <id> <0|1>` 设置（SDK: vt.mark / vt.toggle 自动调）。 */
 };
 
 struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used; };
