@@ -296,6 +296,7 @@ void drop_client(void)
     g.sub_mask = 0;          /* §4.6：断连/被踢 → 订阅清零（下一个客户端要自己重新 sub） */
     g.sub_phys_mask = 0; g.sub_phys_ev = 0;      /* 过滤器一并复位（0/空 = 全通） */
     g.sub_region_id[0] = 0; g.sub_region_ev = 0;
+    g.sub_phys_ts = g.sub_region_ts = 0;          /* 线路格式也复位（下一个客户端自己订） */
     outq_reset();          /* §4.6：断连/被踢 → 出站队列销毁（残包不许串给下一个客户端） */
     owner_reset();
 }
@@ -461,6 +462,13 @@ int cmd_meta(char *t, char **stp, char *resp, size_t cap)
 {
     (void)stp;                                          /* 元命令不带参数（签名与其它族保持一致，便于分派） */
     if (!strcmp(t, "ping")) { snprintf(resp, cap, "pong"); return 0; }
+    if (!strcmp(t, "quiet")) {                       /* quiet [0|1]：注入族回包开关（默认 0 = 回 ok，老客户端不变） */
+        char *sv = strtok_r(NULL, " \t", stp);
+        long v = 1;
+        if (sv) { char *e = NULL; v = strtol(sv, &e, 10); if (e == sv || *e || (v != 0 && v != 1)) { snprintf(resp, cap, "err quiet"); return -1; } }
+        if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err quiet"); return -1; }
+        g.quiet = (int)v; snprintf(resp, cap, "ok"); return 0;
+    }
     if (!strcmp(t, "res")) {
         snprintf(resp, cap, "res %d %d raw %d %d %d %d phys %d",
                  g.logical_width, g.logical_height,
@@ -473,6 +481,18 @@ int cmd_meta(char *t, char **stp, char *resp, size_t cap)
         owner_reset(); snprintf(resp, cap, "ok"); return 0;
     }
     return 1;
+}
+/**
+ * (vtouch-doc: ack_ok)
+ * @brief 注入族的回包：默认 "ok"；quiet 模式留空（resp[0]=0 ⇒ client_frame 不发帧）。
+ * @param   resp     响应缓冲
+ * @param   cap      缓冲容量
+ * @note    单条注入命令一次 ok，在脚本侧要读一帧 + 剥前缀 + 丢弃 ⇒ 注入风暴时每秒几千行纯浪费。
+ */
+static void ack_ok(char *resp, size_t cap)
+{
+    if (g.quiet) { resp[0] = 0; return; }
+    snprintf(resp, cap, "ok");
 }
 /**
  * (vtouch-doc: cmd_point_once)
@@ -496,7 +516,7 @@ int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
             set_virtual(g.virt, slot, t, g.virt[slot].x, g.virt[slot].y) || emit_frame() < 0) {
             snprintf(resp, cap, "err point"); return -1;
         }
-        snprintf(resp, cap, "ok"); return 0;
+        ack_ok(resp, cap); return 0;
     }
     if (!strcmp(t, "down") || !strcmp(t, "move")) {
         char *ss = strtok_r(NULL, " \t", stp), *sx = strtok_r(NULL, " \t", stp), *sy = strtok_r(NULL, " \t", stp);
@@ -508,7 +528,7 @@ int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
             set_virtual(g.virt, slot, t, x, y) || emit_frame() < 0) {
             snprintf(resp, cap, "err point"); return -1;
         }
-        snprintf(resp, cap, "ok"); return 0;
+        ack_ok(resp, cap); return 0;
     }
     return 1;
 }
@@ -531,7 +551,7 @@ int cmd_frame(char *t, char **stp, char *resp, size_t cap)
         if (g.frame_open || strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err frame"); return -1; }
         memcpy(g.staged, g.virt, sizeof g.staged);
         g.frame_open = 1; memset(g.frame_seen, 0, sizeof g.frame_seen);
-        snprintf(resp, cap, "ok"); return 0;
+        ack_ok(resp, cap); return 0;
     }
     if (!strcmp(t, "point")) {
         char *ss = strtok_r(NULL, " \t", stp), *state = strtok_r(NULL, " \t", stp);
@@ -544,13 +564,13 @@ int cmd_frame(char *t, char **stp, char *resp, size_t cap)
             g.frame_seen[slot] || set_virtual(g.staged, slot, state, x, y)) {
             snprintf(resp, cap, "err point"); return -1;
         }
-        g.frame_seen[slot] = 1; snprintf(resp, cap, "ok"); return 0;
+        g.frame_seen[slot] = 1; ack_ok(resp, cap); return 0;
     }
     if (!strcmp(t, "end_frame")) {
         if (!g.frame_open || strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err frame"); return -1; }
         memcpy(g.virt, g.staged, sizeof g.virt);
         if (emit_frame() < 0) { g.frame_open = 0; snprintf(resp, cap, "err frame"); return -1; }
-        g.frame_open = 0; snprintf(resp, cap, "ok"); return 0;
+        g.frame_open = 0; ack_ok(resp, cap); return 0;
     }
     return 1;
 }
@@ -679,7 +699,7 @@ static int parse_ev_bits(char *s, unsigned *out)
     unsigned e = 0;
     if (!strcmp(s, "*")) { *out = 0; return 0; }
     for (tk = strtok_r(s, ",", &sv); tk; tk = strtok_r(NULL, ",", &sv)) {
-        unsigned b = vt_subev_bit(tk);
+        unsigned b = vt_subev_bit(tk);   /* ts 是伪事件（SUBEV_TS），只影响线路格式，不参与事件过滤 */
         if (b == 0) return -1;
         e |= b;
     }
@@ -712,7 +732,12 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
         sel = strtok_r(NULL, " \t", stp);
         evs = strtok_r(NULL, " \t", stp);
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
-        if (!ch) { g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0; }   /* 裸 sub：老语义（全槽全事件） */
+        if (!ch) {   /* 裸 sub：老语义（全槽/全区域、全事件、**带 ts 与区域 id = 老线路格式**） */
+            g.sub_mask |= want;
+            if (want & SUB_PHYS)   { g.sub_phys_mask = 0;   g.sub_phys_ev = 0;   g.sub_phys_ts = 1; }
+            if (want & SUB_REGION) { g.sub_region_id[0] = 0; g.sub_region_ev = 0; g.sub_region_ts = 1; }
+            snprintf(resp, cap, "ok"); return 0;
+        }
         /* 带 <选择> ⇒ 精确设定过滤器（不再 |=，两次带参 sub 不应互相污染过滤器）。
          * 事件缺省 = 简报（phys: down,up；region: down,up,enter,exit）—— **默认不含 move**，
          * 要位置流必须显式写 move（物理行占实测 97% 的量）。 */
@@ -723,6 +748,9 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_UP) : 0;
             g.sub_phys_mask = m; g.sub_phys_ev = e;
+            g.sub_phys_ts = (e & SUBEV_TS) ? 1 : 0;    /* 带参数订阅默认不发时间戳：要就写 down,up,ts */
+            fprintf(stderr, "vtouchd: 订阅 phys 槽=%s ev=%s ts=%d 线路=phys_ev <ev> <slot> <x> <y>%s\n",
+                    m ? (sel ? sel : "0") : "全部", evs ? evs : "(默认)", g.sub_phys_ts, g.sub_phys_ts ? " <t>" : "");
         } else if (want == SUB_REGION) {
             if (sel && strcmp(sel, "*")) {
                 if (strlen(sel) > REGION_ID_MAX) { snprintf(resp, cap, "err sub"); return -1; }
@@ -731,6 +759,11 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_ENTER | SUBEV_EXIT | SUBEV_UP) : 0;
             g.sub_region_ev = e;
+            g.sub_region_ts = (e & SUBEV_TS) ? 1 : 0;
+            /* 线路格式写进日志，省得对着抓包猜（只订一个区域 ⇒ 不再重复发 id） */
+            fprintf(stderr, "vtouchd: 订阅 region id=%s ev=%s ts=%d 线路=<%s> <ev> <slot> <x> <y>%s\n",
+                    g.sub_region_id[0] ? g.sub_region_id : "*", evs ? evs : "(默认)", g.sub_region_ts,
+                    g.sub_region_id[0] ? "(id省略)" : "id", g.sub_region_ts ? " <t>" : "");
         } else { snprintf(resp, cap, "err sub"); return -1; }   /* sub all 不支持过滤器（语义歧义） */
         g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0;
     }

@@ -53,6 +53,7 @@
 #define SUBEV_MOVE  4u
 #define SUBEV_EXIT  8u
 #define SUBEV_UP    16u
+#define SUBEV_TS    32u   /* 伪事件：随事件带墙钟毫秒（默认不发；注入族回包同理可关） */
 #define VT_UP   0
 #define VT_DOWN 1
 #define VT_MOVE 2
@@ -129,6 +130,8 @@ struct vt_state {
     unsigned sub_phys_ev;                              /* SUBEV_* 位；0 = 全部事件 */
     char     sub_region_id[REGION_ID_MAX + 1];         /* 只看这个区域；"" = 全部区域 */
     unsigned sub_region_ev;                            /* SUBEV_* 位；0 = 全部事件 */
+    int      sub_phys_ts, sub_region_ts;               /* 线路格式：事件行末是否带墙钟毫秒（裸 sub = 1，老客户端不受影响） */
+    int      quiet;                                    /* 注入族（touch/down/move/up/frame）不回 ok：脚本侧不必白收白解析 */
     struct vtq region_q;                               /* 主线程 push / 区域线程 pop */
     struct region regions[MAX_REGIONS];
     int region_count;

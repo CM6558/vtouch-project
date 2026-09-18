@@ -200,6 +200,7 @@ unsigned vt_subev_bit(const char *ev)
     if (!strcmp(ev, "move"))  return SUBEV_MOVE;
     if (!strcmp(ev, "exit"))  return SUBEV_EXIT;
     if (!strcmp(ev, "up"))    return SUBEV_UP;
+    if (!strcmp(ev, "ts"))    return SUBEV_TS;   /* 伪事件：只决定事件行要不要带墙钟毫秒 */
     return 0;
 }
 static int subev_want(unsigned mask, const char *ev)
@@ -225,8 +226,16 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, ui
     char msg[128];
     /* 末尾这个 <ms> 是**事件发生的墙钟毫秒**（与脚本的 Date.now() 同基准），
      * 由事件自带的单调时间戳换算而来 —— 用它算按压时长/做防抖/看延迟都够。 */
-    int n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d %llu",
-                     id, ev, slot, lx, ly, (unsigned long long)wall_ms_from_mono(ts_mono));
+    int n;
+    /* 线路格式（2026-09-18「不必要的数据不传」）：
+     *   只订了一个区域 ⇒ 不重复发 id（SDK 侧自己知道订的是谁）；
+     *   时间戳按需（默认不发）—— 脚本侧少一次 parseInt + 十来个字符。 */
+    if (g.sub_region_id[0])
+        n = snprintf(msg, sizeof msg, "region_ev %s %d %d %d", ev, slot, lx, ly);
+    else
+        n = snprintf(msg, sizeof msg, "region_ev %s %s %d %d %d", id, ev, slot, lx, ly);
+    if (n > 0 && (size_t)n < sizeof msg && g.sub_region_ts)
+        n += snprintf(msg + n, sizeof msg - (size_t)n, " %llu", (unsigned long long)wall_ms_from_mono(ts_mono));
 #ifdef VT_UI
     /* 面板的事件环：独立通道，和「脚本有没有订阅」无关（面板不该因为没脚本就看不到事件）。 */
     if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
@@ -257,8 +266,12 @@ void phys_ev_send(const struct vt_ev *ev)
     if (g.sub_phys_mask != 0 && (ev->slot < 0 || ev->slot >= 32 ||
                                  !(g.sub_phys_mask & (1u << ev->slot)))) return;
     if (!subev_want(g.sub_phys_ev, act)) return;
-    n = snprintf(msg, sizeof msg, "phys_ev %s %d %d %d %llu", act, ev->slot, ev->x, ev->y,
-                 (unsigned long long)wall_ms_from_mono(ev->ts));
+    /* 时间戳按需（默认不发；裸 sub phys = 老格式，老客户端不受影响） */
+    if (g.sub_phys_ts)
+        n = snprintf(msg, sizeof msg, "phys_ev %s %d %d %d %llu", act, ev->slot, ev->x, ev->y,
+                     (unsigned long long)wall_ms_from_mono(ev->ts));
+    else
+        n = snprintf(msg, sizeof msg, "phys_ev %s %d %d %d", act, ev->slot, ev->x, ev->y);
     if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
     fprintf(stderr, "vtouchd: phys %s slot%d %d,%d t=%llu\n", act, ev->slot, ev->x, ev->y,
             (unsigned long long)wall_ms_from_mono(ev->ts));
