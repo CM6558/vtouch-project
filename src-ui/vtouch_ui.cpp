@@ -248,37 +248,50 @@ static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的�
 static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
 static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
 static int g_rr_off = -1;
-/* 把一条区域几何从「base 屏帧」映射到「target 屏帧」下的竖屏几何：
- * 位置按比例、尺寸不变、起点钳进表允许范围（越界不裁剪）。base/target 都由调用方给 ——
- * 转屏批次用 (上一屏 → 当前屏)，落盘用 (当前屏 → 竖屏规范帧)。 */
+static int g_rr_insane = 0;               /* 见过的「不自洽屏帧」次数（只用于限频日志） */
+static int g_rr_env = -1;                 /* VTOUCH_REGION_BASE 是否已读 */
+
+/* 上报的屏帧是否**自洽**：rot 0/2 时屏幕应为竖形、rot 1/3 时应为横形。
+ * ⚠ 必须校验：Java 侧 getRotation() 与 getRealSize() 是两次独立反射（`VTouchUI.java:143-152`），
+ * 转屏瞬间实测会出现「方向已变、尺寸还没变」的半更新三元组（该文件 `:22-23` 的注释亦记此事）。
+ * 拿这种帧去换算：比例步退化成恒等（尺寸没变）+ 多转一次 ⇒ 区域被算到屏外；且基准被记成坏帧后，
+ * 下一个自洽帧再换算一次 = **坏进坏出、不会自愈**（真机症状：转屏后位置全乱）。 */
+static int frame_sane(int rot, int w, int h)
+{
+    if (w <= 0 || h <= 0) return 0;
+    if (rot == 1 || rot == 3) return (w > h) ? 1 : 0;
+    return (w <= h) ? 1 : 0;
+}
+/* 把一条区域几何从「base 屏帧」映射到「target 屏帧」下的竖屏几何。
+ * **语义（用户 2026-09-18 钉死）：保持「视口坐标」不变** —— 即以当前方向的左上角为原点、用户在这块屏上
+ * 看到的坐标原样保留，只把它换算到**竖屏坐标系**里存（表 / 脚本 / 核心判定用的就是这套）。
+ *   例：竖屏显示 (100,100) → 手机逆时针转 90°(rot1) 后，竖屏坐标系里的值应为 (1339,100)；
+ *       反过来 p2c_rot(1,1339,100) = (100,100) ✓ —— 于是表里的数字天然等于「手指在该点的原生坐标」，
+ *       核心照旧拿原生坐标判定 ⇒ **显示的位置与检测的位置一致，且核心零改动**。
+ * 不做比例缩放（那是「相对位置」语义，用户已否掉）；越出当前屏的视口坐标会被下面的最小钳制钉到边界。 */
 static int region_rot_map(int br, int bw, int bh, int tr, int tw, int th,
                           int type, int a1, int a2, int a3, int a4,
                           int *o1, int *o2, int *o3, int *o4)
 {
-    int x1, y1, x2, y2, cxf, cyf, hwf, hhf, nx, ny, t;
+    int x1, y1, x2, y2, t;
     if (bw <= 0 || bh <= 0 || tw <= 0 || th <= 0) return -1;
-    if (type == 1) {                     /* 圆：只搬圆心，半径不变（p2c/c2p 都是等距映射 ⇒ 半径同值） */
-        p2c_rot(br, a1, a2, &x1, &y1);
-        nx = (int)((double)x1 * tw / bw + 0.5);
-        ny = (int)((double)y1 * th / bh + 0.5);
-        c2p_rot(tr, nx, ny, o1, o2);
+    if (type == 1) {                     /* 圆：只搬圆心，半径按屏上像素不变 */
+        p2c_rot(br, a1, a2, &x1, &y1);           /* ① 竖屏值 → 旧屏的视口坐标 */
+        c2p_rot(tr, x1, y1, o1, o2);             /* ② 视口坐标原样带进新屏 → 竖屏值 */
         *o3 = (a3 > 0) ? a3 : 1; *o4 = 0;
-    } else {                             /* 矩形：中心按比例搬，屏上的宽高（像素）不变 */
+    } else {                             /* 矩形：两角按视口坐标搬，屏上宽高自然不变 */
         p2c_rot(br, a1, a2, &x1, &y1);
         p2c_rot(br, a3, a4, &x2, &y2);
         if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
         if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
-        cxf = (x1 + x2) / 2; cyf = (y1 + y2) / 2;
-        hwf = (x2 - x1) / 2; hhf = (y2 - y1) / 2;
-        nx = (int)((double)cxf * tw / bw + 0.5);
-        ny = (int)((double)cyf * th / bh + 0.5);
-        c2p_rot(tr, nx - hwf, ny - hhf, &x1, &y1);
-        c2p_rot(tr, nx + hwf, ny + hhf, &x2, &y2);
-        *o1 = x1 < x2 ? x1 : x2; *o2 = y1 < y2 ? y1 : y2;
-        *o3 = x1 < x2 ? x2 : x1; *o4 = y1 < y2 ? y2 : y1;
+        c2p_rot(tr, x1, y1, o1, o2);
+        c2p_rot(tr, x2, y2, o3, o4);
+        /* c2p 是旋转+镜像：两个角的相对大小可能翻过来，归一一次（轴对齐矩形不变式） */
+        if (*o1 > *o3) { t = *o1; *o1 = *o3; *o3 = t; }
+        if (*o2 > *o4) { t = *o2; *o2 = *o4; *o4 = t; }
     }
     /* 只在「核心会拒」时做最小钳制：它要求起点（圆心/矩形最小角）落在竖屏范围内、尺寸非负。
-     * 越界显示是允许的（用户口径），所以这里不裁剪、只挪起点。 */
+     * 视口坐标越出当前屏是允许的（用户口径），但**竖屏存储里有范围**，越界只能钉到边界。 */
     if (*o1 < 0) *o1 = 0;
     if (*o2 < 0) *o2 = 0;
     if (*o1 > g_w - 1) *o1 = g_w - 1;
@@ -301,7 +314,31 @@ static void region_rot_step(void)
         g_rr_off = (v && !strcmp(v, "off")) ? 1 : 0;
         if (g_rr_off) ALOGI("区域跟随旋转：关闭（VTOUCH_REGION_ROT=off）");
     }
+    /* 排障逃生门：VTOUCH_REGION_BASE=rot,w,h 直接指定「表里的数字属于哪个屏」，覆盖 regions.conf 的 #frame。
+     * 用在「表是横屏加的、但文件里没记」这种历史数据上（改一次不用重编）。 */
+    if (g_rr_env < 0) {
+        g_rr_env = 1;
+        const char *v = getenv("VTOUCH_REGION_BASE");
+        int br, bw, bh;
+        if (v) {
+            if (sscanf(v, "%d,%d,%d", &br, &bw, &bh) == 3 && br >= 0 && br <= 3 && bw > 0 && bh > 0) {
+                g_rr_base_rot = br; g_rr_base_w = bw; g_rr_base_h = bh;
+                ALOGI("区域跟随旋转：基准帧被 VTOUCH_REGION_BASE 覆盖为 rot%d %dx%d", br, bw, bh);
+            } else {
+                ALOGW("VTOUCH_REGION_BASE 非法（%s）→ 忽略，用 #frame/竖屏", v);
+            }
+        }
+    }
     if (g_rr_off || g_w <= 0 || g_h <= 0 || g_scr_w <= 0 || g_scr_h <= 0) return;
+    /* ⚠ 只认自洽的屏帧（见 frame_sane）。不自洽就**什么都不做**：既不换算、也不推进基准，
+     * 等 Java 侧 500ms 观察窗给到自洽值（通常 5~40ms 后；这段短暂错位被双图层翻转遮住）。 */
+    if (!frame_sane(g_rot, g_scr_w, g_scr_h)) {
+        g_rr_insane++;
+        if (g_rr_insane == 1 || (g_rr_insane % 120) == 0)
+            ALOGW("区域跟随旋转：屏帧不自洽（rot%d %dx%d，方向与屏幕形状矛盾），暂不换算（累计 %d 次）",
+                  g_rot, g_scr_w, g_scr_h, g_rr_insane);
+        return;
+    }
     if (g_rr_base_w <= 0) { g_rr_base_rot = 0; g_rr_base_w = g_w; g_rr_base_h = g_h; }  /* 基准 = 竖屏帧 */
     if (!g_rr_active) {
         if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
@@ -430,7 +467,7 @@ static int save_failed(void)
 static int save_regions(void)
 {
     char tmppath[128];
-    int i, n, live_is_current;
+    int i, n, tr, tw, th;
     /* 转屏批次进行中：表是混合态（部分区域已换算、部分没有）→ 推迟到收尾后再写。
      * 不清 g_save_pending，渲染线程下一帧会再来一次（收尾时 ui_region_changed 也会再置位）。 */
     if (g_rr_active) { g_save_pending = 1; return 0; }
@@ -441,22 +478,20 @@ static int save_regions(void)
     if (!f) { ALOGE("regions.conf 写入失败 %s: %s", tmppath, strerror(errno)); return save_failed(); }
     fprintf(f, "#vtouch-regions v%d\n", REGION_CONF_VER);
     n = vtouch_region_count();
-    /* 落盘写**竖屏规范帧**口径：文件里的数字与「脚本坐标 / 核心判定」同一套，且**与启动方向无关**
-     * —— 每次启动读回来都能还原成「当次的屏幕相对位置」。只有表当前确实是「当前屏」口径时才换算
-     * （g_rr_base_w 为 0 = 跟随关闭或显示还没就绪 → 表本来就是规范口径，原样写）。 */
-    live_is_current = (g_rr_base_w > 0 && g_rr_base_rot == g_rot &&
-                       g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h);
+    /* 数字一律**原样**写，另用 #frame 记下「这些数字属于哪个屏」—— 表是横屏加的还是竖屏加的，
+     * 只有录制者知道，写盘时不猜（真机踩过：横屏加的表被下次启动当成竖屏口径读 ⇒ 区域跑到别处）。
+     * 归属规则：跟随已推进到当前屏 ⇒ 属当前屏；否则属**基准帧**（默认竖屏规范帧，与旧文件兼容）。 */
+    tr = 0; tw = g_w; th = g_h;
+    if (g_rr_base_w > 0) { tr = g_rr_base_rot; tw = g_rr_base_w; th = g_rr_base_h; }
+    if (g_rr_base_w > 0 && frame_sane(g_rot, g_scr_w, g_scr_h) &&
+        g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) {
+        tr = g_rot; tw = g_scr_w; th = g_scr_h;
+    }
+    if (tw > 0 && th > 0) fprintf(f, "#frame %d %d %d\n", tr, tw, th);   /* 尺寸未知时不写：按旧文件处理 */
     for (i = 0; i < n; i++) {
-        char id[16]; int t, a1, a2, a3, a4, en, c1, c2, c3, c4;
+        char id[16]; int t, a1, a2, a3, a4, en;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
-        c1 = a1; c2 = a2; c3 = a3; c4 = a4;
-        if (live_is_current && g_scr_w > 0 && g_scr_h > 0 &&
-            region_rot_map(g_rot, g_scr_w, g_scr_h, 0, g_w, g_h, t, a1, a2, a3, a4, &c1, &c2, &c3, &c4) == 0) {
-            /* 已换成规范帧的值（越界只挪起点，见 region_rot_map） */
-        } else {
-            c1 = a1; c2 = a2; c3 = a3; c4 = a4;
-        }
-        fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, c1, c2, c3, c4, en);
+        fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, a1, a2, a3, a4, en);
     }
     for (i = 0; i < g_nhide; i++) fprintf(f, "hide %s\n", g_hidden[i]);
     if (fclose(f) != 0) { ALOGE("regions.conf 落盘失败: %s", strerror(errno)); return save_failed(); }
@@ -471,7 +506,7 @@ static int save_regions(void)
 static void load_regions(void)
 {
     char line[128];
-    int ver = 0, migrated = 0;
+    int ver = 0, migrated = 0, frame_seen = 0, nreg = 0;
     FILE *f = fopen(REGION_CONF_NEW, "r");
     if (!f) {
         f = fopen(REGION_CONF_OLD, "r");      /* 首次升级：把 tmpfs 里的老表搬过来 */
@@ -487,12 +522,24 @@ static void load_regions(void)
         return;
     }
     while (fgets(line, sizeof line, f)) {
-        char id[16]; int t, a1, a2, a3, a4, en;
-        if (sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
+        char id[16]; int t, a1, a2, a3, a4, en, fr, fw, fh;
+        /* #frame：这些数字是**在哪个屏上量的**（横屏加的表不能当竖屏口径读）。读到就把它当基准帧，
+         * 启动后由 region_rot_step 按当前屏换算过去（每帧一条）。 */
+        if (sscanf(line, "#frame %d %d %d", &fr, &fw, &fh) == 3) {
+            if (fw > 0 && fh > 0 && fr >= 0 && fr <= 3) {
+                g_rr_base_rot = fr; g_rr_base_w = fw; g_rr_base_h = fh;
+                frame_seen = 1;
+                ALOGI("区域跟随旋转：regions.conf #frame rot%d %dx%d（表里数字所属的屏；与当前屏不一致就换算）",
+                      fr, fw, fh);
+            } else {
+                ALOGW("regions.conf #frame 非法（rot%d %dx%d）→ 按竖屏规范帧解释", fr, fw, fh);
+            }
+        } else if (sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
             /* 判返回值：!= 0 有**两种**来源 —— ① 核心拒（非法 id：字符集/长度见 src/vt_region.c 的
              * id_ok；或表满）；② glue_post 的 edit_applied 1s 超时（返回 -1，胶水层自己会打一条
              * 「编辑 seq=… 超时未生效」在前面）。文案两种都提，别把超时误报成「核心拒绝」。
              * 两种都跳过这一条、继续载入其余条目（一条坏记录不该带走整张表，更不许崩）。 */
+            nreg++;
             if (vtouch_region_add(id, t, a1, a2, a3, a4, en) != 0)
                 ALOGW("regions.conf 跳过 %s（核心拒绝或编辑超时，见上一行 glue 日志, type%d %d,%d,%d,%d en%d）",
                       id, t, a1, a2, a3, a4, en);
@@ -501,6 +548,10 @@ static void load_regions(void)
         }
     }
     fclose(f);
+    if (!frame_seen && nreg > 0)
+        ALOGI("区域跟随旋转：regions.conf 无 #frame（旧文件，%d 条）→ 按**竖屏规范帧**解释；"
+              "若这批区域其实是横屏时加的，它们会出现在「相对位置转 90°」的地方 —— 用面板拖动/重画一次即可写下 #frame",
+              nreg);
     if (migrated) save_regions();     /* 迁移完立刻写回持久路径（老 tmpfs 文件留着无害） */
 }
 static void gen_id(char *out, int circle)
