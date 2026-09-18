@@ -47,6 +47,12 @@
 #define WS_IN_MAX (MAX_PAYLOAD + 14)     /* 单帧上限 + 头（2 + 8 扩展长 + 4 掩码） */
 #define SUB_PHYS   1      /* 订阅位：物理触摸流（按 slot 报 down/move/up，与区域无关） */
 #define SUB_REGION 2      /* 订阅位：区域事件（五事件，按区域过滤） */
+/* 事件位（订阅时的「可选订阅事件」；0 = 未设 ⇒ 全通，老脚本 sub phys / sub region 语义不变） */
+#define SUBEV_DOWN  1u
+#define SUBEV_ENTER 2u
+#define SUBEV_MOVE  4u
+#define SUBEV_EXIT  8u
+#define SUBEV_UP    16u
 #define VT_UP   0
 #define VT_DOWN 1
 #define VT_MOVE 2
@@ -117,6 +123,12 @@ struct vt_state {
     int ps_down[MAX_PHYS], ps_x[MAX_PHYS], ps_y[MAX_PHYS];   /* 物理槽上一帧快照（转发判 down/up/move）*/
     uint64_t ps_press_ns[MAX_PHYS];
     int sub_mask;                                      /* 订阅位：SUB_REGION / 0 = 未订阅 */
+    /* 订阅过滤器（2026-09-18「订阅时就过滤」）：0/空 = 全通（老脚本行为不变）。
+     * 物理行占实测 97% 的量 ⇒ 脚本侧的 onTouch 默认只订 down,up、并可按槽过滤。 */
+    unsigned sub_phys_mask;                            /* 槽位掩码；0 = 全部槽 */
+    unsigned sub_phys_ev;                              /* SUBEV_* 位；0 = 全部事件 */
+    char     sub_region_id[REGION_ID_MAX + 1];         /* 只看这个区域；"" = 全部区域 */
+    unsigned sub_region_ev;                            /* SUBEV_* 位；0 = 全部事件 */
     struct vtq region_q;                               /* 主线程 push / 区域线程 pop */
     struct region regions[MAX_REGIONS];
     int region_count;
@@ -189,6 +201,7 @@ int region_hit(const struct region *rg, int lx, int ly);
 void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, uint64_t ts_mono);
 /* 物理触摸流（sub phys）：按 slot 报 down/move/up，不按区域过滤。 (vtouch-doc: phys_ev_send) */
 void phys_ev_send(const struct vt_ev *ev);
+unsigned vt_subev_bit(const char *ev);   /* 事件名 → SUBEV_* 位（订阅过滤器共用） */
 /* 处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。 (vtouch-doc: region_apply) */
 void region_apply(const struct vt_ev *ev);
 /* 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。 (vtouch-doc: region_thread_main) */

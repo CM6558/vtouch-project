@@ -187,6 +187,29 @@ int region_hit(const struct region *rg, int lx, int ly)
     return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
 }
 /**
+ * (vtouch-doc: vt_subev_bit)
+ * @brief 事件名 → SUBEV_* 位（订阅过滤器共用；未知名字返回 0）。
+ * @param   ev       事件名：down/enter/move/exit/up
+ * @return  对应位；未知名字 0。
+ * @note    vt_region.c 推送时判、vt_ws.c 解析 sub 命令时用。
+ */
+unsigned vt_subev_bit(const char *ev)
+{
+    if (!strcmp(ev, "down"))  return SUBEV_DOWN;
+    if (!strcmp(ev, "enter")) return SUBEV_ENTER;
+    if (!strcmp(ev, "move"))  return SUBEV_MOVE;
+    if (!strcmp(ev, "exit"))  return SUBEV_EXIT;
+    if (!strcmp(ev, "up"))    return SUBEV_UP;
+    return 0;
+}
+static int subev_want(unsigned mask, const char *ev)
+{
+    unsigned b;
+    if (mask == 0) return 1;
+    b = vt_subev_bit(ev);
+    return (b != 0 && (mask & b)) ? 1 : 0;
+}
+/**
  * (vtouch-doc: region_ev_send)
  * @brief 发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。
  * @param   id       区域名
@@ -196,10 +219,6 @@ int region_hit(const struct region *rg, int lx, int ly)
  * @param   ly       逻辑 y
  * @param   ts_mono  事件时间戳（单调钟纳秒；发出去时换算成墙钟毫秒）
  * @note    低频事件；只报物理手指。报文末尾带 <ms>：事件发生的墙钟毫秒（与脚本 Date.now() 同基准），由 ts_mono 换算而来 —— 脚本算按压时长/防抖/看延迟用它。
- *
- * 为什么这么写（原有注释，逐字保留）：
- *   命中事件通知（低频：down/up/enter/exit/move）；§4.5：进出发送队列，绝不直写 socket。
- *   没订区域通道就不白推 region_ev（判定的账照记，只打日志）。
  */
 void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, uint64_t ts_mono)
 {
@@ -212,7 +231,8 @@ void region_ev_send(const char *id, const char *ev, int slot, int lx, int ly, ui
     /* 面板的事件环：独立通道，和「脚本有没有订阅」无关（面板不该因为没脚本就看不到事件）。 */
     if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
 #endif
-    if (g.sub_mask & SUB_REGION) {
+    if ((g.sub_mask & SUB_REGION) && (g.sub_region_id[0] == 0 || !strcmp(g.sub_region_id, id)) &&
+        subev_want(g.sub_region_ev, ev)) {
         if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);
         fprintf(stderr, "vtouchd: ev %s %s slot%d %d,%d t=%llu\n", id, ev, slot, lx, ly,
                 (unsigned long long)wall_ms_from_mono(ts_mono));
@@ -232,8 +252,11 @@ void phys_ev_send(const struct vt_ev *ev)
     char msg[96];
     const char *act;
     int n;
-    if (!(g.sub_mask & SUB_PHYS)) return;
     act = (ev->action == VT_DOWN) ? "down" : (ev->action == VT_UP) ? "up" : "move";
+    if (!(g.sub_mask & SUB_PHYS)) return;
+    if (g.sub_phys_mask != 0 && (ev->slot < 0 || ev->slot >= 32 ||
+                                 !(g.sub_phys_mask & (1u << ev->slot)))) return;
+    if (!subev_want(g.sub_phys_ev, act)) return;
     n = snprintf(msg, sizeof msg, "phys_ev %s %d %d %d %llu", act, ev->slot, ev->x, ev->y,
                  (unsigned long long)wall_ms_from_mono(ev->ts));
     if (n > 0 && (size_t)n < sizeof msg) outq_push_text(msg, (size_t)n);

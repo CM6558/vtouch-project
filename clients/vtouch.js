@@ -31,8 +31,10 @@
  * 两条推送（都是单向；回调跑在子线程，h 里都带 t = **事件发生的墙钟毫秒**，与 Date.now() 同基准）：
  *   vt.onRegion([id,] [事件,] cb)   区域事件 down/enter/move/exit/up —— **按区域过滤**：手指滑出
  *                                   区域后就只剩一个 exit 了，所以要「追手指」得用下面这条。
- *   vt.onTouch([slot,] cb)          **物理触摸流**：任何物理手指的 down/move/up，不按区域过滤；
- *                                   vt.follow(slot, cb) 是它的简写（只跟一根手指）。
+ *   vt.onTouch([slot,] cb [, 事件])  **物理触摸流**：按槽订阅（只发你订的那根手指），不按区域过滤；
+ *                                   **默认只报 down/up**；要轨迹写 "down,move,up" 或 "*"
+ *                                   （move 是实测 97% 的行量，默认开着等于白烧 CPU）；
+ *                                   vt.follow(slot, cb, 事件) 是它的简写。
  *   两条流只报**物理**手指 —— 脚本自己注入的虚拟触点不会回流（防自激）。
  *
  * 典型用法「某手指在区域内按下 → 一路跟到抬起」：
@@ -459,8 +461,9 @@ if (typeof global === "object" && global && global.VTOUCH_NO_AUTOSTART) {
  *   vt.onRegion(cb)                    所有区域 + down/up/enter/exit（默认不含 move）
  *   vt.onRegion(cb, "up")              所有区域 + 只要抬起
  *   vt.onRegion("c1", "down,move", cb) 指定区域 + 指定事件
- *   vt.onTouch(cb)                     物理触摸流：任何手指的 down/move/up（不按区域过滤）
- *   vt.onTouch(3, cb) / vt.follow(3,cb) 只跟 slot 3 这根手指 —— 它移到哪、何时抬起都拿得到
+ *   vt.onTouch(cb [, 事件])            物理触摸流：任何手指的 down/up（**默认不含 move**）
+ *   vt.onTouch(3, cb) / vt.follow(3,cb) 只跟 slot 3 这根手指 —— 槽号下发给核心，别的槽根本不发
+ *   vt.onTouch(3, cb, "down,move,up")  要轨迹必须显式要 move（实测它占 97% 的行量）
  *                                      （区域事件只覆盖"区域内"，追手指要用这条流）
  * events 省略 = down/up/enter/exit；"*" / "any" = 全部（含 move）；也可给数组。
  * 回调收到 h = { id, ev, slot, x, y, t }，跑在**分发线程**里，**串行**执行（事件到达顺序 == 回调
@@ -641,6 +644,7 @@ function dispatchTouch(s) {
     for (var i = 0; i < snapshot.length; i++) {
         var H = snapshot[i];
         if (H.slot !== null && H.slot !== h.slot) continue;
+        if (H.want && h.ev && !H.want[h.ev]) continue;   /* 事件类型：核心按并集过滤 + 这里按各 handler 各筛 */
         offer(h, H.cb);
     }
 }
@@ -785,11 +789,66 @@ function startReader() {
         }
     });
 }
-/* 订阅一个通道（幂等） */
-function subscribe(ch) {
+/* 对象键列表（不依赖 Object.keys，Rhino 老版本也稳） */
+function keysOf(m) {
+    var out = [], k;
+    for (k in m) if (Object.prototype.hasOwnProperty.call(m, k)) out.push(k);
+    return out;
+}
+/* 事件的**去重**判断（下发给核心的过滤器用；按固定顺序拼，便于幂等比较） */
+function evListOf(want) {
+    var all = ["down", "enter", "move", "exit", "up"], out = [], i;
+    for (i = 0; i < all.length; i++) if (want[all[i]]) out.push(all[i]);
+    return out.join(",");
+}
+/* 订阅一个通道（幂等）。arg = 核心侧过滤器（如 "0,3 down,up"、"* down,up,enter,exit"）；
+ * 省略 arg = 老语义（裸 sub phys / sub region：全槽/全区域、全事件）。 */
+function subscribe(ch, arg) {
     var conn = g_conn || connect();
-    if (!g_subbed[ch]) { conn.send("sub " + ch); g_subbed[ch] = 1; }
+    var cmd = "sub " + ch + (arg ? " " + arg : "");
+    if (g_subbed[ch] !== cmd) { conn.send(cmd); g_subbed[ch] = cmd; }
     return conn;
+}
+/* 真退订：SNK 以前只在本地摘 handler，核心照旧按老订阅全量推送、读线程空转解析（评审登记的浪费）。 */
+function unsubscribe(ch) {
+    if (!g_subbed[ch]) return;
+    delete g_subbed[ch];
+    try { if (g_conn) g_conn.send("unsub " + ch); } catch (e) {}
+}
+/* 把 handler 集合聚合成**每通道一条**订阅命令（核心只存一份过滤器，SDK 负责取并集）：
+ *   槽位/区域取并集，事件取并集 —— 只要有一个 handler 要 move 就带 move，全不要就不带。
+ *   核心侧按这份过滤器在**推送前**判：不订的东西连队列都不进、不过网络、不花 AutoJs6 的 CPU。 */
+function refreshSub() {
+    var i, k, H, list, evs, want, ids, anyAll;
+    /* --- 物理触摸流 --- */
+    var slotSet = {}, anySlot = false;
+    want = {};
+    for (i = 0; i < g_touchHandlers.length; i++) {
+        H = g_touchHandlers[i];
+        if (H.slot === null || H.slot === undefined) anySlot = true; else slotSet[H.slot] = 1;
+        for (k in H.want) want[k] = 1;
+    }
+    if (!g_touchHandlers.length) unsubscribe("phys");
+    else {
+        list = anySlot ? "-1" : keysOf(slotSet).join(",");
+        evs = evListOf(want);
+        /* 事件列表为空时退回老语义（= 全事件，含 move）会白烧 CPU ⇒ 空就只订简报。 */
+        subscribe("phys", list + " " + (evs || "down,up"));
+    }
+    /* --- 区域事件 --- */
+    ids = {}; anyAll = false; want = {};
+    for (i = 0; i < g_regionHandlers.length; i++) {
+        H = g_regionHandlers[i];
+        if (!H.id) anyAll = true; else ids[H.id] = 1;
+        for (k in H.want) want[k] = 1;
+    }
+    if (!g_regionHandlers.length) unsubscribe("region");
+    else {
+        var idArr = keysOf(ids);
+        list = (anyAll || idArr.length !== 1) ? "*" : idArr[0];   /* 核心的 region 选择只支持单 id 或 * */
+        evs = evListOf(want);
+        subscribe("region", list + " " + (evs || "down,up,enter,exit"));
+    }
 }
 /* 末行 `end N` 里的 N（表里声明的条数）；取不到数字返回 -1（那就只按「见过末行」判完整性）。 */
 function endCount(line) {
@@ -850,6 +909,7 @@ function dropHandler(arr, H) {
     try {
         for (var i = 0; i < arr.length; i++) if (arr[i] === H) { arr.splice(i, 1); break; }
     } finally { g_handlersLock.unlock(); }
+    refreshSub();                               /* 手全摘光 ⇒ refreshSub 里会真退订（unsub） */
     if (!g_regionHandlers.length && !g_touchHandlers.length && g_keepAlive) {
         try { clearInterval(g_keepAlive); } catch (e) {}
         g_keepAlive = null;
@@ -863,12 +923,12 @@ function onRegion(a, b, c) {
     else { id = a; evs = b; cb = c; }
     if (typeof cb !== "function") throw new Error("onRegion 需要一个回调函数");
     var H = { id: id, want: parseEvents(evs), cb: cb };
-    subscribe("region");
     startReader();
     /* **先挂 handler 再查表**（评审 L6）：下面这段查询是同步的，表空时最多 4×300ms 再叠 listRegions 自身
      * 1s 超时；旧顺序在这段窗口里把到达的事件投递给 **0 个 handler** ⇒ 「脚本开头那几步的动作不触发」。 */
     g_handlersLock.lock();
     try { g_regionHandlers.push(H); } finally { g_handlersLock.unlock(); }
+    refreshSub();                               /* 挂上再聚合：区域 id / 事件类型一起下发给核心过滤 */
     if (id) {                                   /* 查表：id 写错/被停用立刻提示，不让你干等到怀疑人生 */
         var rows = listRegions(), hit = false, i, tries = 0;
         /* 区域表是**面板**起来后从 regions.conf 载进核心的，而核心的监听早于面板
@@ -887,18 +947,20 @@ function onRegion(a, b, c) {
     keepAlive();
     return { stop: function () { dropHandler(g_regionHandlers, H); } };
 }
-/* onTouch([slot,] cb)：**物理触摸流** —— 不按区域过滤，按下之后一路跟到抬起。
+/* onTouch([slot,] cb [, 事件])：**物理触摸流** —— 不按区域过滤，按下之后一路跟到抬起。
  * 典型用法：在 onRegion 里收到 down → 记住 h.slot → 之后用 onTouch(slot, cb) 跟这根手指，
  * 它移到哪、什么时候抬起都拿得到（哪怕早就滑出了那个区域）。
+ * **事件默认只订简报（down,up），不含 move**：位置流是实测 97% 的行量，要轨迹必须显式写
+ * onTouch(slot, cb, "down,move,up")（或 "*"）。核心按订阅在推送前过滤 ⇒ 不订的东西不进队列、
+ * 不过网络、不花 AutoJs6 的 CPU；槽号也会一起下发给核心（不是自己订阅的那根手指，核心根本不发）。
  * 回调收到 h = { ev, slot, x, y, t }，ev ∈ down/move/up（move 只在位置变化时报）。 */
-function onTouch(a, b) {
-    var slot = null, cb;
-    if (typeof a === "function") { cb = a; }
-    else { slot = (a === undefined || a === null) ? null : Math.round(a); cb = b; }
+function onTouch(a, b, c) {
+    var slot = null, cb, evs = null;
+    if (typeof a === "function") { cb = a; evs = b; }
+    else { slot = (a === undefined || a === null) ? null : Math.round(a); cb = b; evs = c; }
     if (typeof cb !== "function") throw new Error("onTouch 需要一个回调函数");
     if (slot !== null && (slot < 0 || slot >= g_physSlots)) throw new Error("slot 0~" + (g_physSlots - 1));
-    var H = { slot: slot, cb: cb };
-    subscribe("phys");
+    var H = { slot: slot, want: parseEvents(evs || "down,up"), cb: cb };
     startReader();
     /* 同 slot 已有 handler → 先停掉旧的，避免同一 up 被两个 handler 各收到一次 */
     g_handlersLock.lock();
@@ -913,15 +975,17 @@ function onTouch(a, b) {
         }
         g_touchHandlers.push(H);
     } finally { g_handlersLock.unlock(); }
+    refreshSub();                               /* 槽号 + 事件类型聚合后下发给核心过滤（含真退订） */
     keepAlive();
     /* 补发缓存的 down：如果该 slot 刚按下但 follow 注册晚了，补一条 down */
-    if (slot !== null && g_lastPhysDown[slot]) {
+    if (slot !== null && g_lastPhysDown[slot] && H.want.down) {
         offer(g_lastPhysDown[slot], cb);
     }
     return { stop: function () { dropHandler(g_touchHandlers, H); } };
 }
-/* follow(slot)：只跟一根手指的便捷写法（等价 onTouch(slot, cb)） */
-function follow(slot, cb) { return onTouch(slot, cb); }
+/* follow(slot, cb [, 事件])：只跟一根手指的便捷写法（等价 onTouch(slot, cb, 事件)）。
+ * 要轨迹别忘了第三个参数："down,move,up"。 */
+function follow(slot, cb, evs) { return onTouch(slot, cb, evs); }
 
 module.exports = {
     start: start, stop: stop, alive: alive, ensure: ensure,

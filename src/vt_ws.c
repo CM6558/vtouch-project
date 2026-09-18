@@ -1,5 +1,6 @@
 /* vt_ws.c（§10 WebSocket 协议） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
+#include <stdlib.h>          /* strtol：解析 sub 的槽号列表 */
 
 static unsigned char ws_in[WS_IN_MAX];
 static size_t ws_in_len;
@@ -293,6 +294,8 @@ void drop_client(void)
     }
     ws_in_len = 0;
     g.sub_mask = 0;          /* §4.6：断连/被踢 → 订阅清零（下一个客户端要自己重新 sub） */
+    g.sub_phys_mask = 0; g.sub_phys_ev = 0;      /* 过滤器一并复位（0/空 = 全通） */
+    g.sub_region_id[0] = 0; g.sub_region_ev = 0;
     outq_reset();          /* §4.6：断连/被踢 → 出站队列销毁（残包不许串给下一个客户端） */
     owner_reset();
 }
@@ -638,34 +641,111 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
     snprintf(resp, cap, "err region"); return -1;
 }
 /**
+ * (vtouch-doc: parse_slot_mask)
+ * @brief 逗号分隔的槽号列表 → 槽位掩码（sub phys 的 <选择>）。
+ * @param   s        槽号列表，如 "0" / "0,3"（原地切分）
+ * @param   out      结果掩码
+ * @return  0 成功；-1 语法错（非数字 / 越界 / 空）。
+ * @note    用独立的 strtok_r saveptr —— 复用外层状态会把命令参数切坏。
+ */
+static int parse_slot_mask(char *s, unsigned *out)
+{
+    char *sv = NULL, *tk;
+    unsigned m = 0;
+    for (tk = strtok_r(s, ",", &sv); tk; tk = strtok_r(NULL, ",", &sv)) {
+        char *end = NULL;
+        long v = strtol(tk, &end, 10);
+        if (end == tk || *end != 0 || v < 0 || v >= 32) return -1;
+        m |= (1u << (unsigned)v);
+    }
+    if (m == 0) return -1;
+    *out = m;
+    return 0;
+}
+/**
+ * (vtouch-doc: parse_ev_bits)
+ * @brief 逗号分隔的事件名列表（或 *）→ SUBEV_* 位（sub 的 <事件>）。
+ * @param   s        事件名列表，如 "down,up"；"*" = 全部
+ * @param   out      结果位；* 存 0（= 未设 = 全通）
+ * @return  0 成功；-1 语法错（含未知事件名）。
+ * @note    * 与「<选择> 缺省」共用「0 = 全通」这一约定。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   逗号分隔的事件名列表 → SUBEV_* 位；`*` 表示全部（存 0 = 未设 = 全通）。
+ */
+static int parse_ev_bits(char *s, unsigned *out)
+{
+    char *sv = NULL, *tk;
+    unsigned e = 0;
+    if (!strcmp(s, "*")) { *out = 0; return 0; }
+    for (tk = strtok_r(s, ",", &sv); tk; tk = strtok_r(NULL, ",", &sv)) {
+        unsigned b = vt_subev_bit(tk);
+        if (b == 0) return -1;
+        e |= b;
+    }
+    if (e == 0) return -1;
+    *out = e;
+    return 0;
+}
+/**
  * (vtouch-doc: cmd_sub)
- * @brief 命令族：sub [phys|region|all] / unsub（裸 sub = 只订区域通道，与改动前一致）。
+ * @brief 命令族：sub [phys|region|all] [<选择> [<事件>]] / unsub [phys|region]（不带选择 = 老语义全订；带选择 = 精确订阅过滤器）。
  * @param   t        命令词
  * @param   stp      strtok_r 状态
  * @param   resp     响应缓冲
  * @param   cap      缓冲容量
  * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
- *
- * 为什么这么写（原有注释，逐字保留）：
- *   sub [g.phys|region|all] / unsub：裸 sub = 全订（老脚本语义不变，§4.6）
+ * @note    <选择>：phys 是槽号列表（0 / 0,3 / * / -1 = 全部槽），region 是区域 id（* = 全部）。<事件>：逗号列表或 *（down,enter,move,exit,up）。给了 <选择> 而不给 <事件> 时默认「简报」——phys: down,up；region: down,up,enter,exit，**默认不含 move**；要位置流必须显式写 move（实测物理行占 97% 的量，默认开它等于白烧 CPU）。过滤器只作用于推送，不影响 stderr 日志。
  */
 int cmd_sub(char *t, char **stp, char *resp, size_t cap)
 {
     if (!strcmp(t, "sub")) {
-        char *ch = strtok_r(NULL, " \t", stp);
+        char *ch = strtok_r(NULL, " \t", stp), *sel, *evs;
         int want = SUB_REGION;                       /* 裸 sub = 区域通道（与改动前一致，老脚本行为不变） */
+        unsigned m = 0, e = 0;
         if (ch) {
             if (!strcmp(ch, "region"))      want = SUB_REGION;
             else if (!strcmp(ch, "phys"))   want = SUB_PHYS;
             else if (!strcmp(ch, "all"))    want = SUB_PHYS | SUB_REGION;
             else { snprintf(resp, cap, "err sub"); return -1; }
         }
+        sel = strtok_r(NULL, " \t", stp);
+        evs = strtok_r(NULL, " \t", stp);
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
-        g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0;   /* 累加而非赋值：SDK 分两次 sub region / sub phys 不能互相覆盖（Bug 8） */
+        if (!ch) { g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0; }   /* 裸 sub：老语义（全槽全事件） */
+        /* 带 <选择> ⇒ 精确设定过滤器（不再 |=，两次带参 sub 不应互相污染过滤器）。
+         * 事件缺省 = 简报（phys: down,up；region: down,up,enter,exit）—— **默认不含 move**，
+         * 要位置流必须显式写 move（物理行占实测 97% 的量）。 */
+        if (want == SUB_PHYS) {
+            if (sel && strcmp(sel, "*") && strcmp(sel, "-1") && parse_slot_mask(sel, &m) != 0) {
+                snprintf(resp, cap, "err sub"); return -1;
+            }
+            if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
+            else e = sel ? (SUBEV_DOWN | SUBEV_UP) : 0;
+            g.sub_phys_mask = m; g.sub_phys_ev = e;
+        } else if (want == SUB_REGION) {
+            if (sel && strcmp(sel, "*")) {
+                if (strlen(sel) > REGION_ID_MAX) { snprintf(resp, cap, "err sub"); return -1; }
+                snprintf(g.sub_region_id, sizeof g.sub_region_id, "%s", sel);
+            } else g.sub_region_id[0] = 0;
+            if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
+            else e = sel ? (SUBEV_DOWN | SUBEV_ENTER | SUBEV_EXIT | SUBEV_UP) : 0;
+            g.sub_region_ev = e;
+        } else { snprintf(resp, cap, "err sub"); return -1; }   /* sub all 不支持过滤器（语义歧义） */
+        g.sub_mask |= want; snprintf(resp, cap, "ok"); return 0;
     }
     if (!strcmp(t, "unsub")) {
+        char *ch = strtok_r(NULL, " \t", stp);
         if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err sub"); return -1; }
-        g.sub_mask = 0; snprintf(resp, cap, "ok"); return 0;
+        if (!ch) {                                   /* 不带参数 = 全退（老语义不变） */
+            g.sub_mask = 0; g.sub_phys_mask = g.sub_phys_ev = 0;
+            g.sub_region_id[0] = 0; g.sub_region_ev = 0;
+        } else if (!strcmp(ch, "phys")) {
+            g.sub_mask &= ~SUB_PHYS; g.sub_phys_mask = g.sub_phys_ev = 0;
+        } else if (!strcmp(ch, "region")) {
+            g.sub_mask &= ~SUB_REGION; g.sub_region_id[0] = 0; g.sub_region_ev = 0;
+        } else { snprintf(resp, cap, "err sub"); return -1; }
+        snprintf(resp, cap, "ok"); return 0;
     }
     return 1;
 }

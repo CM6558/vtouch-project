@@ -14,8 +14,9 @@
  *     .down(x,y) .move(x,y) .up() .tap(x,y[,ms]) .swipe(x1,y1,x2,y2[,ms])
  *   vt.frame([{slot,state,x,y}...])   多指合并进同一帧（state = down/move/up）
  *   vt.onRegion([id,] [事件,] 回调)    区域事件订阅；回调跑在子线程，h={id,ev,slot,x,y,t}
- *   vt.onTouch([slot,] 回调)           **物理触摸流**：不按区域过滤，按下→移动→抬起一路跟；
- *                                     h={ev,slot,x,y,t}；vt.follow(slot,cb) 是它的简写
+ *   vt.onTouch([slot,] 回调 [, 事件])  **物理触摸流**：按槽订阅、不按区域过滤，按下→抬起一路跟；
+ *                                     **默认只报 down/up**，要移动轨迹写 "down,move,up"；
+ *                                     h={ev,slot,x,y,t}；vt.follow(slot,cb,事件) 是它的简写
  *   vt.res()                          逻辑尺寸 + raw 量程（字符串）
  *   vt.keepRunning(true) / vt.stop() / vt.alive() / vt.startedByUs()
  */
