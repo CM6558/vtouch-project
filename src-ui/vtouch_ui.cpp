@@ -676,6 +676,9 @@ static void ui_ev_cb(const char *line)
 {
     char id[16], ev[32];
     int slot, lx, ly;
+    if (!strncmp(line, "mark_ev ", 8)) {          /* 核心改了区域的"开关样式"标记 */
+        g_need = 1; g_force_frames = 2; g_ov_need = 1;   /* 立刻重画（面板按需重绘，这一步是"事件驱动那一下"）*/
+    }
     if (g_evlog_n < 8) snprintf(g_evlog[g_evlog_n++], 96, "%s", line);
     else { memmove(g_evlog[0], g_evlog[1], 96 * 7); snprintf(g_evlog[7], 96, "%s", line); }
     if (sscanf(line, "region_ev %15s %31s %d %d %d", id, ev, &slot, &lx, &ly) == 5) {
@@ -1143,7 +1146,14 @@ static void build_overlay(int sw, int sh)
             {
                 char lbl[24];
                 snprintf(lbl, sizeof lbl, mk ? "%s \xE2\x97\x8F\xE5\xBC\x80" : "%s", id);   /* "id ●开" */
-                dl->AddText(ImVec2((float)a1, (float)(type == 1 ? a2 - a3 - 34 : a2 - 34)), col, lbl);
+                if (mk) {
+                    /* 开关型区域：名字画到**正中间**（有绿底填充后，贴边的标签读不清） */
+                    ImVec2 ts = ImGui::CalcTextSize(lbl);
+                    ImVec2 c = ImVec2((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                    dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), col, lbl);
+                } else {
+                    dl->AddText(ImVec2((float)a1, (float)(type == 1 ? a2 - a3 - 34 : a2 - 34)), col, lbl);
+                }
             }
         }
         /* 框选橡皮筋 + 提示（手势坐标是竖屏的，画之前换算） */

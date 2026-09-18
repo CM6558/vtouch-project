@@ -1063,7 +1063,9 @@ function onRegionPress(a, b, c) {
 /* mark(区域id, on)：给区域打/清「开关样式」标记 —— 面板会把该区域整块高亮
  * （半透明绿底 + 粗绿边 + 标签「id ●开」）。用它把脚本里的状态"画"到面板上。
  * vt.toggle 会自动调它（开=标记，关=清标记），所以用 toggle 时不用手动调。
- * 注意：id 必须**已经存在于核心的区域表**里（面板里画过），否则核心回 err region。 */
+ * 注意：① id 必须**已经存在于核心的区域表**里（面板里画过），否则核心回 err region；
+ *       ② 直接调 mark 只改面板样式，**不改 vt.toggle 的状态** —— 要让"脚本状态 + 面板样式"一起变，
+ *          就用 toggle 返回对象的 sw.set(false) / sw.flip()（它们内部会自动同步），或在别的回调里调它。 */
 function mark(id, on) {
     var conn = g_conn || connect();
     conn.send("region mark " + id + " " + (on ? 1 : 0));

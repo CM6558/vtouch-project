@@ -609,6 +609,16 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
         if (hit >= 0) g.regions[hit].mark = (int)v;
         pthread_mutex_unlock(&g.region_lock);
         if (hit < 0) { snprintf(resp, cap, "err region"); return -1; }   /* 没这个 id 就明确报错，不静默 */
+        fprintf(stderr, "vtouchd: region mark %s %d\n", sid, (int)v);
+#ifdef VT_UI
+        /* 面板是**按需重绘**的：核心改了标记，它没有醒来的理由（脚本在别的回调里关开关时，
+         * 屏幕上不会有人碰它）。所以往事件环推一条，面板收到就立刻重画一帧（≤33ms 节流）。 */
+        {
+            char mb[64];
+            int mn = snprintf(mb, sizeof mb, "mark_ev %s %d\n", sid, (int)v);
+            if (mn > 0 && (size_t)mn < sizeof mb) vt_shm_ring_push(mb, (size_t)mn);
+        }
+#endif
         snprintf(resp, cap, "ok"); return 0;
     }
     if (op && !strcmp(op, "list")) {
