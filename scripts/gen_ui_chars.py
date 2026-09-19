@@ -17,7 +17,9 @@ region_add / region_rename 拒绝非 [A-Za-z0-9_-] 的 id（回 err region），
 
 用法:
     python scripts/gen_ui_chars.py --out build/ui/ui_chars.h   # 生成（默认路径）
-    python scripts/gen_ui_chars.py --check --out <path>        # 只比对，不一致退出码 1
+
+没有 --check 模式：`ui_chars.h` 是 build_ui.sh **每次编译前现生成**到 build/ui/ 的（不入库），
+不存在"已提交版本"可比 ⇒ 检查模式无意义（评审 §3 已判）。
 """
 from __future__ import annotations
 
@@ -58,22 +60,11 @@ def render(chars: str) -> str:
 
 def main() -> int:
     out = DEFAULT_OUT
-    check = "--check" in sys.argv
     argv = sys.argv[1:]
     for i, a in enumerate(argv):
         if a == "--out" and i + 1 < len(argv):
             out = argv[i + 1]
     text = render(collect_chars())
-    if check:
-        if not os.path.exists(out):
-            print("字形表不存在: %s（先跑不带 --check 的生成）" % out)
-            return 1
-        old = open(out, "r", encoding="utf-8").read()
-        if old != text:
-            print("字形表过期: %s ≠ 由源码重新生成的结果 —— 重跑 python scripts/gen_ui_chars.py" % out)
-            return 1
-        print("字形表最新: %s" % out)
-        return 0
     os.makedirs(os.path.dirname(out), exist_ok=True)
     newline = "\n"
     with open(out, "w", encoding="utf-8", newline=newline) as f:

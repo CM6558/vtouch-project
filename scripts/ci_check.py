@@ -7,11 +7,12 @@
                                 [--allow-core <别的核心，可重复>]
 
 检查内容：
-  ① SDK 是自包含的（内嵌负载非空）；
+  ① SDK 是自包含的（内嵌负载**非空**）；
   ①c **内嵌负载的 md5 必须等于 --core 那份**；不等时可以显式 --allow-core <路径> 放行，
      放行后 ② 门的重生成基准换成**那一份**（默认行为不变：不传 --allow-core 时只看 --core）；
-  ② **把 SDK 按 pack_client.py 的规则从当前源码 + 本次构建的核心重新生成一遍，与磁盘上的 SDK 逐字节比对**
+  ② **把 SDK 按 pack_client.py 的规则从当前源码 + 本次构建的核心重新生成一遍，与磁盘上的 SDK 比对**
      —— 通过就说明"这份 SDK = 这份源码 + 这个二进制"，不存在旧副本混充；
+     （比对按**文本**读入（换行归一化）：CRLF/LF 差异看不出来 —— 要断言换行就得两边都按 bytes 读。）
   ③ 示例里的 require 指向单文件客户端，且示例用到的每个 vt.<名字> 都存在于 SDK 导出的 API 里；
   ④ 打印清单（名字 / 大小 / md5），供 job summary 和 artifact 附带。
 
@@ -88,7 +89,11 @@ def main():
     elif m.group(1) == "null":
         bad("SDK 的 PAYLOAD 是 null —— 这是源码态，不是自包含单文件")
     else:
-        ok("内嵌负载非空（%d 字符 base64）" % len(m.group(2)))
+        nb64 = len(m.group(2))
+        if nb64 == 0:
+            bad("内嵌负载是**空串**（PAYLOAD=\"\"）—— 这等于没内嵌核心，不是自包含单文件")
+        else:
+            ok("内嵌负载非空（%d 字符 base64）" % nb64)
         try:
             payload_md5 = hashlib.md5(base64.b64decode(m.group(2))).hexdigest()
         except Exception:
@@ -141,7 +146,7 @@ def main():
             bad("%s 是 stub 模式（VTOUCH_UI_CORE=real 没生效）—— 这种 SDK 的面板不接核心、看不到真实状态"
                 % panel.name)
 
-    print("\n== ② SDK = 当前源码 + 本次构建的核心（逐字节重生成比对）==")
+    print("\n== ② SDK = 当前源码 + 本次构建的核心（按 pack_client.py 规则重新生成后比对；文本读入，换行归一化）==")
     want = source.read_text(encoding="utf-8")
     b64 = base64.b64encode(basis_data).decode("ascii")
     subs = [
@@ -158,7 +163,7 @@ def main():
             bad("源码 %s 里找不到占位符 %s（pack_client.py 与源码不同步）" % (a.source, pat[:28]))
             return 1
     if want == sdk_text:
-        ok("与「当前源码 + 当前核心」重新生成的 SDK 逐字节一致")
+        ok("与「当前源码 + 当前核心」重新生成的 SDK 逐行一致（文本模式：换行归一化）")
     else:
         bad("SDK 与重新生成的结果不一致 —— 磁盘上的 SDK 不是用当前源码/当前核心生成的（重跑 scripts/pack_client.py）")
 
@@ -190,7 +195,8 @@ def main():
     print("\n== ⑤ 客户端顶层函数完整性（防误删：一次边界手术把 startReader 整段删掉过）==")
     # 基线就是本文件里这份名单：只允许**新增**函数，不允许悄悄少一个 ——
     # 少了就是有代码被误删（node --check 只查语法、导出名检查只查 public API，都拦不住）。
-    baseline = set("""Finger alive attach connect connectOnce deviceMd5 dispatchLoop dispatchRegion dispatchTouch dropHandler endCount ensure evListOf finger follow frame installBinary isReadTimeout jb keepAlive keepRunning keysOf listReconcile listRegions mergeMove offer onRegion onTouch parseEvents readByteTolerant readFull readFullTolerant readLine refreshSub res say sh start startReader startedByUs stop subscribe trim unsubscribe warn wsAccept wsKey""".split())
+    # **有意删除**函数时，同步改这份名单（本次删了 `readFull` 严格版：零调用者，握手侧走 readLine）。
+    baseline = set("""Finger alive attach connect connectOnce deviceMd5 dispatchLoop dispatchRegion dispatchTouch dropHandler endCount ensure evListOf finger follow frame installBinary isReadTimeout jb keepAlive keepRunning keysOf listReconcile listRegions mergeMove offer onRegion onTouch parseEvents readByteTolerant readFullTolerant readLine refreshSub res say sh start startReader startedByUs stop subscribe trim unsubscribe warn wsAccept wsKey""".split())
     defined = set(re.findall(r'^function\s+([A-Za-z_]\w*)', source.read_text(encoding="utf-8"), re.M))
     missing = sorted(baseline - defined)
     if missing:

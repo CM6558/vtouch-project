@@ -4,11 +4,8 @@
     {
       "label": "build: vtouchd (arm64 · 全部模块)",
       "detail": "sh scripts/build.sh —— NDK 交叉编译 src/*.c → build/vtouchd（-Wall -Wextra -Werror）",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "scripts/build.sh"
-      ],
+      "type": "shell",
+      "command": "sh scripts/build.sh",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -21,14 +18,22 @@
       ]
     },
     {
+      "label": "build: vtouchd_ui (核心 + 内嵌面板)",
+      "detail": "sh scripts/ui-deploy.sh build —— 先编面板(real)再编带 UI 的核心；不需要 adb",
+      "type": "shell",
+      "command": "sh scripts/ui-deploy.sh build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
       "label": "check: 语法检查当前文件（NDK clang）",
       "detail": "只跑 -fsyntax-only，秒级；用的是 build.sh 同一套 NDK 与同一组告警开关",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "-c",
-        "CC=C:/Users/21102/android-ndk-r27d/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang; \"$CC\" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE -fsyntax-only \"${relativeFile}\""
-      ],
+      "type": "shell",
+      "command": "sh scripts/check_syntax.sh \"${relativeFile}\"",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -39,73 +44,32 @@
     {
       "label": "device: deploy（推二进制并对账 md5）",
       "detail": "sh scripts/deploy.sh deploy —— 需要 adb + 设备 root",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "scripts/deploy.sh",
-        "deploy"
-      ],
+      "type": "shell",
+      "command": "sh scripts/deploy.sh deploy",
       "options": {
         "cwd": "${workspaceFolder}"
       }
     },
     {
       "label": "device: start（起 daemon）",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "scripts/deploy.sh",
-        "start"
-      ],
+      "type": "shell",
+      "command": "sh scripts/deploy.sh start",
       "options": {
         "cwd": "${workspaceFolder}"
       }
     },
     {
       "label": "device: stop（停 daemon，释放物理触摸）",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "scripts/deploy.sh",
-        "stop"
-      ],
+      "type": "shell",
+      "command": "sh scripts/deploy.sh stop",
       "options": {
         "cwd": "${workspaceFolder}"
       }
     },
     {
       "label": "device: status（pid + 日志尾部）",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "scripts/deploy.sh",
-        "status"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}"
-      }
-    },
-    {
-      "label": "test: ws_smoke（协议面，需 daemon 在跑 + adb forward）",
-      "detail": "adb forward tcp:27183 tcp:27183 之后跑 python tests/ws_smoke.py（退出码 0 = 全过）",
-      "type": "process",
-      "command": "python",
-      "args": [
-        "tests/ws_smoke.py"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}"
-      }
-    },
-    {
-      "label": "test: id_split_check（身份两段，读合并设备抓包）",
-      "detail": "需要设备上抓过 /data/local/tmp/merged.log（见 scripts/ondev-capture.sh）",
-      "type": "process",
-      "command": "python",
-      "args": [
-        "tests/id_split_check.py",
-        "--require-both"
-      ],
+      "type": "shell",
+      "command": "sh scripts/deploy.sh status",
       "options": {
         "cwd": "${workspaceFolder}"
       }
@@ -113,12 +77,8 @@
     {
       "label": "doc: 重建函数文档（幂等）",
       "detail": "python scripts/apply_funcdoc.py —— 文案改在 scripts/funcdoc_data.py；跑完二进制应字节不变",
-      "type": "process",
-      "command": "C:/Users/21102/AppData/Local/hermes/git/bin/bash.exe",
-      "args": [
-        "-c",
-        "python scripts/apply_funcdoc.py"
-      ],
+      "type": "shell",
+      "command": "python scripts/apply_funcdoc.py",
       "options": {
         "cwd": "${workspaceFolder}"
       }

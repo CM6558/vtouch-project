@@ -73,7 +73,7 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 - JS：AutoJs6 API（`WebSocket.EVENT_*`、`threads.start()`、`events.on("exit")`）。
 - **函数文档**：每个函数定义正上方一个 Doxygen 块（含 `(vtouch-doc: 名字)` 机器标记），
   原型上方一句话；文案唯一来源 `scripts/funcdoc_data.py`，改完跑 `python scripts/apply_funcdoc.py`，
-  再来一遍必须是"共调整 0 处"（幂等）。
+  再来一遍必须是"共调整 0 处"（幂等）。**`--check` 有退出码**（0 = 0 处调整且不变式全满足）⇒ 可以当门跑，CI 里就是一道。
 - **逻辑尺寸是坐标契约**：区域表 / 区域事件 / 注入命令 / 脚本看到的 `device.width,height`
   全在同一套**竖屏逻辑坐标**里，固定、不随旋转变。取值优先 `-w/-h`，否则核心启动时自己
   问框架（`wm size` → 归一化竖屏）；`wm` 拿不到就**报错退出**，不用内核 sysfs 兜底

@@ -4,8 +4,9 @@ name: build
 #   ① build/vtouchd        —— 默认核心（不带面板）
 #   ② build/vtouchd_ui     —— 带面板的核心（面板三件套内嵌在 .rodata 里）
 #   ③ build/vtouch_onefile.js —— **SDK**：单文件 AutoJs6 客户端（内嵌 ②），配 clients/example.js 示例
-# scripts/ci_check.py 是硬门：它把 SDK 用"当前源码 + 本次构建的核心"重新生成一遍逐字节比对，
+# scripts/ci_check.py 是硬门：它把 SDK 用"当前源码 + 本次构建的核心"重新生成一遍比对，
 # 对不上就让构建失败 —— 所以 artifact 里不可能混进旧副本。
+# 另两道小门：apply_funcdoc.py --check（函数文档幂等，靠退出码判）与字形表两次生成一致。
 
 on:
   push:
@@ -66,6 +67,16 @@ jobs:
 
       - name: 打成 SDK（单文件 AutoJs6 客户端，内嵌核心）
         run: python3 scripts/pack_client.py
+
+      - name: 函数文档幂等门（--check 有退出码：0 处调整 + 不变式全满足才算过）
+        run: python3 scripts/apply_funcdoc.py --check
+
+      - name: 字形表重生成稳定性（同源码两次生成必须逐字节一致）
+        run: |
+          python3 scripts/gen_ui_chars.py --out build/ui/ui_chars.h
+          md5sum build/ui/ui_chars.h > build/_chars1.md5
+          python3 scripts/gen_ui_chars.py --out build/ui/ui_chars.h
+          md5sum -c build/_chars1.md5
 
       - name: 一致性门 + 产物清单
         run: |

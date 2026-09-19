@@ -89,7 +89,7 @@ base64 内嵌进 `build/vtouch_onefile.js`（~3.6MB），推到 `/sdcard/vtouch.
 ## 设备上有什么
 
 ```
-/data/local/tmp/vtouchd_ui     3.0MB  必需的唯一文件（引擎 + 内嵌面板三件套）
+/data/local/tmp/vtouchd_ui     2.7MB  必需的唯一文件（引擎 + 内嵌面板三件套；2,835,976 字节）
 /data/local/tmp/vtouch-ui/            classes.dex + libtestimgui.so + libc++_shared.so —— 核心每次启动自己解包，不用手推
 /data/local/vtouch-runtime/regions.conf  区域表落盘，重启保留
 /data/local/tmp/ui_ondev.sh           （可选）设备侧 start / stop / status 的入口 —— 由主机侧
@@ -129,7 +129,7 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | 命令 | 应答 | 说明 |
 |---|---|---|
 | `ping` | `pong` | 探活 |
-| `res` | `res <宽> <高> raw <xmin> <xmax> <ymin> <ymax> phys <物理槽数>` | 逻辑尺寸、内核轴量程与物理槽数。末段 `phys <n>` 给客户端定**物理槽**的槽数（`src/vt_ws.c:462`）：`onTouch(slot, …)` 的合法 `slot` 就是 `0..n-1`，物理触摸流 `phys_ev` 也只报这一段 |
+| `res` | `res <宽> <高> raw <xmin> <xmax> <ymin> <ymax> phys <物理槽数>` | 逻辑尺寸、内核轴量程与物理槽数。末段 `phys <n>` 给客户端定**物理槽**的槽数（`src/vt_ws.c:501-504`）：`onTouch(slot, …)` 的合法 `slot` 就是 `0..n-1`，物理触摸流 `phys_ev` 也只报这一段 |
 | `reset` | `ok` / `err frame` | 抬掉全部虚拟触点（帧中途拒绝） |
 | `down <slot> <x> <y>` | `ok` / `err point` | 按下（各自成一帧） |
 | `move <slot> <x> <y>` | `ok` / `err point` | 移动（各自成一帧） |
@@ -141,6 +141,8 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `region clear` | `ok 0` | 清空 |
 | `sub [phys\|region\|all]` / `unsub` | `ok` / `err sub` | 订阅通道：裸 `sub` = 区域通道（与改动前一致）；`sub phys` = 物理触摸流；`sub all` = 两条 |
 | `phys_ev <ev> <slot> <x> <y> <ms>`（推送） | — | 物理触摸流：按 slot 的 `down/move/up`，不按区域过滤；追手指用它 |
+
+上表里 **`ping` / `reset` / `region clear` / `sub all` 现役 SDK 不发**（`clients/` 里零命中）—— 它们保留作**调试口**（手工排障），改这几条没有"客户端兼容"压力。
 
 `region list` 的**分帧口径**（现役）：
 

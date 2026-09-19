@@ -51,7 +51,8 @@
  *   region_ev <id> <down|enter|move|exit|up> <slot> <lx> <ly>  区域五事件（sub region；只报物理手指）
  *   两者行末都可带 <墙钟毫秒>（时间戳按需，见 sub 的 <事件> 里的 ts/nots）
  *   面板侧还有第三条「通道」：共享内存事件环（与脚本订不订无关，见 vt_shm.c）。
- *   其余命令（ping / reset / region clear / sub all）现役 SDK 不发，保留作调试口。
+ *   其余命令（ping / reset / region clear / sub all）现役 SDK 不发，保留作**调试口** ——
+ *   改这几条没有"客户端兼容"压力（评审 §3 的口径）。
  *
  * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点 + 清它的出站队列）；grab 与 uinput 不受影响。
  * 构建: sh scripts/build.sh

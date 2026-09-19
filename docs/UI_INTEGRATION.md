@@ -9,7 +9,7 @@
 |---|---|---|
 | 1 | **以核心为准** | 核心先把自己完整拉起来（`vtouch_init()` 全部成功）后才起面板；核心 `cleanup()` 关面板；面板崩不带走注入 |
 | 2 | 核心启动面板（不是面板启动核心） | `vtouch_init()` 最后一步 `vt_panel_start()`；面板是核心的**子进程** |
-| 3 | 面板独立进程、崩溃隔离 | fork/exec；面板只对状态区有**只读**映射（MMU 强制，实测写只读区→SIGSEGV 且父进程照跑） |
+| 3 | 面板独立进程、崩溃隔离 | fork/exec；面板对状态区**只走只读映射**（实测经这条路径写只读区 → SIGSEGV 且父进程照跑。⚠️ 整段 RW 映射仍在、未 `munmap` ⇒ 详见 §4 的准确性修正） |
 | 4 | 延迟尽可能低 | 状态**本身**放在共享内存（零拷贝、零系统调用、零命令往返）；面板编辑 = 一次内存写 + `region_gen++` |
 | 5 | 不引入命令通道 | 面板的"操作"本质全是数据写入（改区域表/面板矩形/停止标志），不需要请求-应答 |
 | 6 | 核心改动最小 | 默认构建（`VT_UI` 关）`.text` 逐字节不变；新增文件为主，改动集中在 6 处 |
@@ -20,7 +20,7 @@
 
 | 产物 | 状态 |
 |---|---|
-| `src-ui/vtouch_ui.cpp`（ImGui 面板；行数以现读为准，约 2131 行） | ✅ 已从备份还原 |
+| `src-ui/vtouch_ui.cpp`（ImGui 面板；行数以现读为准，约 2433 行） | ✅ 已从备份还原 |
 | `src-ui/VTouchUI.java`（图层壳） | ✅ 已还原 |
 | `thirdparty/imgui` v1.91.8 | ✅ 已就位 |
 | `src-ui/ui_stubs.c`（桩：11 个 API） | ✅ 已写，桩模式单跑在真机跑通（`first frame t=+315ms`） |
@@ -34,10 +34,9 @@
 ## 3. 架构总览
 
 ```
-                ┌──────────────────────── 核心进程（app_process，由 service.sh 起）────────────────────────┐
-service.sh ──▶  │ Java 壳：建全屏图层（先不可见）→ 交给 native                                        │
-   (root)       │                                                                                     │
-                │ native 主流程：                                                                     │
+                ┌──────────────── 核心进程（面板由核心 fork/exec 拉起：src/vt_panel.c） ────────────────┐
+                │ Java 壳：建全屏图层（先不可见）→ 交给 native                                          │
+                │ （不再是 service.sh：仓库里没有那个脚本，面板由核心 vt_panel_start 拉起）             │
                 │   ① vtouch_init()：开触摸屏 → EVIOCGRAB → 建 uinput 合并设备 → 监听 27183 → 区域线程  │
                 │   ② 建共享内存（单 memfd，三区）→ g 搬迁进区 A（只读给面板）                          │
                 │   ③ vt_panel_start()：fork/exec 面板子进程，把「状态区 fd + 事件环 fd」按固定 fd 传下去 │
@@ -63,10 +62,12 @@ service.sh ──▶  │ Java 壳：建全屏图层（先不可见）→ 交给
 |---|---|---|---|---|
 | **A** | 3 页 12KB | 核心 RW / 面板 RO | `header{magic,ver,hb,ui_hb}` + `struct vt_state`（就是现在那个 `g`） | 单字段原子；`hb`/`ui_hb` 各有写方，互看 |
 | **B** | 1 页 4KB | 双方 RW | 区域表 `regions[32]` + `region_gen` + 自旋锁 + 面板矩形 `{x1,y1,x2,y2,visible}` + `stop_req` | 自旋锁 + `gen` 双检；矩形用 seq 奇偶校验 + 一次重试（拿不准保守不吞） |
-| **C** | 2 页 8KB | 核心 W / 面板 RO | 事件环：64 × 96B 文本行 + head/tail | SPSC 无锁，环满丢最旧 |
+| **C** | 2 页 8KB | 核心 W / 面板 RO | 事件环：64 × 96B 文本行 + `tail`/`drops` | SPSC 无锁；**v3 起** `tail`/读计数都是**单调计数**（槽位 = 计数 % 64），满则丢**这一条新的**并 `++drops`（生产者绝不推进消费者的读计数） |
 
 **契约纪律**：
-- 面板对区 A **无写权限**（MMU 强制，实测越界写 → SIGSEGV，只死面板）；
+- 面板对区 A **只走只读视图**（attach 时另映射一段 `PROT_READ` 的区 A；实测经这条路径越界写 → SIGSEGV，只死面板）。
+  ⚠️ **准确性修正（评审 §3 对账）**：面板 attach 时还保留着**整段 RW** 的映射（头部与区 B 必须可写），
+  它并没有 `munmap` ⇒ "面板改不了状态"目前是**默认路径纪律**、不是 MMU 强制（要真强制就 `munmap(base)` 或只映射需要的段）；
 - 无锁读者会看到"半更新"，所以面板读复合状态（如矩形整体）必须走 seq 校验；
 - 布局是**双侧契约**，改一处必须同时改另一侧 → 用 `magic` + `ver` 校验，不匹配直接拒绝启动。
 
@@ -77,12 +78,12 @@ extern struct vt_state *g_ptr;   /* vt_internal.h */
 #define g (*g_ptr)
 ```
 
-全库 224 处调用点**一行不改**。初始化时把 `static const struct vt_state G_INIT` 拷进映射即可。
+全库约 455 处 `g.` 引用（`src/*.c` 现读）**一行不改**。初始化时把 `static const struct vt_state G_INIT` 拷进映射即可。
 
 ## 5. 启动时序
 
 ```
-service.sh(root)
+核心（vt_panel_start）fork/exec 面板
   └─ app_process --nice-name=vtouch-ui VTouchUI 1440 3168       ← 进程入口（必须带 ART 才能建系统图层）
        ├─ Java 壳：SurfaceControl.Builder → 全屏 trusted overlay（先 alpha=0/不可见）→ 交给 native
        └─ native：
@@ -127,7 +128,7 @@ service.sh(root)
 | `vtouch_region_add` | 写区 B（同 id 原地更新，语义同 `vt_region.c`）+ `gen++` |
 | `vtouch_region_del/rename` | 新增（核心侧同步提供 `region_del/region_rename`） |
 | `vtouch_region_clear` | 写区 B：`count=0` + `gen++` |
-| `vtouch_set_hooks()` | **按值拷贝**（`src-ui/vtouch_ui.cpp:2034-2032` 传的是栈上临时量；存指针会悬空 → 曾导致 SIGBUS）。`consume` 语义改成"面板往区 B 推矩形，核心自判" |
+| `vtouch_set_hooks()` | **按值拷贝**（`src-ui/vtouch_ui.cpp:2337` 的 `vtouch_set_hooks(&hooks)` 传的是栈上临时量；存指针会悬空 → 曾导致 SIGBUS）。`consume` 语义改成"面板往区 B 推矩形，核心自判" |
 
 ## 8. 旋转 / 横屏适配（本次重点）
 
@@ -230,7 +231,7 @@ service.sh(root)
 | 核心拉起面板 | `面板已启动 pid=2522（dir=/data/local/tmp/vtouch-ui shm_fd=3）`，面板父进程 = 核心 pid ✓ |
 | fd 卫生 | 面板 `fd 3 -> /memfd:vtouch-shm`；指向 `/dev/input/event*` 或 `/dev/uinput` 的 fd **0 条** ✓ |
 | 面板崩/被杀 | `面板已退出 status=0x9（核心继续跑，注入不受影响）` + 按策略重启、1 分钟上限 3 次 ✓ |
-| 停核心 | SIGTERM → 面板一起停 ✓ → `/dev/input/event8` 持有者回到系统自身 3 个 ✓（grab 正确释放） |
+| 停核心 | SIGTERM → 面板一起停 ✓ → 触摸设备节点持有者回到系统自身数量 ✓（grab 正确释放；节点名现读，不写死 `eventN`） |
 | 无 UI 降级 | 面板目录缺失时 `面板未就绪（缺 …/classes.dex）→ 以无 UI 模式继续`，引擎照常起来 ✓ |
 | 面板产物 | 必须连同 **`libc++_shared.so`** 一起交付（NDK 默认动态链 libc++；缺它 `System.load` 抛 `UnsatisfiedLinkError`，被 `src-ui/VTouchUI.java:223-224` 的 catch 吞掉后 `return` → **进程退 0、什么都不干**，极难查）。已由 `scripts/build_ui.sh` 自动带上 |
 
@@ -253,7 +254,7 @@ vtouchd: region add ui_wide   type0 200,2500,1240,2900 en0 (total 3)
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
-| 面板上线即 `SIGSEGV (SEGV_ACCERR)`，backtrace `vt_shm_ui_tick+32`、fault addr = 头部页 `+0x28`（`ui_hb` 偏移） | 我把**头部**也映射成只读，而 `ui_hb`/`panel_pid` 本来就是面板写的 | 头部 + 区 B 面板可写；**区 A 单独再映射一段 `PROT_READ`** 盖住 —— 状态只读由 MMU 强制，头部只读属误伤 |
+| 面板上线即 `SIGSEGV (SEGV_ACCERR)`，backtrace `vt_shm_ui_tick+32`、fault addr = 头部页 `+0x28`（`ui_hb` 偏移） | 我把**头部**也映射成只读，而 `ui_hb`/`panel_pid` 本来就是面板写的 | 头部 + 区 B 面板可写；**区 A 单独再映射一段 `PROT_READ`** 走它 —— 头部只读属误伤。（当时的结论写成「状态只读由 MMU 强制」，其实那次整段 RW 映射没有 `munmap`，见 §4 准确性修正） |
 | `regions.conf` 3 条只落地 1 条 | 编辑邮箱是**单槽**的，连续投会被覆盖 | `glue_post()` 投完等核心吃掉（`edit_applied == seq`，上限 1s）；顺带把"调用返回即已生效"的同步语义还给面板 |
 | 冒烟脚本 fd 判据误报"不合格" | 用的是日志里最后一个 pid（可能已退出/被重启过），且 `grep event` 会命中 ART 自己的 `anon_inode:[eventfd]` | 判据改成"当前活着的面板 pid" + 精确匹配 `/dev/input/event\|/dev/uinput` |
 
@@ -263,7 +264,7 @@ vtouchd: region add ui_wide   type0 200,2500,1240,2900 en0 (total 3)
 
 | 风险 | 对策 |
 |---|---|
-| 共享内存 bug 难查 | `magic`+`ver` 校验；`--dump-shm` 调试开关；把区布局收在一个头文件（`src/vt_shm.h`） |
+| 共享内存 bug 难查 | `magic`+`ver` 校验；把区布局收在一个头文件（`src/vt_shm.h`）。**没有 `--dump-shm` 这个开关**（历史文档提过，从未实现）—— 现状的排障法是直读：`su -c 'od -An -tu4 -j <区C偏移> -N 8 /proc/<core_pid>/fd/3'`（偏移看核心日志「共享内存就绪 … c@<off>」；前两字 = `tail` / `drops`） |
 | `g` 搬迁侵入核心 | 只加 3 行宏；默认构建 `.text` 不变作为回归门 |
 | 双写区并发纪律 | 自旋锁 + `gen` 双检；读者拿不准时保守（不吞触摸、旧数据可接受处才读） |
 | fork 到 exec 只能 async-signal-safe | 面板启动代码整体审查；预先算好 argv/envp 字符串 |

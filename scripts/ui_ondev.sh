@@ -14,17 +14,40 @@ LOG=/data/local/tmp/vt_ui_core.log
 
 panel_pid() { ps -A 2>/dev/null | grep 'vtouch-ui' | grep -v grep | awk '{print $2}' | head -1; }
 core_pid()  { pidof vtouchd_ui; }
-event8_holders() { ls -l /proc/*/fd 2>/dev/null | grep -c '/dev/input/event8'; }
+
+# 动态认设备：**绝不写死 /dev/input/eventN**（换机器/换口就变，AGENTS 里明令禁止）。
+# 节点名从「核心自己抓的那个 fd」现读；grab 释放判定用「停前 vs 停后」的持有者条数对比。
+core_touch_nodes() {
+    P=$(core_pid); [ -n "$P" ] || return 0
+    ls -l /proc/$P/fd 2>/dev/null \
+        | sed -n 's/.*-> \(\/dev\/input\/event[0-9]*\|\/dev\/uinput\)$/\1/p' | sort -u
+}
+count_holders() {   # $1 = 节点列表（空格分隔）；数全系统持有这些节点的 fd 条数
+    [ -z "$1" ] && { echo 0; return; }
+    T=0
+    for n in $1; do
+        C=$(ls -l /proc/*/fd 2>/dev/null | grep -c "$n")
+        T=$((T + C))
+    done
+    echo $T
+}
 
 do_stop() {
+    NODES=$(core_touch_nodes)                 # 停之前先记下（核心一死它的 fd 表就没了）
+    N0=$(count_holders "$NODES")
     P=$(core_pid)
     [ -n "$P" ] && kill -TERM $P
     i=0
     while [ $i -lt 15 ] && [ -n "$(core_pid)" ]; do sleep 0.2; i=$((i+1)); done
     P=$(core_pid)
     [ -n "$P" ] && { echo "核心不响应 SIGTERM → SIGKILL"; kill -9 $P; sleep 1; }
+    [ -n "$NODES" ] && echo "停前：核心抓着 [$NODES]，全系统持有 fd 数 = $N0"
     echo "停后：核心=[$(core_pid)] 面板=[$(panel_pid)]   （都应为空）"
-    echo "持有 /dev/input/event8 的 fd 数 = $(event8_holders)   （回到系统自身数量 = grab 已释放）"
+    if [ -z "$NODES" ]; then
+        echo "grab 判定：停之前核心没在跑（现读不到它抓过哪个节点）⇒ 无需释放"
+    else
+        echo "grab 判定：[$NODES] 现在持有 fd 数 = $(count_holders "$NODES")   （比停前少掉核心自己的那几条 ⇒ grab 已释放；system_server 自己那份会留着）"
+    fi
 }
 
 do_status() {
@@ -54,7 +77,10 @@ do_start() {
 }
 
 case "$ACT" in
+  start)  do_start ;;
   stop)   do_stop ;;
   status) do_status ;;
-  *)      do_start ;;
+  *)      # 兜底**绝不启动**：动作拼错时启动核心会悄没声抓走触摸屏（自己踩过）
+          echo "用法: sh ui_ondev.sh <W> <H> start|stop|status   （W/H 给 - 或省略 = 核心自己探测）"
+          exit 2 ;;
 esac

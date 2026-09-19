@@ -175,17 +175,6 @@ function readLine(ins) {
     }
     return sb.toString();
 }
-/* 严格定长读：任何一次读超时都直接抛（非容错版）。**帧体的读取一律走下面的 readFullTolerant**
- * （帧内迟到不许当掉线，I1）—— 这个函数保留给「不允许迟到」的场合（握手侧的定长读要用它，别改成容错版）。 */
-function readFull(ins, n) {
-    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, n), off = 0;
-    while (off < n) {
-        var k = ins.read(buf, off, n - off);
-        if (k < 0) throw new Error("连接断开");
-        off += k;
-    }
-    return buf;
-}
 /* 是不是「读超时」（SO_TIMEOUT 到点）：recv 只认这一种异常当「本轮无数据」，别的原样往外抛。
  * Java 的异常对象在 Rhino 里拿不到 instanceof（不同 classloader），所以按名字/文案认。 */
 function isReadTimeout(e) {

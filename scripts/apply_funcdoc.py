@@ -8,7 +8,7 @@
   4) 全程幂等：期望结果先算出来跟现状比，一样就不写（可反复跑）；
   5) 只在读写文件时做编码转换，行号一律基于原文件一次算完再自底向上改（否则插入会互相错位）。
 
-用法：python scripts/apply_funcdoc.py [--check]   （--check 只报告不改）
+用法：python scripts/apply_funcdoc.py [--check]   （--check 只报告不改；退出码 0 = 0 处调整且不变式全满足）
 """
 import io, os, re, sys
 
@@ -270,3 +270,11 @@ for fn in C_FILES:
         if prev != "*/" or not blk or blk[0].strip() != "/**" or (MARK % name) not in "\n".join(blk):
             bad.append("%s:%d %s" % (fn, i + 1, name))
 print("不变式（定义正上方紧贴唯一文档块）：", "全部满足 ✓" if not bad else bad)
+
+# 退出码：--check 下「有调整」或「不变式不满足」都算失败 —— 幂等门要能被脚本/CI 判，不靠人眼看输出。
+if CHECK_ONLY:
+    if tot_edit + h or bad:
+        print("检查失败：%d 处需调整、%d 处不变式不满足 ⇒ 跑不带 --check 的 python scripts/apply_funcdoc.py 修正"
+              % (tot_edit + h, len(bad)))
+        sys.exit(1)
+    print("检查通过：0 处调整、不变式全满足")

@@ -384,6 +384,9 @@ int ws_next_frame(unsigned char *payload, size_t *plen, unsigned *opcode)
         if (r < 0) return r;
         if (r == 0) {
             ssize_t n;
+            /* 这条「缓冲满了却还拼不出一个帧」的分支**当前不可达**：帧上限 MAX_PAYLOAD=1024 <
+             * WS_IN_MAX=1038，只要 ws_peek_frame 认得出长度就一定能装下。留着是防御
+             * 「以后把 MAX_PAYLOAD 调到 ≥ sizeof ws_in」这种改法（那时它会变成真正的兜底）。 */
             if (ws_in_len >= sizeof ws_in) { ws_in_len = 0; return -1; }
             do { n = recv(g.client_fd, ws_in + ws_in_len, sizeof ws_in - ws_in_len, 0); }
             while (n < 0 && errno == EINTR && !g.stop_flag);
