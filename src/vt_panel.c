@@ -50,51 +50,83 @@ static const struct {
     { _binary_libcxx_shared_so_start, _binary_libcxx_shared_so_end, "libc++_shared.so" },
 };
 
-/* 32 位 FNV-1a：只用来在日志里给出"这一版面板"的指纹（对账用，不做安全用途）。 */
-static uint32_t fnv1a(const unsigned char *p, size_t n)
+/* 32 位 FNV-1a：只用来在日志里给出"这一版面板"的指纹（对账用，不做安全用途）。
+ * 拆成 upd 版是为了**增量算磁盘上已有文件**的指纹（读 1MB 一块，不整份读进内存）。 */
+static uint32_t fnv1a_upd(uint32_t h, const unsigned char *p, size_t n)
 {
-    uint32_t h = 2166136261u;
     size_t i;
     for (i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
     return h;
+}
+static uint32_t fnv1a(const unsigned char *p, size_t n) { return fnv1a_upd(2166136261u, p, n); }
+
+/* 磁盘上的 dst 与内嵌内容逐字节一致？（大小先比，不同直接判不等 ⇒ 常见情况 1 次 stat 就返回） */
+static int embed_matches(const char *dst, const unsigned char *p, size_t n)
+{
+    static unsigned char buf[1 << 16];
+    struct stat st;
+    uint32_t h = 2166136261u;
+    size_t got, total = 0;
+    FILE *f;
+    if (stat(dst, &st) != 0 || st.st_size <= 0 || (size_t)st.st_size != n) return 0;
+    f = fopen(dst, "rb");
+    if (!f) return 0;
+    while ((got = fread(buf, 1, sizeof buf, f)) > 0) { h = fnv1a_upd(h, buf, got); total += got; }
+    fclose(f);
+    return (total == n && h == fnv1a(p, n));
 }
 
 /**
  * (vtouch-doc: vt_embed_materialize)
  * @brief 把嵌进核心的面板文件写到面板目录（先写 .tmp 再 rename，避免半截文件被加载）。
  * @param   dir      面板目录（如 /data/local/tmp/vtouch-ui）
- * @return  0 写了至少一个文件；-1 没得写（未链接）或写失败。
- * @note    无条件覆盖：宁可每次多写 ~2.8MB（约几十毫秒），也不留"设备上是旧面板"的可能。
+ * @return  1 = 三件都已就绪（可能一个字节都没写：与内嵌内容逐字节相同就跳过）；0 = 核心没内嵌面板（用设备上已有的）；-1 = 有内嵌但没能全部就绪。
+ * @note    先算 fnv1a 比对再决定写不写（省掉每次启动/每次重启重写 ~2.8MB）；逐件都试，最后一起报 —— **不允许半套**。
+ *
+ * 为什么这么写（原有注释，逐字保留 + 2026-09-19 比对跳过）：
+ *   原来无条件覆盖：宁可每次多写 ~2.8MB（约几十毫秒，还在核心主循环里同步做），也不留"设备上是旧面板"的可能。
+ *   现在把"是不是旧面板"判准：**逐字节比对（fnv1a）**，一致就跳过写入 —— 新鲜度一分不减，代价从写 2.8MB 变成读 2.8MB。
+ *   另一个更硬的理由：原来三件逐个 return -1 ⇒ 可能**部分写入**，而调用方只查 classes.dex 存在 ⇒ 带半套文件
+ *   起来、load 失败被 Java 吞、退 0、看门狗再重启（每轮都白写一次）。现在逐件都试、逐件记结果，任一件不
+ *   就绪就报 -1 并让调用方**别拉面板**。
  */
 static int vt_embed_materialize(const char *dir)
 {
     size_t i;
-    int wrote = 0;
-    if (!S_emb[0].s) return -1;                    /* 未链接：用设备上已有的 */
+    int fails = 0;
+    if (!S_emb[0].s) return 0;                     /* 未链接：用设备上已有的 */
     for (i = 0; i < sizeof S_emb / sizeof S_emb[0]; i++) {
         char tmp[PATH_MAX], dst[PATH_MAX];
         size_t n;
         FILE *f;
-        if (!S_emb[i].s || !S_emb[i].e) continue;
+        if (!S_emb[i].s || !S_emb[i].e) { fails++; continue; }
         n = (size_t)(S_emb[i].e - S_emb[i].s);
-        if (n == 0) continue;
+        if (n == 0) { fails++; continue; }
         snprintf(tmp, sizeof tmp, "%s/.%s.tmp", dir, S_emb[i].name);
         snprintf(dst, sizeof dst, "%s/%s", dir, S_emb[i].name);
+        if (embed_matches(dst, S_emb[i].s, n)) {   /* 已经是这一版：一个字节都不用写 */
+            fprintf(stderr, "vtouchd: 面板自解包 %-16s %7zu 字节 fnv=%08x（与本机一致，跳过写入）\n",
+                    S_emb[i].name, n, fnv1a(S_emb[i].s, n));
+            continue;
+        }
         f = fopen(tmp, "wb");
-        if (!f) { fprintf(stderr, "vtouchd: 面板自解包写 %s 失败: %s\n", tmp, strerror(errno)); return -1; }
+        if (!f) { fprintf(stderr, "vtouchd: 面板自解包写 %s 失败: %s\n", tmp, strerror(errno)); fails++; continue; }
         if (fwrite(S_emb[i].s, 1, n, f) != n) {
             fprintf(stderr, "vtouchd: 面板自解包 %s 写不全\n", tmp);
-            fclose(f); unlink(tmp); return -1;
+            fclose(f); unlink(tmp); fails++; continue;
         }
         if (fclose(f) != 0 || rename(tmp, dst) != 0) {
             fprintf(stderr, "vtouchd: 面板自解包 rename %s 失败: %s\n", dst, strerror(errno));
-            unlink(tmp); return -1;
+            unlink(tmp); fails++; continue;
         }
         chmod(dst, 0644);
         fprintf(stderr, "vtouchd: 面板自解包 %-16s %7zu 字节 fnv=%08x\n", S_emb[i].name, n, fnv1a(S_emb[i].s, n));
-        wrote = 1;
     }
-    return wrote ? 0 : -1;
+    if (fails) {
+        fprintf(stderr, "vtouchd: 面板自解包有 %d 件没就绪 → 本次不拉面板（避免半套；下一次启动/重启会再试）\n", fails);
+        return -1;
+    }
+    return 1;
 }
 #endif /* !VT_UI_NO_EMBED */
 
@@ -106,6 +138,8 @@ extern char **environ;
 #define VT_PANEL_RESTART_WIN 60
 #define VT_PANEL_ABSENT_RETRY_MS 3000  /* 面板不在时距上次尝试 ≥3 秒才重试（单调时间，见 vt_panel_watchdog） */
 #define VT_PANEL_HB_STALL_MS 3000      /* 心跳停滞判据（单调时间，见 vt_panel_watchdog） */
+#define VT_PANEL_WAITPID_MS 200        /* waitpid 限频：主循环在负载下可达千拍/秒（单调时间判据） */
+#define VT_PANEL_WAKE_FD 4             /* 传给面板的唤醒 fd 号（核心持 pipe 读端、面板持写端；3 被 VT_SHM_FD 占了） */
 
 static pid_t S_pid = -1;
 static int   S_shm_fd = -1;
@@ -113,6 +147,9 @@ static int   S_restarts;
 static long  S_win_start;
 static int   S_shm_ok;          /* 共享内存检查已过（重启复用的就是同一个 fd；没有 shm 时重试没有意义） */
 static long  S_absent_t0;       /* 进入“面板不在”态的时刻（单调毫秒，0 = 面板在）；见 vt_panel_watchdog */
+static int   S_wake_rd = -1;    /* 面板唤醒 pipe 的读端（只有核心持；面板一写/一死，主循环立刻醒） */
+static int   S_wake_dead;       /* 读端报过 EOF（面板一定没了）→ 看门狗立刻 waitpid，不等限频 */
+static uint64_t S_wake_dead_at;  /* EOF 报到的时刻（单调毫秒；见看门狗里的 2 秒认输） */
 static char  S_dir[PATH_MAX];
 static char  S_dex[PATH_MAX + 32];
 static char  S_clspath[PATH_MAX + 32];
@@ -120,6 +157,7 @@ static char  S_ldpath[PATH_MAX + 32];
 static char  S_uidirenv[PATH_MAX + 32];
 static char  S_shmfd[32];
 static char  S_corepid[32];
+static char  S_wakefd[32];
 static char  S_w[16], S_h[16];
 
 static int pack_env(char ***out)
@@ -127,7 +165,7 @@ static int pack_env(char ***out)
     int n = 0, i;
     char **e;
     while (environ[n]) n++;
-    e = (char **)malloc((size_t)(n + 6) * sizeof(char *));
+    e = (char **)malloc((size_t)(n + 8) * sizeof(char *));
     if (!e) return -1;
     for (i = 0; i < n; i++) e[i] = environ[i];
     e[n++] = S_clspath;
@@ -135,6 +173,7 @@ static int pack_env(char ***out)
     e[n++] = S_uidirenv;
     e[n++] = S_shmfd;
     e[n++] = S_corepid;
+    if (S_wakefd[0]) e[n++] = S_wakefd;    /* 只在真建了唤醒 pipe 时才传（否则 fd 号在子进程里是别的什么东西） */
     e[n] = NULL;
     *out = e;
     return 0;
@@ -171,6 +210,7 @@ int vt_panel_start(int shm_fd)
     char **env = NULL;
     struct stat st;
     pid_t pid;
+    int wfds[2] = { -1, -1 };
 
     if (shm_fd < 0) return -1;
     S_shm_ok = 1;                          /* 过了这关才值得重启：重启走的就是这个 fd（见看门狗） */
@@ -178,19 +218,36 @@ int vt_panel_start(int shm_fd)
     snprintf(S_dir, sizeof S_dir, "%s", dir);
     mkdir(S_dir, 0755);                            /* 目录可能还不存在（B 方案：设备上只有核心一个文件） */
 #ifndef VT_UI_NO_EMBED
-    if (vt_embed_materialize(S_dir) != 0)
-        fprintf(stderr, "vtouchd: 核心未内嵌面板 → 用 %s 里已有的文件\n", S_dir);
+    {
+        int me = vt_embed_materialize(S_dir);
+        if (me < 0) return -1;                     /* 半套：这一轮不拉面板（下一次启动/重启会再试） */
+        if (me == 0)
+            fprintf(stderr, "vtouchd: 核心未内嵌面板 → 用 %s 里已有的文件\n", S_dir);
+    }
 #endif
     snprintf(S_dex, sizeof S_dex, "%s/classes.dex", S_dir);
     if (stat(S_dex, &st) != 0) {
         fprintf(stderr, "vtouchd: 面板未就绪（缺 %s）→ 以无 UI 模式继续\n", S_dex);
         return -1;
     }
+    /* 唤醒 pipe（核心持读端、面板持写端）：面板投编辑 / 请求停引擎时写 1 字节 ⇒ 核心立刻醒；
+     * 面板一死（写端全关）⇒ 读端报 EOF ⇒ 核心立刻收尸。它是本轮的**新 fd**，与 EVIOCGRAB 无关：
+     * 老规矩仍然成立 —— 带 grab 的 input_fd 绝不进子进程（见 cloexec_all 与子进程的 close 循环）。*/
+    if (pipe2(wfds, O_CLOEXEC | O_NONBLOCK) != 0) {
+        fprintf(stderr, "vtouchd: 面板唤醒 pipe 创建失败: %s → 面板编辑要等 poll 超时（退回 8ms 轮询）\n", strerror(errno));
+        wfds[0] = wfds[1] = -1;
+    }
+    if (wfds[0] >= 0) {
+        if (S_wake_rd >= 0) close(S_wake_rd);      /* 上一任面板的读端（看门狗重启路径） */
+        S_wake_rd = wfds[0];
+        S_wake_dead = 0;
+    }
     snprintf(S_clspath, sizeof S_clspath, "CLASSPATH=%s", S_dex);
     snprintf(S_ldpath, sizeof S_ldpath, "LD_LIBRARY_PATH=%s", S_dir);
     snprintf(S_uidirenv, sizeof S_uidirenv, "VTOUCH_UI_DIR=%s", S_dir);
     snprintf(S_shmfd, sizeof S_shmfd, "VTOUCH_SHM_FD=%d", VT_SHM_FD);
     snprintf(S_corepid, sizeof S_corepid, "VTOUCH_CORE_PID=%d", (int)getpid());
+    snprintf(S_wakefd, sizeof S_wakefd, "VTOUCH_WAKE_FD=%d", VT_PANEL_WAKE_FD);
     snprintf(S_w, sizeof S_w, "%d", g.logical_width);
     snprintf(S_h, sizeof S_h, "%d", g.logical_height);
 
@@ -210,6 +267,7 @@ int vt_panel_start(int shm_fd)
     if (pid < 0) {
         fprintf(stderr, "vtouchd: fork 面板失败: %s\n", strerror(errno));
         free(env);
+        if (wfds[1] >= 0) close(wfds[1]);
         return -1;
     }
     if (pid == 0) {
@@ -218,13 +276,24 @@ int vt_panel_start(int shm_fd)
         /* 必须显式清 CLOEXEC：memfd == VT_SHM_FD 时没走 dup2，CLOEXEC 会让它在 exec 时被关掉。
          * fcntl 在 async-signal-safe 列表里，fork 后可以用。 */
         if (fcntl(VT_SHM_FD, F_SETFD, 0) < 0) _exit(125);
-        for (i = 3; i < 1024; i++) if (i != VT_SHM_FD) close(i);
+        if (wfds[1] >= 0) {                              /* 唤醒管道的写端（同一套 dup2 + 清 CLOEXEC） */
+            if (wfds[1] != VT_PANEL_WAKE_FD && dup2(wfds[1], VT_PANEL_WAKE_FD) < 0) _exit(126);
+            if (fcntl(VT_PANEL_WAKE_FD, F_SETFD, 0) < 0) _exit(125);
+        }
+        for (i = 3; i < 1024; i++) {
+            if (i == VT_SHM_FD) continue;
+            if (i == VT_PANEL_WAKE_FD && wfds[1] >= 0) continue;   /* 没建成 pipe 时 fd 4 是别的东西，照关 */
+            close(i);
+        }
         execve(VT_PANEL_APP_PROCESS, argv, env);
         _exit(127);
     }
     free(env);
+    /* 父进程必须**关掉写端**：留着它，面板死了读端也等不到 EOF（唤醒/收尸这条快路就废了）。 */
+    if (wfds[1] >= 0) close(wfds[1]);
     S_pid = pid;
-    fprintf(stderr, "vtouchd: 面板已启动 pid=%d（dir=%s shm_fd=%d）\n", (int)pid, S_dir, shm_fd);
+    fprintf(stderr, "vtouchd: 面板已启动 pid=%d（dir=%s shm_fd=%d wake_fd=%s）\n", (int)pid, S_dir, shm_fd,
+            wfds[0] >= 0 ? "on" : "off");
     return 0;
 }
 
@@ -253,6 +322,7 @@ void vt_panel_watchdog(void)
 {
     static uint32_t last_ui_hb;
     static uint64_t hb_at_ms;                  /* 上次看到心跳变化 / 开始计时的**单调毫秒** */
+    static uint64_t waited_ms;                 /* 上次 waitpid 的单调毫秒（限频，见下） */
     uint32_t hb = vt_shm_ui_hb();
     uint64_t now = now_ns() / 1000000ull;
     int st;
@@ -295,11 +365,49 @@ void vt_panel_watchdog(void)
         return;
     }
     S_absent_t0 = 0;                        /* 面板在 → 重新计时（下次“面板不在”从头算 3s） */
-    if (waitpid(S_pid, &st, WNOHANG) == S_pid) {
-        fprintf(stderr, "vtouchd: 面板已退出 status=0x%x（核心继续跑，注入不受影响）\n", st);
-        S_pid = -1;
-        vt_panel_restart();
+    /* waitpid 限频（单调钟 200ms）：主循环在负载下可达千拍/秒，每拍一次 waitpid 是白烧系统调用，
+     * 而它要判的「面板死了没有」200ms 粒度足够（面板崩了不影响注入，最多多活 200ms）。
+     * 例外：唤醒 fd 报了 EOF（写端全关）→ 进程正在退出的路上，这时**每轮**都 waitpid（不限频）。
+     * 判据用 waitpid 说了算：EOF 只是「要收尸了」的信号，收尸本身还得等进程变成可回收的僵尸
+     * —— 实测两者之间有一拍的窗口（kill 之后 fd 表先拆、进程状态后落），所以这里允许连试几轮。 */
+    if (S_wake_dead || now - waited_ms >= VT_PANEL_WAITPID_MS) {
+        int urgent = S_wake_dead;
+        if (!urgent) waited_ms = now;        /* urgent 时不推进限频 ⇒ 下一轮（8ms）还会立刻进来 */
+        if (waitpid(S_pid, &st, WNOHANG) == S_pid) {
+            fprintf(stderr, "vtouchd: 面板已退出 status=0x%x（核心继续跑，注入不受影响）\n", st);
+            S_pid = -1;
+            S_wake_dead = 0;
+            vt_panel_restart();
+        } else if (urgent) {
+            /* EOF 报过、尸体还没到手：2 秒都没到就继续每轮试（正常情况下一两拍内就收走）；
+             * 超过 2 秒说明是「面板主动关了写端但还活着」这种没见过的情形 —— 认输，退回限频，
+             * 免得为它每 8ms 一次 waitpid。 */
+            if (S_wake_dead_at && now - S_wake_dead_at > 2000) {
+                fprintf(stderr, "vtouchd: 面板唤醒 fd 报 EOF 后 2s 仍不回收（pid=%d）→ 退回限频 waitpid，"
+                                "按无唤醒 fd 继续\n", (int)S_pid);
+                S_wake_dead = 0;
+            }
+        }
     }
+}
+
+/**
+ * (vtouch-doc: vt_panel_wake_fd)
+ * @brief 面板唤醒 fd（核心 poll 它：面板一投编辑/一死，主循环立刻醒）；-1 = 没有（退回短超时轮询）。
+ * @return  读端 fd；-1 = 没有唤醒通道（未起面板 / pipe 建失败 / 已经 EOF 关掉）。
+ */
+int vt_panel_wake_fd(void) { return S_wake_rd; }
+
+/**
+ * (vtouch-doc: vt_panel_wake_drop)
+ * @brief 面板没了（唤醒 fd 报了 EOF）：关掉读端，主循环下轮回到「面板不在」态。
+ * @note    必须关：不关的话 poll 会因为「一直 EOF」变成忙循环。看门狗据此立刻 waitpid（不限频，最多 2s）。
+ */
+void vt_panel_wake_drop(void)
+{
+    if (S_wake_rd >= 0) { close(S_wake_rd); S_wake_rd = -1; }
+    S_wake_dead = 1;
+    S_wake_dead_at = now_ns() / 1000000ull;    /* 看门狗据此判「连试 2 秒还没尸体就认输」 */
 }
 
 /**

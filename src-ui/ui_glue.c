@@ -3,10 +3,13 @@
  * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现。
  * 数据来源与去向（契约见 src/vt_shm.h、docs/UI_INTEGRATION.md §4）：
  *   物理触点 / 区域表 / 逻辑尺寸 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
- *   区域编辑                   → 区 B 的编辑邮箱（核心 8ms 内吃掉，按 region_add/del/rename/clear 语义生效）
+ *   区域编辑                   → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
+ *                                 poll 超时；按 region_add/del/rename/clear 语义生效）
  *   面板矩形                   → 区 B（逆变换回竖屏逻辑坐标；核心据此吞触摸）
  *   事件流                     ← 区 C 事件环（与"脚本有没有订阅"无关）
- *   心跳                       → 头里 ui_hb；核心心跳停滞 → poll_step 返回 -1，面板自杀退出
+ *   心跳                       → 头里 ui_hb；核心心跳停滞（单调钟 3s）→ poll_step 返回 -1，面板自杀退出
+ *   唤醒                       → VTOUCH_WAKE_FD（核心开的 pipe 写端）：投编辑/要停引擎时写 1 字节；
+ *                                核心一死或一关读端，这里的写失败，退回"等下一轮 poll"的老路径。
  *
  * 四条踩过的坑（都别忘）：
  *   1) vtouch_set_hooks **按值拷贝**：调用方传的是栈上临时量，存指针会悬空 → 实测 blr 到野地址 SIGBUS；
@@ -43,10 +46,21 @@ static struct vt_shm_c      *C;
 static struct vtouch_hooks   HK;          /* 按值保存（见文件头坑 1） */
 static int                   HK_ok;
 static uint32_t              glue_seq;
+static int                   W = -1;      /* 唤醒核心的管道写端（VTOUCH_WAKE_FD；-1 = 没有） */
 static char                  snap[MAX_REGIONS][REGION_ID_MAX + 1];
 static int                   snap_n = -1;
 
 /* ---------- 内部工具 ---------- */
+
+/* 叫醒核心：写 1 字节。核心主循环 poll 这个管道，醒来第一件事就是吃编辑邮箱 / 看停引擎请求
+ * ⇒ 面板的编辑从「等下一个 poll 超时」变成「立刻」，核心也就可以长睡（空闲唤醒 125 次/s → 0）。
+ * 写失败不当错误：管道没建（老核心）或读端已关（核心在退出）时，退回「等下一轮」的老路径。 */
+static void glue_wake(void)
+{
+    ssize_t r;
+    if (W < 0) return;
+    do { r = write(W, "w", 1); } while (r < 0 && errno == EINTR);
+}
 
 /* p2c 的逆（vtouch_ui.cpp:193-201）：当前屏坐标 → 竖屏逻辑坐标 */
 static int c2p_x(int rot, int ox, int oy, int W, int H)
@@ -131,11 +145,14 @@ static int glue_post(uint32_t op, const char *id, const char *new_id,
      * （启动批量加载 regions.conf 就是这么丢过 2/3 条）。 */
     if (op == VT_EDIT_ADD && glue_find(id) >= 0) {
         vt_shm_post_edit(&e);
+        glue_wake();
         return 0;
     }
     vt_shm_post_edit(&e);
+    glue_wake();
     /* 邮箱是**单槽**的：不等核心吃掉就投下一条，前一条会被覆盖（启动批量加载 regions.conf 时
-     * 实测 3 个区域只落地 1 个）。这里等一拍 —— 核心 8ms 一轮，实际通常 0~8ms。
+     * 实测 3 个区域只落地 1 个）。这里等一拍 —— 有唤醒管道时核心是**立刻**醒（通常 ~1ms 内生效），
+     * 没有时退回「最多一个 poll 超时」。
      * 顺带让面板拿回"同步"语义：调用返回时核心已经生效，后面回读区域表不会看到旧值。 */
     while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
     if (B->edit_applied != e.seq) {
@@ -200,6 +217,13 @@ int vtouch_init(int argc, char **argv)
         fprintf(stderr, "vtouch-ui: 共享内存附着失败（fd=%d）—— 面板无法工作\n", fd);
         return -1;
     }
+    /* 唤醒核心的管道写端（核心传下来的固定 fd 号）。没有它也能跑：编辑退化成「等核心下一轮 poll」。 */
+    s = getenv("VTOUCH_WAKE_FD");
+    W = (s && *s) ? atoi(s) : -1;
+    if (W >= 0 && fcntl(W, F_GETFD) < 0) {           /* 环境给了号但 fd 不在（老核心/被抢）→ 别乱写 */
+        fprintf(stderr, "vtouch-ui: VTOUCH_WAKE_FD=%d 不是有效 fd（%s）→ 按无唤醒 fd 工作\n", W, strerror(errno));
+        W = -1;
+    }
     S = vt_shm_state(); B = vt_shm_b(); C = vt_shm_c(); Hh = vt_shm_hdr();
     if (!S || !B || !C) return -1;
     fprintf(stderr, "vtouch-ui: 已接核心（逻辑 %dx%d core_pid=%d 面板 pid=%d）\n",
@@ -231,6 +255,7 @@ void vtouch_cleanup(void)
     if (B) {
         vt_shm_publish_rect(0, 0, 0, 0, 0, 0);              /* 先声明"我不吞了"，手指立刻回系统 */
         B->stop_req = 1;
+        glue_wake();                                        /* 叫醒核心：别等 poll 超时才知道要停 */
     }
     /* 「退出」= 停引擎。只杀真正的父进程（核心）：核心先死时面板会被 reparent 到 init，
      * 那时 kill(getppid()) 就是 kill init —— 所以必须用共享内存里记的 core_pid 校验。 */

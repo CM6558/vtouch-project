@@ -17,7 +17,7 @@ static unsigned char ui_eaten[MAX_PHYS];
  * @param   t        事件类型
  * @param   c        事件码
  * @param   v        值
- * @note    上限 MAX_IOV，超出直接忽略。
+ * @note    上限 MAX_IOV（1024 ≥ 最坏整帧 771，由 vt_internal.h 的 static_assert 钉住）：满了就丢事件，所以这个上限必须**大于**最坏帧 —— 否则帧尾的 SYN_REPORT 可能被丢掉，系统里成了半帧。
  */
 void ev_add(int t, int c, int v)
 {
@@ -249,7 +249,7 @@ void owner_reset(void)
 /**
  * (vtouch-doc: enqueue_phys_changes)
  * @brief 物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。
- * @note    推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。
+ * @note    推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。有事件才唤醒区域线程一次（region_q_wake）——静止的手指不产生任何唤醒。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   §4.1 转发内容与时机：物理帧边界（SYN）、emit_frame() 之后 —— 推的是「完整帧状态的快照」。
@@ -257,7 +257,7 @@ void owner_reset(void)
  */
 void enqueue_phys_changes(void)
 {
-    int i, lx, ly, action;
+    int i, lx, ly, action, pushed = 0;
     struct vt_ev ev;
     for (i = 0; i < g.phys_slots; i++) {
         if (g.phys[i].down && !g.ps_down[i]) action = VT_DOWN;
@@ -275,5 +275,9 @@ void enqueue_phys_changes(void)
         ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
         ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i] : now_ns();
         vtq_push(&g.region_q, &ev);                              /* 区域线程（队列唯一消费者） */
+        pushed = 1;
     }
+    /* 一帧只唤醒一次（而不是每条事件一次）：有事件才写 —— 静止的手指不产生任何唤醒。
+     * 必须在**推完之后**写：消费者醒来先排空队列，写早了也只是让它空跑一轮。 */
+    if (pushed) region_q_wake();
 }

@@ -92,8 +92,9 @@
 
 **执行者：主线程**（poll → 读 → 组帧 → 入队）+ **区域线程**（判定 → 推送）。注入热路径上只有一次 `writev` 和一次入队。
 
-1. `src/vtouchd.c:203` `poll()` 四路 fd（物理输入 / 监听 / 客户端 / 出站）；UI 构建下空闲也 8ms 一轮（`src/vtouchd.c:186`），
-   有待重发的整帧时压到 5ms。物理 fd 可读 → `src/vtouchd.c:209` `physical_events()`。
+1. `src/vtouchd.c:224` `poll()` 五路 fd（物理输入 / 监听 / 客户端 / 出站 / 面板唤醒 fd）；空闲睡在 poll 上
+   （默认超时 1000ms，UI 构建下由**面板唤醒 pipe** 打断 —— 面板投编辑/停引擎/面板死亡都是立刻醒），
+   有待重发的整帧压到 5ms、输入缓冲里已经有完整帧压到 1ms。物理 fd 可读 → `src/vtouchd.c:230` `physical_events()`。
 2. **读物理流**（`src/vt_input.c:148`）：`src/vt_input.c:152` 循环 `read()`（一次 read 可能攒好几帧）；
    `src/vt_input.c:153` `ABS_MT_SLOT` 选槽、`src/vt_input.c:155` 越界槽 = 忽略；`src/vt_input.c:157` `ABS_MT_TRACKING_ID`
    （`src/vt_input.c:159` 负值 = 抬手只置 `pending_up`；`src/vt_input.c:161` 正值 = 按下，`src/vt_input.c:162` 记下按下时刻）；
@@ -122,8 +123,10 @@
    `src/vt_frame.c:273` 被面板吞掉的手不进区域判定；`src/vt_frame.c:276` DOWN 用按下时刻、其余用 `now_ns()`；
    `src/vt_frame.c:277` `vtq_push()` 入 SPSC 环（`src/vt_queue.c:39`，容量 VTQ_CAP=64，`src/vt_internal.h:53`）。
    **虚拟触点不入这条队列**（`src/vt_frame.c:198`）——「回触不自激」在源头成立。
-5. **区域线程**（`src/vt_region.c:336`）：`src/vt_region.c:341` `vtq_pop()`（`src/vt_queue.c:83`），空转 1ms（`src/vt_region.c:343`），
-   然后 `region_apply()`（`src/vt_region.c:263`）：
+5. **区域线程**（`src/vt_region.c:427`）：清唤醒计数（`src/vt_region.c:436`）→ `src/vt_region.c:437` `vtq_pop()`（`src/vt_queue.c:83`）排空队列
+   → 空则阻塞在唤醒 fd 上（eventfd，`src/vt_region.c:448` `poll(&p,1,1000)`，那 1s 只是兜底；正常由入队方
+   `region_q_wake()`（`src/vt_region.c:39`）写一次叫醒 —— 空闲不再 1ms 空转），
+   然后 `region_apply()`（`src/vt_region.c:316`）：
    - `src/vt_region.c:288` 先发物理流 `phys_ev_send()`（`src/vt_region.c:219`，只发订了 `SUB_PHYS` 的：`src/vt_region.c:224`）。
    - `src/vt_region.c:289` 加 `region_lock`；`src/vt_region.c:297` 遍历区域表；`src/vt_region.c:303`、`src/vt_region.c:306`、`src/vt_region.c:307`、`src/vt_region.c:310`、`src/vt_region.c:313` 把事件**攒进 `pend[]`**（`src/vt_region.c:275`）而不是直接发。
    - `src/vt_region.c:318` 解锁；`src/vt_region.c:321`-`src/vt_region.c:322` 才逐条 `region_ev_send()`（`src/vt_region.c:193`）——锁里不再有 `fprintf` / 事件环 / 出站入队这些 I/O。
@@ -219,16 +222,18 @@
 **执行者：主线程**（`cleanup`，只跑一次）；面板进程的收尾由它自己的一拍循环负责。
 
 - 信号：`src/vtouchd.c:286` `on_signal()` 只置 `g.stop_flag`（信号里不做清理）；主循环下一轮 `src/vtouchd.c:191` 返回 -1。
-- `main`：`src/vtouchd.c:309` 置标志让区域线程从 1ms 空转里出来 → `src/vtouchd.c:310` `pthread_join` → `src/vtouchd.c:311` `cleanup()`。
+- `main`：`src/vtouchd.c:339` 置标志 + `src/vtouchd.c:340` `region_q_wake()` 叫醒区域线程（它睡在 eventfd 上，不是 1ms 空转）
+  → `src/vtouchd.c:341` `pthread_join` → `src/vtouchd.c:342` `cleanup()`。
 - `cleanup()`（`src/vtouchd.c:264`）：`src/vtouchd.c:266`-`src/vtouchd.c:268` 只跑一次；
   `src/vtouchd.c:270` **先停面板**；`src/vtouchd.c:272`、`src/vtouchd.c:273` 关 client / listen；
   `src/vtouchd.c:274`-`src/vtouchd.c:277` `EVIOCGRAB=0` 再关输入 fd；`src/vtouchd.c:278` `UI_DEV_DESTROY`。
 - 面板怎么停：`src/vt_panel.c:301` `vt_panel_stop()` 发 SIGTERM（`src/vt_panel.c:305`）→ 40×20ms 等待（`src/vt_panel.c:306`-`src/vt_panel.c:313`）→ SIGKILL 兜底（`src/vt_panel.c:315`-`src/vt_panel.c:316`）。
 - 面板主动停引擎：`src-ui/ui_glue.c:228` `vtouch_cleanup()`——`src-ui/ui_glue.c:232` 先声明「我不吞了」，`src-ui/ui_glue.c:233` 置 `stop_req`，
   `src-ui/ui_glue.c:237` 只在 `core_pid == getppid()` 时发 SIGTERM（面板先死时父进程已被 reparent 到 init，不能盲杀）。
-- 看门狗（核心侧，每轮 poll 调一次：`src/vtouchd.c:252`）：心跳停滞 300 拍（约 3s）杀面板（`src/vt_panel.c:260`-`src/vt_panel.c:263`）；
+- 看门狗（核心侧，每轮 poll 调一次：`src/vtouchd.c:282`）：心跳停滞 3 秒（**单调钟**判据 `VT_PANEL_HB_STALL_MS`，`src/vt_panel.c:336`）杀面板；
   面板**不在**时按**单调时间**判据重试：进「面板不在」态记 `S_absent_t0`，距上次尝试 ≥ `VT_PANEL_ABSENT_RETRY_MS`(3000ms) 就再拉一次
-  （`src/vt_panel.c:276`-`src/vt_panel.c:288`；**不是**循环拍数 —— poll 会因可读事件提前返回，拍数口径在负载下会把预算瞬间烧完）；
+  （`src/vt_panel.c:360`-`src/vt_panel.c:363`；**不是**循环拍数 —— poll 会因可读事件提前返回，拍数口径在负载下会把预算瞬间烧完）；
+  `waitpid` 按单调钟限频 200ms（`VT_PANEL_WAITPID_MS`），只有唤醒 fd 报 EOF 时才每轮都试（最多 2s）；
   重启频率上限 3 次/60s（`src/vt_panel.c:236`-`src/vt_panel.c:241`，常量 `src/vt_panel.c:105`、`src/vt_panel.c:106`）；
   `shm` 不可用（`S_shm_ok` 假，`src/vt_panel.c:113`）就不重试。
   **不会最终放弃**：被拒的那次也 `++S_restarts`（`src/vt_panel.c:237`），而 60s 窗口只在下一次调用时才滚动（`src/vt_panel.c:236`）

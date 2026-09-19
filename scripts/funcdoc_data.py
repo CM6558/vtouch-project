@@ -29,7 +29,9 @@ DOCS = {
 "outq_reset": dict(brief="清空出站队列（新客户端接入 / 断连时）。", note="残包不许串给下一个客户端（§4.6）。"),
 "outq_pending": dict(brief="出站队列是否非空（主循环据此决定要不要挂 POLLOUT）。", ret="1 有；0 无。"),
 "outq_push": dict(brief="把一段**已经成帧的字节**放入出站队列（生产者 = 主线程 / 区域线程，一把短锁只包住一次 memcpy）。",
-    params=[("p", "数据"), ("n", "长度")], note="队满丢最旧；文本请用 outq_push_text，不要直接调这个。"),
+    params=[("p", "数据"), ("n", "长度")],
+    note="队满丢最旧；**唯一的例外是正在续写的那条**（sent>0，它的前半截已经进了客户端 socket，"
+         "扔掉会让后续字节接到错的帧头 ⇒ 解帧错位）：这时改为丢这一条新的。文本请用 outq_push_text，不要直接调这个。"),
 "outq_push_text": dict(brief="把一行文本按 WS 文本帧（未加掩码）补齐帧头后入队。", params=[("s", "文本"), ("n", "长度")],
     note="成帧必须在这一层做 —— 队列里存的就是完整帧，刷出端只负责写字节。漏了这步的症状：客户端收到裸文本、"
          "一帧都解不出来，而注入照常生效（所以最难发现）。"),
@@ -37,6 +39,10 @@ DOCS = {
     note="客户端 socket 是非阻塞的，这里绝不阻塞主线程。"),
 
 # ---------------- §5+§6 区域 ----------------
+"region_q_init": dict(brief="建区域队列的唤醒 fd（eventfd）：区域线程靠它阻塞等待，不再 1ms 空转。",
+    ret="0 成功（或已建过）；-1 eventfd 创建失败（不致命：区域线程退回 1ms 空转，功能一个不少）。"),
+"region_q_wake": dict(brief="唤醒区域线程（入队方在推完一批事件后调一次）。",
+    note="写 eventfd 计数；没有 eventfd 时是空操作。绝不阻塞（非阻塞写，写满也只是丢一次唤醒、不丢事件）。"),
 "regions_clear": dict(brief="清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。"),
 "region_add": dict(brief="新增或覆盖一个区域（主线程持 region_lock 写表）。",
     params=[("id", "区域名（≤ REGION_ID_MAX 字符）"), ("type", "0=矩形 1=圆"), ("a1", "矩形 x1 / 圆 cx"),
@@ -57,9 +63,13 @@ DOCS = {
     note="「按下之后一路跟到抬起」的底座：区域事件出了区域就断了，这条流不断。只订 SUB_PHYS 才发；只报物理手指，虚拟触点不进（防自激）。"),
 "region_thread_main": dict(brief="区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。",
     params=[("arg", "未使用")], ret="NULL（线程不主动退出）。",
-    note="只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。"),
+    note="只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。"
+         "空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。"),
 
 # ---------------- §7 物理输入 ----------------
+"phys_event_one": dict(brief="分发单条 input_event（槽选择 / 按下抬起 / 位置 / SYN_DROPPED 兜底 / SYN_REPORT 结帧）。",
+    params=[("e", "一条 input_event（来自批量读的缓冲）")],
+    note="从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。"),
 "validate_device": dict(brief="认一块设备是不是 Type-B 触摸屏（槽 + tracking id + XY 四轴 + 量程），"
                              "并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。",
     params=[("p", "设备节点路径"), ("slots", "输出物理槽数"), ("xmin", "输出 X 下界"), ("xmax", "输出 X 上界"),
@@ -72,11 +82,14 @@ DOCS = {
     ret="0 成功；-1 失败（调用方以退出码 3 退出）。",
     note="槽数 = phys_slots + vslots；tracking id 上限 = total_slots - 1。名字加 _vtouch 后缀，避免与物理设备同名。"),
 "physical_events": dict(brief="读物理流：解析 Type-B 事件进 phys[]（按槽），在 SYN_REPORT 处提交一帧并转发。",
-    note="一次 read 可能攒好几帧，边沿在每帧处理完就清；SYN_DROPPED 保守地把所有槽当抬起。"),
+    note="一次 read 取一批（最多 64 条 input_event）再循环解析，不是每条事件一次 read()（syscall 降一个量级）；"
+         "一次读可能攒好几帧，边沿在每帧处理完就清；SYN_DROPPED 保守地把所有槽当抬起。"),
 
 # ---------------- §8+§9 组帧 / 合帧 / 转发 ----------------
 "ev_add": dict(brief="往本帧的 iovec 里追加一条 input_event（纯内存，不做系统调用）。",
-    params=[("t", "事件类型"), ("c", "事件码"), ("v", "值")], note="上限 MAX_IOV，超出直接忽略。"),
+    params=[("t", "事件类型"), ("c", "事件码"), ("v", "值")],
+    note="上限 MAX_IOV（1024 ≥ 最坏整帧 771，由 vt_internal.h 的 static_assert 钉住）：满了就丢事件，"
+         "所以这个上限必须**大于**最坏帧 —— 否则帧尾的 SYN_REPORT 可能被丢掉，系统里成了半帧。"),
 "uinput_writev_retry": dict(brief="把当前帧一次 writev 写进 uinput；EAGAIN 时等最多 3×20ms 再试。",
     ret="实际写出的字节数；-1 真错。", note="uinput 是以 O_NONBLOCK 打开的。"),
 "emit_iov_writev": dict(brief="提交本帧；**短写要把剩下的 iovec 补完**（只补一条会丢帧尾的 SYN_REPORT，系统里就成了半帧）。",
@@ -93,7 +106,8 @@ DOCS = {
 "owner_reset": dict(brief="客户端断连/被踢：抬掉它所有虚拟触点并立即提交一帧。",
     note="少了这段，客户端在 begin_frame..end_frame 中间断开会把虚拟手指永久粘在设备上。"),
 "enqueue_phys_changes": dict(brief="物理帧边界之后：每槽比快照判 down/up/move，把变化入 region_q 喂区域线程（不推客户端）。",
-    note="推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。"),
+    note="推的是「完整帧状态的快照」；静止不刷屏；必须在 emit_frame 之后调用（§4.1）。有事件才唤醒区域线程一次"
+         "（region_q_wake）——静止的手指不产生任何唤醒。"),
 
 # ---------------- §10 WebSocket ----------------
 "rol32": dict(brief="32 位循环左移（SHA-1 内部用）。", params=[("x", "值"), ("n", "位数")], ret="左移结果。"),
@@ -168,11 +182,17 @@ DOCS = {
 "vtouch_init": dict(brief="初始化：锚墙钟 → 尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。",
     params=[("argc", "参数个数"), ("argv", "参数数组")], ret="0 成功；负数 = 失败阶段（-2..-7），main 直接拿它当退出码。",
     note="这个顺序是有意的：任何失败路径都不会留下「抓着触摸却没人能控制」的状态。"),
-"vtouch_poll_step": dict(brief="主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。",
-    ret="0 继续；-1 该退出。", note="有待重发的整帧时 poll 超时压到 5ms，尽快把手指抬起来。"),
+"vtouch_poll_step": dict(brief="主循环一轮：poll 五路 fd（物理 / 监听 / 客户端 / 出站 / 面板唤醒）→ 各自处理 → 唯一刷出点。",
+    ret="0 继续；-1 该退出。",
+    note="poll 超时取最紧的一档：待重发的整帧 5ms ｜ 输入缓冲里已有完整帧 1ms ｜ 默认 1000ms（VT_UI 若无唤醒 fd 则 8ms）；"
+         "面板的编辑/停引擎请求/面板死亡都由唤醒 fd 立刻打断长睡眠。"),
 "cleanup": dict(brief="释放资源：关客户端 → 关监听 → 放 EVIOCGRAB → 关设备。",
     note="逆序释放：先放触摸（物理触摸立刻回系统），再拆设备。"),
 "ws_input_reset": dict(brief="复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。"),
+"ws_has_complete_frame": dict(brief="WS 输入缓冲里是否**已经有一个完整帧**（主循环据此把 poll 超时压到 ~1ms）。",
+    ret="1 有完整帧；0 没有（含「只有半包」）。",
+    note="与 ws_has_pending 的区别：那个问「有没有半包」（半包压超时就是空转），这个问「有没有整帧」——"
+         "整帧已经在我们手里了，不会再有 POLLIN 来敲门，所以必须尽快处理掉。"),
 "ws_has_pending": dict(brief="WS 输入缓冲里是否还有没解析完的半包数据（主循环据此继续挂 POLLIN）。", ret="1 有；0 没有。",
     note="半包不消费：解析不出完整帧就留着，等下一轮 poll 再拼。"),
 "on_signal": dict(brief="信号处理器：置退出标志，让主循环下一轮自己收尾（不在信号里做清理）。",

@@ -138,48 +138,81 @@ fail:
     ioctl(g.u_fd, UI_DEV_DESTROY); close(g.u_fd); g.u_fd = -1; return -1;
 }
 /**
+ * (vtouch-doc: phys_event_one)
+ * @brief 分发单条 input_event（槽选择 / 按下抬起 / 位置 / SYN_DROPPED 兜底 / SYN_REPORT 结帧）。
+ * @param   e        一条 input_event（来自批量读的缓冲）
+ * @note    从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   单条 input_event 的分发（**从 physical_events 里原样抽出**：批量读之后一次要处理一批，
+ *   边沿语义与逐条 read 的旧版逐字一致 —— 槽选择、按下/抬起、位置、SYN_DROPPED 兜底、SYN_REPORT 结帧）。
+ */
+static void phys_event_one(const struct input_event *e)
+{
+    if (e->type == EV_ABS && e->code == ABS_MT_SLOT) {
+        selected_slot = e->value;
+        if (selected_slot < 0 || selected_slot >= g.phys_slots) selected_slot = -1;   /* 越界 = 忽略后续槽事件 */
+    } else if (e->type == EV_ABS && selected_slot >= 0 && selected_slot < g.phys_slots) {
+        if (e->code == ABS_MT_TRACKING_ID) {
+            if (e->value < 0) {                       /* 抬手 */
+                g.phys[selected_slot].down = 0; g.phys[selected_slot].pending_up = 1;
+            } else {                                 /* 按下（原值不用存：身份按下标算） */
+                g.phys[selected_slot].down = 1;
+                g.ps_press_ns[selected_slot] = now_ns();   /* §4.2：down 上报的是「按下时刻」 */
+            }
+        } else if (e->code == ABS_MT_POSITION_X) g.phys[selected_slot].x = e->value;
+        else if (e->code == ABS_MT_POSITION_Y) g.phys[selected_slot].y = e->value;
+    }
+    if (e->type == EV_SYN && e->code == SYN_DROPPED) {
+        /* 内核环形缓冲溢出：后续事件有空洞，保守地把所有槽当抬起，等下一帧重建 */
+        int k;
+        for (k = 0; k < g.phys_slots; k++) if (g.phys[k].down) { g.phys[k].down = 0; g.phys[k].pending_up = 1; }
+        return;
+    }
+    if (e->type == EV_SYN && e->code == SYN_REPORT) {
+        if (emit_frame() < 0) g.g_emit_fail++;
+        else g.g_emit_fail = 0;
+        /* §4.1 时机：帧边界、emit_frame() 之后入队（快照 = 完整帧状态）。
+         * 入队只喂区域线程（不再推客户端），所以每帧都跑（纯内存比较）。 */
+        enqueue_phys_changes();
+    }
+}
+/**
  * (vtouch-doc: physical_events)
  * @brief 读物理流：解析 Type-B 事件进 phys[]（按槽），在 SYN_REPORT 处提交一帧并转发。
- * @note    一次 read 可能攒好几帧，边沿在每帧处理完就清；SYN_DROPPED 保守地把所有槽当抬起。
+ * @note    一次 read 取一批（最多 64 条 input_event）再循环解析，不是每条事件一次 read()（syscall 降一个量级）；一次读可能攒好几帧，边沿在每帧处理完就清；SYN_DROPPED 保守地把所有槽当抬起。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   物理流：一次 read() 可能攒好几帧，所以边沿（按下/抬起）在每一帧处理完就清。
+ *   批量读（一次 read 取一整个突发，最多 64 条 input_event）而不是每条事件一次 read()：
+ *   实测 250 帧/s、每帧 6~10 条事件 ≈ 1500~2500 次 read()/s，而这些调用就在分发线程上；
+ *   evdev 的标准做法是一次取一批再循环解析，syscall 数量降一个量级。
+ *   半条事件（内核理论上不会返回，返回了就留着）用 carry 缓存接在下次读的前面，绝不丢字节。
  */
 void physical_events(void)
 {
-    struct input_event e;
-    ssize_t n;
-    while ((n = read(g.input_fd, &e, sizeof e)) == (ssize_t)sizeof e) {
-        if (e.type == EV_ABS && e.code == ABS_MT_SLOT) {
-            selected_slot = e.value;
-            if (selected_slot < 0 || selected_slot >= g.phys_slots) selected_slot = -1;   /* 越界 = 忽略后续槽事件 */
-        } else if (e.type == EV_ABS && selected_slot >= 0 && selected_slot < g.phys_slots) {
-            if (e.code == ABS_MT_TRACKING_ID) {
-                if (e.value < 0) {                       /* 抬手 */
-                    g.phys[selected_slot].down = 0; g.phys[selected_slot].pending_up = 1;
-                } else {                                 /* 按下（原值不用存：身份按下标算） */
-                    g.phys[selected_slot].down = 1;
-                    g.ps_press_ns[selected_slot] = now_ns();   /* §4.2：down 上报的是「按下时刻」 */
-                }
-            } else if (e.code == ABS_MT_POSITION_X) g.phys[selected_slot].x = e.value;
-            else if (e.code == ABS_MT_POSITION_Y) g.phys[selected_slot].y = e.value;
+    static struct input_event evs[64];
+    static size_t carry_n;                 /* 上一次读剩的尾字节数（半条事件；内核理论上不会这么给）*/
+    unsigned char *raw = (unsigned char *)evs;
+    size_t i;
+    for (;;) {
+        size_t total, cnt;
+        ssize_t n = read(g.input_fd, raw + carry_n, sizeof evs - carry_n);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
+            if (errno == ENODEV || errno == EIO) {
+                fprintf(stderr, "vtouchd: 输入设备消失/出错 errno=%d (%s) → 停止\n", errno, strerror(errno));
+                g.stop_flag = 1;
+            }
+            break;
         }
-        if (e.type == EV_SYN && e.code == SYN_DROPPED) {
-            /* 内核环形缓冲溢出：后续事件有空洞，保守地把所有槽当抬起，等下一帧重建 */
-            int k;
-            for (k = 0; k < g.phys_slots; k++) if (g.phys[k].down) { g.phys[k].down = 0; g.phys[k].pending_up = 1; }
-            continue;
-        }
-        if (e.type == EV_SYN && e.code == SYN_REPORT) {
-            if (emit_frame() < 0) g.g_emit_fail++;
-            else g.g_emit_fail = 0;
-            /* §4.1 时机：帧边界、emit_frame() 之后入队（快照 = 完整帧状态）。
-             * 入队只喂区域线程（不再推客户端），所以每帧都跑（纯内存比较）。 */
-            enqueue_phys_changes();
-        }
-    }
-    if (n < 0 && (errno == ENODEV || errno == EIO)) {
-        fprintf(stderr, "vtouchd: 输入设备消失/出错 errno=%d (%s) → 停止\n", errno, strerror(errno));
-        g.stop_flag = 1;
+        if (n == 0) break;
+        total = carry_n + (size_t)n;
+        cnt = total / sizeof(struct input_event);
+        for (i = 0; i < cnt; i++) phys_event_one(&evs[i]);
+        carry_n = total - cnt * sizeof(struct input_event);
+        if (carry_n) memmove(raw, raw + cnt * sizeof(struct input_event), carry_n);
+        if (cnt == 0) break;        /* 只进了半条事件：等下一次可读（不空转） */
     }
 }

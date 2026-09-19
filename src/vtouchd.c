@@ -25,9 +25,10 @@
  * 有意不做（别在这里找）：面板(ImGui) / 区域持久化 / UI 回调 / 旋转换算 / 落盘 —— 完整版在 build/_backup_full_*。
  *
  * 用法: vtouchd -w <竖屏宽> -h <竖屏高> [-p 端口] [-v 虚拟槽数]
- * 协议: 一行一条命令，回一行（loopback WS，单客户端，新连接踢旧连接）
+ * 协议: 一行一条命令，回一行（loopback WS，单客户端，新连接踢旧连接；命令表见 vt_ws.c 的命令族）
  *   ping                     -> pong
- *   res                      -> res <lw> <lh> raw <xmin> <xmax> <ymin> <ymax>
+ *   quiet [0|1]              -> ok | err quiet          （1 = 注入族不回 ok，脚本侧少白收白解析）
+ *   res                      -> res <lw> <lh> raw <xmin> <xmax> <ymin> <ymax> phys <n>
  *   reset                    -> ok | err frame
  *   down <slot> <lx> <ly>    -> ok | err point      （各自成一帧）
  *   move <slot> <lx> <ly>    -> ok | err point      （各自成一帧）
@@ -38,11 +39,16 @@
  *   region clear             -> ok <n>
  *   region list              -> region <id> <type> <a1> <a2> <a3> <a4> <en>… / end <n>
  *   region add <id> <type> <a1> <a2> <a3> <a4> <en> -> ok <n> | err region
- *   sub [region]             -> ok（不带参数 = 订阅区域通道；只有这一条推送通道）
- *   unsub                    -> ok
+ *   region mark <id> <0|1>   -> ok <n> | err region    （脚本「开关样式」，面板直接读共享内存照着高亮）
+ *   sub [phys|region|all] [<选择> [<事件>]] -> ok       （**两条**推送通道，各有自己的过滤器）
+ *   unsub [phys|region]      -> ok
  *
- * 出站事件（sub 之后推给客户端，走发送队列）：
- *   region_ev <id> <down|up|enter|exit|move> <slot> <lx> <ly>     区域五事件（只报物理手指）
+ * 出站事件（订阅后推给客户端，走发送队列）：
+ *   phys_ev <down|move|up> <slot> <lx> <ly>                    物理触摸流（sub phys；只报物理手指）
+ *   region_ev <id> <down|enter|move|exit|up> <slot> <lx> <ly>  区域五事件（sub region；只报物理手指）
+ *   两者行末都可带 <墙钟毫秒>（时间戳按需，见 sub 的 <事件> 里的 ts/nots）
+ *   面板侧还有第三条「通道」：共享内存事件环（与脚本订不订无关，见 vt_shm.c）。
+ *   其余命令（ping / reset / region clear / sub all）现役 SDK 不发，保留作调试口。
  *
  * 失败语义：坏客户端只影响它自己（关连接 + 抬掉它的虚拟触点 + 清它的出站队列）；grab 与 uinput 不受影响。
  * 构建: sh scripts/build.sh
@@ -152,7 +158,9 @@ int vtouch_init(int argc, char **argv)
     g.listen_fd = make_listen();
     if (g.listen_fd < 0) { cleanup(); return -6; }
     if (ioctl(g.input_fd, EVIOCGRAB, 1) < 0) { cleanup(); return -5; }
-    /* §4.3：区域线程最后起 —— 它一起来就吃队列，所以要等「所有能失败的步骤」都过了再拉它 */
+    /* §4.3：区域线程最后起 —— 它一起来就吃队列，所以要等「所有能失败的步骤」都过了再拉它。
+     * 唤醒 fd 先建：没有它线程只是退回 1ms 空转，功能不变（见 region_thread_main）。 */
+    region_q_init();
     if (pthread_create(&g.region_tid, NULL, region_thread_main, NULL) != 0) {
         fprintf(stderr, "vtouchd: 区域线程创建失败: %s\n", strerror(errno));
         cleanup(); return -7;
@@ -170,29 +178,35 @@ int vtouch_init(int argc, char **argv)
 }
 /**
  * (vtouch-doc: vtouch_poll_step)
- * @brief 主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。
+ * @brief 主循环一轮：poll 五路 fd（物理 / 监听 / 客户端 / 出站 / 面板唤醒）→ 各自处理 → 唯一刷出点。
  * @return  0 继续；-1 该退出。
- * @note    有待重发的整帧时 poll 超时压到 5ms，尽快把手指抬起来。
+ * @note    poll 超时取最紧的一档：待重发的整帧 5ms ｜ 输入缓冲里已有完整帧 1ms ｜ 默认 1000ms（VT_UI 若无唤醒 fd 则 8ms）；面板的编辑/停引擎请求/面板死亡都由唤醒 fd 立刻打断长睡眠。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   单轮 poll：返回 0 = 继续，-1 = 停止
  */
 int vtouch_poll_step(void)
 {
-    struct pollfd p[4];
-#ifdef VT_UI
-    /* UI 在场：空闲也 8ms 一轮 —— 面板的编辑/心跳要跟得上（区域线程本来就 1ms 一轮，这点唤醒是噪声）。
-     * 无 UI 时保持 1000ms（默认构建行为逐字节不变）。 */
-    int to = g.g_reemit ? 5 : 8;
-#else
-    int to = g.g_reemit ? 5 : 1000;      /* 有待重发的整帧：5ms 一轮，尽快把手抬起来 */
-#endif
+    struct pollfd p[5];
+    nfds_t np;
     int want_out, r;
+    int to;
     if (g.stop_flag) return -1;
 #ifdef VT_UI
     vt_shm_tick();                       /* 核心心跳 */
     vt_shm_edit_apply();                 /* 面板投的区域编辑：这一轮就吃掉 */
     if (vt_shm_stop_req()) { fprintf(stderr, "vtouchd: 面板请求停引擎 → 退出\n"); return -1; }
+#endif
+    /* poll 超时（三档，取最紧的那个）：
+     *   ① 有待重发的整帧 → 5ms：尽快把手抬起来（老行为，逐字保留）；
+     *   ② 输入缓冲里**已经有完整帧** → 1ms：它已经在我们手里了，不会再有一次 POLLIN 来敲门
+     *      （只看 ws_has_pending 的「有没有半包」是不够的 —— 半包不该压超时，整帧才该）；
+     *   ③ VT_UI：有面板唤醒 fd（pipe）就敢长睡 1000ms —— 面板投编辑 / 请求停引擎 / 面板自己死了
+     *      都会立刻把它叫醒；没有这个 fd 时退回 8ms 轮询（否则面板编辑要等满一个 poll 超时）。 */
+    to = g.g_reemit ? 5 : 1000;
+    if (!g.g_reemit && ws_has_complete_frame()) to = 1;
+#ifdef VT_UI
+    if (to > 8 && vt_panel_wake_fd() < 0) to = 8;
 #endif
     want_out = (g.client_fd >= 0 && outq_pending());
     p[0] = (struct pollfd){ g.input_fd, POLLIN | POLLHUP | POLLERR, 0 };
@@ -200,7 +214,14 @@ int vtouch_poll_step(void)
     p[2] = (struct pollfd){ g.client_fd, g.client_fd >= 0 ? (POLLIN | POLLHUP | POLLERR) : 0, 0 };
     /* §4.5：队列非空就把客户端 fd 也挂上 POLLOUT（可写的 socket 总是报 POLLOUT → poll 立刻返回） */
     p[3] = (struct pollfd){ g.client_fd, want_out ? POLLOUT : 0, 0 };
-    r = poll(p, g.client_fd >= 0 ? 4 : 2, to);
+    np = g.client_fd >= 0 ? 4 : 2;
+#ifdef VT_UI
+    if (vt_panel_wake_fd() >= 0) {
+        p[4] = (struct pollfd){ vt_panel_wake_fd(), POLLIN | POLLHUP | POLLERR, 0 };
+        np = 5;
+    }
+#endif
+    r = poll(p, np, to);
     if (r < 0) {
         if (errno == EINTR) return 0;
         fprintf(stderr, "vtouchd: poll 失败 errno=%d (%s) → 停止\n", errno, strerror(errno));
@@ -249,6 +270,15 @@ int vtouch_poll_step(void)
     /* §4.5：唯一的刷出点 —— 队列里是刚入队的响应，或区域线程塞进来的 region_ev */
     if (g.client_fd >= 0 && ((p[3].revents & POLLOUT) || outq_pending())) outq_flush();
 #ifdef VT_UI
+    /* p[4] 面板唤醒 fd：POLLIN = 面板投了编辑 / 请求停引擎（具体动作由**下一轮开头**的
+     * vt_shm_edit_apply / vt_shm_stop_req 做）→ 这里只把管道读空，别让它一直可读；
+     * POLLHUP/POLLERR = 写端全关 = 面板没了 → 立刻收尸重启，不等看门狗下一拍。
+     * 先读后判：数据与 EOF 可能同一拍到达（POLLIN|POLLHUP）。 */
+    if (np == 5 && p[4].revents) {
+        char b[64];
+        if (p[4].revents & POLLIN) { while (read(p[4].fd, b, sizeof b) > 0) ; }
+        if (p[4].revents & (POLLHUP | POLLERR)) vt_panel_wake_drop();
+    }
     vt_panel_watchdog();                 /* 回收子进程 / 判心跳 / 按策略重启 */
 #endif
     return 0;
@@ -306,7 +336,8 @@ int main(int argc, char **argv)
     if (rc != 0) return -rc;            /* 退出码 = 2..7（见 README 的失败出口表） */
     while (vtouch_poll_step() == 0)
         ;
-    g.stop_flag = 1;                      /* 让区域线程从 1ms 空转里出来 */
+    g.stop_flag = 1;                      /* 让区域线程从 poll 里出来 */
+    region_q_wake();                      /* 它可能正阻塞在 eventfd 上（1s 兜底超时外）：显式叫醒一次 */
     if (g.region_started) pthread_join(g.region_tid, NULL);
     cleanup();
     return 0;

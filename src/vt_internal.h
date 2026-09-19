@@ -67,7 +67,12 @@
 #define OUTQ_MSG (MAX_LINE + 8)          /* region list 这种多行响应也要放得下 */
 #define MAX_REGIONS 32
 #define REGION_ID_MAX 15
-#define MAX_IOV 512
+/* 一帧的最大事件数（iovec 容量）。最坏整帧 = 8×(物理槽 + 虚拟槽) + 帧尾 3 条 = 8×(64+32)+3 = 771
+ * （见 vt_frame.c 的 static_assert）。512 装不下它 ⇒ ev_add 静默丢事件，**帧尾的 SYN_REPORT 可能是
+ * 被丢掉的那条**，系统里就成了半帧。这里给到 1024（余量 1.3×；代价是 .bss 里 40KB）。 */
+#define MAX_IOV 1024
+_Static_assert(MAX_IOV >= 8 * MAX_PHYS + 8 * MAX_VIRT + 4,
+               "MAX_IOV 必须容下最坏整帧（含帧尾 SYN_REPORT）：不足会静默丢事件 → 半帧");
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
@@ -195,6 +200,10 @@ int outq_push_text_keep(const char *s, size_t n);
 void outq_flush(void);
 
 /* ---- vt_region.c ---- */
+/* 建区域队列的唤醒 fd（eventfd）：区域线程靠它阻塞等待，不再 1ms 空转。 (vtouch-doc: region_q_init) */
+int region_q_init(void);
+/* 唤醒区域线程（入队方在推完一批事件后调一次）。 (vtouch-doc: region_q_wake) */
+void region_q_wake(void);
 /* 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。 (vtouch-doc: regions_clear) */
 void regions_clear(void);
 /* 新增或覆盖一个区域（主线程持 region_lock 写表）。 (vtouch-doc: region_add) */
@@ -286,6 +295,8 @@ int handle_line(char *line, char *resp, size_t cap);
 /* ---- vt_ws.c 的对外小接口（输入缓冲状态）---- */
 /* WS 输入缓冲里是否还有没解析完的半包数据（主循环据此继续挂 POLLIN）。 (vtouch-doc: ws_has_pending) */
 int ws_has_pending(void);
+/* WS 输入缓冲里是否**已经有一个完整帧**（主循环据此把 poll 超时压到 ~1ms）。 (vtouch-doc: ws_has_complete_frame) */
+int ws_has_complete_frame(void);
 /* 复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。 (vtouch-doc: ws_input_reset) */
 void ws_input_reset(void);
 
@@ -297,6 +308,10 @@ int  vt_panel_start(int shm_fd);
 void vt_panel_watchdog(void);
 /* 停面板：SIGTERM → 800ms → SIGKILL。 (vtouch-doc: vt_panel_stop) */
 void vt_panel_stop(void);
+/* 面板唤醒 fd（核心 poll 它：面板一投编辑/一死，主循环立刻醒）；-1 = 没有（退回短超时轮询）。 (vtouch-doc: vt_panel_wake_fd) */
+int  vt_panel_wake_fd(void);
+/* 面板没了（唤醒 fd 报了 EOF）：关掉读端，主循环下轮回到「面板不在」态。 (vtouch-doc: vt_panel_wake_drop) */
+void vt_panel_wake_drop(void);
 #endif
 
 /* ---- vtouchd.c ---- */
@@ -304,7 +319,7 @@ void vt_panel_stop(void);
 void apply_args(int argc, char **argv);
 /* 初始化：锚墙钟 → 尺寸门 → 清表 → 认设备 → 建 uinput → 先起监听 → 最后 EVIOCGRAB → 起区域线程。 (vtouch-doc: vtouch_init) */
 int vtouch_init(int argc, char **argv);
-/* 主循环一轮：poll 四路 fd（物理 / 监听 / 客户端 / 出站）→ 各自处理 → 唯一刷出点。 (vtouch-doc: vtouch_poll_step) */
+/* 主循环一轮：poll 五路 fd（物理 / 监听 / 客户端 / 出站 / 面板唤醒）→ 各自处理 → 唯一刷出点。 (vtouch-doc: vtouch_poll_step) */
 int vtouch_poll_step(void);
 /* 释放资源：关客户端 → 关监听 → 放 EVIOCGRAB → 关设备。 (vtouch-doc: cleanup) */
 void cleanup(void);

@@ -1,5 +1,6 @@
 /* vt_region.c（§5+§6 区域表与区域线程） —— 模块地图见 vt_internal.h；私有状态就近放 static，共享状态走 g。 */
 #include "vt_internal.h"
+#include <sys/eventfd.h>     /* region_q 的唤醒 fd（事件驱动：空闲不再 1ms 空转） */
 
 /* 区域线程私有状态（§4.4：主线程不再持有区域状态）*/
 static unsigned region_gen;
@@ -8,9 +9,42 @@ static unsigned char r_slot_in[MAX_PHYS][MAX_REGIONS];
 static unsigned char r_slot_hit[MAX_PHYS][MAX_REGIONS];
 /* move 去重基准按 [slot][region] 分开存：多个区域重叠时，同一个 move 要给每个命中的区域各报一条 */
 static int r_slot_last_x[MAX_PHYS][MAX_REGIONS], r_slot_last_y[MAX_PHYS][MAX_REGIONS];
+/* 区域队列的唤醒 fd（eventfd）。**故意不放进 struct vt_state**：它是本模块的私有同步原语，
+ * 放进去要动共享内存布局（面板侧也得跟着 bump VT_SHM_VERSION）。生产者只能调 region_q_wake()。 */
+static int S_q_wake = -1;
 /* 区域几何的宽松量程（见 region_add 里的说明）：面板「视口坐标不变」语义下，区域在某方向落屏外时
  * 竖屏坐标就是负数/超界 —— 合法；这里只挡住会让 dx*dx+dy*dy 溢出的离谱值。 */
 #define VT_REGION_COORD_MAX 4096
+/**
+ * (vtouch-doc: region_q_init)
+ * @brief 建区域队列的唤醒 fd（eventfd）：区域线程靠它阻塞等待，不再 1ms 空转。
+ * @return  0 成功（或已建过）；-1 eventfd 创建失败（不致命：区域线程退回 1ms 空转，功能一个不少）。
+ */
+int region_q_init(void)
+{
+    if (S_q_wake >= 0) return 0;
+    S_q_wake = (int)eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (S_q_wake < 0) {
+        /* 不致命：消费者会退回 1ms 空转（老行为），功能一个不少，只是白费唤醒。 */
+        fprintf(stderr, "vtouchd: eventfd 创建失败: %s → 区域线程退回 1ms 空转\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+/**
+ * (vtouch-doc: region_q_wake)
+ * @brief 唤醒区域线程（入队方在推完一批事件后调一次）。
+ * @note    写 eventfd 计数；没有 eventfd 时是空操作。绝不阻塞（非阻塞写，写满也只是丢一次唤醒、不丢事件）。
+ */
+void region_q_wake(void)
+{
+    uint64_t one = 1;
+    ssize_t r;
+    if (S_q_wake < 0) return;
+    do { r = write(S_q_wake, &one, sizeof one); } while (r < 0 && errno == EINTR);
+    /* 计数上限 2^64-2，写满才可能 EAGAIN —— 那时消费者已经在跑了，丢掉这次唤醒也不丢事件
+     * （它下一轮 poll 返回后必然再排空一次队列）。所以这里不看返回值。 */
+}
 /**
  * (vtouch-doc: regions_clear)
  * @brief 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。
@@ -380,23 +414,39 @@ void region_apply(const struct vt_ev *ev)
  * @brief 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。
  * @param   arg      未使用
  * @return  NULL（线程不主动退出）。
- * @note    只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。
+ * @note    只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   区域线程（§4.4）：只消费队列、只写自己的状态表、只把 region_ev 塞进出站队列。
  *   绝不注入、绝不直写 socket、绝不碰 g.phys[]/g.virt[]。
+ *   唤醒改事件驱动（原来 usleep(1000) 每毫秒醒一次 = 1000 次/s 空转；注释说「不烧 CPU」没错，
+ *   但它让 CPU 永远进不了深空闲）：入队方推完一批事件后 region_q_wake() 写一次 eventfd，
+ *   本线程 poll 它 ⇒ 空闲唤醒归零，事件延迟反而更低（入队即唤醒，不再等下一毫秒）。
+ *   没有 eventfd（创建失败）时逐字退回老行为（1ms 空转）。
  */
 void *region_thread_main(void *arg)
 {
     struct vt_ev ev;
+    uint64_t v;
     (void)arg;
     for (;;) {
-        if (!vtq_pop(&g.region_q, &ev)) {
-            if (g.stop_flag) break;
-            usleep(1000);                        /* 空闲 1ms 一轮：不烧 CPU，也不给事件加延迟 */
+        /* 顺序不能换：**先清唤醒计数 → 再排空队列 → 最后阻塞等**。这样任何时刻「队列里有事件」
+         * 都蕴含「要么计数 > 0（poll 立刻返回），要么这条事件是在本次排空之前入的队（已被取走）」。
+         * 反过来先 poll 再清，就会把「清完之后入队、但发生在排空之前」的那次唤醒吃掉 → 事件躺在队列里睡觉。 */
+        while (S_q_wake >= 0 && read(S_q_wake, &v, sizeof v) > 0) ;
+        while (vtq_pop(&g.region_q, &ev)) region_apply(&ev);
+        if (g.stop_flag) break;
+        if (S_q_wake < 0) {                  /* 没有 eventfd（创建失败）：退回 1ms 空转 */
+            usleep(1000);
             continue;
         }
-        region_apply(&ev);
+        {
+            struct pollfd p = { S_q_wake, POLLIN, 0 };
+            /* 1s 只是**兜底**：正常路径由生产者写完事件后 region_q_wake() 唤醒（空闲唤醒 ~0 次/s）。
+             * 超时留一个存在的理由：唤醒万一丢了也不至于把线程永久卡在 poll 里（退出时主线程还会
+             * 显式再唤醒一次，见 main）。 */
+            poll(&p, 1, 1000);
+        }
     }
     return NULL;
 }

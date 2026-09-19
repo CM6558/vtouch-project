@@ -17,6 +17,23 @@ static size_t ws_in_len;
  */
 int ws_has_pending(void) { return ws_in_len > 0; }
 /**
+ * (vtouch-doc: ws_has_complete_frame)
+ * @brief WS 输入缓冲里是否**已经有一个完整帧**（主循环据此把 poll 超时压到 ~1ms）。
+ * @return  1 有完整帧；0 没有（含「只有半包」）。
+ * @note    与 ws_has_pending 的区别：那个问「有没有半包」（半包压超时就是空转），这个问「有没有整帧」——整帧已经在我们手里了，不会再有 POLLIN 来敲门，所以必须尽快处理掉。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   与 ws_has_pending 的区别：那个问「有没有半包」，这个问「有没有**已经完整**的帧」。
+ *   主循环只用后者压 poll 超时（整帧已经在我们手里了，不会再有 POLLIN 来敲门；半包压超时就是空转）。
+ */
+int ws_has_complete_frame(void)
+{
+    size_t frame_len = 0, payload_off = 0;
+    unsigned opcode = 0;
+    if (ws_in_len == 0) return 0;
+    return ws_peek_frame(&frame_len, &opcode, &payload_off) == 1;
+}
+/**
  * (vtouch-doc: ws_input_reset)
  * @brief 复位 WS 输入缓冲（新客户端接入前清掉上一个客户端的残包）。
  */

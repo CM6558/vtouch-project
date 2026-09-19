@@ -179,6 +179,14 @@ int vt_shm_should_eat(int lx, int ly)
 /* ===================== 面板侧 ===================== */
 #ifdef VT_UI_PANEL
 
+/* 单调毫秒（面板侧自用：心跳判据这类东西都该用单调钟/墙钟，别用拍数）。 */
+static uint64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
 int vt_shm_attach(int fd)
 {
     struct vt_shm_header *h;
@@ -258,15 +266,21 @@ int vt_shm_ui_tick(void)
 {
     struct vt_shm_header *h;
     static uint32_t last_core_hb;
-    static int stalls;
+    static uint64_t hb_at_ms;      /* 上次看到核心心跳变化的**单调毫秒** */
+    static int seen;
+    uint64_t now;
     if (!S_base) return 0;
     h = (struct vt_shm_header *)S_base;
     h->ui_hb++;
     if (h->panel_pid == 0) h->panel_pid = (int32_t)getpid();
-    if (h->hb == last_core_hb) {
-        if (++stalls > 20) { fprintf(stderr, "vtouch-ui: 核心心跳停滞 → 自杀退出\n"); return -1; }
-    } else {
-        last_core_hb = h->hb; stalls = 0;
+    /* 判据是**单调时间**（3 秒），不是拍数：面板的 poll 线程 5ms 一拍，原来「20 拍」只有 100ms ——
+     * 核心把 poll 超时放长之后（事件驱动化：空闲 1s 一轮、心跳 1 次/s）这条会误判「核心死了」，
+     * 面板自己退出去。3 秒窗口对两边都够宽（核心心跳 1 次/s，判死要连丢 3 次才有话）。 */
+    now = mono_ms();
+    if (!seen || h->hb != last_core_hb) { seen = 1; last_core_hb = h->hb; hb_at_ms = now; return 0; }
+    if (now - hb_at_ms >= 3000) {
+        fprintf(stderr, "vtouch-ui: 核心心跳停滞 3s → 自杀退出\n");
+        return -1;
     }
     return 0;
 }

@@ -118,7 +118,7 @@ int outq_pending(void)
  * @brief 把一段**已经成帧的字节**放入出站队列（生产者 = 主线程 / 区域线程，一把短锁只包住一次 memcpy）。
  * @param   p        数据
  * @param   n        长度
- * @note    队满丢最旧；文本请用 outq_push_text，不要直接调这个。
+ * @note    队满丢最旧；**唯一的例外是正在续写的那条**（sent>0，它的前半截已经进了客户端 socket，扔掉会让后续字节接到错的帧头 ⇒ 解帧错位）：这时改为丢这一条新的。文本请用 outq_push_text，不要直接调这个。
  */
 void outq_push(const char *p, size_t n)
 {
@@ -126,7 +126,15 @@ void outq_push(const char *p, size_t n)
     if (g.client_fd < 0 || n == 0 || n >= (size_t)OUTQ_MSG) return;
     pthread_mutex_lock(&outq_lock);
     next = (outq_tail + 1) % OUTQ_CAP;
-    if (next == outq_head) { outq_head = (outq_head + 1) % OUTQ_CAP; queue_drop_log("出站", ++outq_dropped); }
+    if (next == outq_head) {
+        /* 队满 = 丢最旧（保新鲜，有意设计）。**唯一的例外是「正在续写的那条」**（sent > 0）：
+         * 它的前半截已经写进客户端 socket 了，扔掉它会让客户端把**下一帧的帧头**当成它的尾巴
+         * 接上去 ⇒ 解帧错位 / 假掉线（比丢一条新事件坏得多）。这时改成丢这一条**新的**。
+         * 只有队首可能是半写的（outq_flush 只写 head，写完才推进），所以判 head 就够。 */
+        if (outq[outq_head].sent > 0) { queue_drop_log("出站（半帧保护）", ++outq_dropped); pthread_mutex_unlock(&outq_lock); return; }
+        outq_head = (outq_head + 1) % OUTQ_CAP;
+        queue_drop_log("出站", ++outq_dropped);
+    }
     outq[outq_tail].len = (int)n;
     outq[outq_tail].sent = 0;
     memcpy(outq[outq_tail].buf, p, n);
