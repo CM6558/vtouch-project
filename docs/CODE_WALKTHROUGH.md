@@ -150,8 +150,10 @@
   - `ping` / `res` / `reset`：`cmd_meta`（`src/vt_ws.c:457`）；`res` 的组包在 `src/vt_ws.c:461`-`src/vt_ws.c:466`（末段 `phys <n>` 就是物理槽数）。
   - `down` / `move` / `up`：`cmd_point_once`（`src/vt_ws.c:486`），**每条命令自己提交一帧**（`src/vt_ws.c:493`、`src/vt_ws.c:505`）；
     逻辑坐标→raw 在 `src/vt_ws.c:504`（`logical_to_raw`，`src/vt_util.c:112`）。
-  - `begin_frame` / `point` / `end_frame`：`cmd_frame`（`src/vt_ws.c:524`）；帧内先写 `g.staged`（`src/vt_ws.c:529`），
-    `end_frame` 整体换进 `g.virt` 再提交一次（`src/vt_ws.c:548`-`src/vt_ws.c:549`）。
+  - `begin_frame` / `point` / `end_frame` / `points`：`cmd_frame`（`src/vt_ws.c` 的 `cmd_frame`）；帧内先写 `g.staged`，
+    `end_frame` 整体换进 `g.virt` 再提交一次。`points <n> <slot> <state> <x> <y> …` 是**单命令版**：先把 n 组
+    全部解析校验到栈上的 `tmp[]`，再一次性换进 `g.virt` 提交（任何一组不合法 ⇒ 整条不生效、不留半帧）——
+    SDK 的 `vt.frame()` 用它，一帧从 N+2 条命令变 1 条。
   - `region add|clear|list`：`cmd_region`（`src/vt_ws.c:567`）；`clear` 在 `src/vt_ws.c:572`；
     `list` 在 `src/vt_ws.c:576` → `src/vt_ws.c:601` 置 `resp[0]=0` 表示「本族自己发过了」、`src/vt_ws.c:604` 锁内只读表并格式化到本地 `rows[]`、`src/vt_ws.c:613`-`src/vt_ws.c:614` 解锁后逐条入队（走 `outq_push_text_keep`：**队列满就丢这一帧**，不挤旧数据）、`src/vt_ws.c:615`-`src/vt_ws.c:617` 末行 `end <n>` 单独一帧；
     `add` 在 `src/vt_ws.c:611`，id 合法性最终由核心判（`src/vt_region.c:61` 调 `id_ok`，字符集 `[A-Za-z0-9_-]`、长度 1..`REGION_ID_MAX`=`src/vt_internal.h:57`）。

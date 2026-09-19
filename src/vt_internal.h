@@ -40,6 +40,7 @@
 
 #define MAX_PHYS 64
 #define MAX_VIRT 32
+#define VT_POINTS_MAX 16  /* 一条 `points` 命令里的最大点数（单帧多点；报文受 MAX_PAYLOAD 限制，16 组 ≈ 220 字节） */
 #define MAX_LINE 1024
 #define MAX_PAYLOAD 1024
 #define HTTP_MAX 4096

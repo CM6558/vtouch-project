@@ -36,6 +36,9 @@
  *   begin_frame              -> ok | err frame
  *   point <slot> <down|move|up> <lx> <ly> -> ok | err point   （多指合并进同一帧）
  *   end_frame                -> ok | err frame
+ *   points <n> <slot> <down|move|up> <lx> <ly> … -> ok | err point | err frame
+ *                              （一条命令一帧多点：n 组，语义同 begin_frame+N×point+end_frame，
+ *                                但先全解析校验再一次性提交 —— SDK 的 frame() 用它，N+2 条变 1 条）
  *   region clear             -> ok <n>
  *   region list              -> region <id> <type> <a1> <a2> <a3> <a4> <en>… / end <n>
  *   region add <id> <type> <a1> <a2> <a3> <a4> <en> -> ok <n> | err region

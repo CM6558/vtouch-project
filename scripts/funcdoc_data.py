@@ -155,9 +155,11 @@ DOCS = {
 "cmd_point_once": dict(brief="命令族：up / down / move —— 单点命令，每个命令提交一帧。",
     params=[("t", "命令词"), ("stp", "strtok_r 状态"), ("resp", "响应缓冲"), ("cap", "缓冲容量")],
     ret="1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。"),
-"cmd_frame": dict(brief="命令族：begin_frame / point / end_frame —— 帧内多点，一次 SYN 提交。",
+"cmd_frame": dict(brief="命令族：points（一条命令一帧多点）/ begin_frame / point / end_frame —— 帧内多点，一次 SYN 提交。",
     params=[("t", "命令词"), ("stp", "strtok_r 状态"), ("resp", "响应缓冲"), ("cap", "缓冲容量")],
-    ret="1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。"),
+    ret="1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。",
+    note="points <n> <slot> <state> <lx> <ly> …：语义与 begin_frame + N×point + end_frame 逐字等价，"
+         "但先全部解析校验、再一次性提交（任何一组不合法 ⇒ 整条不生效、不留半帧）。"),
 "cmd_region": dict(brief="命令族：region add | clear | list。",
     params=[("t", "命令词"), ("stp", "strtok_r 状态"), ("resp", "响应缓冲"), ("cap", "缓冲容量")],
     ret="1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。", note="主线程只写表（短锁），判定全在区域线程。"),

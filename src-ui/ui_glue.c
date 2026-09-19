@@ -234,12 +234,23 @@ int vtouch_init(int argc, char **argv)
 int vtouch_poll_step(int timeout_ms)
 {
     char line[VT_RING_LINE];
+    static uint32_t last_drops;              /* 事件环丢行数的上次读数（v3：drops 可读 ⇒ 面板能告警） */
     int waited = 0, slice = 5;
     if (timeout_ms <= 0) timeout_ms = 1;
     for (;;) {
         if (vt_shm_ui_tick() != 0) return -1;                /* 核心死了：别"看着正常其实全死" */
         while (vt_shm_ring_pop(line, sizeof line))
             if (HK_ok && HK.event) HK.event(line);           /* 事件环 → 面板的事件日志 */
+        {
+            /* 环满时核心丢的是"这一条新的"（v3），面板这边按累计读数报一次，别让丢条静默。 */
+            uint32_t d = vt_shm_ring_drops();
+            if (d != last_drops) {
+                char note[64];
+                snprintf(note, sizeof note, "(事件环比面板读得快，已丢 %u 条)", (unsigned)d);
+                if (HK_ok && HK.event) HK.event(note);
+                last_drops = d;
+            }
+        }
         glue_watch_table();
         if (B && B->stop_req) return -1;                     /* 引擎要停 → 面板跟着收尾 */
         if (waited >= timeout_ms) break;

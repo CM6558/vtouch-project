@@ -135,6 +135,7 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `move <slot> <x> <y>` | `ok` / `err point` | 移动（各自成一帧） |
 | `up <slot>` | `ok` / `err point` | 抬起（各自成一帧） |
 | `begin_frame` / `point <slot> <down\|move\|up> <x> <y>` / `end_frame` | `ok` / `err frame` `err point` | 一帧多指 |
+| `points <n> <slot> <down\|move\|up> <x> <y> …` | `ok` / `err point` `err frame` | 一帧多指的**单命令**版（n 组；语义同上面三条，但先全校验再一次性提交）。SDK 的 `vt.frame()` 用它 |
 | `region add <id> <0矩形\|1圆形> <a1..a4> <0\|1>` | `ok <总数>` / `err region` | rect: `x1 y1 x2 y2`；circle: `cx cy r 0` |
 | `region list` | 每行 `region <id> <type> <a1..a4> <en>` + 末行 `end <n>` | **一条区域一帧**，末行单独一帧（见下方口径） |
 | `region clear` | `ok 0` | 清空 |

@@ -22,8 +22,10 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  2u            /* 布局语义版本：不匹配就拒绝启动面板。
-                                       * 2 = struct region 增加 mark（脚本"开关样式"）。 */
+#define VT_SHM_VERSION  3u            /* 布局语义版本：不匹配就拒绝启动面板。
+                                       * 2 = struct region 增加 mark（脚本"开关样式"）。
+                                       * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
+                                       *     只消费者推进读计数、环满丢新且 drops 可读）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -64,7 +66,7 @@ struct vt_shm_b {
     volatile int32_t  lock;           /* 自旋锁（只护邮箱，别在热路径上拿） */
     struct vt_shm_edit edit;
     volatile uint32_t edit_applied;   /* 核心已应用的 seq（诊断） */
-    volatile uint32_t ring_read;      /* 事件环的消费者下标（只有面板写） */
+    volatile uint32_t ring_read;      /* 事件环的消费者**单调计数**（只有面板写；生产者绝不碰它） */
     volatile int32_t  stop_req;       /* 面板请求停引擎（核心据此退出；面板另发 SIGTERM 兜底） */
     volatile uint32_t rect_seq;       /* 面板矩形发布序号：偶=稳定 */
     int32_t  panel_visible;           /* 面板当前是否可见（不可见 = 一律不吞） */
@@ -73,10 +75,19 @@ struct vt_shm_b {
 };
 
 /* 区 C：事件环。核心写 tail/line（生产者），**面板对区 C 只有读权限**；
- * 消费者的读下标放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。 */
+ * 消费者的读计数放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。
+ *
+ * 契约（v3，2026-09-19 改）：
+ *   · tail 与 ring_read 都是**单调计数器**（不是下标）：槽位 = 计数 % VT_RING_SLOTS；
+ *     空 = (tail == ring_read)；满 = (tail - ring_read >= VT_RING_SLOTS)（无符号回绕天然安全）。
+ *   · 生产者**绝不写 ring_read**：v2 里环满时它会替消费者推进读下标 —— 等于把面板**可能正在读的
+ *     那一格**丢掉（同 C13 的竞态类）；现在满时丢的是**这一条新的**，并 ++drops。
+ *   · drops 单调递增且面板可读 ⇒ 面板能对"我漏了 N 条"做告警（见 ui_glue.c 的 vt_shm_ring_drops）。
+ *   · 发布顺序：写 line → release 存 tail（消费者 acquire 读 tail 之后再读 line）⇒ 不会读到半行。
+ */
 struct vt_shm_c {
-    volatile uint32_t tail;
-    uint32_t drops;
+    volatile uint32_t tail;           /* 生产者单调计数（已写进环的行数；被丢的不计） */
+    uint32_t drops;                   /* 生产者因环满丢掉的行数（单调；面板只读） */
     char line[VT_RING_SLOTS][VT_RING_LINE];
 };
 
@@ -89,6 +100,8 @@ void vt_shm_tick(void);
 void vt_shm_ring_push(const char *s, size_t n);
 /* 事件环出队（面板唯一读方）；读到一行返回 1，空返回 0。 (vtouch-doc: vt_shm_ring_pop) */
 int  vt_shm_ring_pop(char *out, size_t cap);
+/* 事件环累计丢行数（单调；面板读它做丢条告警）。 (vtouch-doc: vt_shm_ring_drops) */
+uint32_t vt_shm_ring_drops(void);
 /* 吃一次编辑邮箱（面板有编辑就应用）。 (vtouch-doc: vt_shm_edit_apply) */
 void vt_shm_edit_apply(void);
 /* 读面板矩形（seqlock 一次重试）；返回 0 = 可信，-1 = 拿不准（调用方应保守不吞）。 (vtouch-doc: vt_shm_panel_rect) */

@@ -108,20 +108,17 @@ int vt_shm_stop_req(void)
 
 void vt_shm_ring_push(const char *s, size_t n)
 {
-    uint32_t tail, next, rd;
+    uint32_t tail, rd;
     if (!S_c || !S_b) return;
     if (n >= VT_RING_LINE) n = VT_RING_LINE - 1;
-    tail = S_c->tail;
-    next = (tail + 1) % VT_RING_SLOTS;
-    rd = S_b->ring_read;                        /* 消费者下标在区 B（面板写；读到旧值最多多丢一条） */
-    if (next == rd) {
-        S_b->ring_read = (rd + 1) % VT_RING_SLOTS;
-        S_c->drops++;
-    }
-    memcpy(S_c->line[tail], s, n);
-    S_c->line[tail][n] = 0;
-    __sync_synchronize();
-    S_c->tail = next;
+    tail = __atomic_load_n(&S_c->tail, __ATOMIC_RELAXED);
+    rd = __atomic_load_n(&S_b->ring_read, __ATOMIC_ACQUIRE);   /* 消费者的单调计数 */
+    /* 满 = 环里已有 VT_RING_SLOTS 行没被读走（无符号回绕安全）。**丢这一条新的**：
+     * 绝不替消费者推进 ring_read —— 那会丢掉面板可能正在读的那一格（v2 的老行为）。 */
+    if (tail - rd >= VT_RING_SLOTS) { S_c->drops++; return; }
+    memcpy(S_c->line[tail % VT_RING_SLOTS], s, n);
+    S_c->line[tail % VT_RING_SLOTS][n] = 0;
+    __atomic_store_n(&S_c->tail, tail + 1u, __ATOMIC_RELEASE);  /* release：line 一定先于 tail 可见 */
 }
 
 void vt_shm_edit_apply(void)
@@ -246,15 +243,19 @@ struct vt_state *g_ptr;
 
 int vt_shm_ring_pop(char *out, size_t cap)
 {
-    uint32_t rd;
+    uint32_t rd, tail;
     if (!S_c || !S_b || !out || cap == 0) return 0;
-    rd = S_b->ring_read;
-    if (rd == S_c->tail) return 0;               /* 空 */
-    snprintf(out, cap, "%s", S_c->line[rd]);
-    __sync_synchronize();
-    S_b->ring_read = (rd + 1) % VT_RING_SLOTS;
+    rd = __atomic_load_n(&S_b->ring_read, __ATOMIC_RELAXED);
+    /* v3：tail 是**单调计数**，槽位 = 计数 % VT_RING_SLOTS；空判据就是两个计数相等。
+     * acquire：拿到 tail 之后读到的 line 一定是写它那条的完整内容（生产者 release 发布）。 */
+    tail = __atomic_load_n(&S_c->tail, __ATOMIC_ACQUIRE);
+    if (rd == tail) return 0;
+    snprintf(out, cap, "%s", S_c->line[rd % VT_RING_SLOTS]);
+    __atomic_store_n(&S_b->ring_read, rd + 1u, __ATOMIC_RELEASE);
     return 1;
 }
+
+uint32_t vt_shm_ring_drops(void) { return S_c ? S_c->drops : 0; }
 
 struct vt_shm_header *vt_shm_hdr(void) { return (struct vt_shm_header *)S_base; }
 

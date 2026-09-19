@@ -562,12 +562,13 @@ int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
 }
 /**
  * (vtouch-doc: cmd_frame)
- * @brief 命令族：begin_frame / point / end_frame —— 帧内多点，一次 SYN 提交。
+ * @brief 命令族：points（一条命令一帧多点）/ begin_frame / point / end_frame —— 帧内多点，一次 SYN 提交。
  * @param   t        命令词
  * @param   stp      strtok_r 状态
  * @param   resp     响应缓冲
  * @param   cap      缓冲容量
  * @return  1 不是本族命令；0 / -1 = 已处理（-1 时 resp 是错误响应）。
+ * @note    points <n> <slot> <state> <lx> <ly> …：语义与 begin_frame + N×point + end_frame 逐字等价，但先全部解析校验、再一次性提交（任何一组不合法 ⇒ 整条不生效、不留半帧）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   begin_frame / point / end_frame：帧内多点，一次 SYN 提交
@@ -575,6 +576,35 @@ int cmd_point_once(char *t, char **stp, char *resp, size_t cap)
 int cmd_frame(char *t, char **stp, char *resp, size_t cap)
 {
     int slot, x, y;
+    if (!strcmp(t, "points")) {
+        /* points <n> <slot> <state> <lx> <ly> …（n 组）—— 一条命令一帧多点，一次 emit(单 SYN)。
+         * 语义与 begin_frame + N×point + end_frame 逐字等价（同一个 set_virtual + staged 提交），
+         * 但省掉 N+2 条命令的解析与往返：SDK 的 frame() 以前每帧发 N+2 条，现在一条。
+         * 原子性：**先全部解析校验、再一次性提交**（任何一组不合法 ⇒ 整条命令不生效、不留半帧）。 */
+        char *sn = strtok_r(NULL, " \t", stp);
+        int n = 0, k, slot, x, y;
+        unsigned seen_mask = 0;                 /* slot < 32 ⇒ 位图查同帧重复（与 point 的 frame_seen 同语义） */
+        struct contact tmp[MAX_VIRT];
+        if (g.frame_open || !sn || parse_long(sn, 1, VT_POINTS_MAX, &n)) { snprintf(resp, cap, "err point"); return -1; }
+        memcpy(tmp, g.virt, sizeof tmp);
+        for (k = 0; k < n; k++) {
+            char *ss = strtok_r(NULL, " \t", stp), *state = strtok_r(NULL, " \t", stp);
+            char *sx = strtok_r(NULL, " \t", stp), *sy = strtok_r(NULL, " \t", stp);
+            int lx, ly;
+            if (!ss || !state || !sx || !sy ||
+                parse_long(ss, 0, g.vslots - 1, &slot) || parse_long(sx, 0, g.logical_width - 1, &lx) ||
+                parse_long(sy, 0, g.logical_height - 1, &ly) ||
+                logical_to_raw(lx, 0, &x) || logical_to_raw(ly, 1, &y) ||
+                (seen_mask & (1u << (unsigned)slot)) || set_virtual(tmp, slot, state, x, y)) {
+                snprintf(resp, cap, "err point"); return -1;
+            }
+            seen_mask |= 1u << (unsigned)slot;
+        }
+        if (strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err point"); return -1; }   /* 多余参数 */
+        memcpy(g.virt, tmp, sizeof g.virt);
+        if (emit_frame() < 0) { snprintf(resp, cap, "err frame"); return -1; }
+        ack_ok(resp, cap); return 0;
+    }
     if (!strcmp(t, "begin_frame")) {
         if (g.frame_open || strtok_r(NULL, " \t", stp)) { snprintf(resp, cap, "err frame"); return -1; }
         memcpy(g.staged, g.virt, sizeof g.staged);

@@ -417,21 +417,22 @@ function finger(a, b) {
     if (!conn.fingers[slot]) conn.fingers[slot] = new Finger(conn, slot);
     return conn.fingers[slot];
 }
-/* 多指合并进同一帧（begin_frame → point×N → end_frame） */
+/* 多指合并进同一帧：**一条命令**（核心的 points：<n> 后跟 n 组 slot/state/x/y）。
+ * 老实现是 begin_frame + N×point + end_frame 的 N+2 条命令（核心侧每条都要 strtok 一遍）；
+ * points 在核心里是「先全部校验、再一次性提交」，语义与老写法逐字等价（同一个 set_virtual + staged 提交），
+ * 而且中途某一组不合法时整条不生效、不会留下半帧。空数组不发（核心要求 n≥1）。 */
 function frame(pts, conn) {
     if (!conn) conn = g_conn || connect();
     if (!conn.fingers) conn.fingers = {};
     var i, p;
-    conn.send("begin_frame");
-    try {
-        for (i = 0; i < pts.length; i++) {
-            p = pts[i];
-            conn.send("point " + p.slot + " " + p.state + " " + Math.round(p.x) + " " + Math.round(p.y));
-            if (conn.fingers[p.slot]) conn.fingers[p.slot].downState = p.state !== "up";
-        }
-    } finally {
-        conn.send("end_frame");
+    if (!pts || !pts.length) return;
+    var parts = ["points " + pts.length];
+    for (i = 0; i < pts.length; i++) {
+        p = pts[i];
+        parts.push(p.slot, p.state, Math.round(p.x), Math.round(p.y));
+        if (conn.fingers[p.slot]) conn.fingers[p.slot].downState = p.state !== "up";
     }
+    conn.send(parts.join(" "));
 }
 /* 逻辑尺寸与 raw 量程（返回 "res 1440 3168 raw 0 23040 0 50688" 这样的字符串） */
 function res() {
