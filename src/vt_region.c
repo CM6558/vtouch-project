@@ -82,8 +82,9 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
             rg->enabled = enabled ? 1 : 0;
             rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
             /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把四张私有状态表
-             * 整表清零 —— 按下进行中的 slot_hit/slot_in 一起没了，手指抬起时判不出 up
-             * （开关型区域的脚本在**按下时**就 update 自己，正好踩这条：down 给了、up 丢了）。
+             * 整表清零 —— 按下进行中的 slot_hit/slot_in 一起没了，手指抬起时判不出 up。
+             * 触发场景（都是非人为的内部写）：面板拖改/重启回灌 regions.conf、区域跟随旋转的整表重算、
+             * 脚本重连时重放自己那批区域（同名 = 走这条更新分支）—— 正好落在某次按住期间就丢 up。
              * 索引没移动 ⇒ 私有状态无需失效。只有结构变化（regions_clear / region_del 的移位）才 bump。 */
             fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
                     rg->id, type, a1, a2, a3, a4, rg->enabled, g.region_count);

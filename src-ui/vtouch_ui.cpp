@@ -275,7 +275,8 @@ static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的�
  * 与「屏幕上看到哪块」同时跟着新方向走。
  * 节奏：**每帧一条**。编辑邮箱是单槽覆盖式，连投多条会互相覆盖（本项目实测丢 2/3），所以按帧切片，
  * 3 条区域 ≈ 3 帧（~50ms），32 条 ≈ 0.5s 渐进完成，渲染线程一秒都不卡。
- * 关闭：环境变量 VTOUCH_REGION_ROT=off（回到旧的「区域粘在玻璃上」）。 */
+ * 开关：默认**停用**（2026-09-19 用户口径「已设区域不因非人为操作改变」；见函数开头）。要回到旧的
+ * 「区域跟着视口走、转屏后视觉位置不变」用 VTOUCH_REGION_ROT=on；不设=区域粘在玻璃上（坐标不动）。 */
 static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
 static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
 /* 批次状态机（评审 2026-09-18 修）：批首**锁存目标帧**并对整表**快照**，批内一律从快照重算。
@@ -339,6 +340,9 @@ static int region_rot_map(int br, int bw, int bh, int tr, int tw, int th,
     return 0;
 }
 /* 每帧调一次（几个整数比较，极便宜）：把「区域几何所对应的屏」推进到当前屏。
+ * ⚠️ **默认停用**（`g_rr_off`，见函数开头的用户口径）：只有这条路径会把区域坐标「写回」核心表与
+ * regions.conf —— 触发者是转屏/启动这类非人为事件，所以默认不跑。下面对基准帧/批次的全部讲究，
+ * 仅在 VTOUCH_REGION_ROT=on（恢复旧语义）时才生效。
  * ⚠️ 基准必须固定成**竖屏帧**（区域表 / regions.conf 的规范坐标系，也是旧文件的约定），
  * **不能**记成「面板启动时看到的方向」—— 否则启动方向不同，同一份表会被解释成不同的相对位置
  * （真机报过：同一批区域，横屏启动与竖屏启动显示在不同的相对位置）。
@@ -347,10 +351,17 @@ static void region_rot_step(void)
 {
     char id[16];
     int type, a1, a2, a3, a4, en, n1, n2, n3, n4, n;
+    /* 用户口径 2026-09-19：**已经设置的区域不因任何非人为操作改变**。跟随旋转会在转屏/面板启动/屏尺寸
+     * 变化时按屏帧重算整表、并把新几何经 vtouch_region_add 写回核心表与 regions.conf —— 等于用内部维护
+     * 动作改用户数据；且换算一旦遇上不自洽屏帧或 #frame 归属错判，区域会被算到屏外并落盘、重启不自愈。
+     * 默认**停用**：区域表就是「用户设了多少就是多少」，显示按原有坐标、以当前屏左上角为原点画（下面的
+     * p2c 绘制），不为「显示位置」反推数据。要恢复旧语义（区域跟随视口、转屏后视觉位置不变）用
+     * VTOUCH_REGION_ROT=on —— 那条路会把坐标写回，属已知的非人为写入。 */
     if (g_rr_off < 0) {
         const char *v = getenv("VTOUCH_REGION_ROT");
-        g_rr_off = (v && !strcmp(v, "off")) ? 1 : 0;
-        if (g_rr_off) ALOGI("区域跟随旋转：关闭（VTOUCH_REGION_ROT=off）");
+        g_rr_off = (v && !strcmp(v, "on")) ? 0 : 1;
+        ALOGI(g_rr_off ? "区域跟随旋转：停用（默认；VTOUCH_REGION_ROT=on 可恢复旧语义）"
+                       : "区域跟随旋转：启用（VTOUCH_REGION_ROT=on，转屏会重算并写回区域坐标）");
     }
     /* 排障逃生门：VTOUCH_REGION_BASE=rot,w,h 直接指定「表里的数字属于哪个屏」，覆盖 regions.conf 的 #frame。
      * 用在「表是横屏加的、但文件里没记」这种历史数据上（改一次不用重编）。 */
@@ -594,7 +605,7 @@ static void load_regions(void)
             if (fw > 0 && fh > 0 && fr >= 0 && fr <= 3) {
                 g_rr_base_rot = fr; g_rr_base_w = fw; g_rr_base_h = fh;
                 frame_seen = 1;
-                ALOGI("区域跟随旋转：regions.conf #frame rot%d %dx%d（表里数字所属的屏；与当前屏不一致就换算）",
+                ALOGI("regions.conf #frame rot%d %dx%d（表里数字所属的屏；跟随旋转默认停用 → 原样使用，不换算）",
                       fr, fw, fh);
             } else {
                 ALOGW("regions.conf #frame 非法（rot%d %dx%d）→ 按竖屏规范帧解释", fr, fw, fh);
