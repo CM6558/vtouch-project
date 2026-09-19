@@ -81,7 +81,10 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
             rg->type = type;
             rg->enabled = enabled ? 1 : 0;
             rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
-            region_gen++;
+            /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把四张私有状态表
+             * 整表清零 —— 按下进行中的 slot_hit/slot_in 一起没了，手指抬起时判不出 up
+             * （开关型区域的脚本在**按下时**就 update 自己，正好踩这条：down 给了、up 丢了）。
+             * 索引没移动 ⇒ 私有状态无需失效。只有结构变化（regions_clear / region_del 的移位）才 bump。 */
             fprintf(stderr, "vtouchd: region upd %s type%d %d,%d,%d,%d en%d (total %d)\n",
                     rg->id, type, a1, a2, a3, a4, rg->enabled, g.region_count);
             pthread_mutex_unlock(&g.region_lock);
@@ -96,7 +99,8 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
         rg->type = type;
         rg->enabled = enabled ? 1 : 0;
         rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
-        region_gen++;
+        /* 追加分支同样不用 bump：新区域占的是**新表位**，已有 rid 的私有状态不受影响；
+         * 而表位复用（del/clear 之后再加）必定先经过那两处的 bump + 整表清零。 */
         fprintf(stderr, "vtouchd: region add %s type%d %d,%d,%d,%d en%d (total %d)\n",
                 rg->id, type, a1, a2, a3, a4, rg->enabled, g.region_count);
     }
@@ -335,7 +339,7 @@ void region_apply(const struct vt_ev *ev)
     } while (0)
     phys_ev_send(ev);                                /* ① 物理触摸流：按 slot 报，与区域无关 */
     pthread_mutex_lock(&g.region_lock);              /* ② 区域五事件判定 */
-    if (r_seen_gen != region_gen) {                 /* region clear/add：重置本线程私有状态 */
+    if (r_seen_gen != region_gen) {                 /* region clear/del（结构变化才 bump）：重置本线程私有状态 */
         r_seen_gen = region_gen;
         memset(r_slot_in, 0, sizeof r_slot_in);
         memset(r_slot_hit, 0, sizeof r_slot_hit);
@@ -345,7 +349,7 @@ void region_apply(const struct vt_ev *ev)
     for (rid = 0; rid < g.region_count; rid++) {
         struct region *rg = &g.regions[rid];
         int was_in = r_slot_in[slot][rid];
-        if (!rg->enabled) { r_slot_in[slot][rid] = 0; continue; }
+        if (!rg->enabled) { r_slot_in[slot][rid] = 0; r_slot_hit[slot][rid] = 0; continue; }
         hit = region_hit(rg, lx, ly);
         if (ev->action == VT_DOWN) {
             if (hit) { r_slot_hit[slot][rid] = 1; PEND(rg->id, "down"); }

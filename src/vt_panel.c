@@ -105,6 +105,7 @@ extern char **environ;
 #define VT_PANEL_MAX_RESTART 3        /* 1 分钟窗口内最多重启次数 */
 #define VT_PANEL_RESTART_WIN 60
 #define VT_PANEL_ABSENT_RETRY_MS 3000  /* 面板不在时距上次尝试 ≥3 秒才重试（单调时间，见 vt_panel_watchdog） */
+#define VT_PANEL_HB_STALL_MS 3000      /* 心跳停滞判据（单调时间，见 vt_panel_watchdog） */
 
 static pid_t S_pid = -1;
 static int   S_shm_fd = -1;
@@ -251,20 +252,28 @@ static void vt_panel_restart(void)
 void vt_panel_watchdog(void)
 {
     static uint32_t last_ui_hb;
-    static int stall_ticks;
+    static uint64_t hb_at_ms;                  /* 上次看到心跳变化 / 开始计时的**单调毫秒** */
     uint32_t hb = vt_shm_ui_hb();
+    uint64_t now = now_ns() / 1000000ull;
     int st;
 
-    if (hb != last_ui_hb) { last_ui_hb = hb; stall_ticks = 0; }
-    else if (++stall_ticks > 300) {            /* 约 3 秒没有面板心跳 */
-        if (S_pid > 0) {
-            fprintf(stderr, "vtouchd: 面板心跳停滞 3s → 杀掉它（pid=%d）并按策略重启\n", (int)S_pid);
+    /* 判据是**单调时间**，不是循环拍数（与下面「面板不在」那一支同一个理由）：主循环的 poll
+     * 会因任何可读事件提前返回，负载下一拍远快于 8ms（同函数下半段的「千拍/秒」量级）⇒
+     * 「300 拍」可能几十毫秒就走完，会把**忙但健康**的面板误杀，并瞬间烧掉 1 分钟 3 次的预算。 */
+    if (hb != last_ui_hb) { last_ui_hb = hb; hb_at_ms = now; }
+    else if (S_pid > 0) {
+        if (hb_at_ms == 0) hb_at_ms = now;                        /* 面板刚起：先给一个完整窗口 */
+        else if (now - hb_at_ms >= VT_PANEL_HB_STALL_MS) {        /* 3 秒没有面板心跳 */
+            fprintf(stderr, "vtouchd: 面板心跳停滞 %ds → 杀掉它（pid=%d）并按策略重启\n",
+                    VT_PANEL_HB_STALL_MS / 1000, (int)S_pid);
             kill(S_pid, SIGKILL);
+            hb_at_ms = now;
         }
-        stall_ticks = 0;
+    } else {
+        hb_at_ms = 0;                        /* 面板不在：计时归零，等它起来再重新给窗口 */
     }
-    /* “面板不在”独立成一支：stall_ticks 在上面那个 tick 里刚被清 0（进过 `> 300` 那一支就归零），
-     * 再拿它判断等于恒假 —— 面板**首次**没起来（缺 classes.dex / shm fd 无效，vt_panel_start 返回 -1
+    /* “面板不在”独立成一支：上面那个 tick 一进 STALL 分支就把 hb_at_ms 归零了，
+     * 再拿心跳计时判断等于恒假 —— 面板**首次**没起来（缺 classes.dex / shm fd 无效，vt_panel_start 返回 -1
      * 且 S_pid 停在 -1）时就永不重试。所以这里用只在本分支维护的 S_absent_t0（进入“面板不在”态的时刻）。
      *
      * 判据是**单调时间**，不是循环拍数：主循环的 poll 会因任何可读事件提前返回，负载下一拍远快于

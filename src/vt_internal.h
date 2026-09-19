@@ -53,6 +53,10 @@
 #define SUBEV_MOVE  4u
 #define SUBEV_EXIT  8u
 #define SUBEV_UP    16u
+/* 五个**真事件位**的掩码：过滤判定只看这五位。SUBEV_TS/SUBEV_NOTS 是伪位（只描述线路格式，
+ * 不参与过滤）——订阅解析必须先把它们剔出去，否则 `sub phys 0 nots` 会得到「没有任何真事件位」
+ * 的掩码，过滤判定恒假 ⇒ **静默零事件**（客户端看起来订上了、其实什么都收不到）。 */
+#define SUBEV_EV_MASK (SUBEV_DOWN | SUBEV_ENTER | SUBEV_MOVE | SUBEV_EXIT | SUBEV_UP)
 #define SUBEV_TS    32u   /* 伪事件：随事件带墙钟毫秒（**默认带**，用户 2026-09-18 口径） */
 #define SUBEV_NOTS  64u   /* 伪事件：显式**不要**时间戳（省流量时才写） */
 #define VT_UP   0

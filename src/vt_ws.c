@@ -210,6 +210,9 @@ int write_full(int fd, const void *buf, size_t len)
     }
     return 0;
 }
+/* 握手期总期限：SO_RCVTIMEO(300ms) 是**每次 recv** 的超时，逐字节读的循环里等于「每字节 300ms」
+ * —— 本机任意进程连上不发数据就能把主循环（转发/注入线程）拖住几百 ms 甚至数分钟。 */
+#define VT_HS_TOTAL_MS 1000
 /**
  * (vtouch-doc: websocket_handshake)
  * @brief 读 HTTP 请求、校验 Upgrade 与 Sec-WebSocket-Key，回 101。
@@ -228,8 +231,15 @@ int websocket_handshake(int fd)
     struct sha1 s;
     size_t used = 0;
     ssize_t n;
+    const uint64_t hs_deadline = now_ns() + VT_HS_TOTAL_MS * 1000000ull;   /* 整段握手的总预算 */
     const char *guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     while (used + 1 < sizeof req) {
+        struct pollfd pr = { fd, POLLIN, 0 };
+        int left_ms;
+        uint64_t now = now_ns();
+        if (now >= hs_deadline) return -1;           /* 总期限到：慢客户端不再拖住主循环 */
+        left_ms = (int)((hs_deadline - now) / 1000000ull);
+        if (poll(&pr, 1, left_ms) <= 0) return -1;   /* 只等剩余额度：总耗时 ≤ VT_HS_TOTAL_MS */
         n = recv(fd, req + used, 1, 0);
         if (n <= 0) return -1;                       /* 超时/断开都算失败 */
         used += (size_t)n; req[used] = 0;
@@ -293,6 +303,7 @@ void drop_client(void)
         fprintf(stderr, "vtouchd: ws client dropped\n");
     }
     ws_in_len = 0;
+    g.quiet = 0;             /* 下家要自己 quiet：否则上家订的静默会漏给下家（命令都收、回包全没，脚本以为核心死了） */
     g.sub_mask = 0;          /* §4.6：断连/被踢 → 订阅清零（下一个客户端要自己重新 sub） */
     g.sub_phys_mask = 0; g.sub_phys_ev = 0;      /* 过滤器一并复位（0/空 = 全通） */
     g.sub_region_id[0] = 0; g.sub_region_ev = 0;
@@ -388,7 +399,7 @@ int ws_next_frame(unsigned char *payload, size_t *plen, unsigned *opcode)
 int client_frame(void)
 {
     unsigned char payload[MAX_PAYLOAD];
-    char line[MAX_LINE], resp[MAX_LINE];
+    char line[MAX_PAYLOAD + 1], resp[MAX_LINE];   /* +1：载荷上限 1024 的帧要放得下结尾的 NUL */
     int k;
     for (k = 0; k < 32; k++) {
         size_t len = 0, i;
@@ -410,7 +421,7 @@ int client_frame(void)
         }
         if (opcode == 10) continue;
         for (i = 0; i < len; i++) if (payload[i] == 10 || payload[i] == 13) payload[i] = ' ';
-        if (len >= sizeof line) return -1;
+        if (len > MAX_PAYLOAD) return -1;   /* 与 ws_peek_frame 同一把尺子（原来 sizeof line 恰好把合法 1024 字节帧判成协议错） */
         memcpy(line, payload, len); line[len] = 0;
         handle_line(line, resp, sizeof resp);
         /* §4.5：响应进发送队列，主线程只在主循环里刷 —— socket 慢不再卡住注入热路径 */
@@ -772,9 +783,11 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             }
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_UP) : 0;
-            g.sub_phys_mask = m; g.sub_phys_ev = e;
             /* 时间戳**默认带上**（脚本要靠它算按压时长/送达延迟）；只有显式写 nots 才省掉。 */
             g.sub_phys_ts = (e & SUBEV_NOTS) ? 0 : 1;
+            e &= SUBEV_EV_MASK;      /* 伪位不算事件：`sub phys 0 nots` 只写伪位 ⇒ 掩码归 0 = 全通；
+                                      * 否则剩下的掩码没有任何真事件位 ⇒ 判定恒假 ⇒ 静默零事件。 */
+            g.sub_phys_mask = m; g.sub_phys_ev = e;
             fprintf(stderr, "vtouchd: 订阅 phys 槽=%s ev=%s ts=%d 线路=phys_ev <ev> <slot> <x> <y>%s\n",
                     m ? (sel ? sel : "0") : "全部", evs ? evs : "(默认)", g.sub_phys_ts, g.sub_phys_ts ? " <t>" : "");
         } else if (want == SUB_REGION) {
@@ -784,8 +797,8 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
             } else g.sub_region_id[0] = 0;
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }
             else e = sel ? (SUBEV_DOWN | SUBEV_ENTER | SUBEV_EXIT | SUBEV_UP) : 0;
-            g.sub_region_ev = e;
             g.sub_region_ts = (e & SUBEV_NOTS) ? 0 : 1;      /* 同上：默认带时间戳 */
+            g.sub_region_ev = e & SUBEV_EV_MASK;             /* 同上：伪位不算事件（只写 nots/ts ⇒ 全通） */
             /* 线路格式写进日志，省得对着抓包猜（只订一个区域 ⇒ 不再重复发 id） */
             fprintf(stderr, "vtouchd: 订阅 region id=%s ev=%s ts=%d 线路=<%s> <ev> <slot> <x> <y>%s\n",
                     g.sub_region_id[0] ? g.sub_region_id : "*", evs ? evs : "(默认)", g.sub_region_ts,
