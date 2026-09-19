@@ -125,7 +125,12 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 
 ```sh
 sh scripts/ui-deploy.sh status                 # 核心/面板 pid、面板 fd 卫生、日志尾
-adb forward tcp:27183 tcp:27183
-printf 'res\n' | nc -q1 127.0.0.1 27183        # 期望：res 1440 3168 raw 0 23040 0 50688 phys 10
+su -c 'grep -i 6a2f /proc/net/tcp'             # 27183 在听：0100007F:6A2F，状态 0A=LISTEN / 01=有客户端连着
 su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：有 memfd:vtouch-shm，无 /dev/input/event*
 ```
+
+**协议回包别用裸 nc 验**：核心只认 WebSocket 握手，`printf 'res\n' | nc …` 会被判握手失败并关连接
+（症状 = 收 EOF、核心日志多一条 `ws 握手失败`）—— 这条自检以前写在文档里，是错的。
+要验 `res` 回包就**用客户端连**：推 `build/vtouch_onefile.js` 到 `/sdcard/vtouch.js`，
+AutoJs6 里 `require` 后看它日志里的 `res` 行；核心自己的日志也能看出主循环是活的（`engine=on`、
+`ws client connected`、手指按压时的 `phys down/up`）。

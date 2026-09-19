@@ -543,7 +543,7 @@ static int save_failed(void)
 static int save_regions(void)
 {
     char tmppath[128];
-    int i, n, tr, tw, th;
+    int i, n;
     /* 转屏批次进行中：表是混合态（部分区域已换算、部分没有）→ 推迟到收尾后再写。
      * 不清 g_save_pending，渲染线程下一帧会再来一次（收尾时 ui_region_changed 也会再置位）。 */
     if (g_rr_active) { g_save_pending = 1; return 0; }
@@ -554,16 +554,12 @@ static int save_regions(void)
     if (!f) { ALOGE("regions.conf 写入失败 %s: %s", tmppath, strerror(errno)); return save_failed(); }
     fprintf(f, "#vtouch-regions v%d\n", REGION_CONF_VER);
     n = vtouch_region_count();
-    /* 数字一律**原样**写，另用 #frame 记下「这些数字属于哪个屏」—— 表是横屏加的还是竖屏加的，
-     * 只有录制者知道，写盘时不猜（真机踩过：横屏加的表被下次启动当成竖屏口径读 ⇒ 区域跑到别处）。
-     * 归属规则：跟随已推进到当前屏 ⇒ 属当前屏；否则属**基准帧**（默认竖屏规范帧，与旧文件兼容）。 */
-    tr = 0; tw = g_w; th = g_h;
-    if (g_rr_base_w > 0) { tr = g_rr_base_rot; tw = g_rr_base_w; th = g_rr_base_h; }
-    if (g_rr_base_w > 0 && frame_sane(g_rot, g_scr_w, g_scr_h) &&
-        g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) {
-        tr = g_rot; tw = g_scr_w; th = g_scr_h;
-    }
-    if (tw > 0 && th > 0) fprintf(f, "#frame %d %d %d\n", tr, tw, th);   /* 尺寸未知时不写：按旧文件处理 */
+    /* #frame：**只记事实** —— 下面那些 region 行的数字一律是**竖屏逻辑坐标**（面板投编辑前
+     * 就做过「当前屏 → 竖屏逻辑」的逆变换），所以「这些数字属于哪个屏」恒等于竖屏逻辑帧。
+     * 历史上这里写「录制时的屏」（横屏加的表写 rot1 3168x1440，读数的人得猜 + 还要配合跟随旋转
+     * 换算）；跟随旋转 2026-09-19 停用之后那句话既不成立、也永远不会再参与换算 ⇒ 现在只写
+     * rot0 + 竖屏逻辑尺寸。老文件里的 `#frame 1 …` 仍能读进来（只当诊断），写完一次即自我纠正。 */
+    if (g_w > 0 && g_h > 0) fprintf(f, "#frame 0 %d %d\n", g_w, g_h);
     for (i = 0; i < n; i++) {
         char id[16]; int t, a1, a2, a3, a4, en;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
@@ -579,10 +575,21 @@ static int save_regions(void)
     g_save_retry_t = 0;
     return 0;
 }
+/* 核心表里有没有这个 id（面板只读区 A 的现役表；启动回灌「只补缺」靠它）。 */
+static int region_exists(const char *id)
+{
+    int i, n = vtouch_region_count();
+    for (i = 0; i < n; i++) {
+        char cur[16]; int t, a1, a2, a3, a4, en;
+        if (vtouch_get_region(i, cur, sizeof cur, &t, &a1, &a2, &a3, &a4, &en) == 0 && strcmp(cur, id) == 0)
+            return 1;
+    }
+    return 0;
+}
 static void load_regions(void)
 {
     char line[128];
-    int ver = 0, migrated = 0, frame_seen = 0, nreg = 0;
+    int ver = 0, migrated = 0, frame_seen = 0, nreg = 0, nskip = 0;
     FILE *f = fopen(REGION_CONF_NEW, "r");
     if (!f) {
         f = fopen(REGION_CONF_OLD, "r");      /* 首次升级：把 tmpfs 里的老表搬过来 */
@@ -616,6 +623,15 @@ static void load_regions(void)
              * 「编辑 seq=… 超时未生效」在前面）。文案两种都提，别把超时误报成「核心拒绝」。
              * 两种都跳过这一条、继续载入其余条目（一条坏记录不该带走整张表，更不许崩）。 */
             nreg++;
+            /* **只补缺，不覆盖**（2026-09-19 批次 3）：核心表里已经有同 id 的区域 ⇒ 跳过。
+             * 理由：面板是观察者 + 编辑器，核心表才是唯一真相；启动回灌若把脚本刚设的几何覆盖回去，
+             * 就违反用户口径「已设置的区域不因任何非人为操作改变」。缺的照样补上（核心重启后表是空的
+             * ⇒ 全量恢复，与改动前一致）。 */
+            if (region_exists(id)) {
+                nskip++;
+                ALOGI("regions.conf %s 核心表里已有 → 跳过（不覆盖现役几何）", id);
+                continue;
+            }
             if (vtouch_region_add(id, t, a1, a2, a3, a4, en) != 0)
                 ALOGW("regions.conf 跳过 %s（核心拒绝或编辑超时，见上一行 glue 日志, type%d %d,%d,%d,%d en%d）",
                       id, t, a1, a2, a3, a4, en);
@@ -628,6 +644,9 @@ static void load_regions(void)
         ALOGI("区域跟随旋转：regions.conf 无 #frame（旧文件，%d 条）→ 按**竖屏规范帧**解释；"
               "若这批区域其实是横屏时加的，它们会出现在「相对位置转 90°」的地方 —— 用面板拖动/重画一次即可写下 #frame",
               nreg);
+    if (nreg > 0 && nskip)
+        ALOGI("regions.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 ⇒ 不覆盖现役几何）",
+              nreg, nreg - nskip, nskip);
     if (migrated) save_regions();     /* 迁移完立刻写回持久路径（老 tmpfs 文件留着无害） */
 }
 static void gen_id(char *out, int circle)

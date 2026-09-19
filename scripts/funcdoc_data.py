@@ -19,12 +19,13 @@ DOCS = {
 
 # ---------------- §3+§4 队列 ----------------
 "queue_drop_log": dict(brief="队列丢弃的诊断日志：前 3 次每次都打，之后每 100 次打一行。",
-    params=[("what", "队列名（\"事件\" / \"出站\"）"), ("n", "该队列累计丢弃数")],
+    params=[("what", "队列名/动作标签（如 \"事件(丢新)\" / \"事件(合并旧move)\" / \"出站\"）"), ("n", "该队列累计丢弃数")],
     note="诊断不占热路径（代价只是一次取模比较）。"),
 "vtq_push": dict(brief="事件入队（单生产者 = 主线程，消费者 = 区域线程）。",
     params=[("q", "队列"), ("ev", "事件（按值拷入）")],
-    note="永不阻塞、永不失败：队满先尝试把队尾同槽同类 move 原地合并，仍满则丢最旧（CAS 推 head，因为消费者也在推它）。"
-         "消费端最多少收一条事件，注入路径不受影响。"),
+    note="永不阻塞、永不失败：队满先合并（队尾同槽 move，再退 8 格找同槽旧 move 原地覆盖），"
+         "都不行就丢**这一条新的**。生产者**绝不推进 head**（那是消费者一个人的）—— "
+         "老实现满态 CAS 推 head「丢最旧」会与消费者抢 head（评审 C13）。丢的只影响事件条数，注入路径不受影响。"),
 "vtq_pop": dict(brief="事件出队（单消费者 = 区域线程）。", params=[("q", "队列"), ("ev", "输出事件")], ret="1 取到；0 队空。"),
 "outq_reset": dict(brief="清空出站队列（新客户端接入 / 断连时）。", note="残包不许串给下一个客户端（§4.6）。"),
 "outq_pending": dict(brief="出站队列是否非空（主循环据此决定要不要挂 POLLOUT）。", ret="1 有；0 无。"),
@@ -47,9 +48,11 @@ DOCS = {
 "region_add": dict(brief="新增或覆盖一个区域（主线程持 region_lock 写表）。",
     params=[("id", "区域名（≤ REGION_ID_MAX 字符）"), ("type", "0=矩形 1=圆"), ("a1", "矩形 x1 / 圆 cx"),
             ("a2", "矩形 y1 / 圆 cy"), ("a3", "矩形 x2 / 圆 r"), ("a4", "矩形 y2"), ("enabled", "1 启用 0 禁用")],
-    ret="0 成功；-1 参数非法、id 去重失败或表满。", note="几何只做宽松量程检查（±4096，防判定里 dx*dx 溢出）：区域跟着屏幕方向走时可以落在屏外，此时竖屏坐标允许负数/超界（面板「视口坐标不变」语义）；越界区域在核心侧天然不可命中（手指原生坐标恒在框内），除非半径探进可见区。"),
+    ret="0 成功；-1 参数非法、id 去重失败或表满。", note="几何只做宽松量程检查（±4096，防判定里 dx*dx 溢出）：区域跟着屏幕方向走时可以落在屏外，此时竖屏坐标允许负数/超界（面板「视口坐标不变」语义）；越界区域在核心侧天然不可命中（手指原生坐标恒在框内），除非半径探进可见区。补充：type=1（圆）时 a3 是半径，必须非负，负数直接拒。"),
 "region_hit": dict(brief="点是否落在区域内（矩形含边界；圆按半径平方比较）。",
-    params=[("rg", "区域"), ("lx", "逻辑 x"), ("ly", "逻辑 y")], ret="1 命中；0 未命中。"),
+    params=[("rg", "区域"), ("lx", "逻辑 x"), ("ly", "逻辑 y")], ret="1 命中；0 未命中。",
+    note="圆的比较用 64 位算：lx 的上界由 -w 决定（可到 100000），dx*dx 在 32 位里有符号溢出是 UB。",
+    ),
 "region_ev_send": dict(brief="发一条区域事件：订了 region 通道才入出站队列，没订就只打 (UNSUB) 日志。",
     params=[("id", "区域名"), ("ev", "down/enter/move/exit/up"), ("slot", "物理槽号"),
             ("lx", "逻辑 x"), ("ly", "逻辑 y"),
@@ -69,7 +72,9 @@ DOCS = {
 # ---------------- §7 物理输入 ----------------
 "phys_event_one": dict(brief="分发单条 input_event（槽选择 / 按下抬起 / 位置 / SYN_DROPPED 兜底 / SYN_REPORT 结帧）。",
     params=[("e", "一条 input_event（来自批量读的缓冲）")],
-    note="从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。"),
+    note="从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。"
+         "两处相对旧版的修正：SYN_DROPPED 除了把各槽标抬起，还会**立刻结帧**（不再等后面的 SYN_REPORT，"
+         "评审 C14）；g_emit_fail 不在这一层自增（唯一所有者是重发路径，评审 C16）。"),
 "validate_device": dict(brief="认一块设备是不是 Type-B 触摸屏（槽 + tracking id + XY 四轴 + 量程），"
                              "并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。",
     params=[("p", "设备节点路径"), ("slots", "输出物理槽数"), ("xmin", "输出 X 下界"), ("xmax", "输出 X 上界"),
@@ -90,8 +95,10 @@ DOCS = {
     params=[("t", "事件类型"), ("c", "事件码"), ("v", "值")],
     note="上限 MAX_IOV（1024 ≥ 最坏整帧 771，由 vt_internal.h 的 static_assert 钉住）：满了就丢事件，"
          "所以这个上限必须**大于**最坏帧 —— 否则帧尾的 SYN_REPORT 可能被丢掉，系统里成了半帧。"),
-"uinput_writev_retry": dict(brief="把当前帧一次 writev 写进 uinput；EAGAIN 时等最多 3×20ms 再试。",
-    ret="实际写出的字节数；-1 真错。", note="uinput 是以 O_NONBLOCK 打开的。"),
+"uinput_writev_retry": dict(brief="把当前帧一次 writev 写进 uinput（只对 EINTR 重试；EAGAIN 立刻返回 -1，交给重发通道）。",
+    ret="实际写出的字节数；-1 失败（含 EAGAIN）。",
+    note="uinput 以 O_NONBLOCK 打开：EAGAIN 不在热路径里等（老写法 poll 3×20ms 会把触摸线程卡住 60ms）；"
+         "调用方据此置 g_reemit，主循环 5ms 后重发同一帧。"),
 "emit_iov_writev": dict(brief="提交本帧；**短写要把剩下的 iovec 补完**（只补一条会丢帧尾的 SYN_REPORT，系统里就成了半帧）。",
     ret="0 成功；-1 失败。"),
 "any_emitted": dict(brief="本帧是否真的发了触点（决定 BTN_TOUCH / BTN_TOOL_FINGER 的值）。", ret="1 有触点；0 没有。",

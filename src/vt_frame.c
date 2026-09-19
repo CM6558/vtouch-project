@@ -29,29 +29,23 @@ void ev_add(int t, int c, int v)
 }
 /**
  * (vtouch-doc: uinput_writev_retry)
- * @brief 把当前帧一次 writev 写进 uinput；EAGAIN 时等最多 3×20ms 再试。
- * @return  实际写出的字节数；-1 真错。
- * @note    uinput 是以 O_NONBLOCK 打开的。
+ * @brief 把当前帧一次 writev 写进 uinput（只对 EINTR 重试；EAGAIN 立刻返回 -1，交给重发通道）。
+ * @return  实际写出的字节数；-1 失败（含 EAGAIN）。
+ * @note    uinput 以 O_NONBLOCK 打开：EAGAIN 不在热路径里等（老写法 poll 3×20ms 会把触摸线程卡住 60ms）；调用方据此置 g_reemit，主循环 5ms 后重发同一帧。
  *
  * 为什么这么写（原有注释，逐字保留）：
- *   uinput 是 O_NONBLOCK 打开的：队列满会 EAGAIN，短暂等一等（3×20ms），
- *   只有一直不可写才算真错（调用方据此重发/收摊）。
+ *   uinput 是 O_NONBLOCK 打开的：队列满会 EAGAIN。老写法在这里 poll 等 3×20ms，
+ *   只有一直不可写才算真错 —— 但那是**60ms 卡在触摸线程**里，代价比「这一帧晚 5ms 发」大得多。
+ *   现在 EAGAIN 直接返回 -1，靠既有的 g_reemit 通道（主循环 5ms 一拍）重发。
  */
 ssize_t uinput_writev_retry(void)
 {
-    int k;
     ssize_t n;
     do { n = writev(g.u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
-    if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return n;
-    for (k = 0; k < 3; k++) {
-        struct pollfd p = { g.u_fd, POLLOUT, 0 };
-        if (poll(&p, 1, 20) > 0 && (p.revents & POLLOUT)) {
-            do { n = writev(g.u_fd, ev_iov, ev_n); } while (n < 0 && errno == EINTR);
-            if (n >= 0) return n;
-            if (errno != EAGAIN && errno != EWOULDBLOCK) return n;
-        }
-    }
-    return -1;
+    /* EAGAIN（uinput 队列满）**不在热路径里等**：老写法 poll(POLLOUT, 20ms)×3 = 最坏 60ms 卡在
+     * 触摸线程上，与「热路径永不阻塞」正面冲突（评审 C12）。直接返回 -1 —— 调用方会置
+     * g.g_reemit，主循环下一拍（5ms）重发同一帧 ⇒ 最坏延迟 60ms → ≤5ms，故障模式还更好。 */
+    return n;
 }
 /**
  * (vtouch-doc: emit_iov_writev)

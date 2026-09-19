@@ -214,10 +214,13 @@ python scripts/apply_funcdoc.py           # 幂等写入；再来一遍必须"�
 
 ```sh
 sh scripts/ui-deploy.sh status                 # 核心/面板 pid、面板 fd 卫生（触摸设备 fd 必须 0）、日志尾
-adb forward tcp:27183 tcp:27183
-printf 'res\n' | nc -q1 127.0.0.1 27183        # 应回：res 1440 3168 raw 0 23040 0 50688 phys 10（末段 = 本机物理槽数）
+su -c 'grep -i 6a2f /proc/net/tcp'             # 27183 在听：0100007F:6A2F（状态 0A=LISTEN / 01=有客户端）
 su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：memfd:vtouch-shm 有、/dev/input/event* 没有
 ```
+
+**别用裸 `nc` 验协议**：核心只认 WebSocket 握手，`printf 'res\n' | nc -q1 127.0.0.1 27183` 会被判
+握手失败并关连接（收到 EOF、核心日志多一条 `ws 握手失败`）。要验 `res 1440 3168 raw … phys 10`
+这种回包，用客户端连：`build/vtouch_onefile.js` → `/sdcard/vtouch.js`，AutoJs6 `require` 后看脚本日志。
 
 ## CI（GitHub Actions）
 

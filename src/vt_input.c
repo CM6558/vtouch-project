@@ -141,7 +141,7 @@ fail:
  * (vtouch-doc: phys_event_one)
  * @brief 分发单条 input_event（槽选择 / 按下抬起 / 位置 / SYN_DROPPED 兜底 / SYN_REPORT 结帧）。
  * @param   e        一条 input_event（来自批量读的缓冲）
- * @note    从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。
+ * @note    从 physical_events 里抽出来的同一段逻辑（批量读之后一次要处理一批）；边沿语义与逐条 read 的旧版逐字一致。两处相对旧版的修正：SYN_DROPPED 除了把各槽标抬起，还会**立刻结帧**（不再等后面的 SYN_REPORT，评审 C14）；g_emit_fail 不在这一层自增（唯一所有者是重发路径，评审 C16）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   单条 input_event 的分发（**从 physical_events 里原样抽出**：批量读之后一次要处理一批，
@@ -164,14 +164,23 @@ static void phys_event_one(const struct input_event *e)
         else if (e->code == ABS_MT_POSITION_Y) g.phys[selected_slot].y = e->value;
     }
     if (e->type == EV_SYN && e->code == SYN_DROPPED) {
-        /* 内核环形缓冲溢出：后续事件有空洞，保守地把所有槽当抬起，等下一帧重建 */
-        int k;
-        for (k = 0; k < g.phys_slots; k++) if (g.phys[k].down) { g.phys[k].down = 0; g.phys[k].pending_up = 1; }
+        /* 内核环形缓冲溢出：后续事件有空洞，保守地把所有槽当抬起。
+         * **立刻结帧**（评审 C14）：AOSP 语义下通常紧跟一条 SYN_REPORT 兜住，但那是「通常」——
+         * 真没有的话，合并设备上的手指就永远不抬（系统侧一直按着）。这里主动把「全抬」写出去，
+         * 且顺手把抬起转成区域事件（enqueue_phys_changes 比快照 ⇒ 每槽一条 up）。 */
+        int k, any = 0;
+        for (k = 0; k < g.phys_slots; k++)
+            if (g.phys[k].down) { g.phys[k].down = 0; g.phys[k].pending_up = 1; any = 1; }
+        if (any) {
+            if (emit_frame() == 0) g.g_emit_fail = 0;
+            enqueue_phys_changes();
+        }
         return;
     }
     if (e->type == EV_SYN && e->code == SYN_REPORT) {
-        if (emit_frame() < 0) g.g_emit_fail++;
-        else g.g_emit_fail = 0;
+        /* g_emit_fail 的**唯一所有者是重发路径**（vtouchd.c 的 poll 步）：这里只提交，失败已由
+         * emit_frame 置 g_reemit，下一拍重发时才会被计数（评审 C16：两处各自自增语义含糊）。 */
+        if (emit_frame() == 0) g.g_emit_fail = 0;
         /* §4.1 时机：帧边界、emit_frame() 之后入队（快照 = 完整帧状态）。
          * 入队只喂区域线程（不再推客户端），所以每帧都跑（纯内存比较）。 */
         enqueue_phys_changes();

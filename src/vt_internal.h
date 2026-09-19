@@ -91,8 +91,9 @@ struct vt_ev {
 
 struct vtq {
     struct vt_ev buf[VTQ_CAP];
-    unsigned head, tail;     /* 消费者只写 head，生产者只写 tail */
-    unsigned long drops;     /* 溢出丢弃计数（仅诊断） */
+    unsigned head, tail;     /* 消费者只写 head，生产者只写 tail（生产者**绝不**推进 head ——
+                              * 满态只做「合并 / 丢新」，见 vtq_push：那是给 C13 竞态打的补丁） */
+    unsigned long drops;     /* 溢出丢弃计数（仅诊断；只有生产者写） */
 };
 
 struct region {
@@ -239,7 +240,7 @@ void physical_events(void);
 /* ---- vt_frame.c ---- */
 /* 往本帧的 iovec 里追加一条 input_event（纯内存，不做系统调用）。 (vtouch-doc: ev_add) */
 void ev_add(int t, int c, int v);
-/* 把当前帧一次 writev 写进 uinput；EAGAIN 时等最多 3×20ms 再试。 (vtouch-doc: uinput_writev_retry) */
+/* 把当前帧一次 writev 写进 uinput（只对 EINTR 重试；EAGAIN 立刻返回 -1，交给重发通道）。 (vtouch-doc: uinput_writev_retry) */
 ssize_t uinput_writev_retry(void);
 /* 提交本帧；**短写要把剩下的 iovec 补完**（只补一条会丢帧尾的 SYN_REPORT，系统里就成了半帧）。 (vtouch-doc: emit_iov_writev) */
 int emit_iov_writev(void);

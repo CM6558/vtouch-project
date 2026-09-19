@@ -229,9 +229,12 @@ int vtouch_poll_step(void)
     }
     if (p[0].revents & POLLIN) physical_events();
     if (g.g_reemit && g.u_fd >= 0) {
+        /* g_emit_fail 的**唯一所有者**（评审 C16）：数的是「重发连续失败次数」，成功即归零；
+         * 5ms 一拍 ⇒ 200 拍 ≈ 1s 连续失败才停机（真到这一步说明 uinput 已经不收事了）。
+         * 物理路径那边只提交、不计数 —— 它失败时置的就是这个 g_reemit，下一拍必然在这里被计到。 */
         if (emit_frame() == 0) { g.g_reemit = 0; g.g_emit_fail = 0; }
         else if (++g.g_emit_fail >= 200) {
-            fprintf(stderr, "vtouchd: uinput 连续 %d 次写失败 → 停止（物理触摸回系统）\n", g.g_emit_fail);
+            fprintf(stderr, "vtouchd: uinput 连续 %d 次写失败（约 1s）→ 停止（物理触摸回系统）\n", g.g_emit_fail);
             return -1;
         }
     }

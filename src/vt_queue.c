@@ -10,7 +10,7 @@ static pthread_mutex_t outq_lock = PTHREAD_MUTEX_INITIALIZER;
 /**
  * (vtouch-doc: queue_drop_log)
  * @brief 队列丢弃的诊断日志：前 3 次每次都打，之后每 100 次打一行。
- * @param   what     队列名（"事件" / "出站"）
+ * @param   what     队列名/动作标签（如 "事件(丢新)" / "事件(合并旧move)" / "出站"）
  * @param   n        该队列累计丢弃数
  * @note    诊断不占热路径（代价只是一次取模比较）。
  *
@@ -21,54 +21,48 @@ static pthread_mutex_t outq_lock = PTHREAD_MUTEX_INITIALIZER;
 void queue_drop_log(const char *what, unsigned long n)
 {
     if (n <= 3 || n % 100 == 0)
-        fprintf(stderr, "vtouchd: %s队列满，丢弃第 %lu 条（§4.3/§4.5 丢最旧，注入路径不受影响）\n", what, n);
+        fprintf(stderr, "vtouchd: %s：出/入队满，这是第 %lu 次（注入路径不受影响；丢了什么看标签）\n", what, n);
 }
 /**
  * (vtouch-doc: vtq_push)
  * @brief 事件入队（单生产者 = 主线程，消费者 = 区域线程）。
  * @param   q        队列
  * @param   ev       事件（按值拷入）
- * @note    永不阻塞、永不失败：队满先尝试把队尾同槽同类 move 原地合并，仍满则丢最旧（CAS 推 head，因为消费者也在推它）。消费端最多少收一条事件，注入路径不受影响。
+ * @note    永不阻塞、永不失败：队满先合并（队尾同槽 move，再退 8 格找同槽旧 move 原地覆盖），都不行就丢**这一条新的**。生产者**绝不推进 head**（那是消费者一个人的）—— 老实现满态 CAS 推 head「丢最旧」会与消费者抢 head（评审 C13）。丢的只影响事件条数，注入路径不受影响。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   溢出策略（§4.3）：① 队尾同槽同类的 move 原地合并（丢旧位置不影响增量语义）；
- *   ② 仍然满 → 丢最旧（CAS 推 head，因为消费者也在推它）。
- *   队列满时丢的必然是 move：同时按下的物理槽 ≤ g.phys_slots，down/up 事件在手指抬起前
- *   每槽只会出现一次，不可能把 64 格塞满；而且就算真丢，注入路径也照常（只是事件少一条）。
+ *   ② 再往后最多看 8 格，同槽旧 move 原地覆盖（边缘事件也可以覆盖它）；③ 都不行 → 丢**这一条新的**。
+ *   老写法第 ③ 步是「丢最旧」，靠 CAS 推进 head 腾格子 —— 那条路与消费者抢 head（评审 C13），
+ *   会把消费者正在拷的事件覆盖掉、或把 head 写回去，所以我们把它整个去掉了：**head 只有消费者写**。
+ *   队列满时丢的必然是 move 或极端拥挤下的边缘事件：正常负载（每帧 1~6 条、队列 64 格）根本到不了这里。
  */
 void vtq_push(struct vtq *q, const struct vt_ev *ev)
 {
+    /* 生产者**只写 tail 与数据格**，head 永远是消费者一个人的（评审 C13：老实现在满态用 CAS 推进
+     * head「丢最旧」，与消费者「读了 head、正在拷数据」竞态 —— 拷一半的事件被覆盖、或 head 被写回去，
+     * 结果就是丢事件）。满态的新策略：先合并，合并不了就丢**这一条新的**。 */
     unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
     unsigned head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
     unsigned i;
     if (tail - head >= VTQ_CAP) {
-        struct vt_ev *last = &q->buf[(tail - 1u) % VTQ_CAP];
-        if (ev->action == VT_MOVE && last->action == VT_MOVE &&
-            last->slot == ev->slot) {
-            last->x = ev->x; last->y = ev->y; last->ts = ev->ts;
-            return;
+        unsigned last = (tail - 1u) % VTQ_CAP;
+        if (ev->action == VT_MOVE && q->buf[last].action == VT_MOVE && q->buf[last].slot == ev->slot) {
+            q->buf[last].x = ev->x; q->buf[last].y = ev->y; q->buf[last].ts = ev->ts;
+            return;                    /* 最常见的一路：同一根手指连续 move ⇒ 原地合并，一条都不丢 */
         }
-        /* down/up: more CAS rounds; move: 4 rounds */
-        unsigned tries = (ev->action != VT_MOVE) ? 16 : 4;
-        for (i = 0; i < tries; i++) {
-            if (__atomic_compare_exchange_n(&q->head, &head, head + 1u, 0,
-                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) { queue_drop_log("事件", ++q->drops); break; }
-            if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head < VTQ_CAP) break;   /* 消费者已腾出格子 */
-        }
-        if (__atomic_load_n(&q->tail, __ATOMIC_RELAXED) - head >= VTQ_CAP) {
-            /* still full: down/up can overwrite an old move (from head+1, not head) */
-            if (ev->action != VT_MOVE) {
-                for (i = 1; i < VTQ_CAP; i++) {
-                    unsigned idx = (head + i) % VTQ_CAP;
-                    if (q->buf[idx].action == VT_MOVE) {
-                        q->buf[idx] = *ev;
-                        queue_drop_log("事件(覆盖move)", ++q->drops);
-                        return;
-                    }
-                }
+        /* 再往后最多看 8 格：找**同槽的旧 move** 原地覆盖（另一根手指的事件与之交错时的常见情形）。
+         * down/up 也允许覆盖旧 move —— 边缘事件比一条过期位置值重要得多（保「不丢 up」这条口径）。 */
+        for (i = 0; i < 8 && i < VTQ_CAP; i++) {
+            unsigned idx = (tail - 1u - i) % VTQ_CAP;
+            if (q->buf[idx].action == VT_MOVE && q->buf[idx].slot == ev->slot) {
+                q->buf[idx] = *ev;
+                queue_drop_log(ev->action == VT_MOVE ? "事件(合并旧move)" : "事件(覆盖旧move)", ++q->drops);
+                return;
             }
-            queue_drop_log("事件", ++q->drops); return;
         }
+        queue_drop_log("事件(丢新)", ++q->drops);
+        return;
     }
     q->buf[tail % VTQ_CAP] = *ev;
     __atomic_store_n(&q->tail, tail + 1u, __ATOMIC_RELEASE);

@@ -84,7 +84,7 @@ static int id_ok(const char *id, size_t n)
  * @param   a4       矩形 y2
  * @param   enabled  1 启用 0 禁用
  * @return  0 成功；-1 参数非法、id 去重失败或表满。
- * @note    几何只做宽松量程检查（±4096，防判定里 dx*dx 溢出）：区域跟着屏幕方向走时可以落在屏外，此时竖屏坐标允许负数/超界（面板「视口坐标不变」语义）；越界区域在核心侧天然不可命中（手指原生坐标恒在框内），除非半径探进可见区。
+ * @note    几何只做宽松量程检查（±4096，防判定里 dx*dx 溢出）：区域跟着屏幕方向走时可以落在屏外，此时竖屏坐标允许负数/超界（面板「视口坐标不变」语义）；越界区域在核心侧天然不可命中（手指原生坐标恒在框内），除非半径探进可见区。补充：type=1（圆）时 a3 是半径，必须非负，负数直接拒。
  */
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
 {
@@ -107,6 +107,8 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
         a2 < -VT_REGION_COORD_MAX || a2 > VT_REGION_COORD_MAX ||
         a3 < -VT_REGION_COORD_MAX || a3 > VT_REGION_COORD_MAX ||
         a4 < -VT_REGION_COORD_MAX || a4 > VT_REGION_COORD_MAX) return -1;
+    /* 圆的半径必须非负：负数当正半径用是静默的错（评审 C7 的另一半）—— 直接拒，回 err region。 */
+    if (type == 1 && a3 < 0) return -1;
     pthread_mutex_lock(&g.region_lock);
     /* 同 id 查重：存在则原地更新（开关/挪区域只改属性，不新增） */
     for (i = 0; i < g.region_count; i++) {
@@ -215,13 +217,19 @@ int region_rename(const char *old_id, const char *new_id)
  * @param   lx       逻辑 x
  * @param   ly       逻辑 y
  * @return  1 命中；0 未命中。
+ * @note    圆的比较用 64 位算：lx 的上界由 -w 决定（可到 100000），dx*dx 在 32 位里有符号溢出是 UB。
  */
 int region_hit(const struct region *rg, int lx, int ly)
 {
     if (!rg->enabled) return 0;
     if (rg->type == 1) {
-        int dx = lx - rg->a1, dy = ly - rg->a2;
-        return dx * dx + dy * dy <= rg->a3 * rg->a3;
+        /* 用 64 位算：lx 的上界由 -w 决定（允许到 100000），dx = lx - a1 可能远大于 46340
+         * ⇒ dx*dx 在 32 位里有符号溢出（UB；ARM 上通常回绕，症状是「该圆恒不命中」）。
+         * a3（半径）已在 region_add 里校验非负，这里再取一次绝对值没有意义。 */
+        int64_t dx = (int64_t)lx - (int64_t)rg->a1;
+        int64_t dy = (int64_t)ly - (int64_t)rg->a2;
+        int64_t r = (int64_t)rg->a3;
+        return dx * dx + dy * dy <= r * r;
     }
     return lx >= rg->a1 && lx <= rg->a3 && ly >= rg->a2 && ly <= rg->a4;
 }
