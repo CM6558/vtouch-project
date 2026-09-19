@@ -272,7 +272,7 @@ void vt_panel_watchdog(void)
     } else {
         hb_at_ms = 0;                        /* 面板不在：计时归零，等它起来再重新给窗口 */
     }
-    /* “面板不在”独立成一支：上面那个 tick 一进 STALL 分支就把 hb_at_ms 归零了，
+    /* “面板不在”独立成一支：上面那个 STALL 分支一进去就把心跳计时重置成当前时刻了，
      * 再拿心跳计时判断等于恒假 —— 面板**首次**没起来（缺 classes.dex / shm fd 无效，vt_panel_start 返回 -1
      * 且 S_pid 停在 -1）时就永不重试。所以这里用只在本分支维护的 S_absent_t0（进入“面板不在”态的时刻）。
      *
