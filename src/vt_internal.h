@@ -395,6 +395,17 @@ void cleanup(void);
 void on_signal(int s);
 /* 进程入口：装信号 → init → 主循环 → 置 stop_flag 并 join 区域线程 → cleanup。 (vtouch-doc: main) */
 int main(int argc, char **argv);
+
+#ifdef VT_UI
+/* ---- vt_shm.c 的取点接口（核心侧；F2 补记：原型与实现同落 T2.8）---- */
+/* 取点请求是否有效（pick_mode 且距 0→1 转变 ≤20s；超时清 mode + 日志）。 (vtouch-doc: vt_shm_pick_wanted) */
+int  vt_shm_pick_wanted(void);
+/* 记一次取点捕获：写坐标、pick_seq++、清 mode、日志 `取点 捕获 x,y`。 (vtouch-doc: vt_shm_pick_captured) */
+void vt_shm_pick_captured(int lx, int ly);
+/* 面板死亡清理：清 pick_mode（核心看门狗面板死亡分支调）+ 日志。 (vtouch-doc: vt_shm_pick_panel_died) */
+void vt_shm_pick_panel_died(void);
+#endif
+
 /* 共享内存契约（VT_UI 构建才展开内容；必须放在 struct vt_state 定义之后）。 */
 #include "vt_shm.h"
 

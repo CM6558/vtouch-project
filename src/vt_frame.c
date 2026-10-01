@@ -151,13 +151,19 @@ int emit_frame(void)
     for (i = 0; i < g.phys_slots; i++) {
         if (!g.phys[i].down) continue;
 #ifdef VT_UI
-        /* 按下那一刻（上一帧还没 down）问一次面板：这只手是给它用的吗？ */
+        /* 按下那一刻（上一帧还没 down）问一次面板：这只手是给它用的吗？
+         * 没被面板吞掉再看一眼取点请求（T2.8）—— 顺序固定：先面板矩形、后取点。 */
         if (!ui_eaten[i] && !g.ps_down[i]) {
             int elx, ely;
-            if (raw_to_logical(g.phys[i].x, 0, &elx) == 0 && raw_to_logical(g.phys[i].y, 1, &ely) == 0
-                && vt_shm_should_eat(elx, ely)) {
-                ui_eaten[i] = 1;
-                fprintf(stderr, "vtouchd: 面板吞掉 slot%d @%d,%d\n", i, elx, ely);
+            if (raw_to_logical(g.phys[i].x, 0, &elx) == 0 && raw_to_logical(g.phys[i].y, 1, &ely) == 0) {
+                if (vt_shm_should_eat(elx, ely)) {
+                    ui_eaten[i] = 1;
+                    fprintf(stderr, "vtouchd: 面板吞掉 slot%d @%d,%d\n", i, elx, ely);
+                } else if (vt_shm_pick_wanted()) {
+                    /* 取点：吞掉整段手势（同款锁存）+ 回填逻辑坐标 + 清 mode（日志在 captured 里） */
+                    ui_eaten[i] = 1;
+                    vt_shm_pick_captured(elx, ely);
+                }
             }
         }
         if (ui_eaten[i]) continue;

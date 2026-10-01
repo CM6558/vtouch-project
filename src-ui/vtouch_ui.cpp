@@ -49,7 +49,7 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
  * 逆变换回竖屏逻辑坐标由胶水层做（见 src-ui/ui_glue.c）。单跑模式（ui_stubs.c）里是空实现。 */
 void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2);
 /* 操作 / 取点 / 绑定只读：T2.4 胶水新增的 15 个入口，原型逐字（定义见 src-ui/ui_glue.c，
- * 单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点与绑定读留给 T2.6/T2.8 接线。 */
+ * 单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点 T2.8 已接线；绑定读留给 T3.3。 */
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms);
@@ -175,6 +175,11 @@ static float g_mx = -1, g_my = -1;
 static long g_mdown_t = 0;
 static int g_drag = 0;                 /* 标题栏几何拖拽（快照侧直驱，不走 ImGui 拖拽机） */
 static float g_drag_ox = 0, g_drag_oy = 0;
+/* 取点（T2.8）：[取点] 点下置 1（渲染线程），回填/面板内点击取消清 0（poll 线程的 pick_ev 也会清，
+ * 最坏一帧竞态，纯交互态）。g_pick_se/sf 记「发起取点的那一格」（回填目标；滑动四点同理）。 */
+static int g_pick = 0;
+static int g_pick_se = -1;
+static int g_pick_sf = -1;
 /* g_need 无锁置位：只由渲染线程清零，其余线程只置 1（单字对齐存取原子；
  * 极小概率与清零竞态丢一次重画，按钮路径当前帧本就带新状态，WS 路径下次事件补画） */
 static volatile int g_need = 1;
@@ -230,7 +235,6 @@ static long g_save_retry_t = 0;   /* 落盘失败后的下次重试时刻（0=�
 /* 操作表（ops.conf，T2.7）落盘走**独立**的 pending/退避，不与区域表共用一个：
  * 两块文件、两条时间线 —— 一块写失败不该把另一块的改动一起卡住。编辑动作（新建/删除/编辑层
  * [完成]）只置位，实际写盘同样在渲染线程（唯一写者，节奏照 g_save_pending 那套）。 */
-static int save_ops(void);
 static volatile int g_ops_save_pending = 0;
 static long g_ops_save_retry_t = 0;
 /* 面板状态里引用了「已不存在的区域 id」要清理（面板自身改表：单条删/改名是面板自带能力，
@@ -872,6 +876,10 @@ static int ui_consume_cb(int lx, int ly)
     return in_panel((float)sx, (float)sy) ? 1 : 0;
 }
 
+/* 取点结果落点（T2.8）：ui_ev_cb 收到 pick_ev 时转发过来。定义在 T2.6 区块 —— g_ope_ 与 g_ne_
+ * 一族全局都定义在文件后段，这里只能先声明（与 op_edit_open 同款前向声明）。 */
+static void pick_ev_apply(int px, int py);
+
 /* ev 回调（poll 线程）：无锁写。单写者（poll）+单读者（render），定界数组，
  * 行内 snprintf 自带 NUL，最坏一帧内看到新旧混排的一行日志/闪错一次 id，
  * 纯装饰性；换来 poll 线程永不因渲染阻塞（此前 move 事件高频取锁饿死输入，整屏顿）。 */
@@ -895,6 +903,10 @@ static void ui_ev_cb(const char *line)
             g_ex_enter = !strcmp(ev, "enter");
             g_ex_t = now_ms();
         }
+    }
+    {
+        int px, py;
+        if (sscanf(line, "pick_ev %d %d", &px, &py) == 2) pick_ev_apply(px, py);   /* 取点结果（T2.8） */
     }
     g_ov_need = 1;
 }
@@ -1109,6 +1121,16 @@ static void snapshot_touches(void)
             int k = g_dots[i].tn % 12;
             g_dots[i].tx[k] = x; g_dots[i].ty[k] = y;
             g_dots[i].tn++;
+            /* 取点态（T2.8）：面板内新按下 = 取消（点面板里取消）。这一下不喂 ImGui ——
+             * 它就是「取消」这个动作本身（吞掉，免得顺带点到数字键/按钮）。 */
+            int pick_cancel = 0;
+            if (down_edge && ui_live && in_p && g_pick) {
+                pick_cancel = 1;
+                g_pick = 0;
+                vtouch_pick_cancel();
+                g_need = 1; g_force_frames = 2;
+                ALOGI("取点 取消（面板内点击）");
+            }
             /* 手势优先于鼠标：框选 / 选中拖改（面板内一律走鼠标，保证按钮可用） */
             if (down_edge && ui_live && !in_p) {   /* 隐藏时不开始框选/拖改（否则会改表并落盘） */
                 if (g_cap_mode && g_cap_slot < 0) {
@@ -1151,7 +1173,7 @@ static void snapshot_touches(void)
             }
             if (ui_live && i == g_cap_slot) { g_cap_x1 = x; g_cap_y1 = y; }
             if (ui_live && i == g_edit_slot) edit_apply_live(x, y);
-            if (ui_live && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
+            if (ui_live && !pick_cancel && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
                 panel_press(i, sx, sy);            /* 面板鼠标走当前屏坐标 */
             } else if (ui_live && i == g_mslot) {
                 panel_drag_move(sx, sy);
@@ -2259,7 +2281,7 @@ static const char *ope_name_why(int rc)
 }
 
 /* 字段模型：字段序号 → steps6 下标（0=type、1..4=坐标参数、5=ms）；-1 = 该类型没这个字段。
- * 坐标字段（下标 1..4）在数字弹层里会多画一个 [取点]（接线在 T2.8）。 */
+ * 坐标字段（下标 1..4）在数字弹层里会多画一个 [取点]（T2.8 已接线：核心吞一次触摸回填）。 */
 static const int ope_fidx[3][5] = {
     { 1, 2, 5, -1, -1 },       /* 点按：x, y, 按住 ms */
     { 1, 2, 3, 4, 5 },         /* 滑动：起点 x, 起点 y, 终点 x, 终点 y, 时长 ms */
@@ -2341,6 +2363,31 @@ static void ope_num_load(void)
     if (nf == 0 || g_ope_sf < 0 || g_ope_sf >= nf) { g_ope_se = -1; return; }
     idx = ope_fidx[type - 1][g_ope_sf];
     if (idx >= 0) snprintf(g_ne_buf, sizeof g_ne_buf, "%d", g_ope_steps[g_ope_se][idx]);
+}
+
+/* 取点结果落点（T2.8；ui_ev_cb 从 poll 线程转发，见其上方的前向声明）：
+ * 回填到发起取点的那一格坐标字段（x 格收 x、y 格收 y；滑动四点同理）+ 退取点态 + 重画。
+ * 值同时写进 g_ne_buf（值框同显；副本要 [确定] 才落 —— 不写 buf 的话下一次 [确定] 会拿旧值回写）。 */
+static void pick_ev_apply(int px, int py)
+{
+    if (g_pick) {
+        int se = g_pick_se, sf = g_pick_sf, t, idx;
+        if (se >= 0 && se < g_ope_nsteps) {
+            t = g_ope_steps[se][0];
+            if (sf >= 0 && sf < ope_nfields(t)) {
+                idx = ope_fidx[t - 1][sf];
+                if (idx >= 1 && idx <= 4) {                 /* 坐标格：1/3 = x 格，2/4 = y 格 */
+                    int v = (idx == 1 || idx == 3) ? px : py;
+                    g_ope_steps[se][idx] = v;
+                    snprintf(g_ne_buf, sizeof g_ne_buf, "%d", v);
+                    g_ne_msg[0] = 0;
+                    ALOGI("取点 回填 第 %d 步 参数 %d = %d", se + 1, sf + 1, v);
+                }
+            }
+        }
+    }
+    g_pick = 0;                          /* 退取点态（不管回填成没成：这一轮取点结束了） */
+    g_need = 1; g_force_frames = 2;      /* 重画 */
 }
 
 /* 加一步：默认值必须核心必过 —— 点按 = 逻辑屏中心按住 50ms；滑动 = 中心 → 中心下方 200px、300ms；
@@ -2660,13 +2707,24 @@ static void draw_num_edit(void)
     if (is_coord) {
         ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + 12, vby));
         if (btn_light("取点", ImVec2(pickw, vbh))) {
-            /* 接线在 T2.8（核心吞一次触摸回填坐标）：先给可见反馈，不做成「点了没反应」。 */
-            snprintf(g_ne_msg, sizeof g_ne_msg, "取点将在 T2.8 接入：先用下面数字键输入");
-            ALOGI("取点 未接入（T2.8）");
-            g_force_frames = 2;
+            /* T2.8 接线：先进取点态（先 cancel 再 request —— 清掉可能残留的旧请求，核心的
+             * 0→1 转变与 20s 计时从这一次点按起算），核心吞一次触摸回填；点面板里 = 取消。 */
+            g_pick_se = g_ope_se; g_pick_sf = g_ope_sf;
+            vtouch_pick_cancel();
+            vtouch_pick_request();
+            g_pick = 1;
+            g_ne_msg[0] = 0;
+            g_need = 1; g_force_frames = 2;
+            ALOGI("取点 请求 第 %d 步 参数 %d/%d", g_ope_se + 1, g_ope_sf + 1, nf);
         }
     }
-    if (g_ne_msg[0]) {
+    if (g_pick) {
+        /* 取点态提示条（T2.8）：与错误提示共用固定槽位（键盘位置不动，防误点）。 */
+        ImVec2 p1 = ImVec2(x0, vby + vbh + 12), p2 = ImVec2(x0 + cw, p1.y + 46);
+        dl->AddRectFilled(p1, p2, IM_COL32(219, 234, 254, 255), 8);
+        dl->AddRect(p1, p2, IM_COL32(59, 130, 246, 255), 8, 0, 1.5f);
+        dl->AddText(ImVec2(p1.x + 14, p1.y + 3), IM_COL32(29, 78, 216, 255), "点屏幕上目标位置（点面板里取消）");
+    } else if (g_ne_msg[0]) {
         ImGui::SetCursorScreenPos(ImVec2(x0, vby + vbh + 12));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ne_msg);
     }

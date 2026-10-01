@@ -49,6 +49,13 @@ static struct vtouch_hooks   HK;          /* 按值保存（见文件头坑 1）
 static int                   HK_ok;
 static uint32_t              glue_seq;
 static int                   W = -1;      /* 唤醒核心的管道写端（VTOUCH_WAKE_FD；-1 = 没有） */
+static int                   pick_armed;  /* 取点（T2.8）：面板处于取点态（[取点] 已点、结果未取）。
+                                           * take 的门：面板重启接旧核心时 pick_seq 可能非 0，
+                                           * 不在取点态就不该把旧捕获吐出来（T2.4 递延①）。 */
+static uint32_t              pick_last_seq;  /* take 的基线：只回报基线之后的捕获。进取点态时
+                                              * 推进到当前 pick_seq（递延①的等价防护：否则面板重启
+                                              * 接旧核心、pick_seq>0 时，点 [取点] 会在用户 tap 之前
+                                              * 就把旧捕获吐出来 —— 凭空回填旧坐标）。 */
 static char                  snap[MAX_REGIONS][REGION_ID_MAX + 1];
 static int                   snap_n = -1;
 
@@ -233,6 +240,9 @@ int vtouch_init(int argc, char **argv)
     return 0;
 }
 
+/* 面板侧取点接口的前向声明（定义在文件末尾；poll_step 里先用到 take —— T2.8）。 */
+int vtouch_pick_take(int *x, int *y);
+
 int vtouch_poll_step(int timeout_ms)
 {
     char line[VT_RING_LINE];
@@ -251,6 +261,18 @@ int vtouch_poll_step(int timeout_ms)
                 snprintf(note, sizeof note, "(事件环比面板读得快，已丢 %u 条)", (unsigned)d);
                 if (HK_ok && HK.event) HK.event(note);
                 last_drops = d;
+            }
+        }
+        /* 取点（T2.8）：取到新结果 → 合成 pick_ev 行交面板事件回调（HK.event）。
+         * 只在取点态里调 take（T2.4 递延①）：面板重启接旧核心时 pick_seq 可能非 0，
+         * 不在取点态就不该把旧捕获吐出来。 */
+        if (pick_armed) {
+            int px, py;
+            if (vtouch_pick_take(&px, &py)) {
+                char note[48];
+                pick_armed = 0;                          /* 一次请求只回报一次 */
+                snprintf(note, sizeof note, "pick_ev %d %d", px, py);
+                if (HK_ok && HK.event) HK.event(note);
             }
         }
         glue_watch_table();
@@ -529,14 +551,25 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
  * (vtouch-doc: vtouch_pick_request)
  * @brief 请求取点：置区 B pick_mode=1，核心吞一次触摸后回填坐标并自清。
  * @note    核心侧两重防呆：20s 超时自清 + 面板死亡清理；本函数不叫醒核心（触摸按下本身会唤醒它）。
+ *          同时置面板侧「取点态」（pick_armed）并把 take 基线推进到当前 pick_seq（T2.8；T2.4
+ *          递延①的等价防护：面板重启接旧核心时 pick_seq 可能非 0，不推基线的话点 [取点] 会在
+ *          用户 tap 之前把**旧捕获**吐成 pick_ev —— 凭空回填旧坐标）。
  */
-void vtouch_pick_request(void) { if (B) B->pick_mode = 1; }   /* 不叫醒核心：触摸按下本身会唤醒它 */
+void vtouch_pick_request(void)
+{
+    pick_armed = 1;
+    if (B) {
+        pick_last_seq = B->pick_seq;              /* 先推基线、后置 mode：本次请求之后的捕获才算数 */
+        B->pick_mode = 1;
+    }
+}   /* 不叫醒核心：触摸按下本身会唤醒它 */
 
 /**
  * (vtouch-doc: vtouch_pick_cancel)
  * @brief 取消取点：清区 B pick_mode（面板内点击 = 取消）。
+ * @note    同时清面板侧「取点态」（pick_armed）：取消后不再 take。
  */
-void vtouch_pick_cancel(void) { if (B) B->pick_mode = 0; }
+void vtouch_pick_cancel(void) { pick_armed = 0; if (B) B->pick_mode = 0; }
 
 /**
  * (vtouch-doc: vtouch_pick_take)
@@ -544,16 +577,17 @@ void vtouch_pick_cancel(void) { if (B) B->pick_mode = 0; }
  * @param   x        输出竖屏逻辑坐标 x（可 NULL）
  * @param   y        输出竖屏逻辑坐标 y（可 NULL）
  * @return  1 有新坐标（本次取走）；0 没有新结果。
- * @note    内部记静态 last_seq：同一次捕获只回报一次；面板在 vtouch_poll_step 里轮询它，读到就合成 pick_ev。
+ * @note    基线 pick_last_seq 在 vtouch_pick_request 里推进到当时的 pick_seq（T2.8）——
+ *          只回报**本次取点态之后**的捕获；同一次捕获只回报一次。面板在 vtouch_poll_step 里
+ *          轮询它，读到就合成 pick_ev。
  */
 int vtouch_pick_take(int *x, int *y)
 {
-    static uint32_t last_seq;             /* 上次取走的 pick_seq（核心每捕获一次 ++） */
     uint32_t s;
     if (!B) return 0;
     s = B->pick_seq;
-    if (s == last_seq) return 0;          /* 没新捕获：同一次结果不重复回报 */
-    last_seq = s;
+    if (s == pick_last_seq) return 0;     /* 没新捕获：同一次结果不重复回报 */
+    pick_last_seq = s;
     if (x) *x = (int)B->pick_x;
     if (y) *y = (int)B->pick_y;
     return 1;

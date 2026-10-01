@@ -88,9 +88,24 @@ int vt_shm_create(void)
     return fd;                                  /* 返回 fd：fork 时原样传给面板子进程 */
 }
 
+/* 取点（T2.8）的转变追踪：pick_mode 0→1 的时刻（惰性 20s 超时的判据）。
+ * 为什么每轮看一眼（而不是只在 pick_wanted 里记）：pick_wanted 只在「新按下」时被调
+ * （vt_frame.c）——若起点也在那时才记，首次观察必然落在按下这一刻，超时永不可达。
+ * 这里 tick 每轮观察一次（核心空闲 1s 兜底一轮），0→1 即记起点；20s 的判定仍是惰性的
+ * （下一次按下时判，见 vt_shm_pick_wanted）。 */
+static uint64_t S_pick_t0_ns;        /* 单调纳秒；0 = 没在取点态 */
+
+static void pick_track(void)
+{
+    if (!S_b) return;
+    if (S_b->pick_mode) { if (!S_pick_t0_ns) S_pick_t0_ns = now_ns(); }
+    else S_pick_t0_ns = 0;
+}
+
 void vt_shm_tick(void)
 {
     if (S_c) ((struct vt_shm_header *)((char *)S_base))->hb++;
+    pick_track();                       /* 取点转变追踪：0→1 记起点（见上） */
 }
 
 uint32_t vt_shm_ui_hb(void)
@@ -185,6 +200,45 @@ int vt_shm_should_eat(int lx, int ly)
     if (vt_shm_panel_rect(&x1, &y1, &x2, &y2) != 0) return 0;
     if (lx < x1 || lx > x2 || ly < y1 || ly > y2) return 0;
     return 1;
+}
+
+/* ---- 取点（T2.8）：面板 [取点] → 核心吞一次触摸、回填竖屏逻辑坐标 ---- */
+
+#define VT_PICK_TIMEOUT_NS (20ull * 1000ull * 1000ull * 1000ull)   /* 20s（spec §5 防呆） */
+
+int vt_shm_pick_wanted(void)
+{
+    if (!S_b) return 0;
+    if (!S_b->pick_mode) { S_pick_t0_ns = 0; return 0; }
+    if (!S_pick_t0_ns) S_pick_t0_ns = now_ns();   /* tick 还没看过（按下先到）：从这一刻起算 */
+    if (now_ns() - S_pick_t0_ns > VT_PICK_TIMEOUT_NS) {
+        S_b->pick_mode = 0;                       /* 惰性清除：下一次按下时判（spec §5 防呆） */
+        S_pick_t0_ns = 0;
+        fprintf(stderr, "vtouchd: 取点 超时清除\n");
+        return 0;
+    }
+    return 1;
+}
+
+void vt_shm_pick_captured(int lx, int ly)
+{
+    if (!S_b) return;
+    S_b->pick_x = lx;
+    S_b->pick_y = ly;
+    __sync_synchronize();                         /* 坐标先于 pick_seq 可见（面板据 seq 变化取坐标） */
+    S_b->pick_seq++;
+    S_b->pick_mode = 0;                           /* 自动清（spec §5） */
+    S_pick_t0_ns = 0;                             /* 转变追踪复位：下一次 request 的 0→1 重新起算 */
+    fprintf(stderr, "vtouchd: 取点 捕获 %d,%d\n", lx, ly);
+}
+
+void vt_shm_pick_panel_died(void)
+{
+    if (!S_b) return;
+    if (!S_b->pick_mode) return;                  /* 没在取点态：清无可清（不打日志，避免每次面板退出都多一行） */
+    S_b->pick_mode = 0;
+    S_pick_t0_ns = 0;
+    fprintf(stderr, "vtouchd: 取点 面板死亡清除\n");
 }
 
 #endif /* !VT_UI_PANEL */

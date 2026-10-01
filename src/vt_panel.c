@@ -377,6 +377,7 @@ void vt_panel_watchdog(void)
             fprintf(stderr, "vtouchd: 面板已退出 status=0x%x（核心继续跑，注入不受影响）\n", st);
             S_pid = -1;
             S_wake_dead = 0;
+            vt_shm_pick_panel_died();    /* 取点（T2.8）：面板没了，取点态不能留在核心侧（否则下一次按下会被误吞） */
             vt_panel_restart();
         } else if (urgent) {
             /* EOF 报过、尸体还没到手：2 秒都没到就继续每轮试（正常情况下一两拍内就收走）；
