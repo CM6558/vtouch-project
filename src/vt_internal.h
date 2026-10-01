@@ -68,6 +68,12 @@
 #define OUTQ_MSG (MAX_LINE + 8)          /* region list 这种多行响应也要放得下 */
 #define MAX_REGIONS 32
 #define REGION_ID_MAX 15
+#define MAX_OPS        16        /* 操作条数上限 */
+#define MAX_STEPS      32        /* 单条操作步骤数上限 */
+#define OP_NAME_MAX    15        /* 操作名长度上限（同区域 id 规则：[A-Za-z0-9_-]、1..15） */
+#define OP_STEP_TAP    1         /* 步骤类型：点按 */
+#define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */
+#define OP_STEP_WAIT   3         /* 步骤类型：等待 */
 /* 一帧的最大事件数（iovec 容量）。最坏整帧 = 8×(物理槽 + 虚拟槽) + 帧尾 3 条 = 8×(64+32)+3 = 771
  * （见 vt_frame.c 的 static_assert）。512 装不下它 ⇒ ev_add 静默丢事件，**帧尾的 SYN_REPORT 可能是
  * 被丢掉的那条**，系统里就成了半帧。这里给到 1024（余量 1.3×；代价是 .bss 里 40KB）。 */
@@ -104,6 +110,24 @@ struct region {
     int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
     int mark;              /* 脚本侧"开关样式"标记（0=无 1=开）：核心存，面板**直接读共享内存**照着高亮。
                             * 由 WS 命令 `region mark <id> <0|1>` 设置（SDK: vt.mark / vt.toggle 自动调）。 */
+    char trig_op[OP_NAME_MAX + 1];  /* 绑定的操作名；"" = 无 */
+    int  trig_ev;                   /* 触发时机：0=无 1=按下 2=完整按压 */
+    int  kind;                      /* 0=普通 1=开关型 */
+    volatile int toggle_on;         /* 开关型状态：核心写（区域线程，持 region_lock）、面板读 */
+};
+
+struct vt_step {
+    int type;                      /* 1=点按 2=滑动 3=等待（OP_STEP_*） */
+    int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用 */
+    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长 */
+};
+
+struct vt_op {
+    char name[OP_NAME_MAX + 1];
+    int  step_count;               /* 1..MAX_STEPS（校验在核心） */
+    char gate[REGION_ID_MAX + 1];  /* 门控开关的区域 id；""=无 */
+    int  auto_off;                 /* 跑完自动关掉门控开关 */
+    struct vt_step steps[MAX_STEPS];
 };
 
 struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used; };
@@ -152,6 +176,16 @@ struct vt_state {
     pthread_mutex_t region_lock;                       /* 只包住区域表读写，不在注入路径上 */
     pthread_t region_tid;
     int region_started;
+    /* 操作模型：操作表 + 执行器状态 + 触发槽（面板只读直读；编辑走区 B 邮箱）。 */
+    struct vt_op ops[MAX_OPS];                         /* 操作表 */
+    int op_count;                                      /* 操作条数 */
+    volatile int op_run;                               /* 运行中的操作下标；-1 = 空闲 */
+    volatile int op_run_step;                          /* 当前步（0 起） */
+    volatile int op_run_state;                         /* 0=空闲 1=运行 */
+    int ops_wake_fd;                                   /* eventfd：区域线程触发 → 叫醒主循环（-1 = 没有） */
+    volatile uint32_t op_trig_seq;                     /* 触发槽（区域线程写、主线程读；SPSC） */
+    char op_trig_name[OP_NAME_MAX + 1];                /* 触发来源操作名 */
+    int  op_trig_slot;                                 /* 触发来源手指的槽号（日志用） */
 };
 #ifdef VT_UI
 /* VT_UI：状态本体放在共享内存（面板只读映射同一份），g 只是「指向它的引用」——
@@ -208,6 +242,8 @@ int region_q_init(void);
 void region_q_wake(void);
 /* 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。 (vtouch-doc: regions_clear) */
 void regions_clear(void);
+/* 名字合法性（原 id_ok 提取）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX；合法返回 1。 (vtouch-doc: vt_id_ok) */
+int  vt_id_ok(const char *s, size_t n);
 /* 新增或覆盖一个区域（主线程持 region_lock 写表）。 (vtouch-doc: region_add) */
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);
 #ifdef VT_UI
@@ -215,6 +251,12 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
 int region_del(const char *id);
 /* 区域改名（目标 id 已存在则失败）。 (vtouch-doc: region_rename) */
 int region_rename(const char *old_id, const char *new_id);
+#endif
+#ifdef VT_UI
+/* 把区域绑定到操作（opname 允许悬空：触发时解析失败则丢弃）；ev：0=无 1=按下 2=完整按压。 (vtouch-doc: region_bind) */
+int  region_bind(const char *id, const char *opname, int ev);
+/* 设置区域类型（0=普通 1=开关型）。 (vtouch-doc: region_kind_set) */
+int  region_kind_set(const char *id, int kind);
 #endif
 /* 点是否落在区域内（矩形含边界；圆按半径平方比较）。 (vtouch-doc: region_hit) */
 int region_hit(const struct region *rg, int lx, int ly);
@@ -227,6 +269,28 @@ unsigned vt_subev_bit(const char *ev);   /* 事件名 → SUBEV_* 位（订阅�
 void region_apply(const struct vt_ev *ev);
 /* 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。 (vtouch-doc: region_thread_main) */
 void *region_thread_main(void *arg);
+
+#ifdef VT_UI
+/* ---- vt_ops.c（操作执行器）---- */
+/* 初始化操作执行器（建触发唤醒 eventfd；失败降级 -1）。 (vtouch-doc: vt_ops_init) */
+int  vt_ops_init(void);
+/* 主循环每轮调：消费触发槽 → 推进运行中的操作 → 刷新到点 deadline。 (vtouch-doc: vt_ops_tick) */
+void vt_ops_tick(void);
+/* 下一步到点的剩余毫秒数（下限 0）；-1 = 空闲。 (vtouch-doc: vt_ops_next_deadline_ms) */
+int  vt_ops_next_deadline_ms(void);
+/* 起跑一条操作（忙时丢弃 + 日志）。 (vtouch-doc: vt_ops_run) */
+void vt_ops_run(const char *name);
+/* 中止运行中的操作（抬指 + 状态归位 + 日志原因）。 (vtouch-doc: vt_ops_abort) */
+void vt_ops_abort(const char *why);
+/* 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。 (vtouch-doc: vt_ops_put) */
+int  vt_ops_put(const struct vt_op *op);
+/* 删除一条操作。 (vtouch-doc: vt_ops_del) */
+int  vt_ops_del(const char *name);
+/* 清空操作表。 (vtouch-doc: vt_ops_clear) */
+void vt_ops_clear(void);
+/* 区域线程投一次触发（写触发槽 → release 自增 seq → 写唤醒 fd）。 (vtouch-doc: vt_ops_trigger_post) */
+void vt_ops_trigger_post(const char *name, int slot);
+#endif
 
 /* ---- vt_input.c ---- */
 /* 认一块设备是不是 Type-B 触摸屏（槽 + tracking id + XY 四轴 + 量程）， (vtouch-doc: validate_device) */

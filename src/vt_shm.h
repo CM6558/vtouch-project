@@ -26,10 +26,13 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  3u            /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  4u            /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
-                                       *     只消费者推进读计数、环满丢新且 drops 可读）。 */
+                                       *     只消费者推进读计数、环满丢新且 drops 可读）。
+                                       * 4 = 操作模型**一次落全部布局**：状态增操作表/触发槽（struct vt_state）、
+                                       *     struct region 增绑定/开关字段、编辑邮箱增 struct vt_op 载荷、
+                                       *     区 B 增取点字段（pick_*）——此后只加逻辑/UI，布局不再变。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -37,6 +40,13 @@
 #define VT_EDIT_DEL    2
 #define VT_EDIT_RENAME 3
 #define VT_EDIT_CLEAR  4
+#define VT_EDIT_OP_PUT    5           /* 新增/覆盖一条操作（载荷 = struct vt_op；重名=覆盖） */
+#define VT_EDIT_OP_DEL    6           /* 删一条（id=名字） */
+#define VT_EDIT_OP_CLEAR  7           /* 清空操作表 */
+#define VT_EDIT_OP_RUN    8           /* 起跑（id=名字） */
+#define VT_EDIT_OP_STOP   9           /* 中止运行中的操作 */
+#define VT_EDIT_BIND      10          /* id=区域, new_id=操作名（"-"=解除）, type=时机(0/1/2) */
+#define VT_EDIT_KIND      11          /* id=区域, type=kind(0/1) */
 
 #define VT_RING_SLOTS  64             /* 事件环：与核心 outq 容量同量级 */
 #define VT_RING_LINE   96             /* 一条 region_ev 文本行长上限 */
@@ -63,6 +73,7 @@ struct vt_shm_edit {
     char     id[16];
     char     new_id[16];
     int32_t  type, enabled, a1, a2, a3, a4;
+    struct vt_op payload;             /* 操作载荷：VT_EDIT_OP_PUT 用；其余码不读它 */
 };
 
 /* 区 B：面板矩形用 seq 奇偶校验（发布中=奇数），核心拿不准时保守「不吞」。 */
@@ -76,7 +87,14 @@ struct vt_shm_b {
     int32_t  panel_visible;           /* 面板当前是否可见（不可见 = 一律不吞） */
     int32_t  rot;                     /* 面板上报的当前显示方向（诊断/换算校验） */
     int32_t  rx1, ry1, rx2, ry2;      /* 面板矩形，**竖屏逻辑坐标**（外空间） */
+    /* 取点（[取点] 按钮 → 核心吞一次触摸、回填**竖屏逻辑坐标**）。 */
+    volatile int      pick_mode;      /* 面板置 1 = 请求取点（核心捕获 / 20s 超时后自清） */
+    volatile uint32_t pick_seq;       /* 核心每捕获一次 ++（面板据它取新结果） */
+    volatile int32_t  pick_x, pick_y; /* 捕获到的**竖屏逻辑坐标** */
 };
+
+/* 区 B 必须装进一页（4096）：邮箱载荷 struct vt_op 是最大头，加到装不下就在构建期炸出来。 */
+_Static_assert(sizeof(struct vt_shm_b) <= 4096, "区 B 必须装进一页");
 
 /* 区 C：事件环。核心写 tail/line（生产者），**面板对区 C 只有读权限**；
  * 消费者的读计数放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。
