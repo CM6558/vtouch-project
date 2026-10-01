@@ -48,8 +48,9 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
 /* 接核心时代新增：把面板矩形推给核心（核心据此吞触摸）。入参是**当前屏坐标**，
  * 逆变换回竖屏逻辑坐标由胶水层做（见 src-ui/ui_glue.c）。单跑模式（ui_stubs.c）里是空实现。 */
 void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2);
-/* 操作 / 取点 / 绑定只读：T2.4 胶水新增的 15 个入口，原型逐字（定义见 src-ui/ui_glue.c，
- * 单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点 T2.8 已接线；绑定读留给 T3.3。 */
+/* 操作 / 取点 / 绑定：T2.4 胶水新增的 15 个入口 + T3.3 的 2 个写入口，原型逐字（定义见
+ * src-ui/ui_glue.c，单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点 T2.8
+ * 已接线；绑定读/写（trig/bind/kind）T3.3 已接线。 */
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms);
@@ -65,6 +66,8 @@ int  vtouch_pick_take(int *x, int *y);          /* 1 = 有新坐标 */
 int  vtouch_region_kind_get(int i);
 int  vtouch_region_toggle(int i);
 int  vtouch_region_trig(int i, char *op, int n, int *ev);
+int  vtouch_region_bind(const char *id, const char *opname, int ev);   /* 触发绑定（opname "-"/空 = 解除） */
+int  vtouch_region_kind(const char *id, int kind);                     /* 开关型（0=普通 1=开关型） */
 }
 
 #define LOGT "VTouchUI"
@@ -589,8 +592,17 @@ static int save_regions(void)
     if (g_w > 0 && g_h > 0) fprintf(f, "#frame 0 %d %d\n", g_w, g_h);
     for (i = 0; i < n; i++) {
         char id[16]; int t, a1, a2, a3, a4, en;
+        char op[16]; int ev, kd;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
         fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, a1, a2, a3, a4, en);
+        /* T3.3 增量（spec §2.8，**新行类型**；VER 不升 —— 旧读方静默忽略）：
+         *   bind <区域id> <操作名|-> <down|press>   触发绑定（未绑定写 `-` 占位，同 ops.conf 的 gate 口径）
+         *   kind <区域id> <0|1>                     开关型
+         * 时机：仅「完整按压」（ev=2）写 press，其余一律 down（面板只会产出 1/2；未绑定 ev=0）。 */
+        if (vtouch_region_trig(i, op, sizeof op, &ev) != 0) { op[0] = 0; ev = 0; }
+        fprintf(f, "bind %s %s %s\n", id, op[0] ? op : "-", ev == 2 ? "press" : "down");
+        kd = vtouch_region_kind_get(i);
+        fprintf(f, "kind %s %d\n", id, kd == 1 ? 1 : 0);
     }
     for (i = 0; i < g_nhide; i++) fprintf(f, "hide %s\n", g_hidden[i]);
     if (fclose(f) != 0) { ALOGE("regions.conf 落盘失败: %s", strerror(errno)); return save_failed(); }
@@ -632,7 +644,7 @@ static void load_regions(void)
         return;
     }
     while (fgets(line, sizeof line, f)) {
-        char id[16]; int t, a1, a2, a3, a4, en, fr, fw, fh;
+        char id[16], op[16], tms[16]; int t, a1, a2, a3, a4, en, fr, fw, fh, ev, kd;
         /* #frame：这些数字是**在哪个屏上量的**（横屏加的表不能当竖屏口径读）。读到就把它当基准帧，
          * 启动后由 region_rot_step 按当前屏换算过去（每帧一条）。 */
         if (sscanf(line, "#frame %d %d %d", &fr, &fw, &fh) == 3) {
@@ -664,6 +676,26 @@ static void load_regions(void)
                       id, t, a1, a2, a3, a4, en);
         } else if (sscanf(line, "hide %15s", id) == 1) {
             if (g_nhide < 32 && !is_hidden(id)) snprintf(g_hidden[g_nhide++], 16, "%s", id);
+        } else if (sscanf(line, "bind %15s %15s %15s", id, op, tms) == 3) {
+            /* T3.3 增量（spec §2.8，新行类型；旧文件缺 = 默认「无绑定」）。时机词只认 down/press；
+             * 词不认/区域没了/核心拒收/编辑超时 = 只警告跳过 —— 与 region 行「一条坏记录不带走整张表」同口径。
+             * 绑定/开关型是**面板单源**字段（脚本不会设），核心表已有区域也照样回灌：不覆盖几何，只补这两项。 */
+            ev = !strcmp(tms, "press") ? 2 : (!strcmp(tms, "down") ? 1 : -1);
+            if (ev < 0) {
+                ALOGW("regions.conf bind %s 时机词非法（%s，应 down/press）→ 跳过", id, tms);
+            } else if (vtouch_region_bind(id, op, ev) != 0) {
+                ALOGW("regions.conf bind %s → %s 未生效（区域不存在/被拒/编辑超时，见上一行 glue 日志）", id, op);
+            }
+        } else if (strncmp(line, "bind ", 5) == 0) {
+            ALOGW("regions.conf bind 行不完整（缺操作名/时机）→ 跳过");
+        } else if (sscanf(line, "kind %15s %d", id, &kd) == 2) {
+            if (kd != 0 && kd != 1) {
+                ALOGW("regions.conf kind %s 值非法（%d，应 0/1）→ 跳过", id, kd);
+            } else if (vtouch_region_kind(id, kd) != 0) {
+                ALOGW("regions.conf kind %s 未生效（区域不存在/被拒/编辑超时，见上一行 glue 日志）", id);
+            }
+        } else if (strncmp(line, "kind ", 5) == 0) {
+            ALOGW("regions.conf kind 行不完整或值非数字 → 跳过");
         }
     }
     fclose(f);
@@ -889,6 +921,9 @@ static void ui_ev_cb(const char *line)
     int slot, lx, ly;
     if (!strncmp(line, "mark_ev ", 8)) {          /* 核心改了区域的"开关样式"标记 */
         g_need = 1; g_force_frames = 2; g_ov_need = 1;   /* 立刻重画（面板按需重绘，这一步是"事件驱动那一下"）*/
+    }
+    if (!strncmp(line, "toggle_ev ", 10)) {       /* 核心翻转了开关型区域的开关态（T3.3）：照 mark_ev —— 记日志（下面统一入环）+ 立刻重画 */
+        g_need = 1; g_force_frames = 2; g_ov_need = 1;
     }
     if (g_evlog_n < 8) snprintf(g_evlog[g_evlog_n++], 96, "%s", line);
     else { memmove(g_evlog[0], g_evlog[1], 96 * 7); snprintf(g_evlog[7], 96, "%s", line); }
@@ -1340,9 +1375,11 @@ static void build_overlay(int sw, int sh)
                                    : ImVec2((float)a1, (float)a2));
             ImVec2 p1 = (type == 1 ? ImVec2((float)(a1 + a3), (float)(a2 + a3))
                                    : ImVec2((float)a3, (float)a4));
-            /* 「开关样式」：脚本 vt.mark(id,1) / vt.toggle 打开时整块高亮（半透明绿底 + 粗绿边 + 标签加 ●开）。
-             * 标记存在核心的共享内存里（struct region.mark），面板直接读同一份 ⇒ 没有额外通道、没有轮询。 */
-            int mk = vtouch_region_mark(i);
+            /* 「开关样式」：脚本 vt.mark(id,1) 的标记，或**开关型区域当前开着**（T3.3：kind==toggle &&
+             * toggle_on==1）—— 两条来源画同一套绿样式（spec §2.3/§4.2；mark 兼容保留）。
+             * 标记/开关态都存在核心共享内存里（struct region），面板直接读同一份 ⇒ 没有额外通道、没有轮询。 */
+            int mk = vtouch_region_mark(i) ||
+                     (vtouch_region_kind_get(i) == 1 && vtouch_region_toggle(i) == 1);
             if (mk) {
                 ImU32 mkfill = IM_COL32(0, 200, 0, 56);
                 if (type == 1) dl->AddCircleFilled(ImVec2((float)a1, (float)a2), (float)a3, mkfill);
@@ -1824,6 +1861,81 @@ static void build_sidebar(void)
 }
 
 /* ---- 区域卡片（bento：白卡 + zinc-100 边 + xl 圆角 + 等宽四键） ---- */
+
+/* T3.3 触发侧三行的点击处理（触发 / 时机 / 开关型）：写路径都是共享内存编辑邮箱
+ * （ui_glue.c 的 vtouch_region_bind / vtouch_region_kind —— 投完等 applied + 回读校验），
+ * 成功才 save_regions()（增量字段随之落盘，spec §2.8）；失败走 ev_note 提示、卡片按真值重画。 */
+
+/* 触发行：点击循环 无 → 各操作（按操作表顺序）→ 无；悬空值下一次点击归「无」（同门控行惯例）。
+ * 循环到操作时沿用当前时机（无时机 = 默认「按下」）；一个操作都没有时只提示、不动表。 */
+static void rc_trig_cycle(const char *id, const char *cur_op, int cur_ev)
+{
+    char ops[32][16], nxt[16];
+    int n = 0, k, ev, cnt = vtouch_op_count();
+    for (k = 0; k < cnt && n < 32; k++) {
+        char nm[16];
+        if (vtouch_get_op(k, nm, sizeof nm, NULL, NULL, 0, NULL) == 0) {
+            snprintf(ops[n], sizeof ops[n], "%s", nm);
+            n++;
+        }
+    }
+    ev = (cur_ev == 2) ? 2 : 1;                    /* 绑上就有意义：沿用当前时机；无时机默认「按下」 */
+    if (!cur_op[0]) {
+        if (n == 0) {                              /* 一个操作都没有：提示，不动表 */
+            ALOGW("bind %s：没有操作可绑定", id);
+            ev_note("没有操作可绑定：先到「操作」页建一条");
+            return;
+        }
+        snprintf(nxt, sizeof nxt, "%s", ops[0]);
+    } else {
+        for (k = 0; k < n; k++) if (!strcmp(ops[k], cur_op)) break;
+        if (k + 1 < n) snprintf(nxt, sizeof nxt, "%s", ops[k + 1]);
+        else nxt[0] = 0;                           /* 到末尾（含悬空值）→ 回「无」 */
+    }
+    if (vtouch_region_bind(id, nxt[0] ? nxt : "-", ev) != 0) {
+        ALOGW("bind %s → %s 未生效", id, nxt[0] ? nxt : "无");
+        ev_note("绑定未生效：%s", id);
+        g_force_frames = 2;
+        return;
+    }
+    ALOGI("bind %s → %s ev%d", id, nxt[0] ? nxt : "无", ev);
+    save_regions();
+    g_force_frames = 3;
+}
+
+/* 时机行：点击在「按下(1) / 完整按压(2)」间切换（时机是绑定的属性）。未绑定点了不落任何东西 ——
+ * M1 口径：核心不许出现「无绑定却有时机」（解除即清 trig_ev=0），所以无绑定就没有可切的时机。 */
+static void rc_ev_cycle(const char *id, const char *cur_op, int cur_ev)
+{
+    int ev = (cur_ev == 2) ? 1 : 2;
+    if (!cur_op[0]) return;
+    if (vtouch_region_bind(id, cur_op, ev) != 0) {
+        ALOGW("bind %s → %s ev%d 未生效", id, cur_op, ev);
+        ev_note("时机未生效：%s", id);
+        g_force_frames = 2;
+        return;
+    }
+    ALOGI("bind %s → %s ev%d", id, cur_op, ev);
+    save_regions();
+    g_force_frames = 3;
+}
+
+/* 开关型行：点击切换 kind（0 普通 ↔ 1 开关型）。toggle_on 的翻转只由屏上完整按压产生
+ * （核心区域线程，spec §4.2），面板只显示、不翻转 —— 行里的「当前开/关」是只读回显。 */
+static void rc_kind_cycle(const char *id, int cur_kind)
+{
+    int kd = cur_kind ? 0 : 1;
+    if (vtouch_region_kind(id, kd) != 0) {
+        ALOGW("kind %s → %d 未生效", id, kd);
+        ev_note("开关型切换未生效：%s", id);
+        g_force_frames = 2;
+        return;
+    }
+    ALOGI("kind %s → %d", id, kd);
+    save_regions();
+    g_force_frames = 3;
+}
+
 static void region_card(int i, const char *id, int type, int a1, int a2, int a3, int a4, int en)
 {
     ImGui::PushID(i);
@@ -1860,6 +1972,23 @@ static void region_card(int i, const char *id, int type, int a1, int a2, int a3,
             else snprintf(m, sizeof m, "%d,%d - %d,%d   %dx%d",
                           a1, a2, a3, a4, a3 - a1, a4 - a2);
             text_meta_s(m);
+        }
+        /* T3.3 触发侧三行（全宽，键高 76 保手指可点）：触发 / 时机 / 开关型 —— 点击处理见 rc_*_cycle。
+         * 值全部实时读核心（只读区 A）：悬空绑定照显（核心允许悬空）；开关型行带当前开关态只读回显。 */
+        {
+            char op[16] = {0}; int ev = 0, kd = 0, tg = 0;
+            char lbl[72];
+            float rw = ImGui::GetContentRegionAvail().x;
+            vtouch_region_trig(i, op, sizeof op, &ev);   /* 读失败保默认（无绑定/按下）—— 画得出来 */
+            kd = vtouch_region_kind_get(i);
+            tg = vtouch_region_toggle(i);
+            snprintf(lbl, sizeof lbl, "触发：%s", op[0] ? op : "无");
+            if (btn_light(lbl, ImVec2(rw, 76))) rc_trig_cycle(id, op, ev);
+            snprintf(lbl, sizeof lbl, "时机：%s", ev == 2 ? "完整按压" : "按下");
+            if (btn_light(lbl, ImVec2(rw, 76))) rc_ev_cycle(id, op, ev);
+            if (kd == 1) snprintf(lbl, sizeof lbl, "开关型：开 · 当前%s", tg == 1 ? "开" : "关");
+            else snprintf(lbl, sizeof lbl, "开关型：关");
+            if (btn_light(lbl, ImVec2(rw, 76))) rc_kind_cycle(id, kd);
         }
         /* 等宽四键（gap 12，贴合 bento 一致间隙；键高 76 保手指可点） */
         float bw = (ImGui::GetContentRegionAvail().x - 3 * 12) * 0.25f;

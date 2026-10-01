@@ -223,7 +223,7 @@ int region_rename(const char *old_id, const char *new_id)
  * @param   opname   操作名；空串或 "-" = 解除绑定（区 B 邮箱契约）
  * @param   ev       触发时机：0=无 1=按下 2=完整按压
  * @return  0 成功；-1 区域不存在或参数非法。
- * @note    面板编辑入口（区 B 邮箱 VT_EDIT_BIND → vt_shm_edit_apply 调）。名字过 vt_id_ok 同一把尺子；引用不存在的操作**允许悬空**（触发时解析失败由执行器丢弃）。原地更新（同 id、同表位）**不动 region_gen** —— 与 region_add 原地分支同款口径：代次一变区域线程会整表清零私有状态，编辑绑定/面板重启重放配置时进行中的按压会丢 up/锁存。
+ * @note    面板编辑入口（区 B 邮箱 VT_EDIT_BIND → vt_shm_edit_apply 调）。名字过 vt_id_ok 同一把尺子；引用不存在的操作**允许悬空**（触发时解析失败由执行器丢弃）。原地更新（同 id、同表位）**不动 region_gen** —— 与 region_add 原地分支同款口径：代次一变区域线程会整表清零私有状态，编辑绑定/面板重启重放配置时进行中的按压会丢 up/锁存。解除绑定（空串 / "-"）时**同时清 trig_ev=0** —— 防面板回读/落盘出现「无绑定却有时机」残留。
  */
 int region_bind(const char *id, const char *opname, int ev)
 {
@@ -241,7 +241,9 @@ int region_bind(const char *id, const char *opname, int ev)
         rg = &g.regions[i];
         memset(rg->trig_op, 0, sizeof rg->trig_op);
         if (n > 0 && strcmp(opname, "-") != 0) memcpy(rg->trig_op, opname, n);
-        rg->trig_ev = ev;
+        /* M1（T3.3 并入）：解除绑定（空串 / "-"）时**同时清时机** —— 防面板回读/落盘出现
+         * 「无绑定却有时机」残留（trig_op 空 = 无绑定，时机必须跟着归零）。 */
+        rg->trig_ev = rg->trig_op[0] ? ev : 0;
         /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把五张私有状态表
          * 整表清零 —— 编辑绑定/面板重启重放配置时，进行中的按压会丢 up 与触发锁存
          * （与 region_add 原地更新分支同款口径，见其注释）。 */

@@ -25,7 +25,8 @@ static struct vtouch_hooks H;
 static int H_ok;
 
 /* ---- 内存区域表（桩的数据源）---- */
-struct stu_region { char id[16]; int type, a1, a2, a3, a4, enabled; };
+struct stu_region { char id[16]; int type, a1, a2, a3, a4, enabled;
+                    char trig[16]; int trig_ev, kind; };   /* T3.3：触发绑定/开关型（内存表存得下、读得回） */
 static struct stu_region R[32];
 static int RN;
 
@@ -83,6 +84,7 @@ int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, 
         if (H_ok && H.region_changed) H.region_changed();
         return 0;
     }
+    memset(&R[RN], 0, sizeof R[RN]);   /* 新表位清零（同核心 region_add 追加分支）：trig/kind 不带上一任残留 */
     snprintf(R[RN].id, sizeof R[RN].id, "%s", id);
     R[RN].type = type; R[RN].a1 = a1; R[RN].a2 = a2; R[RN].a3 = a3; R[RN].a4 = a4; R[RN].enabled = enabled;
     RN++;
@@ -231,18 +233,44 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
     return 0;
 }
 
-/* 取点 / 绑定读：单跑模式没有核心，空实现（面板画得出来、点得动就行）。 */
+/* 取点：单跑模式没有核心，空实现（面板画得出来、点得动就行）。 */
 void vtouch_pick_request(void) { }
 void vtouch_pick_cancel(void) { }
 int  vtouch_pick_take(int *x, int *y) { (void)x; (void)y; return 0; }
 
-int vtouch_region_kind_get(int i) { seed(); return (i >= 0 && i < RN) ? 0 : -1; }
-int vtouch_region_toggle(int i) { seed(); return (i >= 0 && i < RN) ? 0 : -1; }
+/* 绑定 / 开关型（T3.3）：内存表里存得下、读得回 —— 面板三行在单跑模式也点得动
+ * （没有核心可投递；语义对齐契约：解除清时机、kind 只收 0/1）。 */
+int vtouch_region_bind(const char *id, const char *opname, int ev)
+{
+    int i, unbind;
+    seed();
+    if (!id || !*id || ev < 0 || ev > 2) return -1;
+    unbind = (!opname || !opname[0] || strcmp(opname, "-") == 0);
+    for (i = 0; i < RN; i++) if (!strcmp(R[i].id, id)) {
+        R[i].trig[0] = 0;
+        if (!unbind) snprintf(R[i].trig, sizeof R[i].trig, "%s", opname);
+        R[i].trig_ev = unbind ? 0 : ev;   /* 同核心口径：解除同时清时机 */
+        return 0;
+    }
+    return -1;
+}
+
+int vtouch_region_kind(const char *id, int kind)
+{
+    int i;
+    seed();
+    if (!id || !*id || (kind != 0 && kind != 1)) return -1;
+    for (i = 0; i < RN; i++) if (!strcmp(R[i].id, id)) { R[i].kind = kind; return 0; }
+    return -1;
+}
+
+int vtouch_region_kind_get(int i) { seed(); return (i >= 0 && i < RN) ? R[i].kind : -1; }
+int vtouch_region_toggle(int i) { seed(); return (i >= 0 && i < RN) ? 0 : -1; }   /* 单跑模式没有核心翻转：恒关 */
 int vtouch_region_trig(int i, char *op, int n, int *ev)
 {
     seed();
     if (i < 0 || i >= RN) return -1;
-    if (op && n > 0) op[0] = 0;      /* 单跑模式：演示区域没有绑定 */
-    if (ev) *ev = 0;
+    if (op && n > 0) snprintf(op, (size_t)n, "%s", R[i].trig);
+    if (ev) *ev = R[i].trig_ev;
     return 0;
 }

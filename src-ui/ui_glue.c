@@ -1,7 +1,7 @@
 /* ui_glue.c —— 面板侧胶水：把「老面板的进程内 12 个 C 接口」接到核心的共享内存上。
  *
  * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现；
- * T2.4 起本文件另提供操作 / 取点 / 绑定只读的 15 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）。
+ * T2.4 起本文件另提供操作 / 取点 / 绑定（读 + 写）的 17 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）。
  * 数据来源与去向（契约见 src/vt_shm.h、docs/UI_INTEGRATION.md §4）：
  *   物理触点 / 区域表 / 操作表 / 运行状态 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
  *   区域 / 操作编辑             → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
@@ -636,4 +636,73 @@ int vtouch_region_trig(int i, char *op, int n, int *ev)
     if (op && n > 0) snprintf(op, (size_t)n, "%s", S->regions[i].trig_op);
     if (ev) *ev = S->regions[i].trig_ev;
     return 0;
+}
+
+/* ---------- 触发侧（T3.3）：区域属性投递（BIND / KIND） ---------- */
+
+/* 投一条区域属性编辑（BIND/KIND）：照 glue_post 三步（投邮箱 → 写唤醒管道 → 等 edit_applied 到位）。
+ * 回读校验由调用方做 —— glue_verify 的签名收不下 BIND/KIND 的载荷字段（操作名 / 时机 / kind）。 */
+static int glue_post_prop(uint32_t op, const char *id, const char *new_id, int t)
+{
+    struct vt_shm_edit e;
+    int spins = 0;
+    if (!B) return -1;
+    memset(&e, 0, sizeof e);
+    e.op = op;
+    if (id) snprintf(e.id, sizeof e.id, "%s", id);
+    if (new_id) snprintf(e.new_id, sizeof e.new_id, "%s", new_id);
+    e.type = t;
+    e.seq = ++glue_seq;
+    vt_shm_post_edit(&e);
+    glue_wake();
+    /* 邮箱是单槽的：不等核心吃掉就投下一条，前一条会被覆盖（glue_post 同款理由）。 */
+    while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
+    if (B->edit_applied != e.seq) {
+        fprintf(stderr, "vtouch-ui: 区域属性编辑 seq=%u op=%u 超时未生效\n", e.seq, (unsigned)op);
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_region_bind)
+ * @brief 把区域绑定到操作（投编辑邮箱 → 等 applied → 回读校验；面板侧入口）。
+ * @param   id       区域名
+ * @param   opname   操作名；NULL / 空串 / "-" = 解除绑定（照区 B 邮箱契约）
+ * @param   ev       触发时机：1=按下 2=完整按压（解除时忽略 —— 核心会清 0）
+ * @return  0 核心已吃掉且回读通过；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
+ * @note    回读口径：解除 = trig_op 空串且 trig_ev==0；绑定 = trig_op==opname 且 trig_ev==ev
+ *          （悬空操作名照过 —— 核心允许悬空，触发时再解析）。邮箱单槽：投完等 edit_applied
+ *          到位才返回（正常 ~1ms）；核心不给逐条回执，成没成以回读为准。
+ */
+int vtouch_region_bind(const char *id, const char *opname, int ev)
+{
+    int i, unbind;
+    if (!B || !id || !*id) return -1;
+    if (ev < 0 || ev > 2) return -1;               /* 面板侧预检（核心同一把尺子：0..2） */
+    unbind = (!opname || !opname[0] || strcmp(opname, "-") == 0);
+    if (glue_post_prop(VT_EDIT_BIND, id, unbind ? "-" : opname, ev) != 0) return -1;
+    i = glue_find(id);
+    if (i < 0) return -1;                          /* 区域不在了（被删）→ 回读不通过 */
+    if (unbind) return (S->regions[i].trig_op[0] == 0 && S->regions[i].trig_ev == 0) ? 0 : -1;
+    return (strcmp(S->regions[i].trig_op, opname) == 0 && S->regions[i].trig_ev == ev) ? 0 : -1;
+}
+
+/**
+ * (vtouch-doc: vtouch_region_kind)
+ * @brief 设置区域开关型（投编辑邮箱 → 等 applied → 回读校验；面板侧入口）。
+ * @param   id       区域名
+ * @param   kind     0=普通 1=开关型
+ * @return  0 核心已吃掉且回读通过；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
+ * @note    回读口径 = 区域 kind 与请求一致；toggle_on 不动（核心口径：切回开关型沿用上次开关态）。
+ */
+int vtouch_region_kind(const char *id, int kind)
+{
+    int i;
+    if (!B || !id || !*id) return -1;
+    if (kind != 0 && kind != 1) return -1;         /* 面板侧预检（核心同一把尺子：0/1） */
+    if (glue_post_prop(VT_EDIT_KIND, id, NULL, kind) != 0) return -1;
+    i = glue_find(id);
+    if (i < 0) return -1;
+    return (S->regions[i].kind == (kind ? 1 : 0)) ? 0 : -1;
 }
