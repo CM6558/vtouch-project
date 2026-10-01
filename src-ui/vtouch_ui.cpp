@@ -1132,7 +1132,7 @@ static void snapshot_touches(void)
                 ALOGI("取点 取消（面板内点击）");
             }
             /* 手势优先于鼠标：框选 / 选中拖改（面板内一律走鼠标，保证按钮可用） */
-            if (down_edge && ui_live && !in_p) {   /* 隐藏时不开始框选/拖改（否则会改表并落盘） */
+            if (down_edge && ui_live && !in_p && !g_pick) {   /* 隐藏/取点态不开始框选/拖改（否则会改表并落盘；取点态里外侧按下 = 取点动作本身） */
                 if (g_cap_mode && g_cap_slot < 0) {
                     g_cap_slot = i;
                     g_cap_x0 = g_cap_x1 = x; g_cap_y0 = g_cap_y1 = y;

@@ -293,12 +293,18 @@ DOCS = {
     ret="0 成功；-1 没接共享内存。",
     note="运行中删表可能短暂显示错名（预裁决接受）：显示层、下轮运行自愈。"),
 "vtouch_pick_request": dict(brief="请求取点：置区 B pick_mode=1，核心吞一次触摸后回填坐标并自清。",
-    note="核心侧两重防呆：20s 超时自清 + 面板死亡清理；本函数不叫醒核心（触摸按下本身会唤醒它）。"),
-"vtouch_pick_cancel": dict(brief="取消取点：清区 B pick_mode（面板内点击 = 取消）。"),
+    note="核心侧两重防呆：20s 超时自清 + 面板死亡清理；本函数不叫醒核心（触摸按下本身会唤醒它）。"
+         "同时置面板侧「取点态」（pick_armed）并把 take 基线推进到当前 pick_seq（T2.8；T2.4 递延①"
+         "的等价防护：面板重启接旧核心时 pick_seq 可能非 0，不推基线的话点 [取点] 会在用户 tap 之前"
+         "把**旧捕获**吐成 pick_ev —— 凭空回填旧坐标）。"),
+"vtouch_pick_cancel": dict(brief="取消取点：清区 B pick_mode（面板内点击 = 取消）。",
+    note="同时清面板侧「取点态」（pick_armed）：取消后不再 take。"),
 "vtouch_pick_take": dict(brief="取走一次取点结果（对比 pick_seq 变化；1 = 有新坐标）。",
     params=[("x", "输出竖屏逻辑坐标 x（可 NULL）"), ("y", "输出竖屏逻辑坐标 y（可 NULL）")],
     ret="1 有新坐标（本次取走）；0 没有新结果。",
-    note="内部记静态 last_seq：同一次捕获只回报一次；面板在 vtouch_poll_step 里轮询它，读到就合成 pick_ev。"),
+    note="基线 pick_last_seq 在 vtouch_pick_request 里推进到当时的 pick_seq（T2.8）——只回报**本次取点态"
+         "之后**的捕获；同一次捕获只回报一次。读侧以 ACQUIRE 读 pick_seq（配写侧屏障：读到新 seq 必能"
+         "读到配对坐标）。面板在 vtouch_poll_step 里轮询它，读到就合成 pick_ev。"),
 "vtouch_region_kind_get": dict(brief="区域的开关型标记（0=普通 1=开关型；只读区 A）。",
     params=[("i", "区域下标")], ret="kind 值；-1 没接共享内存或下标越界。"),
 "vtouch_region_toggle": dict(brief="开关型区域的当前开/关状态（核心写、面板只读）。",

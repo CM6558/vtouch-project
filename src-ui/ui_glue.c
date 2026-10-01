@@ -551,9 +551,9 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
  * (vtouch-doc: vtouch_pick_request)
  * @brief 请求取点：置区 B pick_mode=1，核心吞一次触摸后回填坐标并自清。
  * @note    核心侧两重防呆：20s 超时自清 + 面板死亡清理；本函数不叫醒核心（触摸按下本身会唤醒它）。
- *          同时置面板侧「取点态」（pick_armed）并把 take 基线推进到当前 pick_seq（T2.8；T2.4
- *          递延①的等价防护：面板重启接旧核心时 pick_seq 可能非 0，不推基线的话点 [取点] 会在
- *          用户 tap 之前把**旧捕获**吐成 pick_ev —— 凭空回填旧坐标）。
+ *          同时置面板侧「取点态」（pick_armed）并把 take 基线推进到当前 pick_seq（T2.8；T2.4 递延①
+ *          的等价防护：面板重启接旧核心时 pick_seq 可能非 0，不推基线的话点 [取点] 会在用户 tap 之前
+ *          把**旧捕获**吐成 pick_ev —— 凭空回填旧坐标）。
  */
 void vtouch_pick_request(void)
 {
@@ -578,14 +578,16 @@ void vtouch_pick_cancel(void) { pick_armed = 0; if (B) B->pick_mode = 0; }
  * @param   y        输出竖屏逻辑坐标 y（可 NULL）
  * @return  1 有新坐标（本次取走）；0 没有新结果。
  * @note    基线 pick_last_seq 在 vtouch_pick_request 里推进到当时的 pick_seq（T2.8）——
- *          只回报**本次取点态之后**的捕获；同一次捕获只回报一次。面板在 vtouch_poll_step 里
- *          轮询它，读到就合成 pick_ev。
+ *          只回报**本次取点态之后**的捕获；同一次捕获只回报一次。读侧以 ACQUIRE 读 pick_seq
+ *          （配写侧屏障：读到新 seq 必能读到配对坐标）。面板在 vtouch_poll_step 里轮询它，
+ *          读到就合成 pick_ev。
  */
 int vtouch_pick_take(int *x, int *y)
 {
     uint32_t s;
     if (!B) return 0;
-    s = B->pick_seq;
+    /* acquire：配写侧 __sync_synchronize 的读半边 —— 读到新 pick_seq 必能读到配对坐标（同事件环用法） */
+    s = __atomic_load_n(&B->pick_seq, __ATOMIC_ACQUIRE);
     if (s == pick_last_seq) return 0;     /* 没新捕获：同一次结果不重复回报 */
     pick_last_seq = s;
     if (x) *x = (int)B->pick_x;
