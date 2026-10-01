@@ -123,3 +123,126 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
     *type = R[i].type; *a1 = R[i].a1; *a2 = R[i].a2; *a3 = R[i].a3; *a4 = R[i].a4; *enabled = R[i].enabled;
     return 0;
 }
+
+/* ---- 操作 / 取点 / 绑定只读（T2.5 起面板调用；单跑模式给一份内存表）----
+ * 与 ui_glue.c 逐个同签名；行为是「够画出来、够点」的桩（运行态停在「第 1 步」，点停止才归位）。 */
+struct stu_op { char name[16]; char gate[16]; int autoff, nsteps, steps[8][6]; };
+static struct stu_op O[32];
+static int ON;
+static int ORUN = -1, ORSTEP = 0, ORSTATE = 0;
+
+static void seed_ops(void)
+{
+    if (ON) return;
+    /* 一条演示操作（等待 100ms）：与演示区域同理 —— 面板首次起来就有东西可看、可跑、可删 */
+    snprintf(O[ON].name, sizeof O[ON].name, "demo_wait");
+    O[ON].nsteps = 1;
+    O[ON].steps[0][0] = 3;    /* OP_STEP_WAIT（同核心枚举值） */
+    O[ON].steps[0][5] = 100;  /* ms */
+    ON++;
+}
+
+int vtouch_op_count(void) { seed_ops(); return ON; }
+
+int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff)
+{
+    seed_ops();
+    if (i < 0 || i >= ON) return -1;
+    if (name && n > 0) snprintf(name, (size_t)n, "%s", O[i].name);
+    if (gate && gn > 0) snprintf(gate, (size_t)gn, "%s", O[i].gate);
+    if (steps) *steps = O[i].nsteps;
+    if (autoff) *autoff = O[i].autoff;
+    return 0;
+}
+
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms)
+{
+    seed_ops();
+    if (i < 0 || i >= ON || s < 0 || s >= O[i].nsteps) return -1;
+    if (type) *type = O[i].steps[s][0];
+    if (a1) *a1 = O[i].steps[s][1];
+    if (a2) *a2 = O[i].steps[s][2];
+    if (a3) *a3 = O[i].steps[s][3];
+    if (a4) *a4 = O[i].steps[s][4];
+    if (ms) *ms = O[i].steps[s][5];
+    return 0;
+}
+
+int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps)
+{
+    int i;
+    seed_ops();
+    if (!name || !*name || !steps6 || nsteps < 1 || nsteps > 8) return -1;   /* 桩上限与 steps[8] 对齐 */
+    for (i = 0; i < ON; i++) if (!strcmp(O[i].name, name)) break;
+    if (i >= ON) {
+        if (ON >= (int)(sizeof O / sizeof O[0])) return -1;
+        i = ON++;
+    }
+    snprintf(O[i].name, sizeof O[i].name, "%s", name);
+    snprintf(O[i].gate, sizeof O[i].gate, "%s", gate ? gate : "");
+    O[i].autoff = autoff ? 1 : 0;
+    O[i].nsteps = nsteps;
+    memcpy(O[i].steps, steps6, (size_t)nsteps * 6 * sizeof(int));
+    return 0;
+}
+
+int vtouch_op_del(const char *name)
+{
+    int i, j;
+    seed_ops();
+    if (!name || !*name) return -1;
+    for (i = 0; i < ON; i++) if (!strcmp(O[i].name, name)) {
+        for (j = i; j + 1 < ON; j++) O[j] = O[j + 1];
+        ON--;
+        if (ORUN == i) { ORUN = -1; ORSTEP = 0; ORSTATE = 0; }
+        return 0;
+    }
+    return -1;
+}
+
+void vtouch_op_clear(void)
+{
+    ON = 0;
+    ORUN = -1; ORSTEP = 0; ORSTATE = 0;
+}
+
+int vtouch_op_run(const char *name)
+{
+    int i;
+    seed_ops();
+    if (!name || !*name) return -1;
+    for (i = 0; i < ON; i++) if (!strcmp(O[i].name, name)) {
+        ORUN = i; ORSTEP = 0; ORSTATE = 1;   /* 桩：停在「第 1 步」，点停止才归位（不做步进模拟） */
+        return 0;
+    }
+    return -1;
+}
+
+void vtouch_op_stop(void)
+{
+    ORUN = -1; ORSTEP = 0; ORSTATE = 0;
+}
+
+int vtouch_op_status(int *run_i, int *run_step, int *run_state)
+{
+    if (run_i) *run_i = ORUN;
+    if (run_step) *run_step = ORSTEP;
+    if (run_state) *run_state = ORSTATE;
+    return 0;
+}
+
+/* 取点 / 绑定读：单跑模式没有核心，空实现（面板画得出来、点得动就行）。 */
+void vtouch_pick_request(void) { }
+void vtouch_pick_cancel(void) { }
+int  vtouch_pick_take(int *x, int *y) { (void)x; (void)y; return 0; }
+
+int vtouch_region_kind_get(int i) { seed(); return (i >= 0 && i < RN) ? 0 : -1; }
+int vtouch_region_toggle(int i) { seed(); return (i >= 0 && i < RN) ? 0 : -1; }
+int vtouch_region_trig(int i, char *op, int n, int *ev)
+{
+    seed();
+    if (i < 0 || i >= RN) return -1;
+    if (op && n > 0) op[0] = 0;      /* 单跑模式：演示区域没有绑定 */
+    if (ev) *ev = 0;
+    return 0;
+}

@@ -48,6 +48,23 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
 /* 接核心时代新增：把面板矩形推给核心（核心据此吞触摸）。入参是**当前屏坐标**，
  * 逆变换回竖屏逻辑坐标由胶水层做（见 src-ui/ui_glue.c）。单跑模式（ui_stubs.c）里是空实现。 */
 void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2);
+/* 操作 / 取点 / 绑定只读：T2.4 胶水新增的 15 个入口，原型逐字（定义见 src-ui/ui_glue.c，
+ * 单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点与绑定读留给 T2.6/T2.8 接线。 */
+int  vtouch_op_count(void);
+int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
+int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms);
+int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps);
+int  vtouch_op_del(const char *name);
+void vtouch_op_clear(void);
+int  vtouch_op_run(const char *name);
+void vtouch_op_stop(void);
+int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
+void vtouch_pick_request(void);
+void vtouch_pick_cancel(void);
+int  vtouch_pick_take(int *x, int *y);          /* 1 = 有新坐标 */
+int  vtouch_region_kind_get(int i);
+int  vtouch_region_toggle(int i);
+int  vtouch_region_trig(int i, char *op, int n, int *ev);
 }
 
 #define LOGT "VTouchUI"
@@ -97,7 +114,7 @@ static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
 static float g_pan_x = 780, g_pan_y = 200;
 static int g_sheet = 1;                   /* 内容页开/合（合 = 只留侧栏） */
 static int g_min = 0;                     /* 收起态：整窗只剩一条标题栏（会话内有效，重启展开） */
-static int g_nav = 0;                     /* 0 区域 1 日志 2 设置 */
+static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日志 3=设置 */
 #define PAD_X 16
 #define PAD_Y 12
 #define TITLE_H 88
@@ -619,7 +636,7 @@ static void load_regions(void)
             }
         } else if (sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
             /* 判返回值：!= 0 有**两种**来源 —— ① 核心拒（非法 id：字符集/长度见 src/vt_region.c 的
-             * id_ok；或表满）；② glue_post 的 edit_applied 1s 超时（返回 -1，胶水层自己会打一条
+             * vt_id_ok；或表满）；② glue_post 的 edit_applied 1s 超时（返回 -1，胶水层自己会打一条
              * 「编辑 seq=… 超时未生效」在前面）。文案两种都提，别把超时误报成「核心拒绝」。
              * 两种都跳过这一条、继续载入其余条目（一条坏记录不该带走整张表，更不许崩）。 */
             nreg++;
@@ -1584,8 +1601,9 @@ static void build_sidebar(void)
         float bw = ImGui::GetContentRegionAvail().x;
         ImGui::TextDisabled("页面");
         if (nav_btn("区域列表", g_nav == 0 && g_sheet, bw)) { g_nav = 0; g_sheet = 1; g_need = 1; }
-        if (nav_btn("事件日志", g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
-        if (nav_btn("设置",     g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
+        if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
+        if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
+        if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
         ImGui::Dummy(ImVec2(0, 8));
         ImGui::TextDisabled("框选工具");
         if (nav_btn(g_cap_mode == 1 ? "矩形 · 进行中" : "矩形框选", g_cap_mode == 1, bw)) {
@@ -1732,6 +1750,193 @@ static void page_regions(void)
     g_list_left = ImGui::GetWindowPos().x;
     g_list_h = ImGui::GetWindowSize().y;
     g_list_w = ImGui::GetWindowSize().x;
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+/* ---- 操作页（T2.5）：卡片列表 + 运行/停止/新建/删除；数据全部实时读核心（只读区 A）----
+ * 运行状态由渲染线程每拍看一眼（ops_run_watch）：一变就请求重画 —— 不然面板静止不重绘，
+ * 「运行中 · 第 k/n 步」会永远停在按下那一刻的读数上。 */
+
+/* 步骤类型：与核心 OP_STEP_*（src/vt_internal.h）同值；面板不 include 核心头，独立定义。 */
+#define OP_STEP_TAP   1
+#define OP_STEP_SWIPE 2
+#define OP_STEP_WAIT  3
+
+/* 操作运行状态看门（渲染线程每拍调）：op_status 的（运行下标, 当前步, 状态）一变就请求重画。 */
+static void ops_run_watch(void)
+{
+    static int last = -1;
+    int ri = -1, step = 0, state = 0, sig;
+    if (vtouch_op_status(&ri, &step, &state) != 0) return;   /* 没接共享内存（桩模式）：无事可做 */
+    sig = state ? (ri + 1) * 1024 + step : -1;               /* 加 1 保非负；步数远小于 1024 */
+    if (sig == last) return;
+    last = sig;
+    g_need = 1;
+}
+
+/* 默认名：opN，N = 第一个没被占用的序号（与 gen_id 同款逻辑：从 1 起扫，99 兜底）。 */
+static void gen_op_name(char *out)
+{
+    int k, n = vtouch_op_count();
+    for (k = 1; k < 100; k++) {
+        char tmp[16];
+        int used = 0;
+        snprintf(tmp, sizeof tmp, "op%d", k);
+        for (int i = 0; i < n; i++) {
+            char nm[16];
+            if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) == 0 && !strcmp(nm, tmp)) {
+                used = 1;
+                break;
+            }
+        }
+        if (!used) { snprintf(out, 16, "%s", tmp); return; }
+    }
+    snprintf(out, 16, "op99");
+}
+
+/* ＋新建：默认 1 步「等待 100ms」—— 安全中性、核心必过（点按/滑动要坐标，面板此刻没有可用的
+ * 默认值；等待既不碰坐标也不占虚拟槽），参数交给编辑层（T2.6）再改。 */
+static void op_new(void)
+{
+    const int wait100[6] = { OP_STEP_WAIT, 0, 0, 0, 0, 100 };
+    char nm[16];
+    gen_op_name(nm);
+    if (vtouch_op_put(nm, "", 0, wait100, 1) == 0) {
+        ALOGI("op new %s", nm);
+        g_force_frames = 3;
+    } else {
+        ALOGW("op new 失败 %s（核心拒或编辑超时）", nm);
+        ev_note("新建操作失败：%s", nm);
+    }
+}
+
+/* 删除（与区域卡片同款：立即删，失败进事件日志）。 */
+static void op_del_by_name(const char *name)
+{
+    if (vtouch_op_del(name) != 0) {
+        ALOGW("op del 失败 %s", name);
+        ev_note("删除操作失败：%s", name);
+        return;
+    }
+    ALOGI("op del %s n=%d", name, vtouch_op_count());
+    g_force_frames = 3;
+}
+
+/* 一张操作卡片：名字 + 元信息行（步数/门控/自动关）+ 运行中行 + 等宽三键。
+ * run_i/run_step/run_state 是页头本帧读好传下来的 op_status 读数。 */
+static void op_card(int i, const char *name, int steps, const char *gate, int autoff,
+                    int run_i, int run_step, int run_state)
+{
+    int is_run = run_state && run_i == i;      /* 同时至多一条在跑（核心对忙的起跑直接丢弃） */
+    ImGui::PushID(1000 + i);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, is_run ? ImVec4(0.937f, 0.965f, 1.00f, 1.00f) : WHITE);
+    ImGui::PushStyleColor(ImGuiCol_Border, is_run ? BLUE500 : ZINC200);
+    ImGui::BeginChild("card", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        dl->AddCircleFilled(ImVec2(p.x + 11, p.y + 22), 11,
+                            is_run ? IM_COL32(34, 197, 94, 255) : IM_COL32(161, 161, 170, 255));
+        ImGui::Dummy(ImVec2(28, 44));
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(name);
+        {
+            char m[96];
+            snprintf(m, sizeof m, "%d 步 · 门控 %s · 跑完自动关 %s",
+                     steps, gate[0] ? gate : "无", autoff ? "开" : "关");
+            text_meta_s(m);
+        }
+        if (is_run) {                          /* 运行态实时读核心：第 k/n 步 */
+            char m[48];
+            int k = run_step + 1;              /* 核心的 op_run_step 是 0 起，显示按人话 1 起 */
+            if (k < 1) k = 1;
+            if (k > steps) k = steps;          /* 显示层夹住：运行中删表等竞态也不画出「第 5/3 步」 */
+            snprintf(m, sizeof m, "运行中 · 第 %d/%d 步", k, steps);
+            text_meta_s(m);
+        }
+        /* 等宽三键（gap 12，键高 76 保手指可点）：运行/停止 · 编辑 · 删除 */
+        float bw = (ImGui::GetContentRegionAvail().x - 2 * 12) / 3.0f;
+        if (is_run) {
+            if (btn_dark("停止", ImVec2(bw, 76))) {
+                ALOGI("op stop %s", name);
+                vtouch_op_stop();
+                g_force_frames = 3;
+            }
+        } else {
+            if (btn_blue("运行", ImVec2(bw, 76))) {
+                if (vtouch_op_run(name) != 0) {   /* 非 0 = 没送达（超时/没接共享内存）→ 可见反馈 */
+                    ALOGW("op run 请求未送达 %s", name);
+                    ev_note("运行请求未送达：%s", name);
+                } else ALOGI("op run %s", name);
+                g_force_frames = 3;
+            }
+        }
+        ImGui::SameLine();
+        if (btn_light("编辑", ImVec2(bw, 76))) {
+            /* 编辑覆盖层 T2.6 才接入：先给可见反馈（低噪声，只进事件日志），不做成「点了没反应」。 */
+            ALOGI("op edit %s（编辑层未接入）", name);
+            ev_note("编辑层尚未接入：%s", name);
+        }
+        ImGui::SameLine();
+        if (btn_red("删除", ImVec2(bw, 76))) op_del_by_name(name);
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 12));
+    ImGui::Dummy(ImVec2(0, 0));   /* bento 卡片间隙 gap-4 */
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+}
+
+static void page_ops(void)
+{
+    int n = vtouch_op_count();
+    int run_i = -1, run_step = 0, run_state = 0;
+    char meta[40];
+    vtouch_op_status(&run_i, &run_step, &run_state);   /* 本帧读数：页头与卡片共用同一份 */
+    snprintf(meta, sizeof meta, "%d 条", n);
+    page_header("操作", meta);
+    if (run_state) {
+        char rn[16] = {0}, m[48];
+        int k = run_step + 1;
+        if (run_i >= 0 && vtouch_get_op(run_i, rn, sizeof rn, NULL, NULL, 0, NULL) == 0 && rn[0]) {
+            if (k < 1) k = 1;
+            snprintf(m, sizeof m, "运行中：%s · 第 %d 步", rn, k);
+        } else {
+            snprintf(m, sizeof m, "运行中");     /* 运行中删表等竞态：名字读不到就只报状态 */
+        }
+        text_meta_s(m);
+    } else {
+        text_meta_s("空闲");
+    }
+    ImGui::Dummy(ImVec2(0, 4));
+    if (btn_blue("＋新建", ImVec2(260, 84))) op_new();
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    text_meta_s("默认 1 步「等待 100ms」");
+    ImGui::Dummy(ImVec2(0, 6));
+    if (n == 0) {
+        text_meta_w("还没有操作：点「＋新建」加一条");
+        return;
+    }
+    /* 列表自成一格可滚容器（与区域列表同款；拖动滚动目标同走 SCR_LIST —— 谁在显谁发布实区） */
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::BeginChild("##ops", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    {
+        for (int i = 0; i < n; i++) {
+            char name[16], gate[16];
+            int steps = 0, autoff = 0;
+            if (vtouch_get_op(i, name, sizeof name, &steps, gate, sizeof gate, &autoff) != 0) continue;
+            op_card(i, name, steps, gate, autoff, run_i, run_step, run_state);
+        }
+    }
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
@@ -1901,7 +2106,7 @@ static void build_panel(void)
         ImVec2 pp = ImGui::GetWindowPos(), ps = ImGui::GetWindowSize();
         g_pan_r[0] = pp.x; g_pan_r[1] = pp.y; g_pan_r[2] = pp.x + ps.x; g_pan_r[3] = pp.y + ps.y;
     }
-    /* 列表实区每帧先清空：只在区域页发布，其它页不命中 → 不会误滚 */
+    /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作），其它页不命中 → 不会误滚 */
     g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
@@ -1921,7 +2126,8 @@ static void build_panel(void)
         pub_zone(g_zone_sheet);
         drag_scroll_for(SCR_SHEET);
         if (g_nav == 0) page_regions();
-        else if (g_nav == 1) page_log();
+        else if (g_nav == 1) page_ops();
+        else if (g_nav == 2) page_log();
         else page_settings();
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -2092,6 +2298,7 @@ static void *render_thread_fn(void *)
         }
         snapshot_touches();
         region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
+        ops_run_watch();          /* 操作运行状态变了 → 请求重画（「运行中 · 第 k/n 步」实时读核心） */
         int need_draw = g_need;   /* 显式请求的重画：不被下面的静止门吞掉 */
         go = g_need || g_ov_need;
         if (g_force_frames > 0) go = 1;
