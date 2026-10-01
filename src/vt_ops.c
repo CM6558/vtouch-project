@@ -9,6 +9,9 @@
  *   · 执行器：起跑 = 整条快照（运行中改表 / 删表影响不到本次，spec §7）；一次只跑一条；
  *     状态机用单调钟绝对时间表；手指走 virt[]（身份段 = phys_slots + 槽号），与 WS 客户端
  *     同槽时按「不避让」记 `op 槽冲突`（spec §3.5）；到点由 poll 的第四档唤醒（不新起线程）。
+ *   · 避让客户端帧事务（R1 封口）：起跑遇帧窗丢弃（`op 丢弃 帧内`）；运行中遇帧窗**冻结**
+ *     （vt_ops_tick 不推进 / 不自检 / 不消费触发），帧关后把 t0/deadline/t_start 一起平移暂停时长；
+ *     冻结期 vt_ops_next_deadline_ms 返回 -1、不参与第四档（帧关靠 WS fd 活动唤醒）。
  *   · 操作表与执行器状态都只在主线程读写（编辑邮箱在 vtouch_poll_step 里吃、执行器也在主线程跑）——
  *     与区域表不同，这里不需要 region_lock 那把锁。
  *
@@ -206,6 +209,8 @@ void vt_ops_clear(void)
  *   conflict  撞槽日志只打一次（v1 不做避让，spec §3.5）
  *   trig_seen  已消费到的触发序号（触发槽 SPSC 的消费者一侧）
  *   t_start   起跑时刻（完成日志的「用时」）
+ *   frozen / frozen_since  帧冻结标记与冻结起点（帧窗内暂停推进；帧关后把 t0/deadline/t_start
+ *              一起平移暂停时长 —— 见 vt_ops_tick）；起跑 / 完成 / 中止都清零，不泄漏到下一次运行
  * 全部只有主线程碰（编辑邮箱在 poll_step 里吃、执行器也在主线程跑）—— 不需要锁。
  */
 static struct {
@@ -229,6 +234,8 @@ static struct {
     int      conflict;
     uint32_t trig_seen;
     uint64_t t_start;
+    int      frozen;                                         /* 帧冻结中（R1 封口）：帧窗内暂停推进 */
+    uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
 } R;
 
 /* 步内阶段：BEGIN=本步的起始动作还没发；TAP_UP=等 hold 到点抬指；SWIPE_MOVE=等下一个采样点；
@@ -332,6 +339,7 @@ static void op_finish(void)
     op_ev_push("done", R.nsteps, R.nsteps);
     R.active = 0;
     R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
+    R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
@@ -493,6 +501,35 @@ void vt_ops_tick(void)
 {
     uint64_t now;
     if (g.g_reemit) return;                                  /* 上一帧没写出去：不推进（不丢帧、不跳步） */
+
+    /* 帧冻结（R1 封口）：客户端帧事务（begin_frame..end_frame）开着时，本次 tick 直接返回 ——
+     * 不推进 / 不自检 / 不消费触发。机制与起跑门（op_drop_frame）同源：帧窗内执行器写 g.virt 的
+     * 每一笔都会被 end_frame 的 memcpy(g.virt, g.staged) 按 begin 快照回填冲击（down 被抹 ⇒ 悬空
+     * 触点；up 被抹 ⇒ 设备侧已抬、core 侧还占着槽）。冻结 ⇒ 帧窗内执行器零 g.virt 写入，既不产生
+     * 悬空触点、也不会被回填扰乱；主循环单线程（poll_step 串行）⇒ 没有检查-使用窗口。
+     * 帧关由 WS fd 活动唤醒（不依赖第四档 —— 冻结期 vt_ops_next_deadline_ms 返回 -1）。 */
+    if (R.active && g.frame_open) {
+        if (!R.frozen) {
+            R.frozen = 1;                                    /* 首次进入：记住暂停起点（每段冻结/解冻各一行日志） */
+            R.frozen_since = op_now_ms();
+            fprintf(stderr, "vtouchd: op 暂停 帧内\n");
+        }
+        return;
+    }
+    if (R.frozen) {
+        /* 解冻（帧关后的第一次 tick）：把本步起点 t0、到点 deadline、起跑时刻 t_start 一起平移
+         * 暂停时长 —— 操作从暂停点原样继续（剩余时间不变），完成日志的「用时」因此不含暂停。
+         * deadline 必须跟着一起平移：它是先前按旧 t0 算好的绝对值，只动 t0 会让下一步动作立刻
+         * 补发，而且 op_next_step 的 t0 = deadline 会把这笔平移又拉回去。 */
+        uint64_t pause_ms;
+        now = op_now_ms();
+        pause_ms = now - R.frozen_since;
+        R.t0 += pause_ms;
+        R.deadline += pause_ms;
+        R.t_start += pause_ms;
+        R.frozen = 0;
+        fprintf(stderr, "vtouchd: op 恢复 帧内\n");
+    }
     op_consume_trigger();                                    /* 可能起跑一条操作（deadline = 现在） */
     if (!R.active) return;
     op_selfcheck();                                          /* 手指被外力动过：该记的记、该中止的中止 */
@@ -515,6 +552,9 @@ int vt_ops_next_deadline_ms(void)
 {
     uint64_t now;
     if (!R.active) return -1;
+    /* 帧冻结（R1 封口）：帧窗内不做 deadline 唤醒 —— 剩余毫秒已被暂停冻住（甚至为负），再返回 0
+     * 会把主循环压成 0ms 超时自旋；返回 -1 让主循环维持别的档位，帧关由 WS fd 活动唤醒后自会重算。 */
+    if (R.frozen || g.frame_open) return -1;
     now = op_now_ms();
     if (R.deadline <= now) return 0;
     if (R.deadline - now > (uint64_t)INT_MAX) return INT_MAX;   /* 防御：步长上限 10min，正常够不到 */
@@ -565,6 +605,7 @@ void vt_ops_run(const char *name)
     R.slot = slot;
     R.step = 0;
     R.conflict = 0;
+    R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.hold = R.dur = R.nsamp = R.sample = 0;
     R.t_start = op_now_ms();
     R.t0 = R.t_start;
@@ -600,6 +641,7 @@ void vt_ops_abort(const char *why)
     op_ev_push("abort", i, R.nsteps);
     R.active = 0;
     R.slot = -1;
+    R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
