@@ -1972,6 +1972,8 @@ static char g_ope_kbmsg[72] = {0};      /* 名字子层里的拒收提示 */
 static int  g_ope_up = 0;               /* 名字子层大小写档 */
 static int  g_ope_se = -1;              /* 数字弹层：正在编第几步（-1 = 关） */
 static int  g_ope_sf = 0;               /* 数字弹层：第几个字段（0 起） */
+static char g_ope_saved_as[16] = {0};   /* 本会话最近一次 put 成功的名字（[完成] 重试豁免自己刚写进表的名字）；开层/关层清空 */
+static char g_ope_del_owed[16] = {0};   /* 尚欠删除的旧名（del 超时/未送达留下的账，再点 [完成] 先补删）；开层/关层清空 */
 static char g_ne_buf[8] = {0};          /* 数字弹层输入缓冲（最多 6 位数字；坐标/毫秒共用） */
 static char g_ne_msg[72] = {0};         /* 数字弹层就地提示（范围/位数的硬门反馈） */
 
@@ -2073,7 +2075,8 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
 }
 
 /* 操作名合法性（照核心 vt_id_ok：1..15、[A-Za-z0-9_-]；与区域改名同一把尺子，撞的是别的操作名）：
- * 0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_name 自己不算）。 */
+ * 0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_name 自己不算；本会话刚 put 成功的名字 saved_as
+ * 也不算 —— 删旧失败的 [完成] 重试必须能过这一关，否则表里刚写进去的新名会把自己判成「被别人用了」）。 */
 static int ope_name_ok(const char *old_name, const char *s)
 {
     int i, n = (int)strlen(s), k = vtouch_op_count();
@@ -2087,7 +2090,7 @@ static int ope_name_ok(const char *old_name, const char *s)
     for (i = 0; i < k; i++) {
         char nm[16];
         if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) != 0) continue;
-        if (!strcmp(nm, s) && strcmp(nm, old_name)) return 4;
+        if (!strcmp(nm, s) && strcmp(nm, old_name) && strcmp(nm, g_ope_saved_as)) return 4;
     }
     return 0;
 }
@@ -2168,12 +2171,17 @@ static void ope_step_text(const int *s6, char *out, int outcap)
     }
 }
 
-/* 数字弹层：把当前字段的现值装进输入缓冲。 */
+/* 数字弹层：把当前字段的现值装进输入缓冲。类型/字段下标非法 → 不装值、直接关层
+ * （防 ope_fidx 越界读；口径同 draw_num_edit 的同一道判据）。 */
 static void ope_num_load(void)
 {
-    int type = g_ope_steps[g_ope_se][0];
-    int idx = ope_fidx[type - 1][g_ope_sf];
+    int type, nf, idx;
     g_ne_buf[0] = 0;
+    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; return; }
+    type = g_ope_steps[g_ope_se][0];
+    nf = ope_nfields(type);
+    if (nf == 0 || g_ope_sf < 0 || g_ope_sf >= nf) { g_ope_se = -1; return; }
+    idx = ope_fidx[type - 1][g_ope_sf];
     if (idx >= 0) snprintf(g_ne_buf, sizeof g_ne_buf, "%d", g_ope_steps[g_ope_se][idx]);
 }
 
@@ -2247,6 +2255,7 @@ static void ope_gate_cycle(void)
     }
     g_need = 1; g_force_frames = 2;
     if (n == 0) {
+        g_ope_gate[0] = 0;                       /* 顺手清门控值：没开关型区域了，别让保存写出悬空 id（核心容忍但清理更干净） */
         snprintf(g_ope_msg, sizeof g_ope_msg, "没有开关型区域：门控只认开关型（在区域页设）");
         return;
     }
@@ -2264,6 +2273,7 @@ static void op_edit_close(void)
     g_ope_kb = 0; g_ope_kbmsg[0] = 0;
     g_ope_se = -1; g_ne_msg[0] = 0;
     g_ope_msg[0] = 0;
+    g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态只活在开层期间（[取消] 也丢账：旧条目可去列表里删） */
     g_need = 1; g_force_frames = 3;
 }
 
@@ -2300,17 +2310,33 @@ static void op_edit_open(int i, const char *name)
     g_ope_nsteps = steps;
     g_ope_msg[0] = 0; g_ope_kbmsg[0] = 0; g_ope_kb = 0; g_ope_up = 0;
     g_ope_se = -1; g_ope_sf = 0; g_ne_msg[0] = 0;
+    g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态开层清零（只服务本次编辑） */
     g_need = 1; g_force_frames = 3;
     ALOGI("op edit open i=%d %s（%d 步）", i, name, steps);
 }
 
-/* [完成] 保存流：面板预检（硬门）→ vtouch_op_put 整条落表 → 改过名再删旧名 → **全成**才关层。
- * 任何一步失败：就地提示、覆盖层不关（改完可再点 [完成]）。 */
+/* [完成] 保存流：先补上轮欠账（旧名没删掉）→ 面板预检（硬门）→ vtouch_op_put 整条落表 →
+ * 改过名再删旧名 → **全成**才关层。任何一步失败：就地提示、覆盖层不关（改完可再点 [完成]）。
+ * 删旧失败记成 g_ope_del_owed，重试点先补删 —— 「再点 [完成] 重试」这条路曾因名字查重把自己
+ * 刚 put 的新名判成「被别人用了」而走不通，saved_as 豁免 + 补删台账一起把它接通。 */
 static void op_edit_save(void)
 {
     int flat[OPE_MAX_STEPS * 6];
     int s, k, rc;
+    int old_settled = 0;             /* 头顶补删删掉的正是 g_ope_orig：底部「old≠del_owed」门槛的落点 */
     char why[96];
+
+    /* 上轮留下的欠账：先补删旧条目（del 超时/未送达会欠着；补成再走正常保存流）。 */
+    if (g_ope_del_owed[0]) {
+        if (vtouch_op_del(g_ope_del_owed) != 0) {
+            snprintf(g_ope_msg, sizeof g_ope_msg, "旧条目『%s』仍未删除成功，再点 [完成] 重试", g_ope_del_owed);
+            ALOGW("op edit 旧条目仍未删除 %s", g_ope_del_owed);
+            g_force_frames = 2;
+            return;
+        }
+        old_settled = !strcmp(g_ope_del_owed, g_ope_orig);   /* 记在清零前：这个旧名已确认不在表里 */
+        g_ope_del_owed[0] = 0;
+    }
     rc = ope_name_ok(g_ope_orig, g_ope_name);
     if (rc != 0) {
         snprintf(g_ope_msg, sizeof g_ope_msg, "%s", ope_name_why(rc));
@@ -2334,15 +2360,19 @@ static void op_edit_save(void)
     for (s = 0; s < g_ope_nsteps; s++)
         for (k = 0; k < 6; k++) flat[s * 6 + k] = g_ope_steps[s][k];
     if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_nsteps) != 0) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/坐标/时长照核心校验）或编辑未送达");
+        snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/坐标/时长照核心校验，含表满）或编辑未送达");
         ALOGW("op edit put 失败 %s", g_ope_name);
         g_force_frames = 2;
         return;
     }
-    if (strcmp(g_ope_orig, g_ope_name)) {
-        if (vtouch_op_del(g_ope_orig) != 0) {        /* 改了名但旧名没删掉：表里会两条 → 就地报错让用户重试 */
-            snprintf(g_ope_msg, sizeof g_ope_msg, "旧名删除失败：%s（可再点 [完成] 重试）", g_ope_orig);
-            ALOGW("op edit 旧名删除失败 %s", g_ope_orig);
+    snprintf(g_ope_saved_as, sizeof g_ope_saved_as, "%s", g_ope_name);   /* 登记成功名：重试时它在表里，不再判成重名 */
+    /* 需要删旧名 ⟺ 改过名 且 旧名不是刚补删掉的那个（old≠del_owed：del_owed 补成后已按规格清零，
+     * settled 承接同一条门槛 —— 回读已确认表里没有它，再删一次纯属空转）。 */
+    if (strcmp(g_ope_orig, g_ope_name) && !old_settled) {
+        if (vtouch_op_del(g_ope_orig) != 0) {        /* 改了名但旧名没删掉：表里会两条 → 记账，下次 [完成] 先补删 */
+            snprintf(g_ope_del_owed, sizeof g_ope_del_owed, "%s", g_ope_orig);
+            snprintf(g_ope_msg, sizeof g_ope_msg, "已保存；旧条目『%s』删除失败——再点 [完成] 重试", g_ope_orig);
+            ALOGW("op edit 旧条目删除失败 %s", g_ope_orig);
             g_force_frames = 2;
             return;
         }
@@ -2370,7 +2400,7 @@ static void ope_step_row(int i)
     ImGui::AlignTextToFramePadding();
     text_meta_s(p);
     {
-        float bw = (ImGui::GetContentRegionAvail().x - 3 * 8) * 0.25f;
+        float bw = (ImGui::GetContentRegionAvail().x - 3 * 12) * 0.25f;   /* 3 个缝按真实 SameLine 间距 12 扣（原先按 8 预算 → [删] 出内容区被裁） */
         if (btn_blue("参数", ImVec2(bw, 72))) {      /* 进数字弹层：从第 1 个字段起逐个编 */
             g_ope_se = i; g_ope_sf = 0;
             ope_num_load();
