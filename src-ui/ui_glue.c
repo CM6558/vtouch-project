@@ -1,10 +1,12 @@
 /* ui_glue.c —— 面板侧胶水：把「老面板的进程内 12 个 C 接口」接到核心的共享内存上。
  *
- * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现。
+ * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现；
+ * T2.4 起本文件另提供操作 / 取点 / 绑定只读的 15 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）。
  * 数据来源与去向（契约见 src/vt_shm.h、docs/UI_INTEGRATION.md §4）：
- *   物理触点 / 区域表 / 逻辑尺寸 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
- *   区域编辑                   → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
- *                                 poll 超时；按 region_add/del/rename/clear 语义生效）
+ *   物理触点 / 区域表 / 操作表 / 运行状态 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
+ *   区域 / 操作编辑             → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
+ *                                 poll 超时；按 region_add/del/rename/clear、vt_ops_* 语义生效）
+ *   取点                       ↕ 区 B 的 pick_*（面板置模式，核心吞一次触摸回填逻辑坐标后自清）
  *   面板矩形                   → 区 B（逆变换回竖屏逻辑坐标；核心据此吞触摸）
  *   事件流                     ← 区 C 事件环（与"脚本有没有订阅"无关）
  *   心跳                       → 头里 ui_hb；核心心跳停滞（单调钟 3s）→ poll_step 返回 -1，面板自杀退出
@@ -312,4 +314,290 @@ int vtouch_region_rename(const char *old_id, const char *new_id)
 void vtouch_region_clear(void)
 {
     glue_post(VT_EDIT_CLEAR, NULL, NULL, 0, 0, 0, 0, 0, 0);
+}
+
+/* ---------- 操作 / 取点 / 绑定只读（T2.4；面板 T2.5+ 逐字调用） ---------- */
+
+/* 按名字找操作下标（只读区 A；比较口径同 glue_find）。 */
+static int glue_op_find(const char *name)
+{
+    int i, n;
+    if (!S || !name || !*name) return -1;
+    n = S->op_count;
+    if (n > MAX_OPS) n = MAX_OPS;
+    for (i = 0; i < n; i++)
+        if (strncmp(S->ops[i].name, name, OP_NAME_MAX) == 0) return i;
+    return -1;
+}
+
+/* 投一条操作编辑（照 glue_post 三步：投邮箱 → 写唤醒管道 → 等 edit_applied 到位）。
+ * 为什么必须等：邮箱是**单槽**的 —— 不等核心吃掉就投下一条，前一条会被覆盖；操作的新建 /
+ * 删除 / 起跑丢一次就是真丢（区域批量加载踩过同款坑）。返回 0 = 核心已吃掉；-1 = 没共享内存 / 超时。 */
+static int glue_post_op(uint32_t op, const char *name, const struct vt_op *payload)
+{
+    struct vt_shm_edit e;
+    int spins = 0;
+    if (!B) return -1;
+    memset(&e, 0, sizeof e);
+    e.op = op;
+    if (name) snprintf(e.id, sizeof e.id, "%s", name);
+    if (payload) e.payload = *payload;          /* 结构按值拷：区 B 一页装得下（见 vt_shm.h 的 _Static_assert） */
+    e.seq = ++glue_seq;
+    vt_shm_post_edit(&e);
+    glue_wake();
+    while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
+    if (B->edit_applied != e.seq) {
+        fprintf(stderr, "vtouch-ui: 操作编辑 seq=%u op=%u 超时未生效\n", e.seq, (unsigned)op);
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_op_count)
+ * @brief 操作表当前条数（面板列表用；只读区 A）。
+ * @return  操作条数；没接共享内存时 0。
+ */
+int vtouch_op_count(void) { return S ? S->op_count : 0; }
+
+/**
+ * (vtouch-doc: vtouch_get_op)
+ * @brief 取一条操作的元信息（名字 / 步数 / 门控 / 自动关；只读区 A）。
+ * @param   i        操作下标（0..count-1）
+ * @param   name     输出名字缓冲
+ * @param   n        名字缓冲容量
+ * @param   steps    输出步数（可为 NULL）
+ * @param   gate     输出门控区域 id 缓冲（可为 NULL）
+ * @param   gn       门控缓冲容量
+ * @param   autoff   输出跑完自动关（可为 NULL）
+ * @return  0 成功；-1 没接共享内存或下标越界。
+ * @note    任一出参可为 NULL（跳过不写）；字符串一律 snprintf 截断、保证 NUL 结尾。
+ */
+int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff)
+{
+    const struct vt_op *o;
+    if (!S || i < 0 || i >= S->op_count || i >= MAX_OPS) return -1;
+    o = &S->ops[i];
+    if (name && n > 0) snprintf(name, (size_t)n, "%s", o->name);
+    if (gate && gn > 0) snprintf(gate, (size_t)gn, "%s", o->gate);
+    if (steps) *steps = o->step_count;
+    if (autoff) *autoff = o->auto_off;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_get_op_step)
+ * @brief 取一条操作的某一步（类型 / 四个参数 / 时长；只读区 A）。
+ * @param   i        操作下标
+ * @param   s        步下标（0..步数-1）
+ * @param   type     输出步骤类型 OP_STEP_*（可 NULL）
+ * @param   a1       输出参数 1（可 NULL）
+ * @param   a2       输出参数 2（可 NULL）
+ * @param   a3       输出参数 3（可 NULL）
+ * @param   a4       输出参数 4（可 NULL）
+ * @param   ms       输出时长毫秒（可 NULL）
+ * @return  0 成功；-1 没接共享内存或下标越界。
+ * @note    点按：a1,a2 = 坐标、ms = 按住时长；滑动：a1,a2 → a3,a4 = 起终点、ms = 时长；等待：只用 ms。
+ */
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms)
+{
+    const struct vt_step *st;
+    if (!S || i < 0 || i >= S->op_count || i >= MAX_OPS) return -1;
+    if (s < 0 || s >= S->ops[i].step_count || s >= MAX_STEPS) return -1;
+    st = &S->ops[i].steps[s];
+    if (type) *type = st->type;
+    if (a1) *a1 = st->a1;
+    if (a2) *a2 = st->a2;
+    if (a3) *a3 = st->a3;
+    if (a4) *a4 = st->a4;
+    if (ms) *ms = st->ms;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_op_put)
+ * @brief 新增或覆盖一条操作（整条投编辑邮箱 → 回读校验；面板侧入口）。
+ * @param   name     操作名（核心再校验：1..15、[A-Za-z0-9_-]）
+ * @param   gate     门控开关区域 id；NULL 或空串 = 无
+ * @param   autoff   跑完自动关门控（非 0 视为 1）
+ * @param   steps6   扁平步表：每 6 个 int 一组，顺序 type,a1,a2,a3,a4,ms
+ * @param   nsteps   步数（1..32；越界当场拒，不投）
+ * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
+ * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；核心的校验是单点（名字 / 步数 / 坐标 / 时长），被拒时回读失败、面板走现有错误提示路径。
+ */
+int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps)
+{
+    struct vt_op op;
+    int i, r;
+    if (!B || !name || !*name) return -1;
+    if (!steps6) { fprintf(stderr, "vtouch-ui: 操作载荷缺步表\n"); return -1; }
+    if (nsteps < 1 || nsteps > MAX_STEPS) {          /* 越界不读 steps6：步表在面板侧，读越界就是 UB */
+        fprintf(stderr, "vtouch-ui: 操作载荷步数非法（%d，应在 1..%d）\n", nsteps, MAX_STEPS);
+        return -1;
+    }
+    memset(&op, 0, sizeof op);
+    snprintf(op.name, sizeof op.name, "%s", name);
+    snprintf(op.gate, sizeof op.gate, "%s", gate ? gate : "");
+    op.auto_off = autoff ? 1 : 0;
+    op.step_count = nsteps;
+    for (i = 0; i < nsteps; i++) {                   /* 扁平步表：每 6 个 int 一组（type,a1..a4,ms） */
+        op.steps[i].type = steps6[i * 6 + 0];
+        op.steps[i].a1   = steps6[i * 6 + 1];
+        op.steps[i].a2   = steps6[i * 6 + 2];
+        op.steps[i].a3   = steps6[i * 6 + 3];
+        op.steps[i].a4   = steps6[i * 6 + 4];
+        op.steps[i].ms   = steps6[i * 6 + 5];
+    }
+    if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) return -1;
+    /* 回读校验（spec §2.6）：核心不给逐条回执 —— 找到同名且步数一致才算真落地。 */
+    r = glue_op_find(name);
+    if (r < 0 || S->ops[r].step_count != nsteps) return -1;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_op_del)
+ * @brief 删除一条操作（面板侧入口）。
+ * @param   name     操作名
+ * @return  0 表里已无同名条目（含本来就不存在）；-1 没接共享内存 / 超时。
+ * @note    回读校验 = 找不到同名条目（spec §2.6）。
+ */
+int vtouch_op_del(const char *name)
+{
+    if (!B || !name || !*name) return -1;
+    if (glue_post_op(VT_EDIT_OP_DEL, name, NULL) != 0) return -1;
+    /* 回读校验：表里找不到同名才算删掉（本来就不存在 = 目标状态已成立，也算成）。 */
+    return (glue_op_find(name) < 0) ? 0 : -1;
+}
+
+/**
+ * (vtouch-doc: vtouch_op_clear)
+ * @brief 清空操作表（面板侧入口）。
+ * @note    回读校验 = op_count==0；未生效只打一行日志（void 返回，不阻塞面板）。
+ */
+void vtouch_op_clear(void)
+{
+    if (glue_post_op(VT_EDIT_OP_CLEAR, NULL, NULL) != 0) return;
+    if (S && S->op_count != 0)                       /* 回读校验：没清干净就报一行，别静默 */
+        fprintf(stderr, "vtouch-ui: 操作表清空未生效（op_count=%d）\n", S->op_count);
+}
+
+/**
+ * (vtouch-doc: vtouch_op_run)
+ * @brief 起跑一条操作（投编辑邮箱；核心忙 / 没空闲槽 / 帧内时按核心口径丢弃 + 日志）。
+ * @param   name     操作名
+ * @return  0 核心已吃掉本次请求；-1 没接共享内存 / 超时。
+ * @note    **不做回读校验**（spec §2.6）：运行可能瞬间结束、状态已归位，回读判不了；要显示运行态请读 vtouch_op_status。
+ */
+int vtouch_op_run(const char *name)
+{
+    if (!B || !name || !*name) return -1;
+    /* 不回读运行状态（spec §2.6）：操作可能瞬间跑完、状态已归位 —— 只认「邮箱被吃掉」。 */
+    return glue_post_op(VT_EDIT_OP_RUN, name, NULL);
+}
+
+/**
+ * (vtouch-doc: vtouch_op_stop)
+ * @brief 中止运行中的操作（投编辑邮箱；没在跑时是空操作）。
+ * @note    与 run 同口径：投递成功即返回；核心侧幂等、收尾也走它。
+ */
+void vtouch_op_stop(void)
+{
+    if (glue_post_op(VT_EDIT_OP_STOP, NULL, NULL) != 0)
+        fprintf(stderr, "vtouch-ui: 停止请求未送达核心\n");
+}
+
+/**
+ * (vtouch-doc: vtouch_op_status)
+ * @brief 读执行器运行状态（只读区 A）。
+ * @param   run_i    输出运行中的操作下标（-1 = 空闲；可 NULL）
+ * @param   run_step 输出当前步（0 起；可 NULL）
+ * @param   run_state 输出 0=空闲 1=运行（可 NULL）
+ * @return  0 成功；-1 没接共享内存。
+ * @note    运行中删表可能短暂显示错名（预裁决接受）：显示层、下轮运行自愈。
+ */
+int vtouch_op_status(int *run_i, int *run_step, int *run_state)
+{
+    if (!S) return -1;
+    if (run_i) *run_i = S->op_run;
+    if (run_step) *run_step = S->op_run_step;
+    if (run_state) *run_state = S->op_run_state;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_pick_request)
+ * @brief 请求取点：置区 B pick_mode=1，核心吞一次触摸后回填坐标并自清。
+ * @note    核心侧两重防呆：20s 超时自清 + 面板死亡清理；本函数不叫醒核心（触摸按下本身会唤醒它）。
+ */
+void vtouch_pick_request(void) { if (B) B->pick_mode = 1; }   /* 不叫醒核心：触摸按下本身会唤醒它 */
+
+/**
+ * (vtouch-doc: vtouch_pick_cancel)
+ * @brief 取消取点：清区 B pick_mode（面板内点击 = 取消）。
+ */
+void vtouch_pick_cancel(void) { if (B) B->pick_mode = 0; }
+
+/**
+ * (vtouch-doc: vtouch_pick_take)
+ * @brief 取走一次取点结果（对比 pick_seq 变化；1 = 有新坐标）。
+ * @param   x        输出竖屏逻辑坐标 x（可 NULL）
+ * @param   y        输出竖屏逻辑坐标 y（可 NULL）
+ * @return  1 有新坐标（本次取走）；0 没有新结果。
+ * @note    内部记静态 last_seq：同一次捕获只回报一次；面板在 vtouch_poll_step 里轮询它，读到就合成 pick_ev。
+ */
+int vtouch_pick_take(int *x, int *y)
+{
+    static uint32_t last_seq;             /* 上次取走的 pick_seq（核心每捕获一次 ++） */
+    uint32_t s;
+    if (!B) return 0;
+    s = B->pick_seq;
+    if (s == last_seq) return 0;          /* 没新捕获：同一次结果不重复回报 */
+    last_seq = s;
+    if (x) *x = (int)B->pick_x;
+    if (y) *y = (int)B->pick_y;
+    return 1;
+}
+
+/**
+ * (vtouch-doc: vtouch_region_kind_get)
+ * @brief 区域的开关型标记（0=普通 1=开关型；只读区 A）。
+ * @param   i        区域下标
+ * @return  kind 值；-1 没接共享内存或下标越界。
+ */
+int vtouch_region_kind_get(int i)
+{
+    if (!S || i < 0 || i >= S->region_count || i >= MAX_REGIONS) return -1;
+    return S->regions[i].kind ? 1 : 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_region_toggle)
+ * @brief 开关型区域的当前开/关状态（核心写、面板只读）。
+ * @param   i        区域下标
+ * @return  1 开 0 关；-1 没接共享内存或下标越界。
+ * @note    与 mark 是两套来源：面板样式画 mark || (kind==toggle && toggle_on)。
+ */
+int vtouch_region_toggle(int i)
+{
+    if (!S || i < 0 || i >= S->region_count || i >= MAX_REGIONS) return -1;
+    return S->regions[i].toggle_on ? 1 : 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_region_trig)
+ * @brief 区域的触发绑定（绑定的操作名 + 触发时机；只读区 A）。
+ * @param   i        区域下标
+ * @param   op       输出操作名缓冲（可 NULL；未绑定 = 空串）
+ * @param   n        缓冲容量
+ * @param   ev       输出触发时机 0=无 1=按下 2=完整按压（可 NULL）
+ * @return  0 成功；-1 没接共享内存或下标越界。
+ * @note    绑定写入（BIND）与开关型（KIND）批 3 才生效；这里读的是核心区 A 里的现值（悬空引用照读）。
+ */
+int vtouch_region_trig(int i, char *op, int n, int *ev)
+{
+    if (!S || i < 0 || i >= S->region_count || i >= MAX_REGIONS) return -1;
+    if (op && n > 0) snprintf(op, (size_t)n, "%s", S->regions[i].trig_op);
+    if (ev) *ev = S->regions[i].trig_ev;
+    return 0;
 }
