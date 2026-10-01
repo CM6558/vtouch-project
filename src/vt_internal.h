@@ -138,6 +138,7 @@ struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used
 #define VT_STATE_DEFAULTS \
     .input_fd = -1, .u_fd = -1, .listen_fd = -1, .client_fd = -1, \
     .ws_port = 27183, .vslots = 10, .id_max = 31, \
+    .ops_wake_fd = -1,                     /* 操作触发唤醒 fd：初值 -1，避开「0 = stdin 合法 fd」的锐边 */ \
     .region_lock = PTHREAD_MUTEX_INITIALIZER
 
 struct vt_state {

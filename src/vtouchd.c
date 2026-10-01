@@ -165,6 +165,10 @@ int vtouch_init(int argc, char **argv)
     /* §4.3：区域线程最后起 —— 它一起来就吃队列，所以要等「所有能失败的步骤」都过了再拉它。
      * 唤醒 fd 先建：没有它线程只是退回 1ms 空转，功能不变（见 region_thread_main）。 */
     region_q_init();
+#ifdef VT_UI
+    /* 操作执行器的触发唤醒 fd（失败不致命：触发退回 ≤1s 的 poll 兜底）。 */
+    vt_ops_init();
+#endif
     if (pthread_create(&g.region_tid, NULL, region_thread_main, NULL) != 0) {
         fprintf(stderr, "vtouchd: 区域线程创建失败: %s\n", strerror(errno));
         cleanup(); return -7;
@@ -191,7 +195,7 @@ int vtouch_init(int argc, char **argv)
  */
 int vtouch_poll_step(void)
 {
-    struct pollfd p[5];
+    struct pollfd p[6];
     nfds_t np;
     int want_out, r;
     int to;
@@ -199,18 +203,27 @@ int vtouch_poll_step(void)
 #ifdef VT_UI
     vt_shm_tick();                       /* 核心心跳 */
     vt_shm_edit_apply();                 /* 面板投的区域编辑：这一轮就吃掉 */
+    vt_ops_tick();                       /* 操作执行器：触发 / 撞槽自检 / 到点动作（一拍一步） */
     if (vt_shm_stop_req()) { fprintf(stderr, "vtouchd: 面板请求停引擎 → 退出\n"); return -1; }
 #endif
-    /* poll 超时（三档，取最紧的那个）：
+    /* poll 超时（四档，取最紧的那个）：
      *   ① 有待重发的整帧 → 5ms：尽快把手抬起来（老行为，逐字保留）；
      *   ② 输入缓冲里**已经有完整帧** → 1ms：它已经在我们手里了，不会再有一次 POLLIN 来敲门
      *      （只看 ws_has_pending 的「有没有半包」是不够的 —— 半包不该压超时，整帧才该）；
      *   ③ VT_UI：有面板唤醒 fd（pipe）就敢长睡 1000ms —— 面板投编辑 / 请求停引擎 / 面板自己死了
-     *      都会立刻把它叫醒；没有这个 fd 时退回 8ms 轮询（否则面板编辑要等满一个 poll 超时）。 */
+     *      都会立刻把它叫醒；没有这个 fd 时退回 8ms 轮询（否则面板编辑要等满一个 poll 超时）；
+     *   ④ VT_UI：操作执行器运行中 → 「下一步到点」的剩余毫秒（下限 0，见下）。 */
     to = g.g_reemit ? 5 : 1000;
     if (!g.g_reemit && ws_has_complete_frame()) to = 1;
 #ifdef VT_UI
     if (to > 8 && vt_panel_wake_fd() < 0) to = 8;
+    /* ④ 操作执行器到点唤醒（第四档）：运行中把超时压到「下一步到点」的剩余毫秒（下限 0）。
+     * 写失败重发期间（g_reemit）不参与：那一档固定 5ms，是 g_emit_fail「约 1s 连续失败才停机」
+     * 的节奏基准 —— 压到 0 会把 200 次重试挤在几毫秒里烧完，等于把 1s 的保护改成 4ms。 */
+    if (!g.g_reemit) {
+        int od = vt_ops_next_deadline_ms();
+        if (od >= 0 && od < to) to = od;
+    }
 #endif
     want_out = (g.client_fd >= 0 && outq_pending());
     p[0] = (struct pollfd){ g.input_fd, POLLIN | POLLHUP | POLLERR, 0 };
@@ -223,6 +236,13 @@ int vtouch_poll_step(void)
     if (vt_panel_wake_fd() >= 0) {
         p[4] = (struct pollfd){ vt_panel_wake_fd(), POLLIN | POLLHUP | POLLERR, 0 };
         np = 5;
+    }
+    /* 操作执行器的触发唤醒 fd：固定挂 p[5]（面板 p[4] 之后）。面板 fd 不在时 p[4] 放一条
+     * 忽略项（fd=-1：poll 跳过负 fd），维持「前 np 条都有效」的约定。 */
+    if (g.ops_wake_fd >= 0) {
+        if (np < 5) p[4] = (struct pollfd){ -1, 0, 0 };
+        p[5] = (struct pollfd){ g.ops_wake_fd, POLLIN, 0 };
+        np = 6;
     }
 #endif
     r = poll(p, np, to);
@@ -281,10 +301,15 @@ int vtouch_poll_step(void)
      * vt_shm_edit_apply / vt_shm_stop_req 做）→ 这里只把管道读空，别让它一直可读；
      * POLLHUP/POLLERR = 写端全关 = 面板没了 → 立刻收尸重启，不等看门狗下一拍。
      * 先读后判：数据与 EOF 可能同一拍到达（POLLIN|POLLHUP）。 */
-    if (np == 5 && p[4].revents) {
+    if (np >= 5 && p[4].revents) {
         char b[64];
         if (p[4].revents & POLLIN) { while (read(p[4].fd, b, sizeof b) > 0) ; }
         if (p[4].revents & (POLLHUP | POLLERR)) vt_panel_wake_drop();
+    }
+    /* p[5] 操作触发唤醒 fd：只把可读状态关掉（触发本身在**下一轮开头**的 vt_ops_tick 里消费） */
+    if (np == 6 && (p[5].revents & POLLIN)) {
+        uint64_t b;
+        while (read(g.ops_wake_fd, &b, sizeof b) > 0) ;
     }
     vt_panel_watchdog();                 /* 回收子进程 / 判心跳 / 按策略重启 */
 #endif
@@ -304,6 +329,7 @@ void cleanup(void)
     if (cleaned) return;
     cleaned = 1;
 #ifdef VT_UI
+    vt_ops_abort("引擎收尾");            /* 先抬掉操作的手指（uinput 还活着，抬指帧发得出去） */
     vt_panel_stop();                     /* 先停面板，再放 grab（面板不该在抓着触摸时继续画） */
 #endif
     if (g.client_fd >= 0) { close(g.client_fd); g.client_fd = -1; }
