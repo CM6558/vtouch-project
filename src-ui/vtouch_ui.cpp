@@ -227,6 +227,12 @@ static int g_scr_moved = 0;
 static int save_regions(void);   /* 定义见下：WS 线程只置位，实际写盘在渲染线程。返回 0=已落盘 */
 static volatile int g_save_pending = 0;
 static long g_save_retry_t = 0;   /* 落盘失败后的下次重试时刻（0=可立即尝试） */
+/* 操作表（ops.conf，T2.7）落盘走**独立**的 pending/退避，不与区域表共用一个：
+ * 两块文件、两条时间线 —— 一块写失败不该把另一块的改动一起卡住。编辑动作（新建/删除/编辑层
+ * [完成]）只置位，实际写盘同样在渲染线程（唯一写者，节奏照 g_save_pending 那套）。 */
+static int save_ops(void);
+static volatile int g_ops_save_pending = 0;
+static long g_ops_save_retry_t = 0;
 /* 面板状态里引用了「已不存在的区域 id」要清理（面板自身改表：单条删/改名是面板自带能力，
  * WS 命令族只有 clear/list/add）：WS 线程只置请求，
  * 真正的清理放渲染线程做 —— g_hidden/g_sel_id 归它管，跨线程改同一份数组才是新问题。 */
@@ -665,6 +671,156 @@ static void load_regions(void)
         ALOGI("regions.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 ⇒ 不覆盖现役几何）",
               nreg, nreg - nskip, nskip);
     if (migrated) save_regions();     /* 迁移完立刻写回持久路径（老 tmpfs 文件留着无害） */
+}
+
+/* ---- 操作表落盘（ops.conf，T2.7）------------------------------------------------------
+ * 格式（docs/OPS_PLAN.md §2.8，逐字）：`#vtouch-ops v1` 起头；一条操作 = op 行 + N 条 step 行 ——
+ *   op <名> gate <门控区域id|-> autooff <0|1>
+ *   step <type> <a1> <a2> <a3> <a4> <ms>
+ * 保存：.tmp + rename（同 save_regions，掉电不会留半截文件）；失败挂 g_ops_save_pending、
+ * 1s 后退避重试（节奏同 save_failed）；成功一行「ops.conf 已存 N 条」。
+ * 加载：版本门（首行不认识 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；只补缺
+ * （核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
+#define OPS_CONF_VER  1
+#define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
+#define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS / 编辑层 OPE_MAX_STEPS（面板不 include 核心头） */
+
+/* 核心操作表里有没有这个名字（启动回灌「只补缺」靠它；与 region_exists 同款）。 */
+static int op_exists(const char *name)
+{
+    int i, n = vtouch_op_count();
+    for (i = 0; i < n; i++) {
+        char cur[16];
+        if (vtouch_get_op(i, cur, sizeof cur, NULL, NULL, 0, NULL) == 0 && strcmp(cur, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+/* 落盘失败：把请求重新挂上、定好 1s 后重试（不刷盘），并返回 -1。节奏/风格与 save_failed 同款。 */
+static int ops_save_failed(void)
+{
+    g_ops_save_pending = 1;
+    g_ops_save_retry_t = now_ms() + 1000;
+    return -1;
+}
+static int save_ops(void)
+{
+    char tmppath[128];
+    int i, n;
+    region_conf_dir();     /* 与 regions.conf 同目录（/data/local/vtouch-runtime，持久分区） */
+    snprintf(tmppath, sizeof tmppath, "%s.tmp", OPS_CONF_FILE);
+    /* 先写 .tmp 再 rename：掉电/被杀不会留下半截文件（半截文件会被版本门整份丢弃 = 操作全丢） */
+    FILE *f = fopen(tmppath, "w");
+    if (!f) { ALOGE("ops.conf 写入失败 %s: %s", tmppath, strerror(errno)); return ops_save_failed(); }
+    fprintf(f, "#vtouch-ops v%d\n", OPS_CONF_VER);
+    n = vtouch_op_count();
+    for (i = 0; i < n; i++) {
+        char name[16], gate[16];
+        int steps = 0, autoff = 0, s;
+        if (vtouch_get_op(i, name, sizeof name, &steps, gate, sizeof gate, &autoff) != 0) continue;
+        /* gate 空串 = 无门控 → 按 spec 写占位符 `-`（读回时还原空串）；悬空 id 原样写（核心允悬空） */
+        fprintf(f, "op %s gate %s autooff %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0);
+        for (s = 0; s < steps; s++) {
+            int t, a1, a2, a3, a4, ms;
+            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms) != 0) continue;
+            fprintf(f, "step %d %d %d %d %d %d\n", t, a1, a2, a3, a4, ms);
+        }
+    }
+    if (fclose(f) != 0) { ALOGE("ops.conf 落盘失败: %s", strerror(errno)); return ops_save_failed(); }
+    if (rename(tmppath, OPS_CONF_FILE) != 0) {
+        ALOGE("ops.conf rename 失败: %s", strerror(errno));
+        return ops_save_failed();
+    }
+    g_ops_save_pending = 0;      /* 只有真落盘成功才清请求（唯一写者=渲染线程 / 启动期主线程） */
+    g_ops_save_retry_t = 0;
+    ALOGI("ops.conf 已存 %d 条", n);
+    return 0;
+}
+/* 结算一条从文件读到的记录（下一条 op 行 / EOF 时调用）。返回 0=补入 / 1=跳过（核心已有）/
+ * -1=坏记录（已警告）。一条坏记录不影响后面的记录。 */
+static int ops_load_put(const char *name, const char *gate, int autoff,
+                        const int *flat, int nsteps, int bad)
+{
+    if (bad || nsteps < 1) {
+        ALOGW("ops.conf 跳过一条坏记录（%s%s）", name[0] ? name : "无名记录", bad ? "，字段非法" : "，无步骤行");
+        return -1;
+    }
+    if (op_exists(name)) {
+        ALOGI("ops.conf %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
+        return 1;
+    }
+    if (vtouch_op_put(name, gate, autoff, flat, nsteps) != 0) {
+        ALOGW("ops.conf 跳过 %s（核心拒收或编辑超时，见上一行 glue 日志, %d 步）", name, nsteps);
+        return -1;
+    }
+    return 0;
+}
+static void load_ops(void)
+{
+    char line[192];
+    int ver = 0, nrec = 0, nok = 0, nskip = 0, nbad = 0, orphan = 0, rc = 0;
+    /* 待结算的一条（op 行 + 其后 step 行）：下一条 op 行/EOF 才结算 —— 半截记录不落表 */
+    char nm[16] = {0};
+    char gt[16] = {0};
+    int  ao = 0, nst = 0, bad = 0;
+    int  flat[OPS_MAX_STEPS * 6];
+    FILE *f = fopen(OPS_CONF_FILE, "r");
+    if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
+    /* 版本门：无版本行 / 版本不符 = 旧版本残留 → 整份丢弃；照 regions.conf 口径改写当前表 */
+    if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 || ver != OPS_CONF_VER) {
+        fclose(f);
+        ALOGI("ops.conf 旧格式/版本不符 → 丢弃清空");
+        save_ops();
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        char a[16], b[16];
+        int ao2 = 0, t, a1, a2, a3, a4, ms;
+        int pn = sscanf(line, "op %15s gate %15s autooff %d", a, b, &ao2);
+        if (pn >= 1) {                    /* op 行（字段不全会只匹配 1/2 个）—— 先结算上一条 */
+            if (nm[0]) {
+                nrec++;
+                rc = ops_load_put(nm, gt, ao, flat, nst, bad);
+                if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
+                nm[0] = 0;
+            }
+            if (pn == 3) {
+                snprintf(nm, sizeof nm, "%s", a);
+                /* gate `-` = 无门控（保存侧占位符）→ 还原空串；悬空 id 原样带（核心允许悬空） */
+                snprintf(gt, sizeof gt, "%s", (b[0] == '-' && b[1] == 0) ? "" : b);
+                ao = ao2 ? 1 : 0;
+                nst = 0; bad = 0;
+            } else {
+                ALOGW("ops.conf 跳过一条坏记录（op 行字段不全）");
+                nrec++; nbad++;
+                nm[0] = 0;
+            }
+        } else if (sscanf(line, "step %d %d %d %d %d %d", &t, &a1, &a2, &a3, &a4, &ms) == 6) {
+            if (!nm[0]) {
+                if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
+                continue;
+            }
+            orphan = 0;
+            if (nst < OPS_MAX_STEPS) {
+                flat[nst * 6 + 0] = t; flat[nst * 6 + 1] = a1; flat[nst * 6 + 2] = a2;
+                flat[nst * 6 + 3] = a3; flat[nst * 6 + 4] = a4; flat[nst * 6 + 5] = ms;
+                nst++;
+            } else bad = 1;               /* 步数越上限：整条按坏记录处理（核心只收 1..32） */
+        } else if (strncmp(line, "step ", 5) == 0) {   /* step 行解析失败（字段残缺）→ 整条作废 */
+            if (nm[0]) bad = 1;
+            else if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
+        }
+        /* 其余不识别的行（未来扩展/空行）静默忽略 —— 与 load_regions 同口径 */
+    }
+    if (nm[0]) {                          /* 结算最后一条 */
+        nrec++;
+        rc = ops_load_put(nm, gt, ao, flat, nst, bad);
+        if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
+    }
+    fclose(f);
+    if (nrec > 0 && (nskip || nbad))
+        ALOGI("ops.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 %d、坏记录 %d）",
+              nrec, nok, nskip + nbad, nskip, nbad);
 }
 static void gen_id(char *out, int circle)
 {
@@ -1810,6 +1966,7 @@ static void op_new(void)
     gen_op_name(nm);
     if (vtouch_op_put(nm, "", 0, wait100, 1) == 0) {
         ALOGI("op new %s", nm);
+        g_ops_save_pending = 1;      /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
         g_force_frames = 3;
     } else {
         ALOGW("op new 失败 %s（核心拒或编辑超时）", nm);
@@ -1826,6 +1983,7 @@ static void op_del_by_name(const char *name)
         return;
     }
     ALOGI("op del %s n=%d", name, vtouch_op_count());
+    g_ops_save_pending = 1;          /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
     g_force_frames = 3;
 }
 
@@ -2336,6 +2494,7 @@ static void op_edit_save(void)
         }
         old_settled = !strcmp(g_ope_del_owed, g_ope_orig);   /* 记在清零前：这个旧名已确认不在表里 */
         g_ope_del_owed[0] = 0;
+        g_ops_save_pending = 1;      /* 表里少了一条（欠账补删掉）→ 落盘（T2.7） */
     }
     rc = ope_name_ok(g_ope_orig, g_ope_name);
     if (rc != 0) {
@@ -2366,6 +2525,7 @@ static void op_edit_save(void)
         return;
     }
     snprintf(g_ope_saved_as, sizeof g_ope_saved_as, "%s", g_ope_name);   /* 登记成功名：重试时它在表里，不再判成重名 */
+    g_ops_save_pending = 1;                      /* 整条已落表 → 渲染线程那一拍写 ops.conf（T2.7） */
     /* 需要删旧名 ⟺ 改过名 且 旧名不是刚补删掉的那个（old≠del_owed：del_owed 补成后已按规格清零，
      * settled 承接同一条门槛 —— 回读已确认表里没有它，再删一次纯属空转）。 */
     if (strcmp(g_ope_orig, g_ope_name) && !old_settled) {
@@ -2911,6 +3071,10 @@ static void *render_thread_fn(void *)
         if (g_save_pending && (g_save_retry_t == 0 || now_ms() >= g_save_retry_t)) {
             save_regions();
         }
+        /* 操作表（ops.conf，T2.7）同款、**独立** pending/退避：两块文件各写各的，一块失败不拖另一块。 */
+        if (g_ops_save_pending && (g_ops_save_retry_t == 0 || now_ms() >= g_ops_save_retry_t)) {
+            save_ops();
+        }
         /* 「关闭 UI」/恢复的日志：ui_show_cb 跑在 WS(触摸)线程上、不许在那里同步写日志，
          * 只置标志，由这里打（隐藏期间本循环仍在 30ms 跑，所以不会丢）。 */
         if (g_ui_log_pending >= 0) {
@@ -3218,6 +3382,7 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
 #endif
     if (vtouch_init(7, argv) != 0) return -2;
     load_regions();   /* 上次落盘的表（regions.conf），没有则空表 */
+    load_ops();       /* 上次落盘的操作表（ops.conf）：只补缺（核心已有同名不动）；坏记录单条跳过 */
     ALOGI("panel init %dx%d regions=%d t=+%.0fms", w, h, vtouch_region_count(),
           (double)t_since_start());
     g_poll_on = 1;
