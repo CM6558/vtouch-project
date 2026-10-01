@@ -72,6 +72,37 @@ vt.onRegion("c1", "down", function (h) {
 base64 内嵌进 `build/vtouch_onefile.js`（~3.6MB），推到 `/sdcard/vtouch.js` 后 require 即可 ——
 设备上没有该二进制或版本不对时，它会自己写进去并用 md5 校验（当前手机里放的就是这一版）。
 
+## su 脚本入口（不装 AutoJs 也能起）
+
+主机侧 `python scripts/pack_su.py` 把 `build/vtouchd_ui` base64 内嵌进模板 `clients/vtouch.sh`
+（三个占位符 `<<PAYLOAD_MD5>>` / `<<PAYLOAD_SIZE>>` / `<<PAYLOAD>>` 在 `clients/vtouch.sh:17-18`，
+载荷写在标记行 `__VTOUCH_PAYLOAD_BELOW__` 之下，`:111-112`），生成**设备侧自包含入口**
+`build/vtouch.sh`（产物只写 LF，`scripts/pack_su.py:43`；打包器自带「载荷解回来逐字节等于源二进制」
+自检，`:37-40`）。设备上只要放这一个文件：
+
+```sh
+adb push build/vtouch.sh /sdcard/vtouch.sh
+su -c 'sh /sdcard/vtouch.sh start'      # 装 + 起（幂等：已在跑只报状态）
+su -c 'sh /sdcard/vtouch.sh status'     # 核心/面板 pid + 端口 + md5 + 日志尾
+su -c 'sh /sdcard/vtouch.sh stop'       # SIGTERM → 先停面板、再放 EVIOCGRAB；10s 不退才 SIGKILL
+su -c 'sh /sdcard/vtouch.sh install'    # 只装不启
+```
+
+| 子命令 | 行为 |
+|---|---|
+| `install` | 解载荷 → 长度/md5 对账 → `chmod 755` → 原子 `mv` → **回读 md5**（`clients/vtouch.sh:41-52`）；设备上已是同一 md5 就直接跳过（`:36-40`） |
+| `start` | 先 `install`，再起核心并等日志出现 `engine=on`（最多 8s；`:55-75`） |
+| `stop` | 没在跑就直说；跑着就 `SIGTERM`（核心自己先停面板、再放 grab），10s 没退 `SIGKILL`（`:77-90`） |
+| `status` | 内嵌版本与设备已装两份 md5 对摆，核心/面板 pid + 端口 27183（`/proc/net/tcp` 找 `6a2f`）+ 日志尾 15 行（`:92-98`） |
+
+「装完必回读」是这套入口的口径：安装链每一步都对账（长度 `:45`、md5 `:47`、回读 md5 `:50-51`），
+`status` 又用 pidof / 端口 / md5 三样把「跑没跑、听没听、装的是不是这份」一次摆出来 ——
+md5 不一致就是没装上或被换过。无参数 = 用法 + 退出 2（`:105`）；非 root = 提示 + 退出 1（`:24`）。
+
+`clients/vtouch.sh` 是**模板**（保留占位符，别直接推它）；`build/vtouch.sh` 是产物（不入库，换核心就
+重跑打包器；同一输入两次打包逐字节一致）。老 AutoJs6 通道（`clients/vtouch.js` / 单文件版）原样保留，
+两条路互不影响。
+
 ## 逻辑尺寸：启动时自动获取
 
 尺寸不是"屏幕多大"，是这套系统的**坐标契约**（区域表 / 区域事件 / 注入命令 / 脚本看到的
