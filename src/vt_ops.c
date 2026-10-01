@@ -272,6 +272,18 @@ static void op_drop_busy(void)
     op_ring_line("op 丢弃 忙\n");
 }
 
+/* 帧内丢弃：客户端帧事务（begin_frame..end_frame）开着时不能起跑操作。
+ * 机制：起跑会直接写 g.virt 并 emit，而 end_frame 的 memcpy(g.virt, g.staged) 会按 begin_frame 时的
+ * 快照把「当时为空」的槽抹回空 ⇒ 设备侧永远拿不到 tracking_id=-1 的收尾（悬空触点）；
+ * abort 的抬指也因为 down 已被抹掉而发不出去。全库不变式：直写 g.virt 的写方必须避让帧事务
+ * （先例 vt_ws.c 的 up/down/move 命令门；粘触点由 vt_frame.c 的 owner_reset 治）。
+ * 日志形态与「忙」一致（stderr + 环行）。 */
+static void op_drop_frame(void)
+{
+    fprintf(stderr, "vtouchd: op 丢弃 帧内\n");
+    op_ring_line("op 丢弃 帧内\n");
+}
+
 /* 现在的阶段手指按着没有（撞槽自检 / 中止抬指都看它）。 */
 static int op_finger_down(void)
 {
@@ -319,6 +331,7 @@ static void op_finish(void)
     fprintf(stderr, "vtouchd: op 完成 %s 用时=%llums\n", R.name, (unsigned long long)ms);
     op_ev_push("done", R.nsteps, R.nsteps);
     R.active = 0;
+    R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
@@ -529,13 +542,15 @@ void vt_ops_run(const char *name)
     int i, k, slot = -1;
 
     if (R.active) { op_drop_busy(); return; }
+    if (g.frame_open) { op_drop_frame(); return; }           /* 帧事务开着：直写 g.virt 会被 end_frame 的 staged 回填抹掉（悬空触点） */
     n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
     if (n < 1 || n > OP_NAME_MAX) { op_drop("操作不存在", NULL); return; }
     memcpy(nm, name, n); nm[n] = 0;
     for (i = 0; i < g.op_count; i++) if (!strcmp(g.ops[i].name, nm)) break;
     if (i >= g.op_count) { op_drop("操作不存在", nm); return; }
     for (k = 0; k < g.vslots; k++) {
-        if (g.virt[k].down || g.virt[k].pending_up || g.staged[k].down) continue;
+        if (g.virt[k].down || g.virt[k].pending_up ||
+            g.staged[k].down || g.staged[k].pending_up) continue;
         slot = k; break;
     }
     if (slot < 0) { op_drop("没空闲槽", nm); return; }
