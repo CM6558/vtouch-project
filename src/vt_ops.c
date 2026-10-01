@@ -15,7 +15,9 @@
  *     补执行 —— 执行器任何路径都不在帧窗内写 g.virt（R2a 封口 / L8）；
  *     冻结期 vt_ops_next_deadline_ms 返回 -1、不参与第四档（帧关靠 WS fd 活动唤醒）。
  *   · 操作表与执行器状态都只在主线程读写（编辑邮箱在 vtouch_poll_step 里吃、执行器也在主线程跑）——
- *     与区域表不同，这里不需要 region_lock 那把锁。
+ *     它们自己不需要锁；但门控检查（起跑）与自动关（完成）要读改**区域表**（gate 的存在性 /
+ *     kind / toggle_on）—— 那部分照区域线程同款锁纪律：持 g.region_lock 判定 / 改值，锁外
+ *     环行 + 日志（锁内不 I/O）。
  *
  * 依赖：包含 vt_internal.h 之后，g 就是共享内存里的那份状态（见 vt_internal.h 的 g_ptr 宏）。
  * 守卫：整文件在 VT_UI 分支内 —— 默认构建里本文件编成空 TU（build.sh 用通配把 src 下的 .c 一起链）。
@@ -203,7 +205,7 @@ void vt_ops_clear(void)
  * 本次运行（spec §7）。字段与用途：
  *   active  1 = 有一条操作在跑；idx = 起跑时的表下标（回显 g.op_run）
  *   name    快照名（表被删了日志也得有名字）；nsteps/steps[] = 快照步表
- *   gate/auto_off  门控字段：本期只抄不用（门控 / 自动关批 3 生效，spec §4.3）
+ *   gate/auto_off  门控字段：起跑快照带入；起跑门控检查与跑完自动关用它（批 3 落地，spec §4.3）
  *   step    当前步下标（0 起）；t0 = 本步名义开始时刻；deadline = 下一次动作的到点（单调毫秒）
  *   phase   步内阶段（PH_*）；slot = 全程占用的虚拟槽
  *   hold/dur/nsamp/sample  点按按住时长 / 滑动时长、采样点数、下一个采样点下标
@@ -251,6 +253,20 @@ enum { PH_BEGIN = 0, PH_TAP_UP, PH_SWIPE_MOVE, PH_SWIPE_UP, PH_WAIT };
 
 /* 单调毫秒（执行器的时间全走它：不累加拍数、不混墙钟，到点判据不漂）。 */
 static uint64_t op_now_ms(void) { return now_ns() / 1000000ull; }
+
+/* 高频明细开关（L9 / spec §8 第 10 条）：滑动每采样点一行默认**不**打，env `VTOUCH_OPS_TRACE=1`
+ * 才开。env 读一次存静态 —— 之后只是一次分支判断，不碰环境、不影响时序；默认零输出。
+ * 首次求值发现开着时打一行提示：测试阶段一眼确认开关生效。 */
+static int op_trace_on(void)
+{
+    static int on = -1;                                      /* -1 = env 还没读过 */
+    if (on < 0) {
+        const char *v = getenv("VTOUCH_OPS_TRACE");
+        on = (v && strcmp(v, "1") == 0) ? 1 : 0;
+        if (on) fprintf(stderr, "vtouchd: op trace 开（VTOUCH_OPS_TRACE=1）\n");
+    }
+    return on;
+}
 
 /* 往共享内存事件环推一行（面板日志 + 立即重画；与 mark_ev 同源 —— 都是主线程）。 */
 static void op_ring_line(const char *s)
@@ -338,12 +354,44 @@ static void op_conflict_abort(void)
     vt_ops_abort("reset/断连");
 }
 
-/* 完成（最后一步走完）：日志 + 环行 + 状态归位。门控 auto_off 的翻回（批 3）加在这里。 */
+/* 自动关（spec §4.3；批 3）：正常完成（op_finish）且快照 auto_off=1 时把门控开关翻回关。
+ * 门控 id 取起跑快照 R.gate（运行中改表 / 删表影响不到本次，spec §7）；找不到区域 / 区域不是
+ * 开关型 → 跳过（悬空引用允许 —— 同起跑门控的安全侧口径；不投递、不改值）。
+ * 锁纪律与 T3.1 §4.2 翻转同款：持 region_lock 改 toggle_on，解锁后再投递
+ * （toggle_ev 环行 + 日志）—— 锁内改值、锁外环行/日志。 */
+static void op_auto_off(void)
+{
+    char id[REGION_ID_MAX + 1];
+    int i, hit = 0;
+
+    if (!R.auto_off || !R.gate[0]) return;                   /* 没开自动关 / 没门控：无事可做 */
+    pthread_mutex_lock(&g.region_lock);
+    for (i = 0; i < g.region_count; i++) {
+        if (strcmp(g.regions[i].id, R.gate) != 0) continue;
+        if (g.regions[i].kind == 1) {                        /* 只有开关型有 toggle_on 可翻 */
+            g.regions[i].toggle_on = 0;
+            memcpy(id, g.regions[i].id, sizeof id);
+            hit = 1;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    if (!hit) return;                                        /* 未找到 / 非开关型：跳过（悬空引用允许：不改值、不投递） */
+    {
+        char msg[48];
+        int n = snprintf(msg, sizeof msg, "toggle_ev %s %d", id, 0);   /* 环行格式与 T3.1 §4.2 逐字同款 */
+        if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
+        fprintf(stderr, "vtouchd: 区域 %s 开关 → 关\n", id);
+    }
+}
+
+/* 完成（最后一步走完）：日志 + 环行 + 自动关（auto_off 翻回门控开关）+ 状态归位。 */
 static void op_finish(void)
 {
     uint64_t ms = op_now_ms() - R.t_start;
     fprintf(stderr, "vtouchd: op 完成 %s 用时=%llums\n", R.name, (unsigned long long)ms);
     op_ev_push("done", R.nsteps, R.nsteps);
+    op_auto_off();                                           /* 仅正常完成翻回；中止不翻（中止≠跑完，spec §4.3） */
     R.active = 0;
     R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
@@ -407,6 +455,7 @@ static void op_begin_step(void)
 static void op_advance(void)
 {
     const struct vt_step *st;
+    int lx, ly;
     switch (R.phase) {
     case PH_BEGIN:
         op_begin_step();
@@ -417,8 +466,11 @@ static void op_advance(void)
         break;
     case PH_SWIPE_MOVE:
         st = &R.steps[R.step];
-        if (op_finger_ll("move", op_lerp(st->a1, st->a3, R.sample, R.nsamp),
-                                 op_lerp(st->a2, st->a4, R.sample, R.nsamp)) != 0) { op_conflict_abort(); return; }
+        lx = op_lerp(st->a1, st->a3, R.sample, R.nsamp);
+        ly = op_lerp(st->a2, st->a4, R.sample, R.nsamp);
+        if (op_finger_ll("move", lx, ly) != 0) { op_conflict_abort(); return; }
+        if (op_trace_on())                                   /* L9：默认零输出（判定只一次分支） */
+            fprintf(stderr, "vtouchd: op 采样 %s %d/%d %d,%d\n", R.name, R.sample, R.nsamp, lx, ly);
         if (R.sample >= R.nsamp) {                           /* 末点 = 终点；up 下一拍（隔一帧） */
             R.phase = PH_SWIPE_UP;
             R.deadline = R.t0 + (uint64_t)R.dur;
@@ -591,7 +643,10 @@ int vt_ops_next_deadline_ms(void)
  *   ② 查表命中后整条**快照**进 R（步骤表一起抄）：运行中面板改表 / 删表都影响不到本次（spec §7）；
  *   ③ 挑槽同时看 virt[] / staged[] / pending_up —— 帧内暂存与待抬的触点都还占着槽（down 会被
  *   set_virtual 拒），全空才真的空闲；挑不到就丢弃（不排队、不等待）。
- *   门控（gate / auto_off）本期只抄进快照 + 日志（`门控=<r1|无>`），门控拦截与自动关批 3 生效。
+ *   门控（gate / auto_off）批 3 起生效：gate 非空先过门控检查 —— 锁内判定（必须存在且
+ *   kind==toggle 且 toggle_on==1，否则 `op 丢弃 门控拦截`），锁外记日志；检查插在②与③之间：
+ *   先问「能不能跑」，再问「有没有槽」。auto_off 只在正常完成（op_finish）翻回门控开关，
+ *   中止不翻（中止≠跑完）；翻回的锁纪律与 T3.1 §4.2 同款（锁内改值、锁外环行/日志）。
  */
 void vt_ops_run(const char *name)
 {
@@ -606,6 +661,28 @@ void vt_ops_run(const char *name)
     memcpy(nm, name, n); nm[n] = 0;
     for (i = 0; i < g.op_count; i++) if (!strcmp(g.ops[i].name, nm)) break;
     if (i >= g.op_count) { op_drop("操作不存在", nm); return; }
+    /* 门控检查（spec §4.3；批 3）：gate 非空 → 找区域；必须存在且 kind==toggle 且 toggle_on==1
+     * 才放行，否则拒绝 + `op 丢弃 门控拦截`（解析失败同理 —— 安全侧）。放在查表命中后、挑槽前：
+     * 先问「能不能跑」（门控），再问「有没有槽」（资源）。判定要读区域表（区域线程会写 toggle_on），
+     * 照 T3.1 锁纪律：持 region_lock 判定、解锁后再记日志（锁内不 I/O）。 */
+    if (g.ops[i].gate[0]) {
+        int gate_on = 0;
+        const char *gate_why = "区域不存在";                 /* 拦截原因（stderr 明细用；放行时置 NULL） */
+        pthread_mutex_lock(&g.region_lock);
+        for (k = 0; k < g.region_count; k++) {
+            if (strcmp(g.regions[k].id, g.ops[i].gate) != 0) continue;
+            if (g.regions[k].kind != 1) gate_why = "非开关型";
+            else if (g.regions[k].toggle_on != 1) gate_why = "未开";
+            else { gate_on = 1; gate_why = NULL; }
+            break;
+        }
+        pthread_mutex_unlock(&g.region_lock);
+        if (!gate_on) {
+            op_drop("门控拦截", nm);
+            if (gate_why) fprintf(stderr, "vtouchd: op 门控 %s 拦截原因=%s\n", nm, gate_why);
+            return;
+        }
+    }
     for (k = 0; k < g.vslots; k++) {
         if (g.virt[k].down || g.virt[k].pending_up ||
             g.staged[k].down || g.staged[k].pending_up) continue;
