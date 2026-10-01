@@ -57,17 +57,17 @@ void regions_clear(void)
     region_gen++;                    /* 区域线程看到代次变化会自己清私有状态 */
     pthread_mutex_unlock(&g.region_lock);
 }
-/* 区域 id 合法性：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX。
- * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致 —— 核心是**单点校验**：脚本经 WS 推的 id
- * 与面板经共享内存邮箱推的 id 都从这里过。核心放行而面板字形表里没有的字符（CJK / `!` 之流）
- * 只会被画成方框，所以这道门必须守在核心侧。
+/* 名字合法性（区域 id / 操作名共用）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX；合法返回 1。
+ * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致 —— 核心是**单点校验**：脚本经 WS 推的 id、
+ * 面板经共享内存邮箱推的 id 与操作名（vt_ops.c）都从这里过。核心放行而面板字形表里没有的字符
+ * （CJK / `!` 之流）只会被画成方框，所以这道门必须守在核心侧。
  */
-static int id_ok(const char *id, size_t n)
+int vt_id_ok(const char *s, size_t n)
 {
     size_t i;
     if (n < 1 || n > REGION_ID_MAX) return 0;
     for (i = 0; i < n; i++) {
-        char ch = id[i];
+        char ch = s[i];
         if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
               (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 0;
     }
@@ -93,9 +93,9 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
     int i, rc = 0;
     if (!id) return -1;
     n = strlen(id);
-    /* 单点校验（见 id_ok）：字符集 [A-Za-z0-9_-] + 长度 1..REGION_ID_MAX ⇒ 非法一律 -1，
+    /* 单点校验（见 vt_id_ok）：字符集 [A-Za-z0-9_-] + 长度 1..REGION_ID_MAX ⇒ 非法一律 -1，
      * WS 侧据此自动回 err region（cmd_region 不用改）。 */
-    if (!id_ok(id, n)) return -1;
+    if (!vt_id_ok(id, n)) return -1;
     if (type != 0 && type != 1) return -1;
     /* 几何范围：**不再要求落在竖屏框内、也不再要求非负**（2026-09-18）。面板的「跟随屏幕方向」语义是
      * 「视口坐标不变」（以当前方向左上角为原点的坐标原样保留），区域在某个方向下可以落在屏外 ——
@@ -184,9 +184,9 @@ int region_rename(const char *old_id, const char *new_id)
     int i;
     if (!old_id || !new_id) return -1;
     n = strlen(new_id);
-    /* 同一把尺子（见 id_ok）：字符集/长度非法直接拒。
+    /* 同一把尺子（见 vt_id_ok）：字符集/长度非法直接拒。
      * 「改成同名」不走重名分支 —— 先比 old/new 再查重的顺序在下面，原样保留。 */
-    if (!id_ok(new_id, n)) return -1;
+    if (!vt_id_ok(new_id, n)) return -1;
     pthread_mutex_lock(&g.region_lock);
     if (strcmp(old_id, new_id) != 0) {
         for (i = 0; i < g.region_count; i++) {
