@@ -166,6 +166,8 @@ void vt_shm_edit_apply(void)
         fprintf(stderr, "vtouchd: op 编辑 stop\n");
         vt_ops_abort("停止按钮");
         break;
+    case VT_EDIT_BIND:   region_bind(e.id, e.new_id, (int)e.type); break;    /* id=区域, new_id=操作名（"-"=解除）, type=时机(0/1/2) */
+    case VT_EDIT_KIND:   region_kind_set(e.id, (int)e.type); break;          /* id=区域, type=kind(0/1) */
     default: break;
     }
     S_b->edit_applied = e.seq;

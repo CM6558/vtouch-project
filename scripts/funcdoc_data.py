@@ -60,14 +60,30 @@ DOCS = {
     note="低频事件；只报物理手指。报文末尾带 <ms>：事件发生的墙钟毫秒（与脚本 Date.now() 同基准），由 ts_mono 换算而来 —— 脚本算按压时长/防抖/看延迟用它。"),
 "region_apply": dict(brief="处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。",
     params=[("ev", "来自 region_q 的事件")],
-    note="三张状态表是线程私有的，只在 region_lock 里读区域表。"),
+    note="状态表（含 T3.1 的触发锁存 r_trig_latch）是线程私有的，只在 region_lock 里读区域表；"
+         "触发/开关判定同在锁内，投递（vt_ops_trigger_post / toggle_ev 环行 / 日志）与 region_ev_send 一样在解锁之后。"),
 "phys_ev_send": dict(brief="物理触摸流（sub phys）：按 slot 报 down/move/up，不按区域过滤。",
     params=[("ev", "来自 region_q 的事件（带逻辑坐标与时间戳）")],
     note="「按下之后一路跟到抬起」的底座：区域事件出了区域就断了，这条流不断。只订 SUB_PHYS 才发；只报物理手指，虚拟触点不进（防自激）。"),
 "region_thread_main": dict(brief="区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。",
     params=[("arg", "未使用")], ret="NULL（线程不主动退出）。",
-    note="只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。"
-         "空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。"),
+    note="只消费队列、只写自己的状态表（含开关位）与触发槽、只往出站队列/事件环塞 region_ev 与 toggle_ev；"
+         "绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。"),
+
+# ---------------- §4 触发侧（T3.1；面板编辑入口，定义在 vt_region.c） ----------------
+"region_bind": dict(brief="把区域绑定到操作（opname 允许悬空：触发时解析失败则丢弃）；ev：0=无 1=按下 2=完整按压。",
+    params=[("id", "区域名（必须已存在）"), ("opname", "操作名；空串或 \"-\" = 解除绑定（区 B 邮箱契约）"),
+            ("ev", "触发时机：0=无 1=按下 2=完整按压")],
+    ret="0 成功；-1 区域不存在或参数非法。",
+    note="面板编辑入口（区 B 邮箱 VT_EDIT_BIND → vt_shm_edit_apply 调）。名字过 vt_id_ok 同一把尺子；"
+         "引用不存在的操作**允许悬空**（触发时解析失败由执行器丢弃）。原地更新（同 id、同表位）"
+         "**不动 region_gen** —— 与 region_add 原地分支同款口径：代次一变区域线程会整表清零私有状态，"
+         "编辑绑定/面板重启重放配置时进行中的按压会丢 up/锁存。"),
+"region_kind_set": dict(brief="设置区域类型（0=普通 1=开关型）。",
+    params=[("id", "区域名（必须已存在）"), ("kind", "0=普通 1=开关型")],
+    ret="0 成功；-1 区域不存在或参数非法。",
+    note="面板编辑入口（区 B 邮箱 VT_EDIT_KIND → vt_shm_edit_apply 调）。原地更新（同 id、同表位）"
+         "**不动 region_gen**（同 region_bind 口径）；只改 kind，toggle_on 原样保留（切回开关型时沿用上次开关态）。"),
 
 # ---------------- §7 物理输入 ----------------
 "phys_event_one": dict(brief="分发单条 input_event（槽选择 / 按下抬起 / 位置 / SYN_DROPPED 兜底 / SYN_REPORT 结帧）。",

@@ -9,6 +9,11 @@ static unsigned char r_slot_in[MAX_PHYS][MAX_REGIONS];
 static unsigned char r_slot_hit[MAX_PHYS][MAX_REGIONS];
 /* move 去重基准按 [slot][region] 分开存：多个区域重叠时，同一个 move 要给每个命中的区域各报一条 */
 static int r_slot_last_x[MAX_PHYS][MAX_REGIONS], r_slot_last_y[MAX_PHYS][MAX_REGIONS];
+#ifdef VT_UI
+/* 「完整按压」触发锁存（T3.1）：down 命中置 1，该槽 up 时消费（开关翻转 / 完整按压触发）并清零。
+ * 与 r_slot_hit 并列、不参与五事件判定（OPS_PLAN §4.1）；结构变化（代次 bump）随其余私有状态一起重置。 */
+static unsigned char r_trig_latch[MAX_PHYS][MAX_REGIONS];
+#endif
 /* 区域队列的唤醒 fd（eventfd）。**故意不放进 struct vt_state**：它是本模块的私有同步原语，
  * 放进去要动共享内存布局（面板侧也得跟着 bump VT_SHM_VERSION）。生产者只能调 region_q_wake()。 */
 static int S_q_wake = -1;
@@ -117,8 +122,8 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
             rg->type = type;
             rg->enabled = enabled ? 1 : 0;
             rg->a1 = a1; rg->a2 = a2; rg->a3 = a3; rg->a4 = a4;
-            /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把四张私有状态表
-             * 整表清零 —— 按下进行中的 slot_hit/slot_in 一起没了，手指抬起时判不出 up。
+            /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把五张私有状态表
+             * 整表清零 —— 按下进行中的 slot_hit/slot_in/触发锁存一起没了，手指抬起时判不出 up。
              * 触发场景（都是非人为的内部写）：面板拖改/重启回灌 regions.conf、区域跟随旋转的整表重算、
              * 脚本重连时重放自己那批区域（同名 = 走这条更新分支）—— 正好落在某次按住期间就丢 up。
              * 索引没移动 ⇒ 私有状态无需失效。只有结构变化（regions_clear / region_del 的移位）才 bump。 */
@@ -207,6 +212,73 @@ int region_rename(const char *old_id, const char *new_id)
     }
     pthread_mutex_unlock(&g.region_lock);
     return -1;
+}
+#endif /* VT_UI */
+
+#ifdef VT_UI
+/**
+ * (vtouch-doc: region_bind)
+ * @brief 把区域绑定到操作（opname 允许悬空：触发时解析失败则丢弃）；ev：0=无 1=按下 2=完整按压。
+ * @param   id       区域名（必须已存在）
+ * @param   opname   操作名；空串或 "-" = 解除绑定（区 B 邮箱契约）
+ * @param   ev       触发时机：0=无 1=按下 2=完整按压
+ * @return  0 成功；-1 区域不存在或参数非法。
+ * @note    面板编辑入口（区 B 邮箱 VT_EDIT_BIND → vt_shm_edit_apply 调）。名字过 vt_id_ok 同一把尺子；引用不存在的操作**允许悬空**（触发时解析失败由执行器丢弃）。原地更新（同 id、同表位）**不动 region_gen** —— 与 region_add 原地分支同款口径：代次一变区域线程会整表清零私有状态，编辑绑定/面板重启重放配置时进行中的按压会丢 up/锁存。
+ */
+int region_bind(const char *id, const char *opname, int ev)
+{
+    struct region *rg;
+    size_t n;
+    int i, rc = -1;
+    if (!id || !opname) return -1;
+    if (ev < 0 || ev > 2) return -1;                     /* 时机：0=无 1=按下 2=完整按压 */
+    n = strlen(opname);
+    /* 名字过 vt_id_ok 同一把尺子；"-" 是区 B 邮箱契约的「解除」哨兵，不落成字面操作名。 */
+    if (n > 0 && strcmp(opname, "-") != 0 && !vt_id_ok(opname, n)) return -1;
+    pthread_mutex_lock(&g.region_lock);
+    for (i = 0; i < g.region_count; i++) {
+        if (strcmp(g.regions[i].id, id) != 0) continue;
+        rg = &g.regions[i];
+        memset(rg->trig_op, 0, sizeof rg->trig_op);
+        if (n > 0 && strcmp(opname, "-") != 0) memcpy(rg->trig_op, opname, n);
+        rg->trig_ev = ev;
+        /* 原地更新（同 id、同表位）**不动 region_gen**：代次一变，区域线程会把五张私有状态表
+         * 整表清零 —— 编辑绑定/面板重启重放配置时，进行中的按压会丢 up 与触发锁存
+         * （与 region_add 原地更新分支同款口径，见其注释）。 */
+        rc = 0;
+        fprintf(stderr, "vtouchd: op 编辑 bind %s → %s ev%d\n",
+                rg->id, rg->trig_op[0] ? rg->trig_op : "无", ev);
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return rc;
+}
+/**
+ * (vtouch-doc: region_kind_set)
+ * @brief 设置区域类型（0=普通 1=开关型）。
+ * @param   id       区域名（必须已存在）
+ * @param   kind     0=普通 1=开关型
+ * @return  0 成功；-1 区域不存在或参数非法。
+ * @note    面板编辑入口（区 B 邮箱 VT_EDIT_KIND → vt_shm_edit_apply 调）。原地更新（同 id、同表位）**不动 region_gen**（同 region_bind 口径）；只改 kind，toggle_on 原样保留（切回开关型时沿用上次开关态）。
+ */
+int region_kind_set(const char *id, int kind)
+{
+    struct region *rg;
+    int i, rc = -1;
+    if (!id) return -1;
+    if (kind != 0 && kind != 1) return -1;               /* 0=普通 1=开关型 */
+    pthread_mutex_lock(&g.region_lock);
+    for (i = 0; i < g.region_count; i++) {
+        if (strcmp(g.regions[i].id, id) != 0) continue;
+        rg = &g.regions[i];
+        rg->kind = kind ? 1 : 0;                         /* toggle_on 不复位：切回开关型保留上次开关态 */
+        /* 原地更新：不动 region_gen（同 region_bind 口径）。 */
+        rc = 0;
+        fprintf(stderr, "vtouchd: op 编辑 kind %s → %d\n", rg->id, rg->kind);
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return rc;
 }
 #endif /* VT_UI */
 
@@ -334,11 +406,22 @@ struct region_pend_ev {
     int slot, lx, ly;
     uint64_t ts;
 };
+#ifdef VT_UI
+/* region_apply 攒「触发/开关」的本地槽位（T3.1）：同 pend 口径 —— id/操作名必须拷进本地缓冲
+ * （解锁后区域表可能已被改名/删除/清空），判定在锁内、投递在解锁之后。
+ * what：R_TRIG_DOWN=按下触发 / R_TRIG_FULL=完整按压触发 / R_TRIG_TOGGLE=开关翻转（on=翻转后的值）。 */
+enum { R_TRIG_DOWN = 1, R_TRIG_FULL = 2, R_TRIG_TOGGLE = 3 };
+struct region_pend_trig {
+    char id[REGION_ID_MAX + 1];
+    char op[OP_NAME_MAX + 1];
+    int slot, what, on;
+};
+#endif
 /**
  * (vtouch-doc: region_apply)
  * @brief 处理一个物理事件：先按 slot 报物理触摸流（sub phys），再做区域五事件判定。
  * @param   ev       来自 region_q 的事件
- * @note    三张状态表是线程私有的，只在 region_lock 里读区域表。
+ * @note    状态表（含 T3.1 的触发锁存 r_trig_latch）是线程私有的，只在 region_lock 里读区域表；触发/开关判定同在锁内，投递（vt_ops_trigger_post / toggle_ev 环行 / 日志）与 region_ev_send 一样在解锁之后。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   五事件判定的事件化版本（§4.4）。与完整版 region_match 逐分支等价：
@@ -366,9 +449,14 @@ void region_apply(const struct vt_ev *ev)
      * 判定顺序与发事件的相对顺序逐字不变；**唯一语义变化**是「事件在解锁后才投递」：判定与投递
      * 之间表可能已被 clear/删除/改名，事件仍按**判定时**的 id 投递（id 已拷进 pend[].id，读不到被
      * 改写的缓冲）⇒ 「该区域在表里已不存在了，还收到它的 up/exit」这种交错在改动前不可能出现、
-     * 现在可能（顺序/内容判定仍用当拍锁内读到的表）。 */
+     * 现在可能（顺序/内容判定仍用当拍锁内读到的表）。
+     * T3.1 触发/开关同模式：判定在锁内，触发投递 / toggle_ev 环行 / 日志攒进 ptrig[]、解锁后再投。 */
     struct region_pend_ev pend[MAX_REGIONS * 2];
     int np = 0, rid, hit, i, lx = ev->x, ly = ev->y, slot = ev->slot;
+#ifdef VT_UI
+    struct region_pend_trig ptrig[MAX_REGIONS * 2];
+    int nt = 0;
+#endif
     if (slot < 0 || slot >= MAX_PHYS) return;
 /* 攒一条待发事件（只在锁内调用）；满了丢最末这条（新的），绝不越界。 */
 #define PEND(_id, _name) do {                                                \
@@ -380,23 +468,49 @@ void region_apply(const struct vt_ev *ev)
             np++;                                                            \
         }                                                                    \
     } while (0)
+#ifdef VT_UI
+/* 攒一条待投递的触发/开关（只在锁内调用）；满了丢最末这条（新的），绝不越界。 */
+#define TRIGPEND(_id, _op, _what, _on) do {                                  \
+        if (nt < (int)(sizeof ptrig / sizeof ptrig[0])) {                    \
+            memcpy(ptrig[nt].id, (_id), strlen(_id) + 1);                    \
+            memcpy(ptrig[nt].op, (_op), strlen(_op) + 1);                    \
+            ptrig[nt].slot = slot;                                           \
+            ptrig[nt].what = (_what);                                        \
+            ptrig[nt].on = (_on);                                            \
+            nt++;                                                            \
+        }                                                                    \
+    } while (0)
+#endif
     phys_ev_send(ev);                                /* ① 物理触摸流：按 slot 报，与区域无关 */
-    pthread_mutex_lock(&g.region_lock);              /* ② 区域五事件判定 */
+    pthread_mutex_lock(&g.region_lock);              /* ② 区域五事件判定 + 触发/开关判定 */
     if (r_seen_gen != region_gen) {                 /* region clear/del（结构变化才 bump）：重置本线程私有状态 */
         r_seen_gen = region_gen;
         memset(r_slot_in, 0, sizeof r_slot_in);
         memset(r_slot_hit, 0, sizeof r_slot_hit);
         memset(r_slot_last_x, 0, sizeof r_slot_last_x);
         memset(r_slot_last_y, 0, sizeof r_slot_last_y);
+#ifdef VT_UI
+        memset(r_trig_latch, 0, sizeof r_trig_latch);
+#endif
     }
     for (rid = 0; rid < g.region_count; rid++) {
         struct region *rg = &g.regions[rid];
         int was_in = r_slot_in[slot][rid];
-        if (!rg->enabled) { r_slot_in[slot][rid] = 0; r_slot_hit[slot][rid] = 0; continue; }
+        if (!rg->enabled) { r_slot_in[slot][rid] = 0; r_slot_hit[slot][rid] = 0;
+#ifdef VT_UI
+            r_trig_latch[slot][rid] = 0;             /* 状态卫生：禁用中的区域不留锁存（同 slot_hit 口径） */
+#endif
+            continue; }
         hit = region_hit(rg, lx, ly);
         if (ev->action == VT_DOWN) {
             if (hit) { r_slot_hit[slot][rid] = 1; PEND(rg->id, "down"); }
             r_slot_last_x[slot][rid] = lx; r_slot_last_y[slot][rid] = ly;
+#ifdef VT_UI
+            /* 按下重定基线（=hit）：未命中清 0 —— 万一某次 up 被队列丢过，陈旧锁存会在下次抬起误触发。 */
+            r_trig_latch[slot][rid] = hit;
+            if (hit && rg->trig_ev == 1 && rg->trig_op[0])
+                TRIGPEND(rg->id, rg->trig_op, R_TRIG_DOWN, 0);   /* 时机「按下」：down 命中那一刻触发 */
+#endif
         } else if (ev->action == VT_MOVE) {
             if (hit && !was_in) PEND(rg->id, "enter");
             else if (!hit && was_in) PEND(rg->id, "exit");
@@ -407,6 +521,17 @@ void region_apply(const struct vt_ev *ev)
         } else {
             if ((r_slot_hit[slot][rid] || was_in) && hit) PEND(rg->id, "up");
             r_slot_hit[slot][rid] = 0;
+#ifdef VT_UI
+            if (r_trig_latch[slot][rid]) {           /* 「完整按压」：down 命中过 → 抬起时结算一次（位置不限） */
+                if (rg->kind == 1) {                 /* 开关型：翻转（持锁写）+ 推 toggle_ev（锁外） */
+                    rg->toggle_on = !rg->toggle_on;
+                    TRIGPEND(rg->id, "", R_TRIG_TOGGLE, rg->toggle_on);
+                }
+                if (rg->trig_ev == 2 && rg->trig_op[0])
+                    TRIGPEND(rg->id, rg->trig_op, R_TRIG_FULL, 0);   /* 时机「完整按压」 */
+                r_trig_latch[slot][rid] = 0;
+            }
+#endif
         }
         r_slot_in[slot][rid] = (ev->action != VT_UP && hit) ? 1 : 0;
     }
@@ -415,14 +540,32 @@ void region_apply(const struct vt_ev *ev)
      * 按 rid 升序，每个区域内先 down / enter|exit，后 move / up。 */
     for (i = 0; i < np; i++)
         region_ev_send(pend[i].id, pend[i].name, pend[i].slot, pend[i].lx, pend[i].ly, pend[i].ts);
+#ifdef VT_UI
+    /* ③' 触发/开关投递（同样解锁后）：按判定时的入账顺序 —— 开关翻转在前、完整按压触发在后。 */
+    for (i = 0; i < nt; i++) {
+        if (ptrig[i].what == R_TRIG_TOGGLE) {
+            char msg[48];
+            int n = snprintf(msg, sizeof msg, "toggle_ev %s %d", ptrig[i].id, ptrig[i].on);
+            if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
+            fprintf(stderr, "vtouchd: 区域 %s 开关 → %s\n", ptrig[i].id, ptrig[i].on ? "开" : "关");
+        } else {
+            vt_ops_trigger_post(ptrig[i].op, ptrig[i].slot);
+            fprintf(stderr, "vtouchd: op 触发 %s → %s（%s）\n", ptrig[i].id, ptrig[i].op,
+                    ptrig[i].what == R_TRIG_DOWN ? "按下" : "完整按压");
+        }
+    }
+#endif
 #undef PEND
+#ifdef VT_UI
+#undef TRIGPEND
+#endif
 }
 /**
  * (vtouch-doc: region_thread_main)
  * @brief 区域线程主循环：pop region_q → region_apply；区域表代次变了就重置私有状态。
  * @param   arg      未使用
  * @return  NULL（线程不主动退出）。
- * @note    只消费队列、只写自己的状态表、只往出站队列塞 region_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。
+ * @note    只消费队列、只写自己的状态表（含开关位）与触发槽、只往出站队列/事件环塞 region_ev 与 toggle_ev；绝不注入、绝不直写 socket、绝不碰 phys[]/virt[]。空闲时阻塞在唤醒 fd（eventfd）上 —— 事件入队即醒，不再 1ms 空转。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   区域线程（§4.4）：只消费队列、只写自己的状态表、只把 region_ev 塞进出站队列。
