@@ -9,8 +9,10 @@
  *   · 执行器：起跑 = 整条快照（运行中改表 / 删表影响不到本次，spec §7）；一次只跑一条；
  *     状态机用单调钟绝对时间表；手指走 virt[]（身份段 = phys_slots + 槽号），与 WS 客户端
  *     同槽时按「不避让」记 `op 槽冲突`（spec §3.5）；到点由 poll 的第四档唤醒（不新起线程）。
- *   · 避让客户端帧事务（R1 封口）：起跑遇帧窗丢弃（`op 丢弃 帧内`）；运行中遇帧窗**冻结**
+ *   · 避让客户端帧事务（R1 + R2a 封口）：起跑遇帧窗丢弃（`op 丢弃 帧内`）；运行中遇帧窗**冻结**
  *     （vt_ops_tick 不推进 / 不自检 / 不消费触发），帧关后把 t0/deadline/t_start 一起平移暂停时长；
+ *     中止（面板 STOP / 收尾）遇帧窗**推迟**：原因记账进 R.stop_why，帧关后的第一次 tick 在解冻点
+ *     补执行 —— 执行器任何路径都不在帧窗内写 g.virt（R2a 封口 / L8）；
  *     冻结期 vt_ops_next_deadline_ms 返回 -1、不参与第四档（帧关靠 WS fd 活动唤醒）。
  *   · 操作表与执行器状态都只在主线程读写（编辑邮箱在 vtouch_poll_step 里吃、执行器也在主线程跑）——
  *     与区域表不同，这里不需要 region_lock 那把锁。
@@ -211,6 +213,9 @@ void vt_ops_clear(void)
  *   t_start   起跑时刻（完成日志的「用时」）
  *   frozen / frozen_since  帧冻结标记与冻结起点（帧窗内暂停推进；帧关后把 t0/deadline/t_start
  *              一起平移暂停时长 —— 见 vt_ops_tick）；起跑 / 完成 / 中止都清零，不泄漏到下一次运行
+ *   stop_pending / stop_why  帧窗内被推迟的中止（R2a 封口 / L8）：原因快照进 stop_why（短缓冲、
+ *              安全截断，不存裸指针）；帧关后的第一次 tick 在解冻点补执行（见 vt_ops_tick）；
+ *              起跑 / 完成 / 中止正常路径三处清零，不泄漏到下一次运行
  * 全部只有主线程碰（编辑邮箱在 poll_step 里吃、执行器也在主线程跑）—— 不需要锁。
  */
 static struct {
@@ -236,6 +241,8 @@ static struct {
     uint64_t t_start;
     int      frozen;                                         /* 帧冻结中（R1 封口）：帧窗内暂停推进 */
     uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
+    int      stop_pending;                                   /* 帧窗内被推迟的中止（R2a 封口）：帧关后补执行；三处清零 */
+    char     stop_why[32];                                   /* 推迟中止的原因快照（短缓冲、安全截断；不存裸指针） */
 } R;
 
 /* 步内阶段：BEGIN=本步的起始动作还没发；TAP_UP=等 hold 到点抬指；SWIPE_MOVE=等下一个采样点；
@@ -340,6 +347,7 @@ static void op_finish(void)
     R.active = 0;
     R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
+    R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
@@ -530,6 +538,16 @@ void vt_ops_tick(void)
         R.frozen = 0;
         fprintf(stderr, "vtouchd: op 恢复 帧内\n");
     }
+    /* 帧窗内被推迟的中止（R2a 封口 / L8）：帧关后在这里补执行 —— 上面的守卫保证走到这里时
+     * frame_open 已为 0（帧还开着的话 R.active 的 tick 在前面就 return 了），vt_ops_abort 走
+     * 正常路径（抬指 + 归位 + 日志）。该轮到此为止：不再消费触发 / 自检 / 推进（该轮不再做别的）。
+     * 单线程论证：面板 STOP 在 poll_step 的 vt_shm_edit_apply 里落账、紧接着就是本次 tick（同一轮、
+     * 任何 WS 处理之前）—— 帧还开着 ⇒ 上面冻结分支已把 frozen 置起，这里必然在解冻之后。 */
+    if (R.stop_pending) {
+        R.stop_pending = 0;                                  /* 先清账再执行：abort 内不再看到这笔 */
+        vt_ops_abort(R.stop_why);
+        return;
+    }
     op_consume_trigger();                                    /* 可能起跑一条操作（deadline = 现在） */
     if (!R.active) return;
     op_selfcheck();                                          /* 手指被外力动过：该记的记、该中止的中止 */
@@ -606,6 +624,7 @@ void vt_ops_run(const char *name)
     R.step = 0;
     R.conflict = 0;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
+    R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.hold = R.dur = R.nsamp = R.sample = 0;
     R.t_start = op_now_ms();
     R.t0 = R.t_start;
@@ -635,6 +654,17 @@ void vt_ops_abort(const char *why)
 {
     int i;
     if (!R.active) return;
+    /* 帧窗避让（R2a 封口 / L8）：帧事务开着时抬指会被 end_frame 的 memcpy(g.virt, g.staged) 按
+     * begin 快照回填（设备侧已抬、virt 又变回「按着」并 emit ⇒ 粘指）—— 执行器任何路径都不在
+     * 帧窗内写 g.virt。改成记账：原因按短缓冲安全截断存进 R.stop_why（不存裸指针），帧关后的
+     * 第一次 tick 在解冻点补执行（见 vt_ops_tick）。收尾（cleanup）撞帧窗时同样推迟且不再执行 ——
+     * 进程随即 teardown，触点由 uinput 设备销毁一并释放（日志可能少一条 `op 中止`，测试阶段核）。 */
+    if (g.frame_open) {
+        R.stop_pending = 1;
+        snprintf(R.stop_why, sizeof R.stop_why, "%s", why ? why : "?");
+        fprintf(stderr, "vtouchd: op 中止推迟 帧内 原因=%s\n", R.stop_why);
+        return;                                              /* 不动 virt / 状态：帧窗内零 g.virt 写入 */
+    }
     i = R.step < R.nsteps ? R.step + 1 : R.nsteps;
     if (op_finger_down()) op_finger_raw("up", R.rx, R.ry);
     fprintf(stderr, "vtouchd: op 中止 %s 步 %d/%d 原因=%s\n", R.name, i, R.nsteps, why ? why : "?");
@@ -642,6 +672,7 @@ void vt_ops_abort(const char *why)
     R.active = 0;
     R.slot = -1;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
+    R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
