@@ -16,7 +16,7 @@
 - **默认（无 UI）构建必须保持可编译**：所有新增核心代码放 `#ifdef VT_UI` 分支内（`vt_ops.c` 整文件同 `vt_shm.c` 的守卫写法）。
 - 告警零容忍：`-Wall -Wextra -Werror`；单文件秒查 `sh scripts/check_syntax.sh <文件>`。
 - 函数文档唯一来源 `scripts/funcdoc_data.py`：**每个新函数的文案先写进库**，再 `python scripts/apply_funcdoc.py`；`--check` 必须 **0 处**。
-- Shell：`#!/system/bin/sh`（toybox），不用 bashism；模板与产物都要 `sh -n` 通过。
+- Shell：`#!/system/bin/sh`（toybox），不用 bashism；**产物**（模板替换后的形态）必须 `sh -n` 通过——模板本身含占位符、按定义不可直接解析，不设模板解析门。产物必须 LF，且 LF 断言用**字节判据**（`python -c "…count(b'\x0d')"`），不用 `grep -c $'\r'`（在 MSYS 空转）。
 - 契约：**WS 协议零改动**；不加线程、不加命令通道；坐标一律**竖屏逻辑坐标**；`VT_SHM_VERSION` 3→4 **在批 2 一次落全部布局**（spec §2.5），批 3 只加逻辑/UI。
 - 提交：中文信息写到 `build/_msg_<x>.txt`（UTF-8）后 `git commit -F`；**每任务一提交、不自动 push**。
 - 每批开工前：**全量备份 + 恢复点**（house 规矩：备份到 `build/_backup_full_<TS>/`，含 `git status` / `git diff --binary` 快照与未跟踪文件清单）。
@@ -253,7 +253,7 @@ python scripts/pack_su.py
 sh -n build/vtouch.sh                       # 语法（git-bash sh；toybox 真跑留给测试阶段）
 md5sum build/vtouch.sh                      # 记录
 python scripts/pack_su.py && md5sum build/vtouch.sh   # 再打一遍：两次 md5 必须一致（确定性）
-grep -c $'\r' build/vtouch.sh               # 必须为 0（LF）
+python -c "print(open('build/vtouch.sh','rb').read().count(b'\x0d'))"   # 必须为 0（LF 字节判据；grep 版在 MSYS 空转）
 ```
 
 - [ ] **Step 3: 提交**
