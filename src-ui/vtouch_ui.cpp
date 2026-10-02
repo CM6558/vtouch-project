@@ -721,15 +721,17 @@ static void load_regions(void)
     if (migrated) save_regions();     /* 迁移完立刻写回持久路径（老 tmpfs 文件留着无害） */
 }
 
-/* ---- 操作表落盘（ops.conf，T2.7）------------------------------------------------------
- * 格式（docs/OPS_PLAN.md §2.8，逐字）：`#vtouch-ops v1` 起头；一条操作 = op 行 + N 条 step 行 ——
+/* ---- 操作表落盘（ops.conf，T2.7；v2 T3.3）----------------------------------------------
+ * 格式（docs/OPS_PLAN_V2.md §6.2，逐字）：`#vtouch-ops v2` 起头；一条操作 = op 行 + N 条 step 行 ——
  *   op <名> gate <门控区域id|-> autooff <0|1>
- *   step <type> <a1> <a2> <a3> <a4> <ms>
+ *   step <type> <a1> <a2> <a3> <a4> <ms> <ref>
+ * ref 空写 `-`（读回还原空串）；变量照写负数（如 -1）；读端兼容 v1（6 字段 step 行：ref 缺省空、
+ * a3 照读——v1 滑动步的 a3 = x2，不能按缺省丢）。
  * 保存：.tmp + rename（同 save_regions，掉电不会留半截文件）；失败挂 g_ops_save_pending、
  * 1s 后退避重试（节奏同 save_failed）；成功一行「ops.conf 已存 N 条」。
- * 加载：版本门（首行不认识 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；只补缺
- * （核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
-#define OPS_CONF_VER  1
+ * 加载：版本门（v1 兼容读入 / v2 本格式；其余 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；
+ * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
+#define OPS_CONF_VER  2
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
 #define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS / 编辑层 OPE_MAX_STEPS（面板不 include 核心头） */
 
@@ -770,8 +772,10 @@ static int save_ops(void)
         fprintf(f, "op %s gate %s autooff %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0);
         for (s = 0; s < steps; s++) {
             int t, a1, a2, a3, a4, ms;
-            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, NULL, 0) != 0) continue;
-            fprintf(f, "step %d %d %d %d %d %d\n", t, a1, a2, a3, a4, ms);
+            char ref[REGION_ID_MAX + 1];
+            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref) != 0) continue;
+            /* ref 空 = 无引用 → 写占位符 `-`（读回时还原空串，同 gate 口径）；变量（负数）照写 */
+            fprintf(f, "step %d %d %d %d %d %d %s\n", t, a1, a2, a3, a4, ms, ref[0] ? ref : "-");
         }
     }
     if (fclose(f) != 0) { ALOGE("ops.conf 落盘失败: %s", strerror(errno)); return ops_save_failed(); }
@@ -787,7 +791,8 @@ static int save_ops(void)
 /* 结算一条从文件读到的记录（下一条 op 行 / EOF 时调用）。返回 0=补入 / 1=跳过（核心已有）/
  * -1=坏记录（已警告）。一条坏记录不影响后面的记录。 */
 static int ops_load_put(const char *name, const char *gate, int autoff,
-                        const int *flat, int nsteps, int bad)
+                        const int *flat, const char (*refs)[REGION_ID_MAX + 1],
+                        int nsteps, int bad)
 {
     if (bad || nsteps < 1) {
         ALOGW("ops.conf 跳过一条坏记录（%s%s）", name[0] ? name : "无名记录", bad ? "，字段非法" : "，无步骤行");
@@ -797,7 +802,7 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
         ALOGI("ops.conf %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
         return 1;
     }
-    if (vtouch_op_put(name, gate, autoff, flat, NULL, nsteps) != 0) {   /* refs=NULL：ops.conf v1 无 ref 列（T3.3 升 v2 再填） */
+    if (vtouch_op_put(name, gate, autoff, flat, refs, nsteps) != 0) {   /* refs = 每步 ref（v1 行读入时缺省空） */
         ALOGW("ops.conf 跳过 %s（核心拒收或编辑超时，见上一行 glue 日志, %d 步）", name, nsteps);
         return -1;
     }
@@ -812,10 +817,13 @@ static void load_ops(void)
     char gt[16] = {0};
     int  ao = 0, nst = 0, bad = 0;
     int  flat[OPS_MAX_STEPS * 6];
+    char refs[OPS_MAX_STEPS][REGION_ID_MAX + 1];   /* v2 每步 ref（v1 行读入时缺省空） */
     FILE *f = fopen(OPS_CONF_FILE, "r");
     if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
-    /* 版本门：无版本行 / 版本不符 = 旧版本残留 → 整份丢弃；照 regions.conf 口径改写当前表 */
-    if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 || ver != OPS_CONF_VER) {
+    /* 版本门：v1（兼容读入，spec §6.2）与 v2（本格式）都认；无版本行 / 其他版本 = 旧版本残留 →
+     * 整份丢弃；照 regions.conf 口径改写当前表 */
+    if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 ||
+        (ver != 1 && ver != OPS_CONF_VER)) {
         fclose(f);
         ALOGI("ops.conf 旧格式/版本不符 → 丢弃清空");
         save_ops();
@@ -828,7 +836,7 @@ static void load_ops(void)
         if (pn >= 1) {                    /* op 行（字段不全会只匹配 1/2 个）—— 先结算上一条 */
             if (nm[0]) {
                 nrec++;
-                rc = ops_load_put(nm, gt, ao, flat, nst, bad);
+                rc = ops_load_put(nm, gt, ao, flat, refs, nst, bad);
                 if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
                 nm[0] = 0;
             }
@@ -843,26 +851,35 @@ static void load_ops(void)
                 nrec++; nbad++;
                 nm[0] = 0;
             }
-        } else if (sscanf(line, "step %d %d %d %d %d %d", &t, &a1, &a2, &a3, &a4, &ms) == 6) {
-            if (!nm[0]) {
-                if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
-                continue;
+        } else {
+            char rf[REGION_ID_MAX + 1];
+            int sn;
+            rf[0] = 0;                     /* ref 缺省空（v1 6 字段行） */
+            sn = sscanf(line, "step %d %d %d %d %d %d %15s", &t, &a1, &a2, &a3, &a4, &ms, rf);
+            if (sn == 6 || sn == 7) {      /* 6 字段 = v1 行（a3 照读：v1 滑动步 a3=x2，不按缺省丢）；
+                                            * 7 字段 = v2 行 */
+                if (!nm[0]) {
+                    if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
+                    continue;
+                }
+                orphan = 0;
+                if (rf[0] == '-' && rf[1] == 0) rf[0] = 0;   /* ref `-` = 空（写端占位符）→ 还原空串 */
+                if (nst < OPS_MAX_STEPS) {
+                    flat[nst * 6 + 0] = t; flat[nst * 6 + 1] = a1; flat[nst * 6 + 2] = a2;
+                    flat[nst * 6 + 3] = a3; flat[nst * 6 + 4] = a4; flat[nst * 6 + 5] = ms;
+                    snprintf(refs[nst], sizeof refs[nst], "%s", rf);
+                    nst++;
+                } else bad = 1;            /* 步数越上限：整条按坏记录处理（核心只收 1..32） */
+            } else if (strncmp(line, "step ", 5) == 0) {   /* step 行解析失败（字段残缺）→ 整条作废 */
+                if (nm[0]) bad = 1;
+                else if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
             }
-            orphan = 0;
-            if (nst < OPS_MAX_STEPS) {
-                flat[nst * 6 + 0] = t; flat[nst * 6 + 1] = a1; flat[nst * 6 + 2] = a2;
-                flat[nst * 6 + 3] = a3; flat[nst * 6 + 4] = a4; flat[nst * 6 + 5] = ms;
-                nst++;
-            } else bad = 1;               /* 步数越上限：整条按坏记录处理（核心只收 1..32） */
-        } else if (strncmp(line, "step ", 5) == 0) {   /* step 行解析失败（字段残缺）→ 整条作废 */
-            if (nm[0]) bad = 1;
-            else if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
+            /* 其余不识别的行（未来扩展/空行）静默忽略 —— 与 load_regions 同口径 */
         }
-        /* 其余不识别的行（未来扩展/空行）静默忽略 —— 与 load_regions 同口径 */
     }
     if (nm[0]) {                          /* 结算最后一条 */
         nrec++;
-        rc = ops_load_put(nm, gt, ao, flat, nst, bad);
+        rc = ops_load_put(nm, gt, ao, flat, refs, nst, bad);
         if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
     }
     fclose(f);
