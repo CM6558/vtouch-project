@@ -10,6 +10,7 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <pthread.h>
+#include <dirent.h>
 #include <errno.h>
 #include <math.h>
 #include <stdarg.h>
@@ -597,6 +598,8 @@ static int save_failed(void)
     g_save_retry_t = now_ms() + 1000;
     return -1;
 }
+/* 方案镜像钩子（v4 T1.1「方案文件层」段，定义见下）：两个 save 的落盘成功出口各调一次 */
+static void scheme_mirror(void);
 static int save_regions(void)
 {
     char tmppath[128];
@@ -639,6 +642,7 @@ static int save_regions(void)
     }
     g_save_pending = 0;      /* 只有真落盘成功才清请求（唯一写者=渲染线程 / 启动期主线程） */
     g_save_retry_t = 0;
+    scheme_mirror();         /* v4：镜像 live → schemes/<current>（失败告警不阻塞，见「方案文件层」） */
     return 0;
 }
 /* 核心表里有没有这个 id（面板只读区 A 的现役表；启动回灌「只补缺」靠它）。 */
@@ -822,6 +826,7 @@ static int save_ops(void)
     }
     g_ops_save_pending = 0;      /* 只有真落盘成功才清请求（唯一写者=渲染线程 / 启动期主线程） */
     g_ops_save_retry_t = 0;
+    scheme_mirror();             /* v4：镜像 live → schemes/<current>（失败告警不阻塞，见「方案文件层」） */
     ALOGI("ops.conf 已存 %d 条", n);
     return 0;
 }
@@ -929,6 +934,257 @@ static void load_ops(void)
     if (nrec > 0 && (nskip || nbad))
         ALOGI("ops.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 %d、坏记录 %d）",
               nrec, nok, nskip + nbad, nskip, nbad);
+}
+
+/* ---- 方案文件层（v4 T1.1：schemes/<名>/ + current / 迁移 / 镜像）------------------------------------
+ * 布局（docs/OPS_PLAN_V4.md §1）：REGION_CONF_DIR 下 regions.conf / ops.conf（live 工作副本，格式零改动）
+ * + current（一行方案名）+ schemes/<名>/{regions.conf,ops.conf}。不变量 live == schemes/<current>：
+ * 启动兜底迁移 + 强制同步（nativeInit）、save_regions / save_ops 落盘后镜像，共同保证。核心不感知方案。
+ * 迁移（spec §2）：live 任一存在 → 建「默认」收编（缺失份写空合法文件）；全新 → 建空「默认」；
+ * 冲突 → 自增「默认2 / 默认3…」；current 写定；日志 `方案 兜底迁移 → <名>（区域 N / 操作 M）`。
+ * 名字：用户输入走 scheme_name_ok（同 vt_id_ok 尺子）；内部兜底名「默认[N]」非 ASCII，不走字符集门
+ * （读取/枚举用 scheme_name_known 承认这两类）。 */
+#define SCHEME_DIR REGION_CONF_DIR "/schemes"
+#define SCHEME_CUR REGION_CONF_DIR "/current"
+#define SCHEME_LIST_MAX 64      /* scheme_list 一次最多枚举的方案数（T2.1 列表页缓冲按它定宽） */
+
+/* 方案名合法性（用户输入口；与区域 id / 操作名同一把尺子 vt_id_ok）：[A-Za-z0-9_-]、1..15、裸 `-` 除外。
+ * 0 ok / 1 空 / 2 超长 / 3 非法字符（含裸 `-`；`.` 等一律非法，天然排除 `.`/`..` 目录名）。
+ * 无「重名」位 —— 撞目录由 scheme_exists / scheme_list 单独判（T2.1 新建/改名用）。 */
+static int scheme_name_ok(const char *n)
+{
+    int i, len = (int)strlen(n);
+    if (len < 1) return 1;
+    if (len > 15) return 2;
+    if (len == 1 && n[0] == '-') return 3;    /* 裸 `-` = 解除/无门控哨兵（vt_id_ok 同款拒收） */
+    for (i = 0; i < len; i++) {
+        char ch = n[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
+    }
+    return 0;
+}
+/* current 读取与目录枚举的「承认」规则：长度/路径安全先过，再认合法用户名或内部兜底名「默认[N]」。 */
+static int scheme_name_known(const char *n)
+{
+    int len = (int)strlen(n);
+    if (len < 1 || len > 15 || strchr(n, '/')) return 0;
+    if (!strcmp(n, ".") || !strcmp(n, "..")) return 0;    /* 目录名恰好是这两者也不认（防越界） */
+    return scheme_name_ok(n) == 0 || strncmp(n, "默认", 6) == 0;
+}
+/* 方案目录是否存在（stat 判目录；迁移冲突自增 / T2.1 撞名检查用）。 */
+static int scheme_exists(const char *name)
+{
+    char path[160];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+/* qsort 比较器：方案名按字节序（strcmp）排（names 每格 16 字节）。 */
+static int scheme_name_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+/* 枚举 schemes/ 下的方案（readdir；只收承认名 scheme_name_known 的目录），字母序装进 names（每格 16 字节），
+ * 返回条数（≤ max）。目录不存在/读不了 = 0 条（面板退化为空列表，不报错）。 */
+static int scheme_list(char (*names)[16], int max)
+{
+    DIR *d = opendir(SCHEME_DIR);
+    struct dirent *e;
+    int n = 0;
+    if (!d) return 0;
+    while (n < max && (e = readdir(d)) != NULL) {
+        if (!scheme_name_known(e->d_name)) continue;    /* 滤 `.`/`..`、超长、非法名、外来目录 */
+        if (!scheme_exists(e->d_name)) continue;        /* 只收目录（dirent 的类型字段不可靠，用 stat） */
+        snprintf(names[n], 16, "%s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    qsort(names, (size_t)n, 16, scheme_name_cmp);
+    return n;
+}
+/* 读 current（一行名；容忍首尾空白 / 尾随换行）：0 且 out = 名（16 字节）；1 = 缺失/空/不可用（调用方走迁移）。
+ * 承认规则同 scheme_name_known（内部兜底名「默认」非 ASCII，不套字符集门）。 */
+static int scheme_cur_get(char *out)
+{
+    char line[64], *p, *q;
+    FILE *f = fopen(SCHEME_CUR, "rb");
+    out[0] = 0;
+    if (!f) return 1;
+    if (!fgets(line, sizeof line, f)) { fclose(f); return 1; }
+    fclose(f);
+    for (p = line; *p && *p != '\r' && *p != '\n'; p++) { }    /* 只认第一行 */
+    *p = 0;
+    p = line;
+    while (*p == ' ' || *p == '\t') p++;                       /* 去首空白 */
+    q = p + strlen(p);
+    while (q > p && (q[-1] == ' ' || q[-1] == '\t')) *--q = 0; /* 去尾空白 */
+    if (!scheme_name_known(p)) return 1;
+    snprintf(out, 16, "%s", p);
+    return 0;
+}
+/* 写 current（.tmp + rename，同 save_regions 口径：掉电不留半截）；名照写、无换行。0 / -1。
+ * 只接受「承认」的名字（空/超长/带 `/` 直接拒 —— 防御性；正常调用方已先过 scheme_name_ok）。 */
+static int scheme_cur_set(const char *name)
+{
+    char tmppath[128];
+    FILE *f;
+    if (!scheme_name_known(name)) return -1;
+    region_conf_dir();
+    snprintf(tmppath, sizeof tmppath, "%s.tmp", SCHEME_CUR);
+    f = fopen(tmppath, "wb");
+    if (!f) { ALOGE("current 写入失败 %s: %s", tmppath, strerror(errno)); return -1; }
+    fputs(name, f);
+    if (fclose(f) != 0 || rename(tmppath, SCHEME_CUR) != 0) {
+        ALOGE("current 落盘失败 %s: %s", SCHEME_CUR, strerror(errno));
+        remove(tmppath);
+        return -1;
+    }
+    return 0;
+}
+/* 写「空表合法文件」= 本表当前版本行一行（spec §2；.tmp + rename 同口径）。0 / -1。 */
+static int scheme_write_empty(const char *path, int kind)
+{
+    char tmppath[160];
+    FILE *f;
+    snprintf(tmppath, sizeof tmppath, "%s.tmp", path);
+    f = fopen(tmppath, "wb");
+    if (!f) return -1;
+    if (kind == 0) fprintf(f, "#vtouch-regions v%d\n", REGION_CONF_VER);
+    else           fprintf(f, "#vtouch-ops v%d\n", OPS_CONF_VER);
+    if (fclose(f) != 0 || rename(tmppath, path) != 0) { remove(tmppath); return -1; }
+    return 0;
+}
+/* 方案侧文件缺失 → 补空合法文件（「同步」里先补齐再复制；已存在则不动）。0 / -1。 */
+static int scheme_ensure_empty(const char *path, int kind)
+{
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return 0; }
+    return scheme_write_empty(path, kind);
+}
+/* 逐字节复制 src → dst（.tmp + rename；源缺失 → dst 处写空合法文件 —— 迁移「缺失那份」与镜像兜底同一口径）。
+ * 0 / -1（失败保留 errno，调用方打原因）。 */
+static int scheme_copy_file(const char *src, const char *dst, int kind)
+{
+    char tmppath[160];
+    unsigned char buf[4096];
+    size_t n;
+    int err = 0;
+    FILE *in = fopen(src, "rb");
+    FILE *out;
+    if (!in) {
+        if (errno != ENOENT) return -1;
+        return scheme_write_empty(dst, kind);     /* 源缺失 → 空表补齐 */
+    }
+    snprintf(tmppath, sizeof tmppath, "%s.tmp", dst);
+    out = fopen(tmppath, "wb");
+    if (!out) { err = errno; fclose(in); errno = err; return -1; }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { err = EIO; break; }
+    }
+    if (!err && ferror(in)) err = EIO;
+    fclose(in);
+    if (fclose(out) != 0 && !err) err = errno;
+    if (!err && rename(tmppath, dst) != 0) err = errno;
+    if (err) { remove(tmppath); errno = err; return -1; }
+    return 0;
+}
+/* 计数文件里按 `prefix` 开头的行数（迁移日志「区域 N / 操作 M」口径：从文件解析，空/缺 = 0）。 */
+static int scheme_count_lines(const char *path, const char *prefix)
+{
+    char line[256];
+    int n = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    while (fgets(line, sizeof line, f))
+        if (strncmp(line, prefix, strlen(prefix)) == 0) n++;
+    fclose(f);
+    return n;
+}
+/* 启动接管（spec §2；nativeInit 的 load_regions/load_ops 之前调）：current 指向的方案目录/两文件不全
+ * → 兜底迁移（建新方案收编 live / 建空「默认」，冲突自增），current 写定。out = 当前方案名（16 字节；
+ * 空 = 迁移失败 —— 不阻塞启动，调用方照旧按 live 文件继续）。日志逐字：
+ * `方案 兜底迁移 → <名>（区域 N / 操作 M）`（N/M 从落定后的方案文件解析计数）。 */
+static void scheme_migrate(char *out)
+{
+    char cur[16], name[16], path[160];
+    char names[SCHEME_LIST_MAX][16];
+    int nn, k, i, used;
+    out[0] = 0;
+    region_conf_dir();
+    if (mkdir(SCHEME_DIR, 0775) < 0 && errno != EEXIST) {
+        ALOGE("方案目录创建失败 %s: %s", SCHEME_DIR, strerror(errno));
+        return;
+    }
+    if (scheme_cur_get(cur) == 0) {
+        struct stat st;
+        int have_r, have_o;
+        snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, cur);
+        have_r = stat(path, &st) == 0;
+        snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, cur);
+        have_o = stat(path, &st) == 0;
+        if (have_r && have_o) { snprintf(out, 16, "%s", cur); return; }    /* 已是有效方案 */
+        ALOGW("方案 current=%s 的方案目录/文件缺失 → 兜底迁移", cur);
+    }
+    /* 冲突自增：默认 → 默认2 → 默认3…（先枚举承认名；枚举满可能被截断，逐个 stat 兜底） */
+    nn = scheme_list(names, SCHEME_LIST_MAX);
+    for (k = 1, used = 1; k <= 100000 && used; k++) {
+        if (k == 1) snprintf(name, sizeof name, "默认");
+        else        snprintf(name, sizeof name, "默认%d", k);
+        used = 0;
+        for (i = 0; i < nn; i++) if (!strcmp(names[i], name)) { used = 1; break; }
+        if (!used && nn == SCHEME_LIST_MAX && scheme_exists(name)) used = 1;
+    }
+    if (used) { ALOGE("方案兜底迁移：默认名冲突自增超限"); return; }
+    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
+    if (mkdir(path, 0775) < 0) { ALOGE("方案目录创建失败 %s: %s", path, strerror(errno)); return; }
+    /* 收编 live 两文件（缺失份自动写空合法文件；全新则两份都是空表 —— spec §2 同一实现） */
+    snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(REGION_CONF_NEW, path, 0) != 0) {
+        ALOGE("方案兜底迁移：收编 regions.conf 失败 %s: %s", path, strerror(errno));
+        return;
+    }
+    snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(OPS_CONF_FILE, path, 1) != 0) {
+        ALOGE("方案兜底迁移：收编 ops.conf 失败 %s: %s", path, strerror(errno));
+        return;
+    }
+    if (scheme_cur_set(name) != 0) return;     /* current 写定（失败已在里面报） */
+    {
+        int nr, no;
+        snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
+        nr = scheme_count_lines(path, "region ");
+        snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
+        no = scheme_count_lines(path, "op ");
+        ALOGI("方案 兜底迁移 → %s（区域 %d / 操作 %d）", name, nr, no);
+    }
+    snprintf(out, 16, "%s", name);
+}
+/* 启动强制同步（spec §2-3）：schemes/<name>/ 两文件 → live 两路径。方案侧缺失的份先补空合法文件
+ * （「缺失文件按写空合法文件补齐后再复制」），再逐字节复制。0 = 两文件都同步完成；-1 = 有失败
+ * （调用方告警并按现有 live 文件继续 —— 不阻塞启动、不影响注入）。 */
+static int scheme_sync_live(const char *name)
+{
+    char sp[160];
+    int rc = 0;
+    snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, name);
+    if (scheme_ensure_empty(sp, 0) != 0 || scheme_copy_file(sp, REGION_CONF_NEW, 0) != 0) rc = -1;
+    snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
+    if (scheme_ensure_empty(sp, 1) != 0 || scheme_copy_file(sp, OPS_CONF_FILE, 1) != 0) rc = -1;
+    return rc;
+}
+/* 存盘镜像（spec §3）：live 两文件 → schemes/<current>/ 同名复制。save_regions / save_ops 落盘成功后
+ * 各调一次（调用点 = 两个 save 的成功出口）。失败打 `方案 镜像失败 <名>: <原因>`（ALOGE）不阻塞、
+ * 不回滚 —— 下次存盘自然补齐。只写 schemes/、不碰 live ⇒ 不会递归触发保存。
+ * 无 current（迁移失败/尚未接管）→ 直接返回（迁移侧已报错；下次启动兜底再试）。 */
+static void scheme_mirror(void)
+{
+    char cur[16], sp[160];
+    if (scheme_cur_get(cur) != 0) return;
+    snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+    if (scheme_copy_file(REGION_CONF_NEW, sp, 0) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
+    snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, cur);
+    if (scheme_copy_file(OPS_CONF_FILE, sp, 1) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
 }
 static void gen_id(char *out, int circle)
 {
@@ -4704,6 +4960,13 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     { pthread_t th; if (pthread_create(&th, NULL, test_ev_thread, NULL) == 0) pthread_detach(th); }
 #endif
     if (vtouch_init(7, argv) != 0) return -2;
+    {   /* v4 方案接管（spec §2）：兜底迁移 → 强制同步（保证 live == schemes/<current>）→ 照旧加载。
+         * 同步失败只告警：按现有 live 文件继续（不阻塞启动、不影响注入），下次启动兜底再试。 */
+        char scm[16];
+        scheme_migrate(scm);
+        if (scm[0] && scheme_sync_live(scm) != 0)
+            ALOGW("方案 同步失败 %s: %s", scm, strerror(errno));
+    }
     load_regions();   /* 上次落盘的表（regions.conf），没有则空表 */
     load_ops();       /* 上次落盘的操作表（ops.conf）：只补缺（核心已有同名不动）；坏记录单条跳过 */
     ALOGI("panel init %dx%d regions=%d t=+%.0fms", w, h, vtouch_region_count(),
