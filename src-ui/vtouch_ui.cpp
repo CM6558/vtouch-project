@@ -1194,10 +1194,12 @@ static void scheme_mirror(void)
 /* ---- 方案切换执行器（v4 T1.2：预检 / 静默边界 / flush+写 live / clear+重放 / current+日志+刷新）------------
  * 事务顺序照 spec §4（编号同）：①预检（dry-run，零状态修改）②静默边界 ③flush 旧 ④写 live ⑤核心替换
  * （先区域后操作）⑥写 current ⑦日志 + UI 刷新。失败面：预检拒 → 原状；flush 失败仅告警；写 live 失败
- * → 核心未触、原状；核心单条拒收 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）；current 写失败
- * → 下次启动兜底迁移（不算切换失败）。
+ * → 核心未触（9 时 regions 已回滚，保持 live==schemes/<current>）；核心单条拒收 = 既有「坏记录单条
+ * 跳过 + 警告」口径（不算切换失败）；current 写失败 → 能回滚就整体回滚（live+核心 ← <旧>）并返回 10，
+ * 无 current 可回滚时保持旧行为（下次启动兜底迁移）。
  * scheme_switch 返回码（0 = 成功；非零 = 失败原因码，供调用方就地提示）：
- *   1 = 名字非法（空 / 超长 / 非法字符 / 裸 `-`）
+ *   1 = 名字非法（空 / 超长 / `/` / `.` / `..` / 裸 `-`；门 = scheme_name_known 承认域 ——
+ *       与方案列表 / current 同一把尺子，内部兜底名「默认[N]」放行）
  *   2 = 方案目录或文件缺失（schemes/<名>/ 目录或两文件之一读不到）
  *   3 = regions.conf 版本门不过（缺版本行 / 非当前版本）
  *   4 = regions.conf 坏行
@@ -1205,7 +1207,8 @@ static void scheme_mirror(void)
  *   6 = ops.conf 坏行（含：记录无步骤行 / 孤儿 step 行）
  *   7 = ops.conf 单条步数越限（>32）
  *   8 = 写 live regions.conf 失败（核心未触、原状）
- *   9 = 写 live ops.conf 失败（核心未触、原状） */
+ *   9 = 写 live ops.conf 失败（regions 已回滚、原状；核心未触）
+ *  10 = 写 current 失败（已整体回滚：live 与核心回到 <旧>、原状） */
 
 /* 行首识别词（预检用；词后跟空格/制表符才算该类别 —— 与 load 各分支的 sscanf 字面量同集合）。 */
 static int scheme_line_kw(const char *line, const char *kw)
@@ -1306,14 +1309,24 @@ static int scheme_precheck(const char *name)
 }
 /* 关闭操作编辑覆盖层（定义在操作编辑区块 T2.6；切换的静默边界要关掉它 —— 含全部子层与取点态）。 */
 static void op_edit_close(void);
-/* 切换执行（spec §4；返回码见段首注释）。name == current → 直接成功（no-op、零状态修改）。
- * 非 static：跨区块入口 —— T2.1「方案」页接线调用（本任务只落执行器；T1.1 文件层函数全 static）。 */
+/* 回滚复制（评审 I2 / Minor 3）：scheme_copy_file 的「源缺失 → 写空表」语义在回滚方向是危险的
+ * （源没了还写空表 = 把 live 清掉）—— 源缺失直接 -1（调用方告警、保持现状）；其余照常复制。0 / -1。 */
+static int scheme_restore_file(const char *src, const char *dst, int kind)
+{
+    FILE *f = fopen(src, "rb");
+    if (!f) return -1;
+    fclose(f);
+    return scheme_copy_file(src, dst, kind);
+}
+/* 切换执行（spec §4；返回码见段首注释）。名字门 = scheme_name_known 承认域（与 scheme_list /
+ * scheme_cur_get 同一把尺子 —— 内部兜底名「默认[N]」可切）。name == current → 直接成功（no-op、
+ * 零状态修改）。非 static：跨区块入口 —— T2.1「方案」页接线调用（本任务只落执行器；T1.1 文件层函数全 static）。 */
 int scheme_switch(const char *name)
 {
     char cur[16], sp[160], dp[160];
     int rc, rst = 0;
 
-    if (!name || scheme_name_ok(name) != 0) return 1;
+    if (!name || !scheme_name_known(name)) return 1;
     if (scheme_cur_get(cur) == 0 && strcmp(cur, name) == 0) return 0;    /* 已是当前 → no-op */
     rc = scheme_precheck(name);                                          /* ① 预检：坏 → 拒切、原状 */
     if (rc != 0) return rc;
@@ -1340,11 +1353,21 @@ int scheme_switch(const char *name)
         if (scheme_copy_file(OPS_CONF_FILE, dp, 1) != 0)
             ALOGW("方案 切换：flush %s/ops.conf 失败: %s", cur, strerror(errno));
     }
-    /* ④ 写 live（schemes/<new>/ 两文件 → live；复用 1.1 复制 helper。失败 → 核心未触、原状） */
+    /* ④ 写 live（schemes/<new>/ 两文件 → live；复用 1.1 复制 helper）。写失败 → 核心未触：8 时两文件
+     * 都还是原状（复制自身 .tmp + rename，失败不留半改）；9 时 regions 已换 → 用 ③ 刚写好的
+     * schemes/<cur>/regions.conf 回滚（失败仅告警），保持 live==schemes/<current>，防「重试切换的
+     * ③ flush 把新内容写回旧方案目录」（评审 I2）。 */
     snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, name);
     if (scheme_copy_file(sp, REGION_CONF_NEW, 0) != 0) return 8;
     snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
-    if (scheme_copy_file(sp, OPS_CONF_FILE, 1) != 0) return 9;
+    if (scheme_copy_file(sp, OPS_CONF_FILE, 1) != 0) {
+        if (cur[0]) {
+            snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+            if (scheme_restore_file(dp, REGION_CONF_NEW, 0) != 0)
+                ALOGW("方案 切换：回滚 live regions 失败: %s", strerror(errno));
+        }
+        return 9;
+    }
 
     /* ⑤ 核心替换（spec §4-5）：**先区域后操作**；清空后重放 ⇒ load 的「只补缺 / 重复跳过」均不触发
      * （全量补入）；单条被核心拒 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）。load 可重入
@@ -1354,9 +1377,28 @@ int scheme_switch(const char *name)
     vtouch_op_clear();
     load_ops();
 
-    /* ⑥ 写 current（失败 → 下次启动兜底迁移；不算切换失败） */
-    if (scheme_cur_set(name) != 0)
-        ALOGW("方案 切换 %s：current 未写定（下次启动兜底迁移）", name);
+    /* ⑥ 写 current（失败 → 整体回滚 <cur>；评审 Minor 3 复合边）。单回滚 live 不够：下一拍 save 的
+     * 写盘源是**核心表**（save_regions 从核心序列化），且切换后表变 ⇒ glue watch_table 会重置 save 位
+     * （单纯抑制不可靠）⇒ 连核心一起回滚（live+core ← <旧>），此后任何 save/mirror 只会把 <旧> 内容
+     * 写回 <旧> 目录。无 current 无从回滚 → 保持旧行为（mirror 无 current 直接返回、无损坏面）。 */
+    if (scheme_cur_set(name) != 0) {
+        if (!cur[0]) {
+            ALOGW("方案 切换 %s：current 未写定（下次启动兜底迁移）", name);
+        } else {
+            ALOGW("方案 切换 %s：current 未写定 → 回滚 %s", name, cur);
+            snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+            if (scheme_restore_file(dp, REGION_CONF_NEW, 0) != 0)
+                ALOGW("方案 切换：回滚 live regions 失败: %s", strerror(errno));
+            snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
+            if (scheme_restore_file(dp, OPS_CONF_FILE, 1) != 0)
+                ALOGW("方案 切换：回滚 live ops 失败: %s", strerror(errno));
+            vtouch_region_clear();
+            load_regions();
+            vtouch_op_clear();
+            load_ops();
+            return 10;
+        }
+    }
 
     /* ⑦ 日志（spec §8 逐字；N/M 从方案文件解析，口径同迁移日志）+ UI 刷新（区域侧走既有「表变了」
      * 刷新口径；区域 / 操作 / 方案页列表逐帧读核心，重画即重读） */
