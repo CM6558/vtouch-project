@@ -146,7 +146,7 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
 
 **Interfaces:**
 - Consumes: `vt_trig_data`、`OP_VAR_*`（T1.1/T1.2）。
-- Produces: `int vt_ops_run(const char *name, const struct vt_trig_data *td);`（**td=NULL = 手动运行**；原型同步）；执行器私有快照 `R.trig`；解析器（static，建议名 `op_resolve`：`(int v, int *out)` → `0` 成功 / `-1` 无值）。
+- Produces: `void vt_ops_run(const char *name, const struct vt_trig_data *td);`（**td=NULL = 手动运行**；原型同步）；执行器私有快照 `R.trig`；解析器（static，建议名 `op_resolve`：`(int v, int *out)` → `0` 成功 / `-1` 无值）。
 
 - [ ] **Step 1: `vt_ops_run` 扩参**：`op_consume_trigger` 传 `&td`（acquire 读全槽字段后）；`vt_shm.c` 的 `VT_EDIT_OP_RUN` 分派传 `NULL`；起跑把 `td` 快照进 `R.trig`。
 - [ ] **Step 2: 解析器**：`v>=0 → 字面`；`-5..-1 → 查 mask 位`，未设 → 中止（`原因=变量无值`，走既有 abort 机制，步号=当前步）。
