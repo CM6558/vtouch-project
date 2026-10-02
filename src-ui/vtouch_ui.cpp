@@ -122,7 +122,7 @@ static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
 static float g_pan_x = 780, g_pan_y = 200;
 static int g_sheet = 1;                   /* 内容页开/合（合 = 只留侧栏） */
 static int g_min = 0;                     /* 收起态：整窗只剩一条标题栏（会话内有效，重启展开） */
-static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日志 3=设置 */
+static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日志 3=设置 4=说明 */
 #define PAD_X 16
 #define PAD_Y 12
 #define TITLE_H 88
@@ -188,6 +188,13 @@ static float g_drag_ox = 0, g_drag_oy = 0;
 static int g_pick = 0;
 static int g_pick_se = -1;
 static int g_pick_sf = -1;
+/* 取点捕获标记（T3.2）：取点成功后在捕获点画 ~2 秒十字 + 坐标文字（spec §4）。存**竖屏逻辑坐标**
+ * （与回填/日志同一套；绘制前 p2c 换算，复用区域轮廓同款）；纯绘制 —— 不参与命中、不吞触摸、
+ * 不写共享内存。poll 线程写、渲染线程读（与 g_flash_t 同款「单帧竞态纯装饰」口径）；
+ * 多次取点以最新一次为准（重置过期）。 */
+static int g_pickmk_x = 0, g_pickmk_y = 0;
+static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无标记 */
+#define PICK_MARK_MS 2000                /* 标记存活时长（~2 秒） */
 /* g_need 无锁置位：只由渲染线程清零，其余线程只置 1（单字对齐存取原子；
  * 极小概率与清零竞态丢一次重画，按钮路径当前帧本就带新状态，WS 路径下次事件补画） */
 static volatile int g_need = 1;
@@ -1429,6 +1436,19 @@ static void build_overlay(int sw, int sh)
                 }
             }
         }
+        /* 取点捕获标记（T3.2）：~2 秒十字 + 坐标文字（x,y 十进制 = 竖屏逻辑坐标）。
+         * 纯绘制（spec §4）：不参与命中、不吞触摸、不写共享内存；过期即不画（渲染循环补擦除帧）。 */
+        if (g_pickmk_t && t - g_pickmk_t < PICK_MARK_MS) {
+            int mx, my;
+            p2c(g_pickmk_x, g_pickmk_y, &mx, &my);
+            ImU32 mc = IM_COL32(255, 140, 0, 255);          /* 橙：与区域红/绿、触点蓝区分 */
+            const float arm = 48.0f;
+            dl->AddLine(ImVec2((float)mx - arm, (float)my), ImVec2((float)mx + arm, (float)my), mc, 6.0f);
+            dl->AddLine(ImVec2((float)mx, (float)my - arm), ImVec2((float)mx, (float)my + arm), mc, 6.0f);
+            char mkb[32];
+            snprintf(mkb, sizeof mkb, "%d,%d", g_pickmk_x, g_pickmk_y);
+            dl->AddText(ImVec2((float)mx + arm + 10.0f, (float)my - 30.0f), mc, mkb);
+        }
         /* 框选橡皮筋 + 提示（手势坐标是竖屏的，画之前换算） */
         if (g_cap_mode && g_cap_slot >= 0) {
             ImU32 cc = IM_COL32(0, 220, 255, 255);
@@ -1830,6 +1850,7 @@ static void build_sidebar(void)
         if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
         if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
         if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
+        if (nav_btn("说明",     g_nav == 4 && g_sheet, bw)) { g_nav = 4; g_sheet = 1; g_need = 1; }
         ImGui::Dummy(ImVec2(0, 8));
         ImGui::TextDisabled("框选工具");
         if (nav_btn(g_cap_mode == 1 ? "矩形 · 进行中" : "矩形框选", g_cap_mode == 1, bw)) {
@@ -2619,6 +2640,9 @@ static void ope_num_load(void)
  * T3.1：取到的是字面值 —— 顺带切回字面模式（g_ne_lit=1），免得值框还显示中文名。 */
 static void pick_ev_apply(int px, int py)
 {
+    /* 捕获标记（T3.2）：每次取点成功记下捕获点 + 时刻（后一次重置过期）——绘制在渲染线程
+     * （build_overlay），这里只存；纯绘制，与回填成败无关（回填逻辑照旧见下）。 */
+    g_pickmk_x = px; g_pickmk_y = py; g_pickmk_t = now_ms();
     if (g_pick) {
         int se = g_pick_se, sf = g_pick_sf, t, idx;
         if (se >= 0 && se < g_ope_nsteps) {
@@ -3426,6 +3450,43 @@ static void page_settings(void)
     ImGui::TextWrapped("改完自动存 regions.conf，重启还在");
 }
 
+/* 说明页（T3.2）：12 条术语（spec §5 逐字 = 面板文案唯一来源）。数组内容从
+ * docs/OPS_PLAN_V2.md §5 机器提取（去 ** 加粗标记；折行按 CommonMark 软换行拼回单空格），
+ * 提取结果逐字节复核 —— 改文案先改 spec、再按同一规则重提，别手改这里。 */
+static const char *const g_help_lines[] = {
+    "1. 触发：给区域绑一条操作；手指碰到这个区域就会跑那条操作。",
+    "2. 时机·按下：手指碰到区域的那一刻就跑。",
+    "3. 时机·完整按压：手指碰到、抬起后跑（按一下、抬起来，才算数）。",
+    "4. 开关型：把区域当开关——每完整按压一次，「开/关」翻转一次（绿色 = 开）。",
+    "5. 门控：操作的门禁——绑一个开关型区域，它开着，操作才允许跑。",
+    "6. 跑完自动关：操作正常跑完后，自动把门控开关翻回「关」。",
+    "7. 取点：点 [取点]，然后去屏幕上点一下——那个位置填进正在编辑的坐标格，并在屏上标一下。",
+    "8. 变量（触发数据）：这次触发的那根手指——触发按下x / 触发按下y（按下位置）、触发弹起x / 触发弹起y（抬起位置）、触发时长（按下到抬起的毫秒数）。「完整按压」触发时全都有； 「按下」触发只有按下位置；面板手动运行没有。",
+    "9. 按下 / 弹起：两条分开的步骤——按下 = 按住不放；弹起 = 松开。中间可以夹「等待」「判断」。",
+    "10. 区域判断：检查一个点在不在某个区域内；不满足时按你选的来：中止、或跳过下一步。",
+    "11. 开关判断：检查某个开关型区域现在是不是「开」。",
+    "12. 中止原因速查：变量无值 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立。",
+};
+static void page_help(void)
+{
+    page_header("说明", "");
+    ImGui::Dummy(ImVec2(0, 6));
+    /* 正文自成一格可滚容器（与区域列表 / 操作页同款：AlwaysVerticalScrollbar + SCR_LIST） */
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::BeginChild("##help", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    for (int i = 0; i < (int)(sizeof g_help_lines / sizeof g_help_lines[0]); i++) {
+        ImGui::TextWrapped("%s", g_help_lines[i]);
+        ImGui::Dummy(ImVec2(0, 10));
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+
 /* 改名弹层（区域）：键盘本体抽到 draw_char_kb（与操作改名共用）；这里只留区域改名的语义：
  * 确定走 id_name_ok（合法 + 不撞别的区域），成功才 rename_region。 */
 static void draw_name_edit(void)
@@ -3480,7 +3541,7 @@ static void build_panel(void)
         ImVec2 pp = ImGui::GetWindowPos(), ps = ImGui::GetWindowSize();
         g_pan_r[0] = pp.x; g_pan_r[1] = pp.y; g_pan_r[2] = pp.x + ps.x; g_pan_r[3] = pp.y + ps.y;
     }
-    /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作 / 编辑层步骤表），其它页不命中 → 不会误滚 */
+    /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作 / 编辑层步骤表 / 说明），其它页不命中 → 不会误滚 */
     g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
@@ -3507,6 +3568,7 @@ static void build_panel(void)
         if (g_nav == 0) page_regions();
         else if (g_nav == 1) page_ops();
         else if (g_nav == 2) page_log();
+        else if (g_nav == 4) page_help();
         else page_settings();
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -3711,6 +3773,8 @@ static void *render_thread_fn(void *)
                 for (i = 0; i < 8 && !ov_active; i++)
                     if (g_rings[i].on && now_ms() - g_rings[i].t < 400) ov_active = 1;
                 for (i = 0; i < 64 && !ov_active; i++) if (g_dots[i].on) ov_active = 1;
+                /* 取点标记（T3.2）同属「由有到无」：过期后补一帧擦掉（否则十字留在屏上） */
+                if (!ov_active && g_pickmk_t && now_ms() - g_pickmk_t < PICK_MARK_MS) ov_active = 1;
             } else ov_active = 0;
             static int ov_was = 0;
             if (ov_was && !ov_active) { go = 1; g_force_frames = 1; }
