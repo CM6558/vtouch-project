@@ -62,15 +62,20 @@ void regions_clear(void)
     region_gen++;                    /* 区域线程看到代次变化会自己清私有状态 */
     pthread_mutex_unlock(&g.region_lock);
 }
-/* 名字合法性（区域 id / 操作名共用）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX；合法返回 1。
- * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致 —— 核心是**单点校验**：脚本经 WS 推的 id、
+/* 名字合法性（区域 id / 操作名共用）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX，**裸 `-` 除外**；合法返回 1。
+ * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致（裸 `-` 例外：面板预检未收窄、只作提示，最终以核心为准）
+ * —— 核心是**单点校验**：脚本经 WS 推的 id、
  * 面板经共享内存邮箱推的 id 与操作名（vt_ops.c）都从这里过。核心放行而面板字形表里没有的字符
  * （CJK / `!` 之流）只会被画成方框，所以这道门必须守在核心侧。
+ * 裸 `-` 单名拒收（T2.7-M1 / T3.3-M2 根修）：`-` 在区 B 邮箱、regions.conf 的 bind 行与 ops.conf
+ * 的 gate 字段里都是「解除 / 无」哨兵 —— 落成字面名会让触发行/门控行/落盘回读出现歧义；
+ * 其余含 `-` 的名字（r-1、op-2）不受影响。
  */
 int vt_id_ok(const char *s, size_t n)
 {
     size_t i;
     if (n < 1 || n > REGION_ID_MAX) return 0;
+    if (n == 1 && s[0] == '-') return 0;     /* 裸 "-" 拒收（见上注）：解除/无门控哨兵，不作合法名 */
     for (i = 0; i < n; i++) {
         char ch = s[i];
         if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
@@ -249,7 +254,7 @@ int region_bind(const char *id, const char *opname, int ev)
          * （与 region_add 原地更新分支同款口径，见其注释）。 */
         rc = 0;
         fprintf(stderr, "vtouchd: op 编辑 bind %s → %s ev%d\n",
-                rg->id, rg->trig_op[0] ? rg->trig_op : "无", ev);
+                rg->id, rg->trig_op[0] ? rg->trig_op : "无", rg->trig_ev);
         break;
     }
     pthread_mutex_unlock(&g.region_lock);

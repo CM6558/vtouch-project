@@ -628,7 +628,7 @@ int vtouch_region_toggle(int i)
  * @param   n        缓冲容量
  * @param   ev       输出触发时机 0=无 1=按下 2=完整按压（可 NULL）
  * @return  0 成功；-1 没接共享内存或下标越界。
- * @note    绑定写入（BIND）与开关型（KIND）批 3 才生效；这里读的是核心区 A 里的现值（悬空引用照读）。
+ * @note    绑定 / 开关型写入见 vtouch_region_bind / vtouch_region_kind（T3.3 已接线）；这里读的是核心区 A 里的现值（悬空引用照读）。
  */
 int vtouch_region_trig(int i, char *op, int n, int *ev)
 {

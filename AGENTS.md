@@ -14,12 +14,13 @@ src/vtouchd.c        进程：参数 / init / poll 主循环 / 收尾 / main
 src/vt_input.c       物理输入（动态认设备 / 读帧）+ 建 uinput 合并设备
 src/vt_frame.c       组帧（一次 writev）+ 合帧 / 身份两段 / 转发 / 面板吞触摸
 src/vt_ws.c          WebSocket（握手 / 帧解析 / 命令族）
-src/vt_region.c      区域表 / 五事件判定 / 区域线程
+src/vt_region.c      区域表 / 五事件判定 / 区域线程 / 触发绑定与开关（VT_UI 内）
+src/vt_ops.c         操作执行器（校验 / 状态机 / 触发槽 / 门控与自动关；VT_UI 守卫内）
 src/vt_queue.c       事件队列（SPSC 无锁环）+ 出站队列
 src/vt_util.c        小工具（参数解析 / 坐标换算 / 时钟 / 逻辑尺寸探测）
 src/vt_shm.{h,c}     共享内存契约（单 memfd 三区：状态只读 · 双向编辑 · 事件环）
 src/vt_panel.c       拉起/看护面板子进程（fork+exec app_process）+ 内嵌面板自解包
-src-ui/              ImGui 面板（C++）+ JNI 胶水 + 图层/转屏 Java 壳 + 构建入口
+src-ui/              ImGui 面板（C++）+ JNI 胶水 + 图层/转屏 Java 壳 + 构建入口（操作页 + 触发侧卡片行）
 clients/vtouch.js    AutoJs6 客户端 SDK（Finger API：down/move/up/tap/swipe/frame）
 clients/*_demo.js    示例：画圆 / 区域五事件 / 命中区域回触
 scripts/             构建（build.sh / build_ui.sh）、部署起停（ui-deploy.sh / ui_ondev.sh / deploy.sh）、
@@ -62,9 +63,31 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 
 - 必需文件只有 `/data/local/tmp/vtouchd_ui`（引擎 + 内嵌面板三件套，启动时自解包）。
 - 面板目录：`/data/local/tmp/vtouch-ui/`（核心每次启动**无条件**覆盖解包，日志 `面板自解包 <名> <字节> fnv=`）。
-- 区域表落盘：`/data/local/vtouch-runtime/regions.conf`（重启保留）。
+- 区域表落盘：`/data/local/vtouch-runtime/regions.conf`（重启保留；含触发绑定 `bind` / 开关型 `kind` 增量行）。
+- 操作表落盘：`/data/local/vtouch-runtime/ops.conf`（`#vtouch-ops v1`；面板编辑后存，启动只补缺）。
 - WebSocket：`ws://127.0.0.1:27183`（loopback，单客户端，新连接踢旧连接）。
 - **没有开机自启**（按用户口径不做）；手机重启后需要重新起核心。
+
+## 操作编辑器 / 执行器 / 触发侧（现状口径）
+
+- **操作**：「操作」页把「点按 / 滑动 / 等待」编成操作（≤16 条、每条 ≤32 步），编辑与运行都在面板里完成；
+  执行器在**核心主线程**（`src/vt_ops.c`）—— 面板崩了已起跑的操作照跑，一次只跑一条、忙时丢弃。
+- **触发侧**（区域 → 操作）：区域卡片三行 `触发 / 时机 / 开关型`（面板编辑，走区 B 编辑邮箱）。
+  时机 = 按下（down 命中即触发）/ 完整按压（down 命中锁存、抬起结算一次）；开关型 = 完整按压翻转开/关
+  （核心推环行 `toggle_ev <id> <0|1>`）。触发与开关只由**物理手指**产生（虚拟触点不进队列，防自激不破）。
+- **门控与自动关**：操作可绑一个开关型区域作门控 —— 起跑前要求「存在 + 开关型 + 开着」，否则
+  `op 丢弃 门控拦截`；`跑完自动关` 在**正常完成**时把门控开关翻回关（中止不翻）。
+- **落盘**：操作表 = `/data/local/vtouch-runtime/ops.conf`（`#vtouch-ops v1`，一条 = op 行 + N 条 step 行）；
+  触发绑定 / 开关型 = `regions.conf` **增量行**（`bind <区域id> <操作名|-> <down|press>`、`kind <区域id> <0|1>`；
+  文件版本不升、旧读方静默忽略）。两表同口径：面板编辑后存、启动加载**只补缺**、坏记录只跳过单条。
+- **名字规则**：区域 id / 操作名同一把尺子 `[A-Za-z0-9_-]`、1..15，**裸 `-` 除外**（`-` 是邮箱/落盘的
+  「解除 / 无门控」哨兵，核心 `vt_id_ok` 拒收）。
+- **VT_UI 守卫纪律**：ops / 触发侧代码全部在 `#ifdef VT_UI` 内 —— 默认（无面板）构建**零泄漏**
+  （`vt_ops.c` 在默认构建是空 TU）。触碰共享路径（如 `vt_id_ok`）的改动会改变默认核心 md5，
+  属**有意**变更 —— 须在报告/提交里记录。
+- **日志**：`op ` 前缀族（启动/步/完成/中止/丢弃/编辑/被拒/槽冲突/触发）+ `区域 <id> 开关 → 开|关`；
+  高频明细（滑动每采样点等）默认**不打**，`VTOUCH_OPS_TRACE=1` 才开（启动多一行 `op trace 开`）。
+  完整清单见 `docs/OPS_PLAN.md` §8。
 
 ## 约定
 
