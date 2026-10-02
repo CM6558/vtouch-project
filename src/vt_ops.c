@@ -295,6 +295,7 @@ void vt_ops_clear(void)
  *   sx1..sy2  滑动本步解析后的起终点（负数编码在起一步时解析；采样点用它插值）
  *   rx/ry   上一次写进 g.virt[slot] 的 raw 坐标（撞槽检测：别人动过它就知道）
  *   conflict  撞槽日志只打一次（v1 不做避让，spec §3.5）
+ *   jumps   本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用一枚；超限中止 `跳转超限`，spec §2.3）
  *   trig_seen  已消费到的触发序号（触发槽 SPSC 的消费者一侧）
  *   trig    触发数据快照（起跑时整组拷入，运行中不回填；td=NULL 的手动运行 = 全零 ⇒ 全部变量无值）
  *   t_start   起跑时刻（完成日志的「用时」）
@@ -329,6 +330,7 @@ static struct {
     int      sx1, sy1, sx2, sy2;                             /* 滑动本步解析后的起终点（变量快照的解析结果） */
     int      rx, ry;
     int      conflict;
+    int      jumps;                                          /* 本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用；spec §2.3）：超限中止 `跳转超限` */
     uint32_t trig_seen;
     struct vt_trig_data trig;                                /* 触发数据快照（起跑时整组拷入；spec §1.5） */
     uint64_t t_start;
@@ -539,24 +541,79 @@ static void op_next_step(void)
 }
 
 /**
- * (vtouch-doc: op_cond_fail)
- * @brief 条件不成立处理：记 `op 条件 <词> <ref> 不成立 → <中止|跳过下一步>`，再按 a3 收场。
- * @param   st       当前条件步（读 a3 不成立行为与 ref）
- * @param   word     日志词：`区域判断` / `开关判断`
- * @note    **静态**，只在执行器内用（区域判断 / 开关判断两处共用：不成立收场逐字同款，一处实现防两处漂移）。a3=0（OP_COND_ABORT）→ 不成立行先于中止行（走既有中止机制，`原因=条件不成立`）；a3=1（OP_COND_SKIP）→ 步序额外 +1（跳过下一步：跳过的那一步不执行也不求值；越过末步 = 正常完成）。调用点都在 region_lock 之外（spec §3.2 锁纪律：持锁判定、解锁后记日志）。
+ * (vtouch-doc: op_jump_apply)
+ * @brief 跳转收口（条件跳转 / 跳转步共用）：0 = 结束 → op_finish；否则过守卫后落位目标步骤。
+ * @param   target   跳转目标：0 = 结束、1..步数 = 目标步骤
+ * @note    **静态**，只在执行器内用。0 = 结束 → 正常完成（收尾释放 / 自动关照走），不占跳转计数、不判上限（spec §2.3）；否则跳转计数（R.jumps，起跑清零，条件跳转 + 跳转步共用一枚）+1，超过 VT_OPS_JUMP_MAX（200）→ 中止 `跳转超限`（防死循环）；通过 → R.step = 目标-2 → PH_WAIT（本动作单拍结束，下一拍 op_next_step 的正常推进 +1 精确落在目标步：R.step = 目标-1 —— 预置与「跳过下一步」同款）。VTOUCH_OPS_TRACE=1 时每跳一行 `op 跳转 <名> 第 A 步 → 第 B 步`（B=0 打 `→ 结束`；L9 默认零输出）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   跳转收口（条件跳转 / 跳转步共用；spec §2.2/§2.3）：目标 0 = 结束 → 直接 op_finish()（正常完成；收尾释放 /
+ *   自动关照走）—— 不占跳转计数、不判上限；否则过跳转守卫（计数 +1，超过 VT_OPS_JUMP_MAX → 中止 `跳转超限`，
+ *   防死循环）→ R.step = 目标-2 → PH_WAIT（本动作单拍结束，下一拍 op_next_step 的正常推进 +1 精确落在目标步：
+ *   R.step = 目标-1）。预置值取「目标-2」的由来：目标步下标 = 目标-1（0 基）、本动作单拍结束全靠正常推进落位
+ *   —— 与「跳过下一步」的「预置 + 正常推进」同款（照设计稿字面预置 目标-1 会越过目标一步：第 1 步永远到不了、
+ *   「目标 = 自身」不成自环，与 spec §2.2 的循环 / 自环口径矛盾）。TRACE（op_trace_on）：每跳一行
+ *   `op 跳转 <名> 第 A 步 → 第 B 步`（B=0 打 `→ 结束`；L9 默认零输出）。
  */
-static void op_cond_fail(const struct vt_step *st, const char *word)
+static void op_jump_apply(int target)
 {
-    int skip = (st->a3 == OP_COND_SKIP);
-
-    fprintf(stderr, "vtouchd: op 条件 %s %s 不成立 → %s\n", word, st->ref, skip ? "跳过下一步" : "中止");
-    if (!skip) {
-        vt_ops_abort("条件不成立");                           /* 不成立行已先记；中止走既有机制（spec §3.3） */
+    if (op_trace_on()) {                                     /* TRACE：每跳一行（判定只一次分支；L9 默认零输出） */
+        if (target == 0)
+            fprintf(stderr, "vtouchd: op 跳转 %s 第 %d 步 → 结束\n", R.name, R.step + 1);
+        else
+            fprintf(stderr, "vtouchd: op 跳转 %s 第 %d 步 → 第 %d 步\n", R.name, R.step + 1, target);
+    }
+    if (target == 0) { op_finish(); return; }                /* 0 = 结束：正常完成（收尾释放 / 自动关照走）；不占计数、不判上限（spec §2.3） */
+    R.jumps++;
+    if (R.jumps > VT_OPS_JUMP_MAX) {                         /* 防死循环守卫（spec §2.3）：超限走既有中止机制 */
+        vt_ops_abort("跳转超限");
         return;
     }
-    R.step++;                                                /* 跳过下一步：推进量额外 +1（下一拍 op_next_step 再 +1 ⇒ 共 +2） */
-    R.phase = PH_WAIT;                                       /* 单拍动作到此为止，下一拍进下一步 */
+    R.step = target - 2;                                     /* 目标步下标 = 目标-1；下一拍正常推进 +1 落位（见上注） */
+    R.phase = PH_WAIT;                                       /* 单拍动作到此为止，下一拍进目标步 */
     R.deadline = R.t0;
+}
+
+/**
+ * (vtouch-doc: op_cond_apply)
+ * @brief 条件判定收口（两侧四档）：按侧记日志，再执行 继续 / 跳过 / 跳转 / 中止。
+ * @param   st       当前条件步（读本侧档位与跳转目标）
+ * @param   hit      判定结果：1 = 成立、0 = 不成立
+ * @param   word     日志词：`区域判断` / `开关判断`
+ * @note    **静态**，只在执行器内用（区域判断 / 开关判断两处共用：两侧四档一处实现防两处漂移）。档位与目标取本侧（成立侧 = a4/j1、不成立侧 = a3/j2）：继续（单拍结束，下一拍进下一步）；跳过（步序额外 +1：跳过的那一步不执行也不求值；越过末步 = 正常完成）；跳转（0 = 结束 → op_finish；其余交 op_jump_apply 过守卫后落位）；中止（不成立侧 `条件不成立` 承 v2 / 成立侧 `条件中止`）。日志（spec §1.3）：不成立侧恒打、成立侧档位 ≠ 继续才打；不成立行先于中止行。调用点都在 region_lock 之外（spec §3.2 锁纪律：持锁判定、解锁后记日志）。
+ */
+static void op_cond_apply(const struct vt_step *st, int hit, const char *word)
+{
+    int tier   = hit ? st->a4 : st->a3;                      /* 本侧档位（成立侧 = a4 / 不成立侧 = a3） */
+    int target = hit ? st->j1 : st->j2;                      /* 本侧跳转目标（仅档位 = 跳转时有意义） */
+
+    /* 日志（spec §1.3）：不成立侧恒打（四档全列）；成立侧档位 ≠ 继续才打（三档）。 */
+    if (!hit || tier != OP_COND_CONT) {
+        char act[32];
+        if (tier == OP_COND_JUMP && target == 0) snprintf(act, sizeof act, "跳到结束");
+        else if (tier == OP_COND_JUMP)           snprintf(act, sizeof act, "跳到第 %d 步", target);
+        else if (tier == OP_COND_SKIP)           snprintf(act, sizeof act, "跳过下一步");
+        else if (tier == OP_COND_CONT)           snprintf(act, sizeof act, "继续下一步");   /* 只可能到不成立侧（成立侧上面已滤掉） */
+        else                                     snprintf(act, sizeof act, "中止");
+        fprintf(stderr, "vtouchd: op 条件 %s %s %s → %s\n", word, st->ref, hit ? "成立" : "不成立", act);
+    }
+    switch (tier) {
+    case OP_COND_CONT:                                       /* 继续下一步：单拍动作到此为止（现状） */
+        R.phase = PH_WAIT;
+        R.deadline = R.t0;
+        break;
+    case OP_COND_SKIP:                                       /* 跳过下一步：推进量额外 +1（下一拍 op_next_step 再 +1 ⇒ 共 +2） */
+        R.step++;
+        R.phase = PH_WAIT;
+        R.deadline = R.t0;
+        break;
+    case OP_COND_JUMP:                                       /* 跳转：0 = 结束 / 其余过守卫落位（与跳转步共用 op_jump_apply） */
+        op_jump_apply(target);
+        break;
+    default:                                                 /* OP_COND_ABORT：不成立行已先记；中止走既有机制（spec §3.3） */
+        vt_ops_abort(hit ? "条件中止" : "条件不成立");         /* 成立侧新词 `条件中止`；不成立侧承 v2 `条件不成立` */
+        break;
+    }
 }
 
 /* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步）；点按 / 滑动 / 按下 → 中止 `槽占用`）
@@ -663,9 +720,7 @@ static void op_begin_step(void)
         }
         pthread_mutex_unlock(&g.region_lock);
         if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
-        if (!hit) { op_cond_fail(st, "区域判断"); return; }   /* 不成立：中止 / 跳过下一步（a3，spec §3.3） */
-        R.phase = PH_WAIT;                                   /* 成立：单拍动作到此为止，下一拍进下一步 */
-        R.deadline = R.t0;
+        op_cond_apply(st, hit, "区域判断");                   /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
         break;
     }
     case OP_STEP_COND_TOGGLE: {                              /* 开关判断：ref 区域须开关型且开着（spec §3.2） */
@@ -682,9 +737,16 @@ static void op_begin_step(void)
         pthread_mutex_unlock(&g.region_lock);
         if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
         if (!is_toggle) { vt_ops_abort("非开关型"); return; } /* 运行时校验（编辑期不查 kind，spec §3.2） */
-        if (!on) { op_cond_fail(st, "开关判断"); return; }    /* 不成立：中止 / 跳过下一步（a3，spec §3.3） */
-        R.phase = PH_WAIT;                                   /* 成立：单拍动作到此为止，下一拍进下一步 */
-        R.deadline = R.t0;
+        op_cond_apply(st, on, "开关判断");                    /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
+        break;
+    }
+    case OP_STEP_JUMP: {                                     /* 跳转：a1 = 目标（0 = 结束、1..步数 = 目标）；spec §2.2 */
+        int target = st->a1;                                 /* 目标不是变量字段（op_valid 只收字面值）：直读 */
+        if (target == 0)
+            fprintf(stderr, "vtouchd: op 步 %d/%d 跳转 结束\n", R.step + 1, R.nsteps);
+        else
+            fprintf(stderr, "vtouchd: op 步 %d/%d 跳转 第 %d 步\n", R.step + 1, R.nsteps, target);
+        op_jump_apply(target);                               /* 0 = 结束（op_finish）/ 否则守卫 + 落位（spec §2.3） */
         break;
     }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
@@ -955,6 +1017,7 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.slot = slot;
     R.step = 0;
     R.conflict = 0;
+    R.jumps = 0;                                             /* 跳转计数清零：条件跳转 + 跳转步共用一枚，每次起跑重新计（spec §2.3） */
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
