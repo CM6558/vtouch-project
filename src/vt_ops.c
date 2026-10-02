@@ -276,6 +276,9 @@ void vt_ops_clear(void)
  *   stop_pending / stop_why  帧窗内被推迟的中止（R2a 封口 / L8）：原因快照进 stop_why（短缓冲、
  *              安全截断，不存裸指针）；帧关后的第一次 tick 在解冻点补执行（见 vt_ops_tick）；
  *              起跑 / 完成 / 中止正常路径三处清零，不泄漏到下一次运行
+ *   held    按下步的持有态（1 = 有按下步的手指还按着，等弹起步或收尾释放；spec §2.2）：
+ *           按住期只允许 等待 / 弹起（及未来条件步）—— 点按 / 滑动 / 按下在步入口统一中止 `槽占用`；
+ *           收尾（正常完成 / 中止）还按着 → 自动松开 + `op 收尾 松开`；起跑 / 完成 / 中止三处清零
  * 全部只有主线程碰（编辑邮箱在 poll_step 里吃、执行器也在主线程跑）—— 不需要锁。
  */
 static struct {
@@ -291,6 +294,7 @@ static struct {
     uint64_t deadline;
     int      phase;
     int      slot;
+    int      held;                                           /* 按下步持有态（spec §2.2）：1 = 手指还按着；弹起步 / 收尾释放负责清 */
     int      hold;
     int      dur;
     int      nsamp;
@@ -374,7 +378,7 @@ static void op_drop_frame(void)
     op_ring_line("op 丢弃 帧内\n");
 }
 
-/* 现在的阶段手指按着没有（撞槽自检 / 中止抬指都看它）。 */
+/* 现在的**阶段**手指按着没有（撞槽自检 / 中止抬指都看它；按下步的持有态 held 不在此列 —— 走 op_release_held）。 */
 static int op_finger_down(void)
 {
     return R.active && (R.phase == PH_TAP_UP || R.phase == PH_SWIPE_MOVE || R.phase == PH_SWIPE_UP);
@@ -401,6 +405,18 @@ static int op_finger_ll(const char *act, int lx, int ly)
 
 /* 线性插值：滑动的第 k 个采样点（k=0..n；k=n 时精确落在终点）。 */
 static int op_lerp(int a, int b, int k, int n) { return a + (b - a) * k / n; }
+
+/**
+ * (vtouch-doc: op_release_held)
+ * @brief 收尾释放：还按着（held）就补一笔 up 并记 `op 收尾 松开`。
+ * @note    **静态**，只在执行器内用；正常完成（op_finish）与中止（vt_ops_abort）两条收尾路径共用 —— 结束仍按着 → 自动松开（spec §2.2）。帧窗纪律：调用点都在帧关路径上（abort 撞帧窗走 stop_pending 推迟、帧关后才执行）—— 执行器任何路径不在帧窗内写 g.virt 的不变式不破；写失败忽略（槽已不在手里时无事可做，与 abort 抬指同款）。
+ */
+static void op_release_held(void)
+{
+    if (!R.held) return;
+    op_finger_raw("up", R.rx, R.ry);                         /* 写失败忽略：槽已不在手里时无事可做（与 abort 抬指同款） */
+    fprintf(stderr, "vtouchd: op 收尾 松开\n");
+}
 
 /**
  * (vtouch-doc: op_resolve)
@@ -466,10 +482,13 @@ static void op_auto_off(void)
     }
 }
 
-/* 完成（最后一步走完）：日志 + 环行 + 自动关（auto_off 翻回门控开关）+ 状态归位。 */
+/* 完成（最后一步走完）：收尾释放（还按着 → 自动松开）+ 日志 + 环行 + 自动关（auto_off 翻回门控开关）+ 状态归位。 */
 static void op_finish(void)
 {
-    uint64_t ms = op_now_ms() - R.t_start;
+    uint64_t ms;
+
+    op_release_held();                                       /* 收尾兜底（spec §2.2）：结束仍按着 → 写 up + `op 收尾 松开` */
+    ms = op_now_ms() - R.t_start;
     fprintf(stderr, "vtouchd: op 完成 %s 用时=%llums\n", R.name, (unsigned long long)ms);
     op_ev_push("done", R.nsteps, R.nsteps);
     op_auto_off();                                           /* 仅正常完成翻回；中止不翻（中止≠跑完，spec §4.3） */
@@ -477,6 +496,7 @@ static void op_finish(void)
     R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
+    R.held = 0;                                              /* 持有态清零：收尾已释放（上面），绝不泄漏到下一次运行 */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
@@ -491,14 +511,21 @@ static void op_next_step(void)
     R.deadline = R.t0;
 }
 
-/* 起一步：解析本步数值字段（字面值 / 变量引用；引用无值变量 → 中止 `变量无值`）+ 打步日志 +
- * 发这一步的起始动作（点按 / 滑动先 down；等待不动手）。 */
+/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及未来条件步）；点按 / 滑动 / 按下 → 中止 `槽占用`）
+ * + 解析本步数值字段（字面值 / 变量引用；引用无值变量 → 中止 `变量无值`）+ 打步日志 +
+ * 发这一步的起始动作（点按 / 滑动 / 按下先 down；弹起 up；等待不动手）。 */
 static void op_begin_step(void)
 {
     const struct vt_step *st;
     if (R.step >= R.nsteps) { op_finish(); return; }
     st = &R.steps[R.step];
     g.op_run_step = R.step;                                  /* 面板进度（0 起） */
+    /* 按住期门禁（spec §2.2/D4）：持有中只允许 等待 / 弹起（及未来条件步）—— 点按 / 滑动 / 按下
+     * 都会另起一根手指，统一在步入口中止 `槽占用`（判定不逐 case 散落）。 */
+    if (R.held && (st->type == OP_STEP_TAP || st->type == OP_STEP_SWIPE || st->type == OP_STEP_DOWN)) {
+        vt_ops_abort("槽占用");
+        return;
+    }
     switch (st->type) {
     case OP_STEP_TAP: {
         int x, y, ms;
@@ -544,6 +571,31 @@ static void op_begin_step(void)
         fprintf(stderr, "vtouchd: op 步 %d/%d 等待 %dms\n", R.step + 1, R.nsteps, ms);
         R.phase = PH_WAIT;
         R.deadline = R.t0 + (uint64_t)ms;
+        break;
+    }
+    case OP_STEP_DOWN: {                                     /* 按下：a1,a2 = 坐标（可变量），按下并保持（spec §2.2） */
+        int x, y;
+        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0) {
+            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6） */
+            return;
+        }
+        fprintf(stderr, "vtouchd: op 步 %d/%d 按下 %d,%d\n", R.step + 1, R.nsteps, x, y);
+        if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return; }
+        R.held = 1;                                          /* 持有态：弹起步 / 收尾释放负责清（spec §2.2） */
+        R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
+        R.deadline = R.t0;
+        break;
+    }
+    case OP_STEP_UP: {                                       /* 弹起：松开当前按住的手指（无字段） */
+        if (!R.held) {
+            vt_ops_abort("未按下");                           /* 没有按住的手指：安全侧中止（spec §2.2） */
+            return;
+        }
+        fprintf(stderr, "vtouchd: op 步 %d/%d 弹起\n", R.step + 1, R.nsteps);
+        if (op_finger_raw("up", R.rx, R.ry) != 0) { op_conflict_abort(); return; }   /* 抬指（按住那一点） */
+        R.held = 0;
+        R.phase = PH_WAIT;
+        R.deadline = R.t0;
         break;
     }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
@@ -816,6 +868,7 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.conflict = 0;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
+    R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
     R.hold = R.dur = R.nsamp = R.sample = 0;
     R.sx1 = R.sy1 = R.sx2 = R.sy2 = 0;
     R.t_start = op_now_ms();
@@ -845,7 +898,7 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
  * (vtouch-doc: vt_ops_abort)
  * @brief 中止运行中的操作（抬指 + 状态归位 + 日志原因）。
  * @param   why      中止原因（写进日志；如 停止按钮 / 引擎收尾 / reset/断连）
- * @note    **幂等**：没在跑（含没初始化、init 失败路径的 cleanup）就是空操作 —— cleanup() 无条件调它。抬指帧走 emit_frame：写失败置 g_reemit 等主循环重发；进程退出路径由随后 uinput 销毁兜底（触点随设备消失，物理触摸回系统）。
+ * @note    **幂等**：没在跑（含没初始化、init 失败路径的 cleanup）就是空操作 —— cleanup() 无条件调它。抬指帧走 emit_frame：写失败置 g_reemit 等主循环重发；进程退出路径由随后 uinput 销毁兜底（触点随设备消失，物理触摸回系统）。按下步还按着（held）时收尾同样补一笔 up + `op 收尾 松开`（spec §2.2，走 op_release_held）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   幂等是硬要求：cleanup() 在 **init 失败路径**上也会被调（那时执行器可能根本没初始化），
@@ -870,12 +923,14 @@ void vt_ops_abort(const char *why)
     }
     i = R.step < R.nsteps ? R.step + 1 : R.nsteps;
     if (op_finger_down()) op_finger_raw("up", R.rx, R.ry);
+    op_release_held();                                       /* 收尾兜底（spec §2.2）：中止时若还按着 → 同样释放 + `op 收尾 松开` */
     fprintf(stderr, "vtouchd: op 中止 %s 步 %d/%d 原因=%s\n", R.name, i, R.nsteps, why ? why : "?");
     op_ev_push("abort", i, R.nsteps);
     R.active = 0;
     R.slot = -1;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
+    R.held = 0;                                              /* 持有态清零：收尾已释放（上面），绝不泄漏到下一次运行 */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;

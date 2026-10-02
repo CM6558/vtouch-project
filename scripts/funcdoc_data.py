@@ -261,6 +261,11 @@ DOCS = {
     ret="0 成功；-1 变量无值（调用方按 `原因=变量无值` 中止）。",
     note="**静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），"
          "未设即无值 —— **不静默当 0**（spec §1.3/D6）；越界负值不会到达（op_valid 已拒，防御按无值返回 -1）。"),
+"op_release_held": dict(brief="收尾释放：还按着（held）就补一笔 up 并记 `op 收尾 松开`。",
+    note="**静态**，只在执行器内用；正常完成（op_finish）与中止（vt_ops_abort）两条收尾路径共用 —— "
+         "结束仍按着 → 自动松开（spec §2.2）。帧窗纪律：调用点都在帧关路径上（abort 撞帧窗走 "
+         "stop_pending 推迟、帧关后才执行）—— 执行器任何路径不在帧窗内写 g.virt 的不变式不破；"
+         "写失败忽略（槽已不在手里时无事可做，与 abort 抬指同款）。"),
 "vt_ops_run": dict(brief="起跑一条操作（忙时丢弃 + 日志）。",
     params=[("name", "操作名；表里查不到 / 没空闲槽 / 已有操作在跑 = 丢弃 + 对应日志"),
             ("td", "触发数据快照（mask/dx/dy/ux/uy/ms；spec §1.5）；NULL = 手动运行（全零 ⇒ 全部变量无值）")],
@@ -275,7 +280,8 @@ DOCS = {
     params=[("why", "中止原因（写进日志；如 停止按钮 / 引擎收尾 / reset/断连）")],
     note="**幂等**：没在跑（含没初始化、init 失败路径的 cleanup）就是空操作 —— cleanup() 无条件调它。"
          "抬指帧走 emit_frame：写失败置 g_reemit 等主循环重发；进程退出路径由随后 uinput 销毁兜底"
-         "（触点随设备消失，物理触摸回系统）。"),
+         "（触点随设备消失，物理触摸回系统）。按下步还按着（held）时收尾同样补一笔 up + `op 收尾 松开`"
+         "（spec §2.2，走 op_release_held）。"),
 "vt_ops_trigger_post": dict(brief="区域线程投一次触发（写触发槽 → release 自增 seq → 写唤醒 fd）。",
     params=[("name", "要起跑的操作名"), ("slot", "触发来源手指的物理槽号（日志用）"),
             ("td", "触发数据（mask/dx/dy/ux/uy/ms；spec §1.5）：先写各字段、最后 release 自增 seq 发布")],
