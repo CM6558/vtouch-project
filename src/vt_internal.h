@@ -326,7 +326,7 @@ int  vt_ops_del(const char *name);
 /* 清空操作表。 (vtouch-doc: vt_ops_clear) */
 void vt_ops_clear(void);
 /* 区域线程投一次触发（写触发槽 → release 自增 seq → 写唤醒 fd）。 (vtouch-doc: vt_ops_trigger_post) */
-void vt_ops_trigger_post(const char *name, int slot);
+void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *td);
 #endif
 
 /* ---- vt_input.c ---- */

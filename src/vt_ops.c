@@ -818,21 +818,29 @@ void vt_ops_abort(const char *why)
  * @brief 区域线程投一次触发（写触发槽 → release 自增 seq → 写唤醒 fd）。
  * @param   name     要起跑的操作名
  * @param   slot     触发来源手指的物理槽号（日志用）
- * @note    触发槽是**单槽覆盖**：主线程还没消费就被下一发盖掉时，tick 按 seq 差值记 `op 丢弃 覆盖`。名字按上限截断写；唤醒 fd 没建成（-1）时只丢这次唤醒 —— seq 还在，≤1s 的兜底 poll 会捡起。
+ * @param   td       触发数据（mask/dx/dy/ux/uy/ms；spec §1.5）：先写各字段、最后 release 自增 seq 发布
+ * @note    触发槽是**单槽覆盖**：主线程还没消费就被下一发盖掉时，tick 按 seq 差值记 `op 丢弃 覆盖`。写出次序：name/slot/触发数据全部先写、seq 最后 release 自增（消费端 acquire 读全）；名字按上限截断写；唤醒 fd 没建成（-1）时只丢这次唤醒 —— seq 还在，≤1s 的兜底 poll 会捡起。
  *
  * 为什么这么写（原有注释，逐字保留）：
- *   链路：写 name/slot（普通写）→ release 自增 seq（这一下之后名字才算「可见」）→ 写唤醒 fd。
- *   主线程 acquire 读 seq，变了才取名字 —— 单槽覆盖，中间被盖掉的由 seq 差值看出来。
+ *   链路：写 name/slot/触发数据（普通写）→ release 自增 seq（这一下之后名字与数据才算「可见」）→ 写唤醒 fd。
+ *   主线程 acquire 读 seq，变了才取名字/数据 —— 单槽覆盖，中间被盖掉的由 seq 差值看出来。
  *   fd 没建成（-1）也不丢功能：seq 已经涨了，兜底 poll（≤1s）会自己来读。
  */
-void vt_ops_trigger_post(const char *name, int slot)
+void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *td)
 {
     size_t n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
     if (n > OP_NAME_MAX) n = OP_NAME_MAX;
     if (n) memcpy(g.op_trig_name, name, n);
     g.op_trig_name[n] = 0;
     g.op_trig_slot = slot;
-    __atomic_add_fetch(&g.op_trig_seq, 1u, __ATOMIC_RELEASE);
+    /* 触发数据（v2，spec §1.5）：先写全 6 个字段（普通写）—— 主线程 acquire 读到新 seq 后一次读全。 */
+    g.op_trig_mask = td->mask;
+    g.op_trig_dx = td->dx;
+    g.op_trig_dy = td->dy;
+    g.op_trig_ux = td->ux;
+    g.op_trig_uy = td->uy;
+    g.op_trig_ms = td->ms;
+    __atomic_add_fetch(&g.op_trig_seq, 1u, __ATOMIC_RELEASE);   /* 最后 release：上面各字段先可见 */
     if (g.ops_wake_fd >= 0) {
         uint64_t one = 1;
         ssize_t r;

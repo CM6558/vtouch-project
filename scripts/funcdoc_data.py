@@ -268,8 +268,10 @@ DOCS = {
          "抬指帧走 emit_frame：写失败置 g_reemit 等主循环重发；进程退出路径由随后 uinput 销毁兜底"
          "（触点随设备消失，物理触摸回系统）。"),
 "vt_ops_trigger_post": dict(brief="区域线程投一次触发（写触发槽 → release 自增 seq → 写唤醒 fd）。",
-    params=[("name", "要起跑的操作名"), ("slot", "触发来源手指的物理槽号（日志用）")],
+    params=[("name", "要起跑的操作名"), ("slot", "触发来源手指的物理槽号（日志用）"),
+            ("td", "触发数据（mask/dx/dy/ux/uy/ms；spec §1.5）：先写各字段、最后 release 自增 seq 发布")],
     note="触发槽是**单槽覆盖**：主线程还没消费就被下一发盖掉时，tick 按 seq 差值记 `op 丢弃 覆盖`。"
+         "写出次序：name/slot/触发数据全部先写、seq 最后 release 自增（消费端 acquire 读全）；"
          "名字按上限截断写；唤醒 fd 没建成（-1）时只丢这次唤醒 —— seq 还在，≤1s 的兜底 poll 会捡起。"),
 
 # ---------------- §2.4 面板胶水（src-ui/ui_glue.c；该文件不在 C_FILES ⇒ 工具不注入，文案与手写文档块逐字同步） ----------------

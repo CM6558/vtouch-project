@@ -13,6 +13,12 @@ static int r_slot_last_x[MAX_PHYS][MAX_REGIONS], r_slot_last_y[MAX_PHYS][MAX_REG
 /* 「完整按压」触发锁存（T3.1）：down 命中置 1，该槽 up 时消费（开关翻转 / 完整按压触发）并清零。
  * 与 r_slot_hit 并列、不参与五事件判定（OPS_PLAN §4.1）；结构变化（代次 bump）随其余私有状态一起重置。 */
 static unsigned char r_trig_latch[MAX_PHYS][MAX_REGIONS];
+/* 触发数据捕获（v2，spec §1.5）：按下点 + 按下时刻（单调钟纳秒），按槽存 ——
+ * 「完整按压」结算时算 dx/dy/ms 用。捕获点 = DOWN 命中那一刻（见 region_apply）；
+ * 清零点与 r_trig_latch 同段落：代次重置整表清 + 每次按下重定基线（同款「按下重定基线」
+ * 口径，按槽不按区域）。 */
+static int r_trig_dx[MAX_PHYS], r_trig_dy[MAX_PHYS];
+static uint64_t r_trig_dt[MAX_PHYS];
 #endif
 /* 区域队列的唤醒 fd（eventfd）。**故意不放进 struct vt_state**：它是本模块的私有同步原语，
  * 放进去要动共享内存布局（面板侧也得跟着 bump VT_SHM_VERSION）。生产者只能调 region_q_wake()。 */
@@ -416,12 +422,15 @@ struct region_pend_ev {
 #ifdef VT_UI
 /* region_apply 攒「触发/开关」的本地槽位（T3.1）：同 pend 口径 —— id/操作名必须拷进本地缓冲
  * （解锁后区域表可能已被改名/删除/清空），判定在锁内、投递在解锁之后。
- * what：R_TRIG_DOWN=按下触发 / R_TRIG_FULL=完整按压触发 / R_TRIG_TOGGLE=开关翻转（on=翻转后的值）。 */
+ * what：R_TRIG_DOWN=按下触发 / R_TRIG_FULL=完整按压触发 / R_TRIG_TOGGLE=开关翻转（on=翻转后的值）。
+ * td（v2）：触发数据，随 vt_ops_trigger_post 一并投递 —— R_TRIG_DOWN 只带 TDX|TDY（按下点）；
+ * R_TRIG_FULL 带 ALL；开关翻转不携带数据（恒零值）。 */
 enum { R_TRIG_DOWN = 1, R_TRIG_FULL = 2, R_TRIG_TOGGLE = 3 };
 struct region_pend_trig {
     char id[REGION_ID_MAX + 1];
     char op[OP_NAME_MAX + 1];
     int slot, what, on;
+    struct vt_trig_data td;
 };
 #endif
 /**
@@ -476,14 +485,16 @@ void region_apply(const struct vt_ev *ev)
         }                                                                    \
     } while (0)
 #ifdef VT_UI
-/* 攒一条待投递的触发/开关（只在锁内调用）；满了丢最末这条（新的），绝不越界。 */
-#define TRIGPEND(_id, _op, _what, _on) do {                                  \
+/* 攒一条待投递的触发/开关（只在锁内调用）；满了丢最末这条（新的），绝不越界。
+ * _td = 触发数据（v2）：两个触发档给实值；开关翻转不携带数据，传零值 `(struct vt_trig_data){0}`。 */
+#define TRIGPEND(_id, _op, _what, _on, _td) do {                             \
         if (nt < (int)(sizeof ptrig / sizeof ptrig[0])) {                    \
             memcpy(ptrig[nt].id, (_id), strlen(_id) + 1);                    \
             memcpy(ptrig[nt].op, (_op), strlen(_op) + 1);                    \
             ptrig[nt].slot = slot;                                           \
             ptrig[nt].what = (_what);                                        \
             ptrig[nt].on = (_on);                                            \
+            ptrig[nt].td = (_td);                                            \
             nt++;                                                            \
         }                                                                    \
     } while (0)
@@ -498,8 +509,19 @@ void region_apply(const struct vt_ev *ev)
         memset(r_slot_last_y, 0, sizeof r_slot_last_y);
 #ifdef VT_UI
         memset(r_trig_latch, 0, sizeof r_trig_latch);
+        memset(r_trig_dx, 0, sizeof r_trig_dx);
+        memset(r_trig_dy, 0, sizeof r_trig_dy);
+        memset(r_trig_dt, 0, sizeof r_trig_dt);
 #endif
     }
+#ifdef VT_UI
+    /* 触发捕获重定基线（按槽，v2）：每次按下先清 —— 未命中（或上一次 up 被队列丢过）不留陈值，
+     * 与 r_trig_latch 的「按下重定基线（=hit）」同款口径，只是这里按槽不按区域。
+     * 清点在循环**外**：循环内按 rid 清会把同槽别的区域刚写的活捕获清掉（多区域重叠场景）。 */
+    if (ev->action == VT_DOWN) {
+        r_trig_dx[slot] = 0; r_trig_dy[slot] = 0; r_trig_dt[slot] = 0;
+    }
+#endif
     for (rid = 0; rid < g.region_count; rid++) {
         struct region *rg = &g.regions[rid];
         int was_in = r_slot_in[slot][rid];
@@ -515,8 +537,17 @@ void region_apply(const struct vt_ev *ev)
 #ifdef VT_UI
             /* 按下重定基线（=hit）：未命中清 0 —— 万一某次 up 被队列丢过，陈旧锁存会在下次抬起误触发。 */
             r_trig_latch[slot][rid] = hit;
-            if (hit && rg->trig_ev == 1 && rg->trig_op[0])
-                TRIGPEND(rg->id, rg->trig_op, R_TRIG_DOWN, 0);   /* 时机「按下」：down 命中那一刻触发 */
+            if (hit) {   /* 捕获（v2）：按下点 + 按下时刻（ev->ts）—— 完整按压结算的 dx/dy/ms 来源；
+                          * 按槽记（同一根手指一次按压一组值，多区域命中时写入的是同一组）。 */
+                r_trig_dx[slot] = lx;
+                r_trig_dy[slot] = ly;
+                r_trig_dt[slot] = ev->ts;
+            }
+            if (hit && rg->trig_ev == 1 && rg->trig_op[0]) {
+                /* 时机「按下」：down 命中那一刻触发；数据只带按下点（tux/tuy/tms 尚未发生）。 */
+                const struct vt_trig_data td = { OP_TRIGB_TDX | OP_TRIGB_TDY, lx, ly, 0, 0, 0 };
+                TRIGPEND(rg->id, rg->trig_op, R_TRIG_DOWN, 0, td);
+            }
 #endif
         } else if (ev->action == VT_MOVE) {
             if (hit && !was_in) PEND(rg->id, "enter");
@@ -532,10 +563,17 @@ void region_apply(const struct vt_ev *ev)
             if (r_trig_latch[slot][rid]) {           /* 「完整按压」：down 命中过 → 抬起时结算一次（位置不限） */
                 if (rg->kind == 1) {                 /* 开关型：翻转（持锁写）+ 推 toggle_ev（锁外） */
                     rg->toggle_on = !rg->toggle_on;
-                    TRIGPEND(rg->id, "", R_TRIG_TOGGLE, rg->toggle_on);
+                    TRIGPEND(rg->id, "", R_TRIG_TOGGLE, rg->toggle_on, (struct vt_trig_data){0});
                 }
-                if (rg->trig_ev == 2 && rg->trig_op[0])
-                    TRIGPEND(rg->id, rg->trig_op, R_TRIG_FULL, 0);   /* 时机「完整按压」 */
+                if (rg->trig_ev == 2 && rg->trig_op[0]) {
+                    /* 时机「完整按压」：5 个变量全有值 —— dx/dy = down 命中时捕获的按下点，
+                     * ux/uy = 本次抬起点，ms = 按下→抬起时长。两个时间戳都是单调钟纳秒，
+                     * 契约为毫秒（spec §1.1）⇒ /1e6；差为负理论不可能（单调钟），仍钳 ≥0。 */
+                    int64_t dt_ns = (int64_t)(ev->ts - r_trig_dt[slot]);
+                    struct vt_trig_data td = { OP_TRIGB_ALL, r_trig_dx[slot], r_trig_dy[slot], lx, ly,
+                                               dt_ns > 0 ? (int)(dt_ns / 1000000) : 0 };
+                    TRIGPEND(rg->id, rg->trig_op, R_TRIG_FULL, 0, td);
+                }
                 r_trig_latch[slot][rid] = 0;
             }
 #endif
@@ -556,7 +594,7 @@ void region_apply(const struct vt_ev *ev)
             if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
             fprintf(stderr, "vtouchd: 区域 %s 开关 → %s\n", ptrig[i].id, ptrig[i].on ? "开" : "关");
         } else {
-            vt_ops_trigger_post(ptrig[i].op, ptrig[i].slot);
+            vt_ops_trigger_post(ptrig[i].op, ptrig[i].slot, &ptrig[i].td);
             fprintf(stderr, "vtouchd: op 触发 %s → %s（%s）\n", ptrig[i].id, ptrig[i].op,
                     ptrig[i].what == R_TRIG_DOWN ? "按下" : "完整按压");
         }
