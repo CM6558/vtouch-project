@@ -277,7 +277,7 @@ void vt_ops_clear(void)
  *              安全截断，不存裸指针）；帧关后的第一次 tick 在解冻点补执行（见 vt_ops_tick）；
  *              起跑 / 完成 / 中止正常路径三处清零，不泄漏到下一次运行
  *   held    按下步的持有态（1 = 有按下步的手指还按着，等弹起步或收尾释放；spec §2.2）：
- *           按住期只允许 等待 / 弹起（及未来条件步）—— 点按 / 滑动 / 按下在步入口统一中止 `槽占用`；
+ *           按住期只允许 等待 / 弹起（及条件步）—— 点按 / 滑动 / 按下在步入口统一中止 `槽占用`；
  *           收尾（正常完成 / 中止）还按着 → 自动松开 + `op 收尾 松开`；起跑 / 完成 / 中止三处清零
  * 全部只有主线程碰（编辑邮箱在 poll_step 里吃、执行器也在主线程跑）—— 不需要锁。
  */
@@ -511,7 +511,28 @@ static void op_next_step(void)
     R.deadline = R.t0;
 }
 
-/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及未来条件步）；点按 / 滑动 / 按下 → 中止 `槽占用`）
+/**
+ * (vtouch-doc: op_cond_fail)
+ * @brief 条件不成立处理：记 `op 条件 <词> <ref> 不成立 → <中止|跳过下一步>`，再按 a3 收场。
+ * @param   st       当前条件步（读 a3 不成立行为与 ref）
+ * @param   word     日志词：`区域判断` / `开关判断`
+ * @note    **静态**，只在执行器内用（区域判断 / 开关判断两处共用：不成立收场逐字同款，一处实现防两处漂移）。a3=0（OP_COND_ABORT）→ 不成立行先于中止行（走既有中止机制，`原因=条件不成立`）；a3=1（OP_COND_SKIP）→ 步序额外 +1（跳过下一步：跳过的那一步不执行也不求值；越过末步 = 正常完成）。调用点都在 region_lock 之外（spec §3.2 锁纪律：持锁判定、解锁后记日志）。
+ */
+static void op_cond_fail(const struct vt_step *st, const char *word)
+{
+    int skip = (st->a3 == OP_COND_SKIP);
+
+    fprintf(stderr, "vtouchd: op 条件 %s %s 不成立 → %s\n", word, st->ref, skip ? "跳过下一步" : "中止");
+    if (!skip) {
+        vt_ops_abort("条件不成立");                           /* 不成立行已先记；中止走既有机制（spec §3.3） */
+        return;
+    }
+    R.step++;                                                /* 跳过下一步：推进量额外 +1（下一拍 op_next_step 再 +1 ⇒ 共 +2） */
+    R.phase = PH_WAIT;                                       /* 单拍动作到此为止，下一拍进下一步 */
+    R.deadline = R.t0;
+}
+
+/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步）；点按 / 滑动 / 按下 → 中止 `槽占用`）
  * + 解析本步数值字段（字面值 / 变量引用；引用无值变量 → 中止 `变量无值`）+ 打步日志 +
  * 发这一步的起始动作（点按 / 滑动 / 按下先 down；弹起 up；等待不动手）。 */
 static void op_begin_step(void)
@@ -520,7 +541,7 @@ static void op_begin_step(void)
     if (R.step >= R.nsteps) { op_finish(); return; }
     st = &R.steps[R.step];
     g.op_run_step = R.step;                                  /* 面板进度（0 起） */
-    /* 按住期门禁（spec §2.2/D4）：持有中只允许 等待 / 弹起（及未来条件步）—— 点按 / 滑动 / 按下
+    /* 按住期门禁（spec §2.2/D4）：持有中只允许 等待 / 弹起（及条件步）—— 点按 / 滑动 / 按下
      * 都会另起一根手指，统一在步入口中止 `槽占用`（判定不逐 case 散落）。 */
     if (R.held && (st->type == OP_STEP_TAP || st->type == OP_STEP_SWIPE || st->type == OP_STEP_DOWN)) {
         vt_ops_abort("槽占用");
@@ -595,6 +616,47 @@ static void op_begin_step(void)
         if (op_finger_raw("up", R.rx, R.ry) != 0) { op_conflict_abort(); return; }   /* 抬指（按住那一点） */
         R.held = 0;
         R.phase = PH_WAIT;
+        R.deadline = R.t0;
+        break;
+    }
+    case OP_STEP_COND_REGION: {                              /* 区域判断：a1,a2 的点 ∈ ref 区域？（spec §3.1） */
+        int x, y, k, found = 0, hit = 0;
+        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0) {
+            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6） */
+            return;
+        }
+        fprintf(stderr, "vtouchd: op 步 %d/%d 区域判断 %s %d,%d\n",
+                R.step + 1, R.nsteps, st->ref, x, y);
+        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律（spec §3.2）：持锁判定、解锁后记日志（锁内不 I/O） */
+        for (k = 0; k < g.region_count; k++) {
+            if (strcmp(g.regions[k].id, st->ref) != 0) continue;
+            found = 1;
+            hit = region_hit(&g.regions[k], x, y);           /* 平坦函数复用：停用 = 不命中（enabled 守卫在它里面，spec §3.1） */
+            break;
+        }
+        pthread_mutex_unlock(&g.region_lock);
+        if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
+        if (!hit) { op_cond_fail(st, "区域判断"); return; }   /* 不成立：中止 / 跳过下一步（a3，spec §3.3） */
+        R.phase = PH_WAIT;                                   /* 成立：单拍动作到此为止，下一拍进下一步 */
+        R.deadline = R.t0;
+        break;
+    }
+    case OP_STEP_COND_TOGGLE: {                              /* 开关判断：ref 区域须开关型且开着（spec §3.2） */
+        int k, found = 0, is_toggle = 0, on = 0;
+        fprintf(stderr, "vtouchd: op 步 %d/%d 开关判断 %s\n", R.step + 1, R.nsteps, st->ref);
+        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律同门控检查：持锁判定、解锁后记日志（锁内不 I/O） */
+        for (k = 0; k < g.region_count; k++) {
+            if (strcmp(g.regions[k].id, st->ref) != 0) continue;
+            found = 1;
+            is_toggle = (g.regions[k].kind == 1);
+            on = (g.regions[k].toggle_on == 1);
+            break;
+        }
+        pthread_mutex_unlock(&g.region_lock);
+        if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
+        if (!is_toggle) { vt_ops_abort("非开关型"); return; } /* 运行时校验（编辑期不查 kind，spec §3.2） */
+        if (!on) { op_cond_fail(st, "开关判断"); return; }    /* 不成立：中止 / 跳过下一步（a3，spec §3.3） */
+        R.phase = PH_WAIT;                                   /* 成立：单拍动作到此为止，下一拍进下一步 */
         R.deadline = R.t0;
         break;
     }
