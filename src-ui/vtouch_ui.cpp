@@ -202,6 +202,10 @@ static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无
 static int g_ope_i = -1;                 /* 正在编辑的操作下标（-1 = 编辑层关；三态矩形的判据） */
 static int g_ope_coll = 0;               /* 编辑层收起态（取点自动收起 / 手动收起共用；1 = 收成底部条） */
 static long g_pick_t0 = 0;               /* 取点发起时刻（now_ms()；0 = 无）—— 面板自带 20s 兜底计时 */
+/* 取点弹回抑制（T2.4 修复轮 1，评审 Important 1）：编辑层「收起→展开」跃迁的那一帧 / 条上取消那一下，
+ * 还按着的手指一律抑制到抬起（1 = 该 slot 不喂 ImGui）—— 否则矩形回整屏后会被快照锁存成面板鼠标
+ * （1315 不要求 down_edge），抬手时在弹回层里发一次真点击（取点取消 / 回填 / 20s 超时三路通吃）。 */
+static int g_pick_finger[64];
 /* g_need 无锁置位：只由渲染线程清零，其余线程只置 1（单字对齐存取原子；
  * 极小概率与清零竞态丢一次重画，按钮路径当前帧本就带新状态，WS 路径下次事件补画） */
 static volatile int g_need = 1;
@@ -1240,6 +1244,14 @@ static void snapshot_touches(void)
                                (int)rx1, (int)ry1, (int)rx2, (int)ry2);
     }
     if (n > 64) n = 64;
+    /* 取点弹回抑制（T2.4 修复 1）：编辑层「收起 → 展开」跃迁的那一帧，凡还按着的手指一律抑制到
+     * 抬起 —— 矩形回整屏后，快照锁存（1315，不要求 down_edge）会把这些手指锁成面板鼠标，抬手时
+     * 在弹回层里发一次真点击（取点取消 / 回填 / 20s 超时三路通吃）。用**当前帧的按下集合**（d，
+     * 见下面每槽的置位）而不是上一帧快照 g_prev_on：手指首见按下与跃迁同帧的窄竞态（poll 线程先
+     * 吃到 pick_ev、渲染线程同帧才首见该手指）也盖住。 */
+    static int prev_coll = 0;
+    int coll_fell = prev_coll && !g_ope_coll;   /* 本帧检测到「收起 → 展开」跃迁 */
+    prev_coll = g_ope_coll;
     for (i = 0; i < n; i++) {
         int d = 0, x = 0, y = 0;
         if (vtouch_phys_get(i, &d, &x, &y) != 0) d = 0;
@@ -1251,6 +1263,7 @@ static void snapshot_touches(void)
         int in_p = d && ui_live && ui_hit_rect((float)sx, (float)sy);   /* 隐藏时不认面板命中；三态矩形（T2.4） */
         if (d) {
             any = 1;
+            if (coll_fell) g_pick_finger[i] = 1;   /* 弹回抑制（T2.4 修复 1）：跃迁帧还按着的手指不许被锁存 */
             if (!g_dots[i].on) g_dots[i].tn = 0;
             g_dots[i].on = 1; g_dots[i].x = x; g_dots[i].y = y;
             int k = g_dots[i].tn % 12;
@@ -1258,10 +1271,12 @@ static void snapshot_touches(void)
             g_dots[i].tn++;
             /* 取点态（T2.8/T2.4）：收起条上点按 = 取消（「点这里取消」）。这一下不喂 ImGui ——
              * 它就是「取消」这个动作本身（吞掉，免得顺带点到别的）。取消后自动弹回编辑层
-             * （参数层保持）；这里 in_p 在取点态 = 底部条（ui_rect_now 三态），不会误吃取点落点。 */
+             * （参数层保持）；这里 in_p 在取点态 = 底部条（ui_rect_now 三态），不会误吃取点落点。
+             * 手指还按着：g_pick_finger 抑制到抬起 —— 弹回后矩形回整屏也不许锁存成点击（T2.4 修复 1）。 */
             int pick_cancel = 0;
             if (down_edge && ui_live && in_p && g_pick) {
                 pick_cancel = 1;
+                g_pick_finger[i] = 1;                    /* 抑制到抬起（T2.4 修复 1）：这一下是「取消」不是点击 */
                 g_pick = 0; g_pick_t0 = 0;
                 g_ope_coll = 0;                          /* 自动弹回编辑层 */
                 vtouch_pick_cancel();
@@ -1312,12 +1327,13 @@ static void snapshot_touches(void)
             }
             if (ui_live && i == g_cap_slot) { g_cap_x1 = x; g_cap_y1 = y; }
             if (ui_live && i == g_edit_slot) edit_apply_live(x, y);
-            if (ui_live && !pick_cancel && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
+            if (ui_live && !pick_cancel && !g_pick_finger[i] && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
                 panel_press(i, sx, sy);            /* 面板鼠标走当前屏坐标 */
             } else if (ui_live && i == g_mslot) {
                 panel_drag_move(sx, sy);
             }
         } else {
+            g_pick_finger[i] = 0;                    /* 抑制到抬起：抬起即清位（T2.4 修复 1） */
             if (g_prev_on[i] && g_dots[i].on) push_ring(g_dots[i].x, g_dots[i].y);
             g_dots[i].on = 0;
             if (i == g_mslot) panel_release();
