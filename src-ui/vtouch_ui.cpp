@@ -660,6 +660,10 @@ static void load_regions(void)
 {
     char line[128];
     int ver = 0, migrated = 0, frame_seen = 0, nreg = 0, nskip = 0;
+    /* v4 T1.2 可重入（切换期会再跑一遍）：hide 表是 regions.conf 的**派生态**（文件 = 唯一来源）——
+     * 每次载入先复位、再按文件重建。启动时本就为 0（行为不变）；不复位的话二次载入是追加式，
+     * 新文件里没有的旧 hide 条目会残留（旧方案隐藏态泄漏进新方案）。 */
+    g_nhide = 0;
     FILE *f = fopen(REGION_CONF_NEW, "r");
     if (!f) {
         f = fopen(REGION_CONF_OLD, "r");      /* 首次升级：把 tmpfs 里的老表搬过来 */
@@ -1185,6 +1189,188 @@ static void scheme_mirror(void)
     if (scheme_copy_file(REGION_CONF_NEW, sp, 0) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
     snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, cur);
     if (scheme_copy_file(OPS_CONF_FILE, sp, 1) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
+}
+
+/* ---- 方案切换执行器（v4 T1.2：预检 / 静默边界 / flush+写 live / clear+重放 / current+日志+刷新）------------
+ * 事务顺序照 spec §4（编号同）：①预检（dry-run，零状态修改）②静默边界 ③flush 旧 ④写 live ⑤核心替换
+ * （先区域后操作）⑥写 current ⑦日志 + UI 刷新。失败面：预检拒 → 原状；flush 失败仅告警；写 live 失败
+ * → 核心未触、原状；核心单条拒收 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）；current 写失败
+ * → 下次启动兜底迁移（不算切换失败）。
+ * scheme_switch 返回码（0 = 成功；非零 = 失败原因码，供调用方就地提示）：
+ *   1 = 名字非法（空 / 超长 / 非法字符 / 裸 `-`）
+ *   2 = 方案目录或文件缺失（schemes/<名>/ 目录或两文件之一读不到）
+ *   3 = regions.conf 版本门不过（缺版本行 / 非当前版本）
+ *   4 = regions.conf 坏行
+ *   5 = ops.conf 版本门不过（缺版本行 / 非 v1/v2/v3）
+ *   6 = ops.conf 坏行（含：记录无步骤行 / 孤儿 step 行）
+ *   7 = ops.conf 单条步数越限（>32）
+ *   8 = 写 live regions.conf 失败（核心未触、原状）
+ *   9 = 写 live ops.conf 失败（核心未触、原状） */
+
+/* 行首识别词（预检用；词后跟空格/制表符才算该类别 —— 与 load 各分支的 sscanf 字面量同集合）。 */
+static int scheme_line_kw(const char *line, const char *kw)
+{
+    size_t n = strlen(kw);
+    return strncmp(line, kw, n) == 0 && (line[n] == ' ' || line[n] == '\t');
+}
+/* 预检 regions.conf 单行（只读）：坏行 → 1，其余 → 0。判定 = 识别词 + 该类别按 load 同款 sscanf 解析
+ * 失败；#frame 另查值域（rot 0..3 / w,h > 0）。未识别行 / 空行照 load「未来扩展静默忽略」口径放行。
+ * 比 load 更严的只有三处：region / #frame / hide 解析失败在 load 是**静默忽略**（数据行悄悄丢），
+ * 预检按坏行拒切；其余与 load 的警告 / 坏记录口径一一对应。 */
+static int scheme_bad_region_line(const char *line)
+{
+    char id[16], op[16], tms[16];
+    int t, a1, a2, a3, a4, en, fr, fw, fh, kd;
+    if (scheme_line_kw(line, "#frame")) {
+        if (sscanf(line, "#frame %d %d %d", &fr, &fw, &fh) != 3) return 1;
+        return !(fr >= 0 && fr <= 3 && fw > 0 && fh > 0);
+    }
+    if (scheme_line_kw(line, "region"))
+        return sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) != 7;
+    if (scheme_line_kw(line, "hide"))
+        return sscanf(line, "hide %15s", id) != 1;
+    if (scheme_line_kw(line, "bind")) {
+        if (sscanf(line, "bind %15s %15s %15s", id, op, tms) != 3) return 1;
+        return strcmp(tms, "down") != 0 && strcmp(tms, "press") != 0;
+    }
+    if (scheme_line_kw(line, "kind")) {
+        if (sscanf(line, "kind %15s %d", id, &kd) != 2) return 1;
+        return kd != 0 && kd != 1;
+    }
+    return 0;      /* 未识别 / 空行：放行（未来扩展增量行照 load 静默忽略口径） */
+}
+/* 预检（dry-run，spec §4-1）：只读解析 schemes/<name>/ 两文件 —— 版本门 / 坏行 / 步数上限，照 load
+ * 口径但**不推核心**、零状态修改。返回 0 = 可切换；非零 = 上表 2..7 的失败码。 */
+static int scheme_precheck(const char *name)
+{
+    char sp[160], line[256];
+    FILE *f;
+    int ver;
+    snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, name);
+    f = fopen(sp, "r");
+    if (!f) return 2;
+    if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-regions v%d", &ver) != 1 || ver != REGION_CONF_VER) {
+        fclose(f);
+        return 3;
+    }
+    while (fgets(line, sizeof line, f)) {
+        if (scheme_bad_region_line(line)) { fclose(f); return 4; }
+    }
+    fclose(f);
+    snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
+    f = fopen(sp, "r");
+    if (!f) return 2;
+    if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 ||
+        (ver != 1 && ver != 2 && ver != OPS_CONF_VER)) {
+        fclose(f);
+        return 5;
+    }
+    {
+        /* ops 段逐行扫（只读）：与 load_ops 同结构 —— 记录边界 = op 行；记录内 step 行 6/7/9 字段。
+         * 坏行 → 6；单条 step 数超 OPS_MAX_STEPS → 7；记录无步骤行 → 6。 */
+        int have = 0, nst = 0, badline = 0, ovf = 0, rc = 0;
+        while (!rc && fgets(line, sizeof line, f)) {
+            char a[16], b[16];
+            int ao2 = 0, t, a1, a2, a3, a4, ms, j1, j2, sn;
+            char rf[REGION_ID_MAX + 1];
+            int pn = sscanf(line, "op %15s gate %15s autooff %d", a, b, &ao2);
+            if (pn >= 1) {
+                if (have) {                        /* 结算上一条（坏行优先于越限报告） */
+                    if (badline || nst < 1) rc = 6;
+                    else if (ovf) rc = 7;
+                    have = 0;
+                }
+                if (!rc) {
+                    if (pn == 3) { have = 1; nst = 0; badline = 0; ovf = 0; }
+                    else rc = 6;                   /* op 行字段不全（load 警告口径） */
+                }
+            } else {
+                sn = sscanf(line, "step %d %d %d %d %d %d %15s %d %d", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2);
+                if (sn == 6 || sn == 7 || sn == 9) {
+                    if (!have) rc = 6;             /* 孤儿 step 行（load 警告口径） */
+                    else if (nst < OPS_MAX_STEPS) nst++;
+                    else ovf = 1;                  /* 步数越限（load 整条作废口径） */
+                } else if (strncmp(line, "step ", 5) == 0) {
+                    rc = 6;                        /* step 行字段残缺（load 整条作废口径） */
+                }
+                /* 其余行放行（未来扩展 / 空行） */
+            }
+        }
+        fclose(f);
+        if (!rc && have) {
+            if (badline || nst < 1) rc = 6;
+            else if (ovf) rc = 7;
+        }
+        return rc;
+    }
+}
+/* 关闭操作编辑覆盖层（定义在操作编辑区块 T2.6；切换的静默边界要关掉它 —— 含全部子层与取点态）。 */
+static void op_edit_close(void);
+/* 切换执行（spec §4；返回码见段首注释）。name == current → 直接成功（no-op、零状态修改）。
+ * 非 static：跨区块入口 —— T2.1「方案」页接线调用（本任务只落执行器；T1.1 文件层函数全 static）。 */
+int scheme_switch(const char *name)
+{
+    char cur[16], sp[160], dp[160];
+    int rc, rst = 0;
+
+    if (!name || scheme_name_ok(name) != 0) return 1;
+    if (scheme_cur_get(cur) == 0 && strcmp(cur, name) == 0) return 0;    /* 已是当前 → no-op */
+    rc = scheme_precheck(name);                                          /* ① 预检：坏 → 拒切、原状 */
+    if (rc != 0) return rc;
+
+    /* ② 静默边界（spec §4-2）：操作在跑 → 停（VT_EDIT_OP_STOP 的胶水入口 = vtouch_op_stop）；
+     * 取点态 / 编辑覆盖层（操作编辑层含子层；区域改名弹层）开着 → 关（复用现有 close 路径）。 */
+    if (vtouch_op_status(NULL, NULL, &rst) == 0 && rst) vtouch_op_stop();
+    if (g_ope_i >= 0) {
+        op_edit_close();                 /* 既有 close 路径：内含取点撤单 + 全部子层 / 收起态复位 */
+    } else if (g_pick) {                 /* 防御：取点态理论上总伴随编辑层开着 */
+        g_pick = 0; g_pick_t0 = 0;
+        vtouch_pick_cancel();
+    }
+    if (g_name_i >= 0) {                 /* 区域改名弹层：无 close 函数，照 draw_name_edit 取消分支复位 */
+        g_name_i = -1; g_name_msg[0] = 0;
+    }
+
+    /* ③ flush 旧（兜底镜像，spec §4-3；失败仅告警、不中断） */
+    if (cur[0]) {
+        snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+        if (scheme_copy_file(REGION_CONF_NEW, dp, 0) != 0)
+            ALOGW("方案 切换：flush %s/regions.conf 失败: %s", cur, strerror(errno));
+        snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
+        if (scheme_copy_file(OPS_CONF_FILE, dp, 1) != 0)
+            ALOGW("方案 切换：flush %s/ops.conf 失败: %s", cur, strerror(errno));
+    }
+    /* ④ 写 live（schemes/<new>/ 两文件 → live；复用 1.1 复制 helper。失败 → 核心未触、原状） */
+    snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(sp, REGION_CONF_NEW, 0) != 0) return 8;
+    snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(sp, OPS_CONF_FILE, 1) != 0) return 9;
+
+    /* ⑤ 核心替换（spec §4-5）：**先区域后操作**；清空后重放 ⇒ load 的「只补缺 / 重复跳过」均不触发
+     * （全量补入）；单条被核心拒 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）。load 可重入
+     * （见 load_regions 段首：hide 表按文件重建；load_ops 无跨调用状态）。 */
+    vtouch_region_clear();
+    load_regions();
+    vtouch_op_clear();
+    load_ops();
+
+    /* ⑥ 写 current（失败 → 下次启动兜底迁移；不算切换失败） */
+    if (scheme_cur_set(name) != 0)
+        ALOGW("方案 切换 %s：current 未写定（下次启动兜底迁移）", name);
+
+    /* ⑦ 日志（spec §8 逐字；N/M 从方案文件解析，口径同迁移日志）+ UI 刷新（区域侧走既有「表变了」
+     * 刷新口径；区域 / 操作 / 方案页列表逐帧读核心，重画即重读） */
+    {
+        int nr, no;
+        snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, name);
+        nr = scheme_count_lines(sp, "region ");
+        snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
+        no = scheme_count_lines(sp, "op ");
+        ALOGI("方案 切换 %s → %s（区域 %d / 操作 %d）", cur[0] ? cur : "-", name, nr, no);
+    }
+    ui_region_changed();
+    g_need = 1; g_force_frames = 3;
+    return 0;
 }
 static void gen_id(char *out, int circle)
 {
