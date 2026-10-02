@@ -456,14 +456,18 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  * @param   gate     门控开关区域 id；NULL 或空串 = 无
  * @param   autoff   跑完自动关门控（非 0 视为 1）
  * @param   steps6   扁平步表：每 6 个 int 一组，顺序 type,a1,a2,a3,a4,ms
+ * @param   refs     每步的区域引用表（条件步的 ref；可 NULL = 全空）；refs[i] 空串 = 第 i 步无引用
  * @param   nsteps   步数（1..32；越界当场拒，不投）
  * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
  * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；
+ *          refs 逐步拷进 op.steps[i].ref（strnlen 防御照款：未终止按空串处理，同 vtouch_get_op_step 口径）；
  *          核心的校验是单点（名字 / 步数 / 类型 1..7 / 坐标 / 时长 / 变量编码 -5..-1 / 条件步 a3+ref），被拒时回读失败、面板走现有错误提示路径。
  */
-int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps)
+int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6,
+                  const char (*refs)[REGION_ID_MAX + 1], int nsteps)
 {
     struct vt_op op;
+    size_t rn;
     int i, r;
     if (!B || !name || !*name) return -1;
     if (!steps6) { fprintf(stderr, "vtouch-ui: 操作载荷缺步表\n"); return -1; }
@@ -483,6 +487,11 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
         op.steps[i].a3   = steps6[i * 6 + 3];
         op.steps[i].a4   = steps6[i * 6 + 4];
         op.steps[i].ms   = steps6[i * 6 + 5];
+        if (refs) {                                  /* ref 通道（T3.1）：NULL = 全空；每步空串 = 无 */
+            rn = strnlen(refs[i], REGION_ID_MAX + 1);
+            if (rn <= REGION_ID_MAX)                 /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
+                snprintf(op.steps[i].ref, sizeof op.steps[i].ref, "%s", refs[i]);
+        }
     }
     if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) return -1;
     /* 回读校验（spec §2.6）：核心不给逐条回执 —— 找到同名且步数一致才算真落地。 */
