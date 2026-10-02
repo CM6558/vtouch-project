@@ -30,11 +30,11 @@
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、坐标与时长逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec §2.7）：名字与区域 id 同一把尺子（vt_id_ok：[A-Za-z0-9_-]、1..15）；
+ * 规则出处（spec §2.7）：名字与区域 id 同一把尺子（vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；
  * 步数 1..MAX_STEPS；坐标必须落在竖屏逻辑坐标内（0..logical_width-1 / 0..logical_height-1）——
  * 操作的手指是**注入**的，屏外的点没有意义：收下来也只是静默不命中，不如当场拒掉让面板报错；
  * 时长按类型分档：点按 0..60000（0 = 按下即抬）、滑动 1..60000（0 的滑动没有采样点）、等待 0..600000。
- * gate **不在这里校验**：允许悬空 —— 起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
+ * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
 {
@@ -45,7 +45,14 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
      * 不让后面的 vt_id_ok / strcmp / 日志去读越界。 */
     n = strnlen(op->name, sizeof op->name);
     if (n < 1 || n > OP_NAME_MAX || !vt_id_ok(op->name, n)) {
-        snprintf(why, whycap, "名字非法（[A-Za-z0-9_-]、1..%d）", OP_NAME_MAX);
+        snprintf(why, whycap, "名字非法（[A-Za-z0-9_-]、1..%d；裸 `-` 除外）", OP_NAME_MAX);
+        return 0;
+    }
+    /* 门控 id 同款防御（收口）：载荷同样来自邮箱字节 —— 先按数组长度找终止符，超长/未终止即拒；
+     * 不查存在性（允许悬空，起跑时解析不到再丢弃 + 日志，安全侧，spec §4.3）。 */
+    n = strnlen(op->gate, sizeof op->gate);
+    if (n > REGION_ID_MAX) {
+        snprintf(why, whycap, "门控名非法（[A-Za-z0-9_-]、1..%d 或空；裸 `-` 除外）", REGION_ID_MAX);
         return 0;
     }
     if (op->step_count < 1 || op->step_count > MAX_STEPS) {
@@ -524,6 +531,8 @@ static void op_consume_trigger(void)
     if (n > OP_NAME_MAX) n = OP_NAME_MAX;
     memcpy(name, g.op_trig_name, n); name[n] = 0;
     for (k = 1; k < delta; k++) fprintf(stderr, "vtouchd: op 丢弃 覆盖\n");
+    if (op_trace_on())                                       /* L9：默认零输出（判定只一次分支） */
+        fprintf(stderr, "vtouchd: op 触发 %s 槽=%d\n", name, g.op_trig_slot);
     vt_ops_run(name);                                        /* 忙 / 不存在 / 没空闲槽由它丢弃 + 日志 */
 }
 

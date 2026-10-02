@@ -439,7 +439,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
 /**
  * (vtouch-doc: vtouch_op_put)
  * @brief 新增或覆盖一条操作（整条投编辑邮箱 → 回读校验；面板侧入口）。
- * @param   name     操作名（核心再校验：1..15、[A-Za-z0-9_-]）
+ * @param   name     操作名（核心再校验：1..15、[A-Za-z0-9_-]；裸 `-` 除外）
  * @param   gate     门控开关区域 id；NULL 或空串 = 无
  * @param   autoff   跑完自动关门控（非 0 视为 1）
  * @param   steps6   扁平步表：每 6 个 int 一组，顺序 type,a1,a2,a3,a4,ms
@@ -557,11 +557,11 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
  */
 void vtouch_pick_request(void)
 {
-    pick_armed = 1;
     if (B) {
         pick_last_seq = B->pick_seq;              /* 先推基线、后置 mode：本次请求之后的捕获才算数 */
         B->pick_mode = 1;
     }
+    pick_armed = 1;                               /* 先推基线、后置 armed：消除 poll 线程读到「armed 新、基线旧」的亚微秒窗口 */
 }   /* 不叫醒核心：触摸按下本身会唤醒它 */
 
 /**
