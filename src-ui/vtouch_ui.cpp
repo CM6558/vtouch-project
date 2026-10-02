@@ -196,6 +196,12 @@ static int g_pick_sf = -1;
 static int g_pickmk_x = 0, g_pickmk_y = 0;
 static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无标记 */
 #define PICK_MARK_MS 2000                /* 标记存活时长（~2 秒） */
+/* 编辑层（T2.6/T2.4）里「渲染与吞触摸都要读」的三个标量定义在这里（g_ope_ 一族其余在 T2.6 区块）：
+ * 文件前段的快照/吞触摸判据（ui_rect_now / snapshot_touches）要用它们 —— C++ 变量不能像函数那样
+ * 先声明后定义（后置带初值的定义会判重定义），所以把定义搬前。 */
+static int g_ope_i = -1;                 /* 正在编辑的操作下标（-1 = 编辑层关；三态矩形的判据） */
+static int g_ope_coll = 0;               /* 编辑层收起态（取点自动收起 / 手动收起共用；1 = 收成底部条） */
+static long g_pick_t0 = 0;               /* 取点发起时刻（now_ms()；0 = 无）—— 面板自带 20s 兜底计时 */
 /* g_need 无锁置位：只由渲染线程清零，其余线程只置 1（单字对齐存取原子；
  * 极小概率与清零竞态丢一次重画，按钮路径当前帧本就带新状态，WS 路径下次事件补画） */
 static volatile int g_need = 1;
@@ -954,16 +960,47 @@ static void push_ring(int x, int y)
     r->on = 1; r->x = x; r->y = y; r->t = now_ms();
 }
 
+/* 编辑层收起条（取点 / 手动共用）几何：底部居中一条（当前屏坐标）。
+ * 「那一小块」= 其余整屏可点：取点收起时 = 取点落点；手动收起时 = 看游戏（编辑状态全保留）。 */
+#define OPE_BAR_H 92
+static void ope_bar_rect(float *x1, float *y1, float *x2, float *y2)
+{
+    float w = (float)g_scr_w - 48;
+    if (w > 960) w = 960;
+    *x1 = ((float)g_scr_w - w) * 0.5f; *x2 = *x1 + w;
+    *y2 = (float)g_scr_h - 24; *y1 = *y2 - OPE_BAR_H;
+}
+/* 「面板占屏」状态矩形（当前屏坐标）：吞触摸与喂 ImGui 共用同一个判据（三态，T2.4）——
+ *   编辑层展开 → 整屏（编辑时不让误触漏进游戏）；
+ *   编辑层收起（取点 / 手动）→ 底部收起条那一小块（其余整屏可点；取点收起时 = 取点落点）；
+ *   编辑层关闭 → 面板窗口（现状）。 */
+static void ui_rect_now(float *x1, float *y1, float *x2, float *y2)
+{
+    if (g_ope_i >= 0) {
+        if (g_ope_coll) ope_bar_rect(x1, y1, x2, y2);
+        else { *x1 = 0; *y1 = 0; *x2 = (float)g_scr_w - 1; *y2 = (float)g_scr_h - 1; }
+        return;
+    }
+    *x1 = g_pan_x; *y1 = g_pan_y;
+    *x2 = g_pan_x + panel_w(); *y2 = g_pan_y + panel_h();
+}
+static int ui_hit_rect(float x, float y)
+{
+    float x1, y1, x2, y2;
+    ui_rect_now(&x1, &y1, &x2, &y2);
+    return x >= x1 && x < x2 && y >= y1 && y < y2;
+}
+
 /* 面板区吞触摸（注册给核心）：核心每根手指按下时问一次，参数是竖屏逻辑坐标。
  * 命中面板 → 这根手指整段不进系统（点按钮不会点到下层游戏）；面板自己靠 phys 快照照常响应。
- * UI 关闭/图层不可见时不吃，保持「穿透优先」。 */
+ * UI 关闭/图层不可见时不吃，保持「穿透优先」。判据与推给核心的矩形同源（ui_hit_rect）。 */
 static int ui_consume_cb(int lx, int ly)
 {
     int sx, sy;
     if (g_ui_off || !g_want_layer) return 0;
     if (now_ms() < g_rot_settle_t) return 0;   /* 转屏稳定窗口内一律不吞（判定会被锁存整段手势） */
     p2c(lx, ly, &sx, &sy);
-    return in_panel((float)sx, (float)sy) ? 1 : 0;
+    return ui_hit_rect((float)sx, (float)sy) ? 1 : 0;
 }
 
 /* 取点结果落点（T2.8）：ui_ev_cb 收到 pick_ev 时转发过来。定义在 T2.6 区块 —— g_ope_ 与 g_ne_
@@ -1189,14 +1226,19 @@ static void snapshot_touches(void)
      * 拖走、起框选、甚至改动区域表并落盘（而屏幕上什么都看不见，只能靠 regions.conf 发现）。 */
     int ui_live = (!g_ui_off && g_want_layer) ? 1 : 0;
     /* 把"面板现在占哪块屏幕、可不可见"推给核心：核心在注入前拿它决定这只手是给面板还是给 App。
-     * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。 */
+     * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。T2.4 起矩形是**三态**的
+     * （编辑层整屏 / 编辑层收起条 / 面板窗口，见 ui_rect_now）：编辑层打开时整屏吞，
+     * 收起时只吞底部条（其余整屏 = 取点落点 / 看游戏）。 */
     /* 稳定窗内一律**不吞**（宁放不吞）：转屏瞬间坐标系正在换，而吞触摸判定是"按下问一次、
      * 锁存整段手势"，一次错判会让手指整段被吞或整段漏吞（老面板在进程内的谓词里也是这个规矩，
      * 现在挪到"推给核心的矩形"上）。 */
     int eat_ok = ui_live && (now_ms() >= g_rot_settle_t);
-    vtouch_ui_publish_rect(eat_ok, g_rot, g_scr_w, g_scr_h,
-                           (int)g_pan_x, (int)g_pan_y,
-                           (int)(g_pan_x + panel_w()), (int)(g_pan_y + panel_h()));
+    {
+        float rx1, ry1, rx2, ry2;
+        ui_rect_now(&rx1, &ry1, &rx2, &ry2);
+        vtouch_ui_publish_rect(eat_ok, g_rot, g_scr_w, g_scr_h,
+                               (int)rx1, (int)ry1, (int)rx2, (int)ry2);
+    }
     if (n > 64) n = 64;
     for (i = 0; i < n; i++) {
         int d = 0, x = 0, y = 0;
@@ -1206,7 +1248,7 @@ static void snapshot_touches(void)
         p2c(x, y, &sx, &sy);
         int down_edge = d && !g_prev_on[i];
         int up_edge = !d && g_prev_on[i];
-        int in_p = d && ui_live && in_panel((float)sx, (float)sy);   /* 隐藏时不认面板命中 */
+        int in_p = d && ui_live && ui_hit_rect((float)sx, (float)sy);   /* 隐藏时不认面板命中；三态矩形（T2.4） */
         if (d) {
             any = 1;
             if (!g_dots[i].on) g_dots[i].tn = 0;
@@ -1214,18 +1256,22 @@ static void snapshot_touches(void)
             int k = g_dots[i].tn % 12;
             g_dots[i].tx[k] = x; g_dots[i].ty[k] = y;
             g_dots[i].tn++;
-            /* 取点态（T2.8）：面板内新按下 = 取消（点面板里取消）。这一下不喂 ImGui ——
-             * 它就是「取消」这个动作本身（吞掉，免得顺带点到数字键/按钮）。 */
+            /* 取点态（T2.8/T2.4）：收起条上点按 = 取消（「点这里取消」）。这一下不喂 ImGui ——
+             * 它就是「取消」这个动作本身（吞掉，免得顺带点到别的）。取消后自动弹回编辑层
+             * （参数层保持）；这里 in_p 在取点态 = 底部条（ui_rect_now 三态），不会误吃取点落点。 */
             int pick_cancel = 0;
             if (down_edge && ui_live && in_p && g_pick) {
                 pick_cancel = 1;
-                g_pick = 0;
+                g_pick = 0; g_pick_t0 = 0;
+                g_ope_coll = 0;                          /* 自动弹回编辑层 */
                 vtouch_pick_cancel();
                 g_need = 1; g_force_frames = 2;
-                ALOGI("取点 取消（面板内点击）");
+                ALOGI("取点 取消（收起条点按）→ 弹回编辑层");
             }
-            /* 手势优先于鼠标：框选 / 选中拖改（面板内一律走鼠标，保证按钮可用） */
-            if (down_edge && ui_live && !in_p && !g_pick) {   /* 隐藏/取点态不开始框选/拖改（否则会改表并落盘；取点态里外侧按下 = 取点动作本身） */
+            /* 手势优先于鼠标：框选 / 选中拖改（面板内一律走鼠标，保证按钮可用）。
+             * 编辑层开着（含收起态）屏上手势一律不跑：展开时整屏给编辑，收起时整屏给游戏/取点，
+             * 都不是框选/拖改的语境（不然收起态里点游戏会顺手改区域表并落盘）。 */
+            if (down_edge && ui_live && !in_p && !g_pick && g_ope_i < 0) {   /* 隐藏/取点态不开始框选/拖改（否则会改表并落盘；取点态里外侧按下 = 取点动作本身） */
                 if (g_cap_mode && g_cap_slot < 0) {
                     g_cap_slot = i;
                     g_cap_x0 = g_cap_x1 = x; g_cap_y0 = g_cap_y1 = y;
@@ -2336,7 +2382,7 @@ static void page_ops(void)
 
 #define OPE_MAX_STEPS 32                /* = 核心 MAX_STEPS（面板不 include 核心头，独立定义） */
 
-static int  g_ope_i = -1;               /* 正在编辑的操作下标（-1 = 覆盖层关；build_panel 的判据） */
+/* g_ope_i / g_ope_coll / g_pick_t0 的定义已上移到取点区块（文件前段的吞触摸/快照判据要读它们）。 */
 static char g_ope_orig[16] = {0};       /* 打开时的原名（改过名后 [完成] 照它删旧条目） */
 static char g_ope_name[16] = {0};       /* 编辑中的名字（名字子层改，[完成] 才落表） */
 static char g_ope_gate[16] = {0};       /* 门控区域 id（空 = 无） */
@@ -2365,17 +2411,18 @@ static char g_ne_msg[72] = {0};         /* 参数弹层就地提示（范围/位
 #define NE_TGT_J2 2
 
 /* 自绘字符键盘弹层（区域改名 / 操作改名共用：面板收不到系统输入法，字符全靠点）。
- * 画在面板窗内并盖住侧栏与内容页（那两块本帧干脆不画，免得底下按钮还能吃点击）：
+ * 画在当前窗口内并盖住底下内容（调用方那一帧干脆不画底下，免得底下按钮还能吃点击）：
  * 标题 + 当前值框（带原名对照）+ 6x6 字符键 + 特殊键（_ - 大小写 退格）+ 取消/确定。
+ * top = sheet 顶边距（相对窗口顶；面板窗里有标题栏用 TITLE_H+10，编辑层整屏窗用 12）。
  * buf 上限 15 字符、up 是大写档；本函数只画/只改，语义留给调用方：
  * 返回 0 = 无动作 / 1 = 取消 / 2 = 确定。 */
 static int draw_char_kb(const char *title, const char *oldname, char *buf, int bufc,
-                        int *up, char *msg, int msgc)
+                        int *up, char *msg, int msgc, float top)
 {
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 wp = ImGui::GetWindowPos();
     float ww = ImGui::GetWindowWidth(), wh = ImGui::GetWindowHeight();
-    ImVec2 a(wp.x + 12, wp.y + (float)TITLE_H + 10), b(wp.x + ww - 12, wp.y + wh - 12);
+    ImVec2 a(wp.x + 12, wp.y + top), b(wp.x + ww - 12, wp.y + wh - 12);
     int act = 0;
     int cap = bufc - 1;
     if (cap > 15) cap = 15;
@@ -2837,6 +2884,12 @@ static void pick_ev_apply(int px, int py)
         }
     }
     g_pick = 0;                          /* 退取点态（不管回填成没成：这一轮取点结束了） */
+    if (g_pick_t0) {                     /* 只在「这一轮取点确实在飞」时收尾：计时复位 + 弹回编辑层
+                                          * （参数层保持 —— g_ope_se 不动）。带外 pick_ev（非取点态）
+                                          * 不许展开手动收起的编辑层。 */
+        g_pick_t0 = 0;
+        g_ope_coll = 0;
+    }
     g_need = 1; g_force_frames = 2;      /* 重画 */
 }
 
@@ -2937,10 +2990,18 @@ static void ope_gate_cycle(void)
     else g_ope_gate[0] = 0;                          /* 到末尾（含悬空值）→ 回「无」 */
 }
 
-/* 关闭编辑覆盖层（含全部子层状态）：[取消] 与保存全成都走它。 */
+/* 关闭编辑覆盖层（含全部子层状态）：[取消] 与保存全成都走它。
+ * T2.4 边界：关层时若在取点态 → 撤单（核心 pick_mode 清掉）+ 恢复矩形（g_ope_i=-1 后
+ * 三态矩形下一帧回到面板窗口）；收起态一并复位（下次开层是展开态）。 */
 static void op_edit_close(void)
 {
     g_ope_i = -1;
+    if (g_pick) {                                    /* 防御：正常流程取点中只能点收起条，走不到关层 */
+        g_pick = 0; g_pick_t0 = 0;
+        vtouch_pick_cancel();
+        ALOGI("取点 取消（关编辑层）");
+    }
+    g_ope_coll = 0;                                  /* 收起态复位（会话态只活在开层期间） */
     g_ope_kb = 0; g_ope_kbmsg[0] = 0;
     g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并关（变量 / 区域选择弹层） */
@@ -2986,6 +3047,7 @@ static void op_edit_open(int i, const char *name)
     g_ope_msg[0] = 0; g_ope_kbmsg[0] = 0; g_ope_kb = 0; g_ope_up = 0;
     g_ope_se = -1; g_ope_sf = 0; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并清（变量 / 区域选择弹层） */
+    g_ope_coll = 0; g_pick_t0 = 0;                  /* 收起态 / 取点计时清零（防御：正常流程关层已清） */
     g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态开层清零（只服务本次编辑） */
     g_need = 1; g_force_frames = 3;
     ALOGI("op edit open i=%d %s（%d 步）", i, name, steps);
@@ -3166,7 +3228,7 @@ static void draw_ope_name_kb(void)
 {
     int act = draw_char_kb("给操作起个名字：脚本/触发绑定按名字认它（与别的操作重名会被拒）",
                            g_ope_orig, g_ope_name, (int)sizeof g_ope_name, &g_ope_up,
-                           g_ope_kbmsg, (int)sizeof g_ope_kbmsg);
+                           g_ope_kbmsg, (int)sizeof g_ope_kbmsg, 12.0f);   /* 编辑层整屏窗：顶边距 12 */
     if (act == 1) {
         g_ope_kb = 0; g_ope_kbmsg[0] = 0;
         g_need = 1; g_force_frames = 3;
@@ -3210,7 +3272,7 @@ static void draw_num_edit(void)
     wp = ImGui::GetWindowPos();
     ww = ImGui::GetWindowWidth();
     wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + (float)TITLE_H + 10);
+    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
     b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
@@ -3296,14 +3358,18 @@ static void draw_num_edit(void)
         ImGui::SetCursorScreenPos(ImVec2(bx, vy));
         if (btn_light("取点", ImVec2(btnw, vbh))) {
             /* 取点接线照旧（先 cancel 再 request —— 清掉可能残留的旧请求，核心的 0→1 转变与 20s
-             * 计时从这一次点按起算）；v3 回填进缓冲的一对坐标格（pick_ev_apply），点面板里 = 取消。 */
+             * 计时从这一次点按起算）；v3 回填进缓冲的一对坐标格（pick_ev_apply）。
+             * T2.4：进取点态 = 编辑层自动收成底部条（「点屏幕上目标位置 · 点这里取消」）；
+             * 回填 / 点条取消 / 20s 兜底超时 → 自动弹回编辑层（参数层保持）。 */
             g_pick_se = g_ope_se; g_pick_sf = g_ope_sf;
             vtouch_pick_cancel();
             vtouch_pick_request();
             g_pick = 1;
+            g_pick_t0 = now_ms();                    /* 面板自带 20s 兜底计时起点 */
+            g_ope_coll = 1;                          /* 自动收起（收起条 = 取消取点） */
             g_ne_msg[0] = 0;
             g_need = 1; g_force_frames = 2;
-            ALOGI("取点 请求 第 %d 步 参数 %d/%d", g_ope_se + 1, g_ope_sf + 1, nf);
+            ALOGI("取点 请求 第 %d 步 参数 %d/%d（编辑层自动收起）", g_ope_se + 1, g_ope_sf + 1, nf);
         }
         bx += btnw + 12;
     }
@@ -3317,11 +3383,13 @@ static void draw_num_edit(void)
         }
     }
     if (g_pick) {
-        /* 取点态提示条（T2.8）：与错误提示共用固定槽位（键盘位置不动，防误点） */
+        /* 取点态提示条（T2.8）：与错误提示共用固定槽位（键盘位置不动，防误点）。
+         * T2.4 起正常流程这里画不到（进取点态即自动收起，参数层不画）—— 防御保留：
+         * 若某路径让 g_pick 与展开态并存，提示仍指向正确出口（底部条）。 */
         ImVec2 p1 = ImVec2(x0, vy + vbh + 12), p2 = ImVec2(x0 + cw, p1.y + 46);
         dl->AddRectFilled(p1, p2, IM_COL32(219, 234, 254, 255), 8);
         dl->AddRect(p1, p2, IM_COL32(59, 130, 246, 255), 8, 0, 1.5f);
-        dl->AddText(ImVec2(p1.x + 14, p1.y + 3), IM_COL32(29, 78, 216, 255), "点屏幕上目标位置（点面板里取消）");
+        dl->AddText(ImVec2(p1.x + 14, p1.y + 3), IM_COL32(29, 78, 216, 255), "点屏幕上目标位置（点底部条取消）");
     } else if (g_ne_msg[0]) {
         ImGui::SetCursorScreenPos(ImVec2(x0, vy + vbh + 12));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ne_msg);
@@ -3382,7 +3450,7 @@ static void draw_num_edit(void)
         ImGui::SetCursorScreenPos(ImVec2(x0, by));
         if (btn_light("取消", ImVec2(bw2, 92))) {
             ALOGI("op edit 参数取消 第 %d 步", g_ope_se + 1);
-            if (g_pick) { g_pick = 0; vtouch_pick_cancel(); }     /* 防御：未回的取点请求也一并撤（全丢） */
+            if (g_pick) { g_pick = 0; g_pick_t0 = 0; g_ope_coll = 0; vtouch_pick_cancel(); }   /* 防御：未回的取点请求也一并撤（全丢） */
             g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
             g_need = 1; g_force_frames = 3;
         }
@@ -3448,7 +3516,7 @@ static void draw_ope_vlist(void)
     wp = ImGui::GetWindowPos();
     ww = ImGui::GetWindowWidth();
     wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + (float)TITLE_H + 10);
+    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
     b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
@@ -3511,7 +3579,7 @@ static void draw_ope_rlist(void)
     wp = ImGui::GetWindowPos();
     ww = ImGui::GetWindowWidth();
     wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + (float)TITLE_H + 10);
+    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
     b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
@@ -3566,9 +3634,9 @@ static void draw_ope_rlist(void)
     ImGui::PopID();
 }
 
-/* 编辑覆盖层主屏（整面盖住，同改名弹层）：名字行 / 步骤列表（可滚）/ 加步（两行八类型 4+4）/
- * 门控循环 / 跑完自动关 / [取消][完成]。子层（名字键盘、数字弹层、变量选择、区域选择）开着时
- * 本屏不画（被整面盖住）。 */
+/* 编辑层主屏（T2.4 起按**当前屏整屏**绘制，见 build_edit_layer）：头部（名字行 + [收起]）/
+ * 步骤列表（可滚）/ 加步（两行八类型 4+4）/ 门控循环 / 跑完自动关 / [取消][完成]。
+ * 子层（名字键盘、数字弹层、变量选择、区域选择）开着时本屏不画（子层整面盖住）。 */
 static void draw_op_edit(void)
 {
     ImDrawList *dl;
@@ -3584,15 +3652,26 @@ static void draw_op_edit(void)
     wp = ImGui::GetWindowPos();
     ww = ImGui::GetWindowWidth();
     wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + (float)TITLE_H + 10);
+    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
     b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
     x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    /* 名字行（点它开字符键盘子层） */
+    /* 头部：名字小字 + 右 [收起] 钮（T2.4：收成底部条，编辑状态全保留；点条再展开 ——
+     * 「一边看游戏一边改」用。收起态与子层叠加规则：收起只画条，子层状态原样保留，展开即回原层）。 */
     ImGui::SetCursorScreenPos(ImVec2(x0, y0));
     text_meta_s("名字（脚本按名字认它；与别的操作重名会被拒）");
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 36));
+    {
+        float bw = 168.0f;
+        ImGui::SetCursorScreenPos(ImVec2(x0 + cw - bw, y0 - 8));
+        if (btn_light("收起", ImVec2(bw, 64))) {
+            g_ope_coll = 1;
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 收起（编辑状态保留；点条展开）");
+        }
+    }
+    /* 名字行（点它开字符键盘子层） */
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 68));
     if (btn_light(g_ope_name, ImVec2(cw, 84))) {
         g_ope_kb = 1; g_ope_kbmsg[0] = 0; g_ope_up = 0;
         g_need = 1; g_force_frames = 2;
@@ -3601,11 +3680,11 @@ static void draw_op_edit(void)
     /* 就地提示（[完成] 拒收 / 步数门 / 门控提示）；提示槽固定占位：出现提示时下面整块不动，防误点 */
     msg_h = 46.0f;
     if (g_ope_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 36 + 84 + 12));
+        ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 68 + 84 + 12));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
     }
     /* 步骤区标题 + 底部按钮锚点（从底往上排，列表拿中间剩下的高度） */
-    ly = y0 + 36 + 84 + 12 + msg_h;
+    ly = y0 + 68 + 84 + 12 + msg_h;
     by_bottom = b.y - 24;
     done_y = by_bottom - 92;
     autooff_y = done_y - 12 - 76;
@@ -3754,7 +3833,7 @@ static void draw_name_edit(void)
 {
     int act = draw_char_kb("给区域起个名字：脚本就按这个名字认它（默认 r1/c1…，可改）",
                            g_name_old, g_name_buf, (int)sizeof g_name_buf, &g_name_up,
-                           g_name_msg, (int)sizeof g_name_msg);
+                           g_name_msg, (int)sizeof g_name_msg, (float)TITLE_H + 10);   /* 面板窗：sheet 顶在标题栏下 */
     if (act == 1) {
         g_name_i = -1; g_name_msg[0] = 0; g_need = 1; g_force_frames = 3;
         ALOGI("name cancel");
@@ -3817,7 +3896,8 @@ static void build_panel(void)
     }
     if (!g_min) ImGui::Dummy(ImVec2(0, COL_GAP - 10));
     if (!g_min && g_name_i >= 0) draw_name_edit();          /* 改名弹层：本帧不画侧栏/内容页 */
-    else if (!g_min && g_ope_i >= 0) draw_op_edit();        /* 操作编辑覆盖层（T2.6）：同上 */
+    /* 操作编辑层（T2.6/T2.4）不在这里画：编辑层开着时 build_panel 整个不跑（见 draw_frame），
+     * 由 build_edit_layer 按整屏画（展开 = 整屏 sheet；收起 = 底部条）。 */
     if (!g_min && g_name_i < 0 && g_ope_i < 0) build_sidebar();
     if (!g_min && g_sheet && g_name_i < 0 && g_ope_i < 0) {
         ImGui::SameLine();
@@ -3839,6 +3919,67 @@ static void build_panel(void)
     ImGui::PopStyleVar(2);
     ImGui::End();
     if (min_bg) ImGui::PopStyleColor(2);
+}
+
+/* 编辑层收起条（取点 / 手动共用渲染）：底部居中一条（几何见 ope_bar_rect，与吞触摸矩形同源）。
+ * 取点收起 = 「点屏幕上目标位置 · 点这里取消」（spec §4.2 逐字）—— 点按 = 取消，走快照侧
+ * down_edge 拦截（snapshot_touches：按整条命中、不喂 ImGui，取消更稳），这里只画。
+ * 手动收起 = 「编辑中 · 点这里展开」（措辞自定）—— 条本体是按钮，点按 = 展开（状态全保留）。 */
+static void draw_ope_bar(void)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float x1, y1, x2, y2;
+    const char *t = g_pick ? "点屏幕上目标位置 · 点这里取消" : "编辑中 · 点这里展开";
+    ope_bar_rect(&x1, &y1, &x2, &y2);
+    dl->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(24, 24, 27, 235), 14.0f);
+    dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(82, 82, 91, 255), 14.0f, 0, 1.5f);
+    {
+        ImVec2 ts = ImGui::CalcTextSize(t);
+        dl->AddText(ImVec2((x1 + x2 - ts.x) * 0.5f, (y1 + y2 - ts.y) * 0.5f),
+                    IM_COL32(255, 255, 255, 255), t);
+    }
+    if (!g_pick) {
+        ImGui::SetCursorScreenPos(ImVec2(x1, y1));
+        if (ImGui::InvisibleButton("##opebar", ImVec2(x2 - x1, y2 - y1))) {
+            g_ope_coll = 0;
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 展开（收起条点按）");
+        }
+    }
+}
+
+/* 编辑层窗口（T2.4）：编辑层及其全部子层按**当前屏整屏**绘制（不再局限面板窗口）。
+ * 面板主窗口在编辑层开着时不画（build_panel 整个不跑，见 draw_frame）：展开时整屏 sheet 盖住一切；
+ * 收起时只剩底部条，其余整屏看游戏（取点收起时 = 取点落点）。
+ * 窗口本身整屏、背景透明（sheet / 条自画底色）；编辑层关后本窗不再 Begin（ImGui 自动失活，
+ * 下次开层原位复活，无 ini 残留 —— NoSavedSettings）。 */
+static void build_edit_layer(void)
+{
+    float sw = (float)g_scr_w, sh = (float)g_scr_h;
+    if (sw <= 0 || sh <= 0) return;
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(sw, sh), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));   /* 整屏透明：sheet/条之外透出游戏 */
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));     /* 窗口描边也隐掉（否则整屏一圈灰线） */
+    ImGui::Begin("##opedit", 0,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    /* 面板窗口本帧不画：四个实区清掉（免上一帧残留命中把滚动错路由）；编辑层自己的列表 child
+     * 会按需重发布（pub_zone）。 */
+    g_zone_title[0] = g_zone_title[1] = g_zone_title[2] = g_zone_title[3] = 0;
+    g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
+    g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
+    g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
+    if (g_ope_coll) draw_ope_bar();          /* 收起条（取点 / 手动共用渲染） */
+    else draw_op_edit();                     /* 展开：整屏编辑层（子层自盖） */
+    ImGui::PopStyleVar(2);
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    if (g_scr_target == SCR_NONE) g_scroll_acc = 0;   /* 与 build_panel 同款：非滚动容器按下丢弃累积量 */
 }
 
 /* 单帧：事件 API 喂输入 → 单 NewFrame → 双内容 → 提交 */
@@ -3868,7 +4009,8 @@ static void draw_frame(int sw, int sh)
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     if (g_ov_show) build_overlay(sw, sh);
-    build_panel();
+    if (g_ope_i >= 0) build_edit_layer();   /* 编辑层整屏（T2.4）：面板主窗口本帧不画 */
+    else build_panel();
     ImGui::Render();
     if (g_mdown && g_mup_pend) { g_mdown = 0; g_mup_pend = 0; g_mslot = -1; }
     glViewport(0, 0, sw, sh);
@@ -4001,6 +4143,16 @@ static void *render_thread_fn(void *)
             g_need = 1;
             g_force_frames = 4;
             ALOGI("surface swapped t=+%.0fms", (double)t_since_start());
+        }
+        /* 取点自动收起的 20s 兜底（T2.4，面板自带、与核心同长）：核心侧超时是惰性的（下次按下才判），
+         * 面板这份保证到点就弹回 —— 超时 = 撤单 + 弹回编辑层（参数层保持）。放在快照前：
+         * 超时后这一帧的 in_p / 吞触摸矩形立刻回到编辑层展开态。 */
+        if (g_pick && g_pick_t0 && now_ms() - g_pick_t0 > 20000) {
+            g_pick = 0; g_pick_t0 = 0;
+            g_ope_coll = 0;
+            vtouch_pick_cancel();
+            g_need = 1; g_force_frames = 2;
+            ALOGI("取点 超时（面板 20s 兜底）→ 弹回编辑层");
         }
         snapshot_touches();
         region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
