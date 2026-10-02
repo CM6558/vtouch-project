@@ -124,7 +124,7 @@ static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
 static float g_pan_x = 780, g_pan_y = 200;
 static int g_sheet = 1;                   /* 内容页开/合（合 = 只留侧栏） */
 static int g_min = 0;                     /* 收起态：整窗只剩一条标题栏（会话内有效，重启展开） */
-static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日志 3=设置 4=说明 */
+static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日志 3=设置 4=说明 5=方案 */
 #define PAD_X 16
 #define PAD_Y 12
 #define TITLE_H 88
@@ -2444,6 +2444,7 @@ static void build_sidebar(void)
         ImGui::TextDisabled("页面");
         if (nav_btn("区域列表", g_nav == 0 && g_sheet, bw)) { g_nav = 0; g_sheet = 1; g_need = 1; }
         if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
+        if (nav_btn("方案",     g_nav == 5 && g_sheet, bw)) { g_nav = 5; g_sheet = 1; g_need = 1; }
         if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
         if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
         if (nav_btn("说明",     g_nav == 4 && g_sheet, bw)) { g_nav = 4; g_sheet = 1; g_need = 1; }
@@ -4631,6 +4632,394 @@ static void draw_name_edit(void)
     }
 }
 
+/* ---- 方案页（v4 T2.1）：列表 + 切换 / 新建（空）/ 从当前另存为 / 重命名 / 删除 ----------------------
+ * 布局照 spec §6：页头（当前 / 选中）+ 提示槽（固定占位）+ 列表（每行方案名 + [切换]；当前行高亮、
+ * 按钮禁用；可滚 + SCR_LIST 拖滚）+ 底部四键；子层 = 名字键盘（draw_char_kb，ASCII）/ 删除确认
+ * （小确认层）。接线（spec §5；执行器 = T1.2 的 scheme_switch，返回码见其段首注释）：
+ *   切换 = scheme_switch，码表映射就地提示（9/10 是「已回滚」语义，提示里写明）；
+ *   新建 = 建目录 + 两空合法文件（不自动切）；另存为 = live 两文件 → schemes/<名>/ + current 改新名；
+ *   重命名 = 目录 rename +（current == 旧名时）current 同步，同步失败回滚目录名；
+ *   删除 = 拒当前（提示）、确认后删目录。
+ * 日志逐字 spec §8：`方案 新建 <名>` / `方案 另存为 <名>` / `方案 改名 <旧> → <新>` / `方案 删除 <名>`
+ * （切换的成功日志在 scheme_switch 里；本页另加失败路径 `方案 …失败 …` 诊断词，成功路径零新增）。 */
+
+static char g_scm_msg[128] = {0};       /* 页面提示槽（切换结果 / 拒收 / 操作成败；固定占位） */
+static char g_scm_sel[16] = {0};        /* 列表选中行（重命名 / 删除的作用对象；空 = 未选） */
+static int  g_scm_kb = 0;               /* 名字键盘子层：0=关 1=新建 2=另存为 3=重命名 */
+static char g_scm_kbmsg[72] = {0};      /* 名字键盘子层里的拒收提示 */
+static int  g_scm_kbup = 0;             /* 名字键盘子层大小写档 */
+static char g_scm_name[16] = {0};       /* 名字键盘子层输入缓冲 */
+static char g_scm_ren_old[16] = {0};    /* 重命名子层的旧名（键盘「原名」对照） */
+static char g_scm_del[16] = {0};        /* 删除确认层：待删方案名（空 = 层关） */
+
+/* 切换返回码 → 就地提示（码表 = scheme_switch 段首注释；9/10 写明「已回滚」防误读）。 */
+static const char *scm_switch_why(int rc)
+{
+    switch (rc) {
+    case 1:  return "切换失败：名字非法";
+    case 2:  return "切换失败：方案目录或文件缺失";
+    case 3:  return "切换失败：区域表版本不符";
+    case 4:  return "切换失败：区域表有坏行";
+    case 5:  return "切换失败：操作表版本不符";
+    case 6:  return "切换失败：操作表有坏行";
+    case 7:  return "切换失败：操作表某条步数超限";
+    case 8:  return "切换失败：写区域文件失败（未切换，原状）";
+    case 9:  return "切换失败：写操作文件失败（已回滚，未切换）";
+    case 10: return "切换失败：写 current 失败（已整体回滚，未切换）";
+    default: return "切换失败";
+    }
+}
+/* CRUD 失败码 → 就地提示（新建 / 另存为 / 重命名 共用一套码，含义见各 helper 注释）。 */
+static const char *scm_crud_why(int rc)
+{
+    switch (rc) {
+    case 1: return "名字非法：只能 a-z A-Z 0-9 _ -（1..15 字，裸 - 不行）";
+    case 2: return "已有同名方案";
+    case 3: return "方案目录创建失败";
+    case 4: return "方案文件写入失败";
+    case 5: return "current 写入失败（已撤销，未另存）";
+    case 6: return "方案不存在（可能已被删/改名）";
+    case 7: return "目录改名失败";
+    case 8: return "current 同步失败（目录名已回滚）";
+    default: return "操作失败";
+    }
+}
+/* 切换（列表 [切换] 键）：调 T1.2 执行器（预检 / 静默边界 / flush+写 live / 清表重放 / current /
+ * 刷新都在里面）；失败只在这里映射提示 + 诊断日志（执行器对预检拒切不打日志 —— 返回值就是接口）。 */
+static void scm_switch_to(const char *name)
+{
+    int rc = scheme_switch(name);
+    if (rc == 0) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "已切换到 %s", name);
+    } else {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "%s", scm_switch_why(rc));
+        ALOGW("方案 切换失败 %s rc=%d", name, rc);
+    }
+    g_need = 1; g_force_frames = 3;
+}
+/* 删方案目录（spec §5「确认后删目录」）：先删两文件（含 .tmp 残件）再 rmdir。0 / -1（errno 保留）。 */
+static int scm_delete_dir(const char *name)
+{
+    char p[160];
+    snprintf(p, sizeof p, "%s/%s/regions.conf", SCHEME_DIR, name); remove(p);
+    snprintf(p, sizeof p, "%s/%s/regions.conf.tmp", SCHEME_DIR, name); remove(p);
+    snprintf(p, sizeof p, "%s/%s/ops.conf", SCHEME_DIR, name); remove(p);
+    snprintf(p, sizeof p, "%s/%s/ops.conf.tmp", SCHEME_DIR, name); remove(p);
+    snprintf(p, sizeof p, "%s/%s", SCHEME_DIR, name);
+    if (rmdir(p) != 0) return -1;
+    return 0;
+}
+/* 新建（空）（spec §5）：建目录 + 两空合法文件；不自动切换；日志 `方案 新建 <名>`。返回 0 / 1 名字非法
+ * / 2 撞名 / 3 建目录失败 / 4 写空文件失败（4 时清掉半建目录，重试不会撞名）。 */
+static int scm_new_empty(const char *name)
+{
+    char path[160];
+    if (scheme_name_ok(name) != 0) return 1;
+    if (scheme_exists(name)) return 2;
+    region_conf_dir();
+    if (mkdir(SCHEME_DIR, 0775) < 0 && errno != EEXIST) return 3;
+    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
+    if (mkdir(path, 0775) < 0) return 3;
+    snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
+    if (scheme_write_empty(path, 0) == 0) {
+        snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
+        if (scheme_write_empty(path, 1) == 0) {
+            ALOGI("方案 新建 %s", name);
+            return 0;
+        }
+    }
+    scm_delete_dir(name);       /* 半建目录清掉：留半份会让下次重试撞名 */
+    return 4;
+}
+/* 从当前另存为（spec §5）：live 两文件复制进 schemes/<名>/ → current 改新名（内容相同，无需动核心）；
+ * 日志 `方案 另存为 <名>`。返回 0 / 1 名字非法 / 2 撞名 / 3 建目录失败 / 4 复制失败 / 5 current 写失败
+ * （4/5 清掉新目录 = 撤销，重试不会撞名）。 */
+static int scm_save_as(const char *name)
+{
+    char path[160];
+    if (scheme_name_ok(name) != 0) return 1;
+    if (scheme_exists(name)) return 2;
+    region_conf_dir();
+    if (mkdir(SCHEME_DIR, 0775) < 0 && errno != EEXIST) return 3;
+    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
+    if (mkdir(path, 0775) < 0) return 3;
+    snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(REGION_CONF_NEW, path, 0) != 0) { scm_delete_dir(name); return 4; }
+    snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
+    if (scheme_copy_file(OPS_CONF_FILE, path, 1) != 0) { scm_delete_dir(name); return 4; }
+    if (scheme_cur_set(name) != 0) { scm_delete_dir(name); return 5; }
+    ALOGI("方案 另存为 %s", name);
+    return 0;
+}
+/* 重命名（spec §5）：目录 rename；若 current == 旧名 → current 写新名（写失败回滚目录名，保
+ * live == schemes/<current> 不变量）；日志 `方案 改名 <旧> → <新>`。返回 0 / 1 名字非法 / 2 撞名 /
+ * 6 旧方案不存在 / 7 目录改名失败 / 8 current 同步失败（目录名已回滚）。 */
+static int scm_rename(const char *oldn, const char *newn)
+{
+    char po[160], pn[160], cur[16];
+    if (scheme_name_ok(newn) != 0) return 1;
+    if (!strcmp(oldn, newn)) return 0;          /* 同名 = 无操作（键盘 [确定] 直接收层） */
+    if (scheme_exists(newn)) return 2;
+    if (!scheme_exists(oldn)) return 6;
+    snprintf(po, sizeof po, "%s/%s", SCHEME_DIR, oldn);
+    snprintf(pn, sizeof pn, "%s/%s", SCHEME_DIR, newn);
+    if (rename(po, pn) != 0) return 7;
+    if (scheme_cur_get(cur) == 0 && !strcmp(cur, oldn)) {
+        if (scheme_cur_set(newn) != 0) {
+            if (rename(pn, po) != 0)
+                ALOGW("方案 改名 %s → %s：current 同步失败且目录名回滚失败: %s", oldn, newn, strerror(errno));
+            return 8;
+        }
+    }
+    ALOGI("方案 改名 %s → %s", oldn, newn);
+    return 0;
+}
+/* 打开名字键盘子层（1=新建 2=另存为 3=重命名）；重命名预填旧名（键盘「原名」对照 + 可直接改）。 */
+static void scm_kb_open(int mode)
+{
+    g_scm_kb = mode;
+    g_scm_kbmsg[0] = 0;
+    g_scm_kbup = 0;
+    g_scm_name[0] = 0;
+    g_scm_ren_old[0] = 0;
+    if (mode == 3) {
+        snprintf(g_scm_name, sizeof g_scm_name, "%s", g_scm_sel);
+        snprintf(g_scm_ren_old, sizeof g_scm_ren_old, "%s", g_scm_sel);
+    }
+    g_scm_msg[0] = 0;
+    g_need = 1; g_force_frames = 3;
+}
+/* 点名字 = 选中（重命名 / 删除的作用对象）；换选中清旧提示。 */
+static void scm_select(const char *name)
+{
+    snprintf(g_scm_sel, sizeof g_scm_sel, "%s", name);
+    g_scm_msg[0] = 0;
+    g_need = 1; g_force_frames = 2;
+}
+/* 底部 [重命名]：无选中 / 选中已失效 → 就地提示；否则开名字键盘（预填旧名）。 */
+static void scm_act_rename(void)
+{
+    if (!g_scm_sel[0]) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "先点一行名字选中要操作的方案");
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    if (!scheme_exists(g_scm_sel)) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "方案不存在（可能已被删/改名）：%s", g_scm_sel);
+        g_scm_sel[0] = 0;
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    scm_kb_open(3);
+}
+/* 底部 [删除]：无选中 / 失效 → 提示；选中 = 当前 → 拒（spec §5：不允许删除当前）；否则开确认层。 */
+static void scm_act_delete(void)
+{
+    char cur[16];
+    if (!g_scm_sel[0]) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "先点一行名字选中要操作的方案");
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    if (!scheme_exists(g_scm_sel)) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "方案不存在（可能已被删/改名）：%s", g_scm_sel);
+        g_scm_sel[0] = 0;
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    scheme_cur_get(cur);
+    if (cur[0] && !strcmp(cur, g_scm_sel)) {
+        snprintf(g_scm_msg, sizeof g_scm_msg, "当前方案不能删除（先切到别的方案再删）");
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    snprintf(g_scm_del, sizeof g_scm_del, "%s", g_scm_sel);
+    g_scm_msg[0] = 0;
+    g_need = 1; g_force_frames = 3;
+}
+/* 一行方案：名字键（点 = 选中）+ [切换]（当前行禁用）；当前行高亮（浅蓝底 + 蓝边，同操作卡运行态口径）。 */
+static void scm_row(const char *name, const char *cur)
+{
+    int is_cur = cur[0] && !strcmp(name, cur);
+    int is_sel = g_scm_sel[0] && !strcmp(name, g_scm_sel);
+    ImGui::PushID(name);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, is_cur ? ImVec4(0.937f, 0.965f, 1.00f, 1.00f) : WHITE);
+    ImGui::PushStyleColor(ImGuiCol_Border, is_cur ? BLUE500 : (is_sel ? BLUE500 : ZINC200));
+    ImGui::BeginChild("row", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        float gap = 12.0f, bw = 150.0f;
+        float nw = ImGui::GetContentRegionAvail().x - bw - gap;
+        if (nw < 120) nw = 120;
+        if (is_sel) { if (btn_blue(name, ImVec2(nw, 84))) scm_select(name); }
+        else        { if (btn_light(name, ImVec2(nw, 84))) scm_select(name); }
+        ImGui::SameLine();
+        if (is_cur) {                       /* 当前行：按钮禁用（spec §6） */
+            ImGui::BeginDisabled();
+            btn_blue("切换", ImVec2(bw, 84));
+            ImGui::EndDisabled();
+        } else if (btn_blue("切换", ImVec2(bw, 84))) {
+            scm_switch_to(name);
+        }
+        if (is_cur || is_sel) {
+            char m[32];
+            if (is_cur && is_sel) snprintf(m, sizeof m, "当前方案 · 已选中");
+            else if (is_cur)      snprintf(m, sizeof m, "当前方案");
+            else                  snprintf(m, sizeof m, "已选中");
+            text_meta_s(m);
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 12));
+    ImGui::Dummy(ImVec2(0, 0));   /* bento 卡片间隙 */
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+}
+/* 「方案」页（spec §6）：页头（当前 / 选中）+ 提示槽（固定占位，同编辑层口径）+ 列表 + 底部四键。 */
+static void page_scheme(void)
+{
+    char cur[16] = {0}, names[SCHEME_LIST_MAX][16], meta[40], l[64];
+    int n, i;
+    scheme_cur_get(cur);
+    n = scheme_list(names, SCHEME_LIST_MAX);
+    snprintf(meta, sizeof meta, "%d 个", n);
+    page_header("方案", meta);
+    snprintf(l, sizeof l, "当前：%s · 选中：%s", cur[0] ? cur : "—", g_scm_sel[0] ? g_scm_sel : "无");
+    text_meta_s(l);
+    ImGui::Dummy(ImVec2(0, 4));
+    /* 提示槽固定占位：出现提示时下面整块不动，防误点（两行 30px 小字内放得下） */
+    ImGui::BeginChild("##scmmsg", ImVec2(0, 96), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    if (g_scm_msg[0]) {
+        meta_push();
+        ImGui::PushStyleColor(ImGuiCol_Text, RED600);
+        ImGui::TextWrapped("%s", g_scm_msg);
+        ImGui::PopStyleColor();
+        meta_pop();
+    }
+    ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0, 4));
+    /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
+    {
+        float list_h = ImGui::GetContentRegionAvail().y - (84.0f * 2 + 12.0f + 12.0f);
+        if (list_h < 180) list_h = 180;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+        ImGui::BeginChild("##schemes", ImVec2(0, list_h), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        pub_zone(g_zone_list);
+        drag_scroll_for(SCR_LIST);
+        if (n == 0) ImGui::TextDisabled("还没有方案");
+        for (i = 0; i < n; i++) scm_row(names[i], cur);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+    /* 底部四键（2x2）：新建（空） / 从当前另存为 / 重命名 / 删除 */
+    {
+        float gap = 12.0f;
+        float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        if (btn_blue("新建(空)", ImVec2(bw, 84))) scm_kb_open(1);
+        ImGui::SameLine();
+        if (btn_light("从当前另存为", ImVec2(bw, 84))) scm_kb_open(2);
+        if (btn_light("重命名", ImVec2(bw, 84))) scm_act_rename();
+        ImGui::SameLine();
+        if (btn_red("删除", ImVec2(bw, 84))) scm_act_delete();
+    }
+}
+/* 名字键盘子层（新建 / 另存为 / 重命名 共用；整面盖住面板 —— 本帧不画侧栏/内容页）：
+ * [确定] 走各自语义；非法 / 撞名就地拒收（子层不关）；成功关层 + 页面提示 + 日志（spec §8）。 */
+static void draw_scm_kb(void)
+{
+    const char *title = g_scm_kb == 1 ? "给新方案起个名字：只建空表，不切换当前（重名会被拒）"
+                      : g_scm_kb == 2 ? "从当前另存为：把当前内容存成新方案并切过去（重名会被拒）"
+                                      : "重命名方案：起个新名字（存储按名字认它）";
+    int act = draw_char_kb(title, g_scm_kb == 3 ? g_scm_ren_old : NULL,
+                           g_scm_name, (int)sizeof g_scm_name, &g_scm_kbup,
+                           g_scm_kbmsg, (int)sizeof g_scm_kbmsg, (float)TITLE_H + 10);
+    if (act == 1) {
+        g_scm_kb = 0; g_scm_kbmsg[0] = 0;
+        g_need = 1; g_force_frames = 3;
+    } else if (act == 2) {
+        int rc = g_scm_kb == 1 ? scm_new_empty(g_scm_name)
+               : g_scm_kb == 2 ? scm_save_as(g_scm_name)
+                               : scm_rename(g_scm_ren_old, g_scm_name);
+        if (rc == 0) {
+            if (g_scm_kb == 1) snprintf(g_scm_msg, sizeof g_scm_msg, "已新建方案 %s", g_scm_name);
+            else if (g_scm_kb == 2) snprintf(g_scm_msg, sizeof g_scm_msg, "已另存为 %s（已切到新方案）", g_scm_name);
+            else {
+                if (strcmp(g_scm_ren_old, g_scm_name))
+                    snprintf(g_scm_msg, sizeof g_scm_msg, "已改名 %s → %s", g_scm_ren_old, g_scm_name);
+                else g_scm_msg[0] = 0;                       /* 同名 = 无操作：不提示 */
+                snprintf(g_scm_sel, sizeof g_scm_sel, "%s", g_scm_name);   /* 选中跟着新名 */
+            }
+            g_scm_kb = 0; g_scm_kbmsg[0] = 0;
+            g_need = 1; g_force_frames = 3;
+        } else {
+            snprintf(g_scm_kbmsg, sizeof g_scm_kbmsg, "%s", scm_crud_why(rc));
+            if (g_scm_kb == 1) ALOGW("方案 新建失败 %s: %s", g_scm_name, scm_crud_why(rc));
+            else if (g_scm_kb == 2) ALOGW("方案 另存为失败 %s: %s", g_scm_name, scm_crud_why(rc));
+            else ALOGW("方案 改名失败 %s → %s: %s", g_scm_ren_old, g_scm_name, scm_crud_why(rc));
+            g_need = 1; g_force_frames = 2;
+        }
+    }
+}
+/* 删除确认层（spec §6）：轻遮罩 + 小确认卡，文案逐字「删除方案 <名>？不可恢复」；[取消][删除]。
+ * 确认时再核一次「不是当前」（防御；主拒在 [删除] 键入口）：成功才打日志 `方案 删除 <名>` + 提示；
+ * 失败关层 + 页面提示（rmdir 失败无「可改的输入」，留层重试无意义）。 */
+static void draw_scm_del(void)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 wp = ImGui::GetWindowPos();
+    float ww = ImGui::GetWindowWidth(), wh = ImGui::GetWindowHeight();
+    ImVec2 a(wp.x + 12, wp.y + (float)TITLE_H + 10), b(wp.x + ww - 12, wp.y + wh - 12);
+    char t[64];
+    float cw, wrapw, ch, cx, cy;
+    ImVec2 tsz, ca, cb;
+    dl->AddRectFilled(a, b, IM_COL32(24, 24, 27, 110), 14);   /* 轻遮罩：整面盖住（本帧不画底下） */
+    snprintf(t, sizeof t, "删除方案 %s？不可恢复", g_scm_del);
+    cw = 640.0f;
+    if (cw > (b.x - a.x) - 48) cw = (b.x - a.x) - 48;
+    wrapw = cw - 56;
+    tsz = ImGui::CalcTextSize(t, NULL, false, wrapw);
+    ch = tsz.y + 40 + 92 + 32;
+    cx = (a.x + b.x) * 0.5f; cy = (a.y + b.y) * 0.5f;
+    ca = ImVec2(cx - cw * 0.5f, cy - ch * 0.5f); cb = ImVec2(cx + cw * 0.5f, cy + ch * 0.5f);
+    dl->AddRectFilled(ca, cb, IM_COL32(255, 255, 255, 253), 14);
+    dl->AddRect(ca, cb, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+    ImGui::SetCursorScreenPos(ImVec2(ca.x + 28, ca.y + 26));
+    ImGui::PushTextWrapPos(ca.x + 28 + wrapw);
+    ImGui::TextUnformatted(t);
+    ImGui::PopTextWrapPos();
+    {
+        float gap = 12.0f, bw = (cw - 28 * 2 - gap) * 0.5f;
+        float by = cb.y - 26 - 92;
+        ImGui::SetCursorScreenPos(ImVec2(ca.x + 28, by));
+        if (btn_light("取消", ImVec2(bw, 92))) {
+            g_scm_del[0] = 0;
+            g_need = 1; g_force_frames = 3;
+        }
+        ImGui::SetCursorScreenPos(ImVec2(ca.x + 28 + bw + gap, by));
+        if (btn_red("删除", ImVec2(bw, 92))) {
+            char cur[16];
+            scheme_cur_get(cur);
+            if (cur[0] && !strcmp(cur, g_scm_del)) {       /* 防御：主拒在 [删除] 键入口 */
+                snprintf(g_scm_msg, sizeof g_scm_msg, "当前方案不能删除（先切到别的方案再删）");
+            } else if (scm_delete_dir(g_scm_del) != 0) {
+                snprintf(g_scm_msg, sizeof g_scm_msg, "删除失败：%s", strerror(errno));
+                ALOGW("方案 删除失败 %s: %s", g_scm_del, strerror(errno));
+            } else {
+                ALOGI("方案 删除 %s", g_scm_del);
+                if (!strcmp(g_scm_sel, g_scm_del)) g_scm_sel[0] = 0;
+                snprintf(g_scm_msg, sizeof g_scm_msg, "已删除方案 %s", g_scm_del);
+            }
+            g_scm_del[0] = 0;
+            g_need = 1; g_force_frames = 3;
+        }
+    }
+}
+
 /* ---- 面板：标题栏（唯一拖动区）/ 固定侧栏 / 可滚内容页；收起态只剩标题栏 ---- */
 static void build_panel(void)
 {
@@ -4646,6 +5035,8 @@ static void build_panel(void)
     /* push/pop 用同一快照：本函数一次调用内可能被标题栏 toggle 改写 g_min，
      * 直接读 g_min 会出现“push 0 次 / pop 2 次”而触发 ImGui 断言崩溃（已实测）。 */
     const int min_bg = g_min;
+    /* 方案页子层（T2.1：名字键盘 / 删除确认）：整面盖住面板 —— 同区域改名 / 操作编辑层的口径 */
+    const int scm_layer = (g_scm_kb || g_scm_del[0]) ? 1 : 0;
     if (min_bg) {                         /* 收起态：半透明白 + 浅描边，尽量不抢眼 */
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.00f, 1.00f, 1.00f, 0.86f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.72f, 0.75f, 0.45f));
@@ -4668,17 +5059,19 @@ static void build_panel(void)
     if (g_min) {   /* 收起态：只有标题条；清掉侧栏/内容页实区，免上一帧残留命中 */
         g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
         g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
-    } else if (g_name_i >= 0 || g_ope_i >= 0) {
-        /* 覆盖层（区域改名 / 操作编辑）整面盖住：同样清底下实区 —— 不然按下可能命中上一帧残留 → 误滚 */
+    } else if (g_name_i >= 0 || g_ope_i >= 0 || scm_layer) {
+        /* 覆盖层（区域改名 / 操作编辑 / 方案名字键盘 / 方案删除确认）整面盖住：同样清底下实区 —— 不然按下可能命中上一帧残留 → 误滚 */
         g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
         g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
     }
     if (!g_min) ImGui::Dummy(ImVec2(0, COL_GAP - 10));
-    if (!g_min && g_name_i >= 0) draw_name_edit();          /* 改名弹层：本帧不画侧栏/内容页 */
+    if (!g_min && scm_layer && g_scm_kb) draw_scm_kb();     /* 方案名字键盘子层：本帧不画侧栏/内容页 */
+    if (!g_min && scm_layer && !g_scm_kb) draw_scm_del();   /* 方案删除确认层（小确认层） */
+    if (!g_min && !scm_layer && g_name_i >= 0) draw_name_edit();   /* 改名弹层：本帧不画侧栏/内容页 */
     /* 操作编辑层（T2.6/T2.4）不在这里画：编辑层开着时 build_panel 整个不跑（见 draw_frame），
      * 由 build_edit_layer 按整屏画（展开 = 整屏 sheet；收起 = 底部条）。 */
-    if (!g_min && g_name_i < 0 && g_ope_i < 0) build_sidebar();
-    if (!g_min && g_sheet && g_name_i < 0 && g_ope_i < 0) {
+    if (!g_min && !scm_layer && g_name_i < 0 && g_ope_i < 0) build_sidebar();
+    if (!g_min && g_sheet && !scm_layer && g_name_i < 0 && g_ope_i < 0) {
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_ChildBg, WHITE);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 12));
@@ -4689,6 +5082,7 @@ static void build_panel(void)
         else if (g_nav == 1) page_ops();
         else if (g_nav == 2) page_log();
         else if (g_nav == 4) page_help();
+        else if (g_nav == 5) page_scheme();
         else page_settings();
         ImGui::EndChild();
         ImGui::PopStyleVar();
