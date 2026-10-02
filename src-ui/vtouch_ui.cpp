@@ -2648,6 +2648,27 @@ static void ope_tier_text(int tier, int target, char *out, int outcap)
     }
 }
 
+/* 条件档位的循环序（spec §1.1 固定序：继续下一步 → 跳过下一步 → 跳到… → 中止 → 回继续）。 */
+static int ope_tier_next(int tier)
+{
+    switch (tier) {
+    case OP_COND_CONT: return OP_COND_SKIP;
+    case OP_COND_SKIP: return OP_COND_JUMP;
+    case OP_COND_JUMP: return OP_COND_ABORT;
+    default:           return OP_COND_CONT;   /* 中止 / 非法值兜底：回「继续下一步」 */
+    }
+}
+/* 循环钮文字（档位名；「跳到…」只是档位名，具体目标在旁边的目标格）。 */
+static const char *ope_tier_name(int tier)
+{
+    switch (tier) {
+    case OP_COND_CONT: return "继续下一步";
+    case OP_COND_SKIP: return "跳过下一步";
+    case OP_COND_JUMP: return "跳到…";
+    default:           return "中止";         /* OP_COND_ABORT（非法值兜底同款） */
+    }
+}
+
 /* 步骤行参数文本（T3.1 摘要；v3 起两档全显）：坐标/时长格显示变量中文名或原值；条件步 = 区域名 +
  * 成立/不成立两档（跳转档带目标）；跳转步 = 目标（「跳到 第 N 步」/「跳到 结束」）。 */
 static void ope_step_text(int si, char *out, int outcap)
@@ -2771,10 +2792,8 @@ static void ope_num_load(void)
 }
 
 /* 条件目标格键盘模式入口（T2.3 行控件调用；调用方式 = ne_open_target(第几步, NE_TGT_J1|NE_TGT_J2)）。
- * 本任务只备接口（尚无调用方 ⇒ __attribute__((unused)) 保零新告警；T2.3 接线后可去掉该属性）。
  * 打开参数弹层目标模式：单格「成立目标 / 不成立目标」，键盘编 0..32（0 显示「结束」），无变量/取点；
  * 层内只改缓冲，[完成] 校验过写回 g_ope_steps[se][6|7]（j1/j2），[取消] 全丢。 */
-__attribute__((unused))
 static void ne_open_target(int se, int slot)
 {
     if (se < 0 || se >= g_ope_nsteps || (slot != NE_TGT_J1 && slot != NE_TGT_J2)) return;
@@ -3050,13 +3069,53 @@ static void op_edit_save(void)
     op_edit_close();
 }
 
+/* 条件步一侧（成立 / 不成立）的行内控件：循环钮 + 档位 = 跳到… 时该侧出现的目标格。
+ * 循环钮文字随档位（ope_tier_name），点击按固定序推进（ope_tier_next：继续下一步 → 跳过下一步 →
+ * 跳到… → 中止）；目标格显示「第 N 步」/「结束」，点它开目标模式数字键盘编 0..32
+ * （ne_open_target，槽 = j1 / j2）。slot 传 NE_TGT_J1（成立侧：档 = a4、目标 = j1）或
+ * NE_TGT_J2（不成立侧：档 = a3、目标 = j2）。 */
+static void ope_cond_side(int i, int slot)
+{
+    const int *s6 = g_ope_steps[i];
+    int *tier = &g_ope_steps[i][slot == NE_TGT_J1 ? 4 : 3];
+    int tgt = s6[slot == NE_TGT_J1 ? 6 : 7];
+    const char *side = slot == NE_TGT_J1 ? "成立" : "不成立";
+    char lab[48];
+    float aw = ImGui::GetContentRegionAvail().x;
+    ImGui::PushID(slot);                             /* 两侧同标签（如都是「第 5 步」）也要 ID 唯一 */
+    snprintf(lab, sizeof lab, "%s：%s", side, ope_tier_name(*tier));
+    if (*tier == OP_COND_JUMP) {                     /* 跳到…：循环钮 + 目标格并排 */
+        char cell[24], t2[24];
+        float tw = 240.0f, bw = aw - 12 - tw;
+        if (bw < 200.0f) bw = 200.0f;                /* 极窄窗兜底 */
+        if (btn_light(lab, ImVec2(bw, 72))) {
+            *tier = ope_tier_next(*tier);
+            ope_tier_text(*tier, tgt, t2, (int)sizeof t2);
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 条件行为 第 %d 步 %s → %s", i + 1, side, t2);
+        }
+        ImGui::SameLine();
+        if (tgt == 0) snprintf(cell, sizeof cell, "结束");
+        else snprintf(cell, sizeof cell, "第 %d 步", tgt);
+        if (btn_blue(cell, ImVec2(tw, 72))) ne_open_target(i, slot);   /* 点目标格：编 0..32（0 = 结束） */
+    } else if (btn_light(lab, ImVec2(aw, 72))) {
+        char t2[24];
+        *tier = ope_tier_next(*tier);
+        ope_tier_text(*tier, tgt, t2, (int)sizeof t2);
+        g_need = 1; g_force_frames = 2;
+        ALOGI("op edit 条件行为 第 %d 步 %s → %s", i + 1, side, t2);
+    }
+    ImGui::PopID();
+}
+
 /* 步骤行：`i. 点按` + 参数小字一行（摘要），下面按键 [参数（无字段的类型不画）][↑][↓][删]（行高 72 保手指可点）。
- * 条件步（区域判断 / 开关判断）再加两行：区域下拉 + 不成立行为两键（中止 / 跳过下一步）。 */
+ * 条件步（区域判断 / 开关判断）再加三行：区域下拉 + 成立 / 不成立各一枚四档循环钮
+ * （继续下一步 → 跳过下一步 → 跳到… → 中止；档位 = 跳到… 时该侧出现目标格）。 */
 static void ope_step_row(int i)
 {
     const int *s6 = g_ope_steps[i];
     int t = s6[0], nf = ope_nfields(t);
-    char tb[32], p[96];
+    char tb[32], p[176];         /* 摘要缓冲：v3 条件串最坏 ~113B（变量名 + 区域名 + 两侧档位词）→ 96 不够 */
     ope_step_text(i, p, sizeof p);
     ImGui::PushID(2000 + i);
     snprintf(tb, sizeof tb, "%d. %s", i + 1, ope_tname(t));
@@ -3084,7 +3143,8 @@ static void ope_step_row(int i)
         if (btn_red("删", ImVec2(bw, 72))) ope_del_step(i);
     }
     if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
-        /* 条件参数：区域下拉（开关判断的列表只列开关型，见 draw_ope_rlist）+ 不成立行为两键（默认中止） */
+        /* 条件参数：区域下拉（开关判断的列表只列开关型，见 draw_ope_rlist）+ 两枚四档循环钮
+         * （成立 / 不成立各一，行内循环编辑；档位 = 跳到… 时该侧出现目标格，见 ope_cond_side） */
         char g[48];
         float aw = ImGui::GetContentRegionAvail().x;
         snprintf(g, sizeof g, "区域：%s", g_ope_refs[i][0] ? g_ope_refs[i] : "未选");
@@ -3093,23 +3153,8 @@ static void ope_step_row(int i)
             g_need = 1; g_force_frames = 2;
             ALOGI("op edit 区域列表开 第 %d 步 %s", i + 1, ope_tname(t));
         }
-        {
-            float bw2 = (aw - 12) * 0.5f;
-            bool hit;
-            hit = (s6[3] == OP_COND_ABORT) ? btn_blue("中止", ImVec2(bw2, 72)) : btn_light("中止", ImVec2(bw2, 72));
-            if (hit && s6[3] != OP_COND_ABORT) {
-                g_ope_steps[i][3] = OP_COND_ABORT;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("op edit 条件行为 第 %d 步 → 中止", i + 1);
-            }
-            ImGui::SameLine();
-            hit = (s6[3] == OP_COND_SKIP) ? btn_blue("跳过下一步", ImVec2(bw2, 72)) : btn_light("跳过下一步", ImVec2(bw2, 72));
-            if (hit && s6[3] != OP_COND_SKIP) {
-                g_ope_steps[i][3] = OP_COND_SKIP;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("op edit 条件行为 第 %d 步 → 跳过下一步", i + 1);
-            }
-        }
+        ope_cond_side(i, NE_TGT_J1);                 /* 成立侧：档 = a4、目标 = j1 */
+        ope_cond_side(i, NE_TGT_J2);                 /* 不成立侧：档 = a3、目标 = j2 */
     }
     ImGui::Dummy(ImVec2(0, 4));                      /* 行间缝 */
     ImGui::PopID();
@@ -3521,7 +3566,7 @@ static void draw_ope_rlist(void)
     ImGui::PopID();
 }
 
-/* 编辑覆盖层主屏（整面盖住，同改名弹层）：名字行 / 步骤列表（可滚）/ 加步（两行七类型）/
+/* 编辑覆盖层主屏（整面盖住，同改名弹层）：名字行 / 步骤列表（可滚）/ 加步（两行八类型 4+4）/
  * 门控循环 / 跑完自动关 / [取消][完成]。子层（名字键盘、数字弹层、变量选择、区域选择）开着时
  * 本屏不画（被整面盖住）。 */
 static void draw_op_edit(void)
@@ -3588,7 +3633,7 @@ static void draw_op_edit(void)
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
-    /* 加步（v2 七类型，两行）/ 门控 / 自动关 / 收尾 */
+    /* 加步（v3 八类型，两行 4+4）/ 门控 / 自动关 / 收尾 */
     {
         float bw4 = (cw - 3 * 12) / 4.0f;
         ImGui::SetCursorScreenPos(ImVec2(x0, add_y));
@@ -3600,13 +3645,14 @@ static void draw_op_edit(void)
         ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw4 + 12), add_y));
         if (btn_light("＋按下", ImVec2(bw4, 76))) ope_add_step(OP_STEP_DOWN);
         {
-            float bw3 = (cw - 2 * 12) / 3.0f;
             ImGui::SetCursorScreenPos(ImVec2(x0, add_y2));
-            if (btn_light("＋弹起", ImVec2(bw3, 76))) ope_add_step(OP_STEP_UP);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, add_y2));
-            if (btn_light("＋区域判断", ImVec2(bw3, 76))) ope_add_step(OP_STEP_COND_REGION);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), add_y2));
-            if (btn_light("＋开关判断", ImVec2(bw3, 76))) ope_add_step(OP_STEP_COND_TOGGLE);
+            if (btn_light("＋弹起", ImVec2(bw4, 76))) ope_add_step(OP_STEP_UP);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + bw4 + 12, add_y2));
+            if (btn_light("＋区域判断", ImVec2(bw4, 76))) ope_add_step(OP_STEP_COND_REGION);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw4 + 12), add_y2));
+            if (btn_light("＋开关判断", ImVec2(bw4, 76))) ope_add_step(OP_STEP_COND_TOGGLE);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw4 + 12), add_y2));
+            if (btn_light("＋跳转", ImVec2(bw4, 76))) ope_add_step(OP_STEP_JUMP);
         }
     }
     {
