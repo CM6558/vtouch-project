@@ -205,15 +205,17 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
 
 > 开工前：全量备份，记恢复点。
 
-### Task 3.1: 步骤编辑器 v2（7 类型 / 变量切换 / 条件参数）
+### Task 3.1: 步骤编辑器 v2（7 类型 / 变量切换 / 条件参数 / put ref 通道）
 
 **Files:**
 - Modify: `src-ui/vtouch_ui.cpp`
+- Modify: `src-ui/ui_glue.c`, `src-ui/ui_stubs.c`, `scripts/funcdoc_data.py`（put ref 通道；Ruling T2.4-缺口）
 
 - [ ] **Step 1: 类型选择器扩 1..7**（名：点按 / 滑动 / 等待 / 按下 / 弹起 / 区域判断 / 开关判断）；每类型字段布局（弹起无字段）。
 - [ ] **Step 2: 变量切换**：坐标/时长格加 [变量] 按钮 → 弹 5 项中文名列表（触发按下x / 触发按下y / 触发弹起x / 触发弹起y / 触发时长）+「数值」回退；选中存 `-1..-5`，显示中文名（面板本地表）。
 - [ ] **Step 3: 条件参数**：区域列表（可滚动；开关判断只列 `kind==1`）；不成立行为两键（中止 / 跳过下一步）。
 - [ ] **Step 4: 取点接入新字段**（点 [取点] 后点屏 → 填当前坐标格并切回字面值）。
+- [ ] **Step 4b: put ref 通道（Ruling T2.4-缺口）**：`vtouch_op_put` 尾部扩 `const char (*refs)[REGION_ID_MAX + 1]`（可 NULL=全空；每步空串=无）——`ui_glue.c` 组装时 `snprintf(op.steps[i].ref, …)`（strnlen 防御照款）；`ui_stubs.c` 镜像；funcdoc 文案同步；三处调用点同步（编辑器传 refs 数组；load 与快速路径传 NULL——T3.3 再填 load）。
 - [ ] **Step 5: 步骤行摘要显示**（含变量名 / 区域名）。
 - [ ] **Step 6: 门**：real ×2 一致、stub rc=0、默认不变、funcdoc 0/0。
 - [ ] **Step 7: 提交**：`feat: 面板 —— 步骤编辑器 v2（7 类型/变量选择/条件参数）`。
