@@ -27,13 +27,26 @@
 
 #include <sys/eventfd.h>     /* 执行器的触发唤醒 fd（eventfd：写一下就叫醒主循环） */
 
-/* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、坐标与时长逐条过门；
+/* 允许变量的数值字段判据（op_valid v2）：字段 = 字面值 v ∈ [lo, hi]，或变量引用 -5..-1（OP_VAR_*）。
+ * 坐标与时长共用（lo/hi 每档不同：坐标 = 0..逻辑尺寸-1；时长 = 各类型区间，见下）。 */
+static int op_num_ok(int v, int lo, int hi)
+{
+    if (v >= lo && v <= hi) return 1;
+    if (v >= OP_VAR_TMS && v <= OP_VAR_TDX) return 1;
+    return 0;
+}
+
+/* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec §2.7）：名字与区域 id 同一把尺子（vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；
- * 步数 1..MAX_STEPS；坐标必须落在竖屏逻辑坐标内（0..logical_width-1 / 0..logical_height-1）——
- * 操作的手指是**注入**的，屏外的点没有意义：收下来也只是静默不命中，不如当场拒掉让面板报错；
- * 时长按类型分档：点按 0..60000（0 = 按下即抬）、滑动 1..60000（0 的滑动没有采样点）、等待 0..600000。
+ * 规则出处（spec OPS_PLAN_V2 §1.4 / §2.1 / §3）：名字与区域 id 同一把尺子（vt_id_ok：[A-Za-z0-9_-]、
+ * 1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..7（点按/滑动/等待/按下/弹起/区域判断/开关判断）。
+ * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
+ * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
+ * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或变量引用 -1..-5（负数编码，spec §1.4）——
+ * 操作的手指是**注入**的，屏外的点没有意义：收下来也只是静默不命中，不如当场拒掉让面板报错。
+ * 弹起（5）字段全忽略；区域判断/开关判断：a3 ∈ {0,1}（不成立行为）；ref 长度 1..REGION_ID_MAX
+ * 且过 vt_id_ok —— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
  * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
@@ -63,32 +76,68 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
         const struct vt_step *st = &op->steps[i];
         switch (st->type) {
         case OP_STEP_TAP:
-            if (st->a1 < 0 || st->a1 >= g.logical_width ||
-                st->a2 < 0 || st->a2 >= g.logical_height) {
+            if (!op_num_ok(st->a1, 0, g.logical_width - 1) ||
+                !op_num_ok(st->a2, 0, g.logical_height - 1)) {
                 snprintf(why, whycap, "第 %d 步坐标越界", i + 1);
                 return 0;
             }
-            if (st->ms < 0 || st->ms > 60000) {
+            if (!op_num_ok(st->ms, 0, 60000)) {
                 snprintf(why, whycap, "第 %d 步时长越界", i + 1);
                 return 0;
             }
             break;
         case OP_STEP_SWIPE:
-            if (st->a1 < 0 || st->a1 >= g.logical_width ||
-                st->a2 < 0 || st->a2 >= g.logical_height ||
-                st->a3 < 0 || st->a3 >= g.logical_width ||
-                st->a4 < 0 || st->a4 >= g.logical_height) {
+            if (!op_num_ok(st->a1, 0, g.logical_width - 1) ||
+                !op_num_ok(st->a2, 0, g.logical_height - 1) ||
+                !op_num_ok(st->a3, 0, g.logical_width - 1) ||
+                !op_num_ok(st->a4, 0, g.logical_height - 1)) {
                 snprintf(why, whycap, "第 %d 步坐标越界", i + 1);
                 return 0;
             }
-            if (st->ms < 1 || st->ms > 60000) {
+            if (!op_num_ok(st->ms, 1, 60000)) {
                 snprintf(why, whycap, "第 %d 步时长越界", i + 1);
                 return 0;
             }
             break;
         case OP_STEP_WAIT:
-            if (st->ms < 0 || st->ms > 600000) {
+            if (!op_num_ok(st->ms, 0, 600000)) {
                 snprintf(why, whycap, "第 %d 步时长越界", i + 1);
+                return 0;
+            }
+            break;
+        case OP_STEP_DOWN:                       /* 按下：a1,a2 = 坐标（可变量），按下并保持 */
+            if (!op_num_ok(st->a1, 0, g.logical_width - 1) ||
+                !op_num_ok(st->a2, 0, g.logical_height - 1)) {
+                snprintf(why, whycap, "第 %d 步坐标越界", i + 1);
+                return 0;
+            }
+            break;
+        case OP_STEP_UP:                         /* 弹起：字段全忽略 */
+            break;
+        case OP_STEP_COND_REGION:                /* 区域判断：a1,a2 = 点（可变量）；a3 = 不成立行为；ref = 区域 id */
+            if (!op_num_ok(st->a1, 0, g.logical_width - 1) ||
+                !op_num_ok(st->a2, 0, g.logical_height - 1)) {
+                snprintf(why, whycap, "第 %d 步坐标越界", i + 1);
+                return 0;
+            }
+            if (st->a3 != OP_COND_ABORT && st->a3 != OP_COND_SKIP) {
+                snprintf(why, whycap, "第 %d 步不成立行为非法", i + 1);
+                return 0;
+            }
+            n = strnlen(st->ref, sizeof st->ref);
+            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+                return 0;
+            }
+            break;
+        case OP_STEP_COND_TOGGLE:                /* 开关判断：a3 = 不成立行为；ref = 区域 id（须开关型——运行时不在这查） */
+            if (st->a3 != OP_COND_ABORT && st->a3 != OP_COND_SKIP) {
+                snprintf(why, whycap, "第 %d 步不成立行为非法", i + 1);
+                return 0;
+            }
+            n = strnlen(st->ref, sizeof st->ref);
+            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
                 return 0;
             }
             break;
@@ -120,7 +169,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待}、坐标 0..逻辑尺寸-1、时长按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或变量引用（负数编码 -1..-5）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或变量引用（负数编码 -1..-5）、条件步不成立行为 a3 ∈ {0,1}、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认

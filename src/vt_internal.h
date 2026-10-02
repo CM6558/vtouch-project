@@ -74,6 +74,29 @@
 #define OP_STEP_TAP    1         /* 步骤类型：点按 */
 #define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */
 #define OP_STEP_WAIT   3         /* 步骤类型：等待 */
+#define OP_STEP_DOWN        4    /* 步骤类型：按下（按下并保持） */
+#define OP_STEP_UP          5    /* 步骤类型：弹起（松开当前按住的手指） */
+#define OP_STEP_COND_REGION 6    /* 步骤类型：区域判断（a1,a2 的点 ∈ ref 区域） */
+#define OP_STEP_COND_TOGGLE 7    /* 步骤类型：开关判断（ref 区域须开关型且开着） */
+/* 条件步不成立时的行为（a3）：0=中止（默认）、1=跳过下一步。 */
+#define OP_COND_ABORT       0
+#define OP_COND_SKIP        1
+/* 变量编码（v2 契约，spec OPS_PLAN_V2 §1.4）：字段取负数 = 引用触发数据；字面值恒 ≥0。
+ * op_valid 只对「允许变量的字段」放行 [-5, max]，其余字段照旧拒负值。 */
+#define OP_VAR_TDX (-1)          /* tdx：触发按下 x */
+#define OP_VAR_TDY (-2)          /* tdy：触发按下 y */
+#define OP_VAR_TUX (-3)          /* tux：触发弹起 x */
+#define OP_VAR_TUY (-4)          /* tuy：触发弹起 y */
+#define OP_VAR_TMS (-5)          /* tms：触发时长（按下→抬起的毫秒数） */
+#define OP_VAR_N    5            /* 变量个数 */
+/* 触发数据可用位（struct vt_trig_data.mask / g.op_trig_mask）：哪些变量这次有值。
+ * 完整按压全置；按下触发只置 TDX|TDY；面板手动运行全清（无数据）。 */
+#define OP_TRIGB_TDX 1u
+#define OP_TRIGB_TDY 2u
+#define OP_TRIGB_TUX 4u
+#define OP_TRIGB_TUY 8u
+#define OP_TRIGB_TMS 16u
+#define OP_TRIGB_ALL (OP_TRIGB_TDX|OP_TRIGB_TDY|OP_TRIGB_TUX|OP_TRIGB_TUY|OP_TRIGB_TMS)
 /* 一帧的最大事件数（iovec 容量）。最坏整帧 = 8×(物理槽 + 虚拟槽) + 帧尾 3 条 = 8×(64+32)+3 = 771
  * （见 vt_frame.c 的 static_assert）。512 装不下它 ⇒ ev_add 静默丢事件，**帧尾的 SYN_REPORT 可能是
  * 被丢掉的那条**，系统里就成了半帧。这里给到 1024（余量 1.3×；代价是 .bss 里 40KB）。 */
@@ -117,10 +140,17 @@ struct region {
 };
 
 struct vt_step {
-    int type;                      /* 1=点按 2=滑动 3=等待（OP_STEP_*） */
-    int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用 */
-    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长 */
+    int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断（OP_STEP_*） */
+    int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用；按下: x,y；
+                                    * 区域判断: x,y + a3=不成立行为；开关判断: a3=不成立行为 */
+    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长（弹起/条件步不用） */
+    char ref[REGION_ID_MAX + 1];   /* 条件步（区域判断/开关判断）的区域 id；"" = 不用 */
 };
+
+/* 触发数据（区域线程捕获 → 触发槽投递 → 执行器起跑快照，spec §1.5）：
+ * mask = 哪些变量有值（OP_TRIGB_* 位）；dx/dy = 按下点、ux/uy = 抬起点（竖屏逻辑坐标）；
+ * ms = 按下→抬起的毫秒数。 */
+struct vt_trig_data { unsigned mask; int dx, dy, ux, uy, ms; };
 
 struct vt_op {
     char name[OP_NAME_MAX + 1];
@@ -188,6 +218,11 @@ struct vt_state {
     volatile uint32_t op_trig_seq;                     /* 触发槽（区域线程写、主线程读；SPSC） */
     char op_trig_name[OP_NAME_MAX + 1];                /* 触发来源操作名 */
     int  op_trig_slot;                                 /* 触发来源手指的槽号（日志用） */
+    /* 触发数据槽（v5，spec §1.5）：与 op_trig_* 同款 SPSC —— 区域线程先写全字段、release 自增 seq
+     * 发布，主线程 acquire 读到新 seq 后一次读全。mask = 哪些变量有值（OP_TRIGB_* 位）；
+     * dx/dy/ux/uy/ms = 触发按压的按下点 / 抬起点 / 时长（竖屏逻辑坐标与毫秒）。 */
+    unsigned op_trig_mask;
+    int op_trig_dx, op_trig_dy, op_trig_ux, op_trig_uy, op_trig_ms;
 };
 #ifdef VT_UI
 /* VT_UI：状态本体放在共享内存（面板只读映射同一份），g 只是「指向它的引用」——
