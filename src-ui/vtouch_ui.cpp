@@ -142,6 +142,10 @@ static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日
 #define WHITE   ImVec4(1.000f, 1.000f, 1.000f, 1.00f)
 #define BLUE500 ImVec4(0.231f, 0.510f, 0.965f, 1.00f)   /* sidebar-fixed 主色 */
 #define RED600  ImVec4(0.863f, 0.149f, 0.149f, 1.00f)
+/* 预览小地图标记色（T2.5）：点按 = 蓝（同 BLUE500 的 U32 形）/ 按下 = 橙（同取点十字标记）/ 判定点 = 紫 */
+#define PV_BLUE   IM_COL32(59, 130, 246, 255)
+#define PV_ORANGE IM_COL32(255, 140, 0, 255)
+#define PV_PURPLE IM_COL32(147, 51, 234, 255)
 static float panel_w(void) { return (float)(g_min ? MINI_W : (g_sheet ? WIN_W : SIDE_ONLY_W)); }
 static float panel_h(void) { return (float)(g_min ? MINI_H : WIN_H); }
 
@@ -2415,6 +2419,7 @@ static int  g_ope_sf = 0;               /* 参数弹层：激活格（字段序�
 static int  g_ne_tgt = 0;               /* 参数弹层模式：0 = 全字段一屏；1 = 成立目标（j1）；2 = 不成立目标（j2） */
 static int  g_ope_vl = 0;               /* 变量选择弹层开（参数弹层的 [变量]；1 = 开） */
 static int  g_ope_rl = -1;              /* 区域选择弹层：正在选第几步的 ref（-1 = 关） */
+static int  g_ope_pv = 0;               /* 预览页（T2.5）：全屏只读层开（编辑层头 [预览] 进、[关闭] 返回） */
 static char g_ope_saved_as[16] = {0};   /* 本会话最近一次 put 成功的名字（[完成] 重试豁免自己刚写进表的名字）；开层/关层清空 */
 static char g_ope_del_owed[16] = {0};   /* 尚欠删除的旧名（del 超时/未送达留下的账，再点 [完成] 先补删）；开层/关层清空 */
 /* 参数弹层 v3 本地缓冲（全字段一屏 / 原子落）：每格 = {值, 文本}（结构说明见 ope_num_load）。
@@ -3018,6 +3023,7 @@ static void op_edit_close(void)
         ALOGI("取点 取消（关编辑层）");
     }
     g_ope_coll = 0;                                  /* 收起态复位（会话态只活在开层期间） */
+    g_ope_pv = 0;                                    /* 预览页（T2.5）一并关（防御：正常只能经 [关闭] 退出） */
     g_ope_kb = 0; g_ope_kbmsg[0] = 0;
     g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并关（变量 / 区域选择弹层） */
@@ -3064,6 +3070,7 @@ static void op_edit_open(int i, const char *name)
     g_ope_se = -1; g_ope_sf = 0; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并清（变量 / 区域选择弹层） */
     g_ope_coll = 0; g_pick_t0 = 0;                  /* 收起态 / 取点计时清零（防御：正常流程关层已清） */
+    g_ope_pv = 0;                                   /* 预览页状态清零（防御；会话态只活在开层期间） */
     g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态开层清零（只服务本次编辑） */
     g_need = 1; g_force_frames = 3;
     ALOGI("op edit open i=%d %s（%d 步）", i, name, steps);
@@ -3650,15 +3657,280 @@ static void draw_ope_rlist(void)
     ImGui::PopID();
 }
 
-/* 编辑层主屏（T2.4 起按**当前屏整屏**绘制，见 build_edit_layer）：头部（名字行 + [收起]）/
+/* ---- 预览页（T2.5，spec §5）：编辑层 [预览] → 全屏**只读**页（步骤总览 + 坐标小地图） ---- */
+
+/* 分支目标文本（预览用）：档位词；跳转档的目标 = `第 N 步` / `结束`（与「跳转行」同口径）。 */
+static void ope_pv_target(int tier, int tgt, char *out, int outcap)
+{
+    switch (tier) {
+    case OP_COND_CONT: snprintf(out, (size_t)outcap, "继续下一步"); break;
+    case OP_COND_SKIP: snprintf(out, (size_t)outcap, "跳过下一步"); break;
+    case OP_COND_JUMP:
+        if (tgt == 0) snprintf(out, (size_t)outcap, "结束");
+        else          snprintf(out, (size_t)outcap, "第 %d 步", tgt);
+        break;
+    default:           snprintf(out, (size_t)outcap, "中止"); break;   /* OP_COND_ABORT（非法值兜底同款） */
+    }
+}
+
+/* 预览清单行（T2.5）：`N. 类型` + 参数摘要（**逐字 ope_step_text** 出文本；meta 字体，超宽自动折行）；
+ * 条件步再两行分支 `├ 成立 → …` / `└ 不成立 → …`（档位词；跳转档目标 = `第 N 步` / `结束`）；
+ * 跳转步的摘要行 = `→ 第 N 步` / `→ 结束`（spec §5 的「跳转行」）。纯只读文本，无任何控件。 */
+static void ope_preview_row(int i)
+{
+    const int *s6 = g_ope_steps[i];
+    int t = s6[0];
+    char tb[48], p[176], tg[32], b1[80], b2[80];
+    ImGui::PushID(5000 + i);
+    if (t == OP_STEP_JUMP) {
+        if (s6[1] == 0) snprintf(tg, sizeof tg, "结束");
+        else            snprintf(tg, sizeof tg, "第 %d 步", s6[1]);
+        snprintf(tb, sizeof tb, "%d. %s → %s", i + 1, ope_tname(t), tg);
+        ImGui::TextUnformatted(tb);
+    } else {
+        snprintf(tb, sizeof tb, "%d. %s", i + 1, ope_tname(t));
+        ImGui::TextUnformatted(tb);
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ope_step_text(i, p, sizeof p);
+        meta_push();
+        ImGui::TextWrapped("%s", p);
+        meta_pop();
+    }
+    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
+        ope_pv_target(s6[4], s6[6], tg, (int)sizeof tg);      /* 成立侧：档 a4 / 目标 j1 */
+        snprintf(b1, sizeof b1, "├ 成立 → %s", tg);
+        ope_pv_target(s6[3], s6[7], tg, (int)sizeof tg);      /* 不成立侧：档 a3 / 目标 j2 */
+        snprintf(b2, sizeof b2, "└ 不成立 → %s", tg);
+        meta_push();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40);    /* 缩进一档（分支从属该步） */
+        ImGui::TextUnformatted(b1);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40);
+        ImGui::TextUnformatted(b2);
+        meta_pop();
+    }
+    ImGui::Dummy(ImVec2(0, 6));                               /* 行间缝 */
+    ImGui::PopID();
+}
+
+/* 逻辑坐标 → 小地图坐标（越界贴边）：先把值夹回 [0,g_w-1]/[0,g_h-1] 再等比映射；标记中心再夹进
+ * 地图内缘 16px（保标记完整可见）；oob 置 1 = 发生过越界（由标签加「越界」标注）。 */
+static void pv_xy(int x, int y, float mx0, float my0, float mw, float mh,
+                  float *ox, float *oy, int *oob)
+{
+    float fx = (float)x, fy = (float)y;
+    int o = 0;
+    if (fx < 0) { fx = 0; o = 1; } else if (fx > (float)(g_w - 1)) { fx = (float)(g_w - 1); o = 1; }
+    if (fy < 0) { fy = 0; o = 1; } else if (fy > (float)(g_h - 1)) { fy = (float)(g_h - 1); o = 1; }
+    *ox = mx0 + fx * mw / (float)g_w;
+    *oy = my0 + fy * mh / (float)g_h;
+    if (*ox < mx0 + 16) *ox = mx0 + 16;
+    if (*ox > mx0 + mw - 16) *ox = mx0 + mw - 16;
+    if (*oy < my0 + 16) *oy = my0 + 16;
+    if (*oy > my0 + mh - 16) *oy = my0 + mh - 16;
+    *oob = o;
+}
+
+/* 点标签（步号；越界加「越界」后缀）：meta 字体；避让 = 与已放标签太近就下移一行（自定口径：
+ * 先到先占、后来者让位；≤32 点、最多下移 32 行）；右边缘翻到点左侧、顶边翻到点下方。 */
+static void pv_label(float *lx, float *ly, int *nl, float px, float py, int step1, int oob,
+                     float mx0, float mx1, float my0, float my1)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    char t[24];
+    float tx, ty, tw;
+    int i, k, hit;
+    if (oob) snprintf(t, sizeof t, "%d 越界", step1);
+    else     snprintf(t, sizeof t, "%d", step1);
+    tw = g_font_meta ? g_font_meta->CalcTextSizeA(g_font_meta->FontSize, 1e9f, 0.0f, t).x
+                     : ImGui::CalcTextSize(t).x;
+    tx = px + 18; ty = py - 46;                       /* 默认：点右上角 */
+    if (tx + tw > mx1 - 6) tx = px - 18 - tw;         /* 右边缘：翻到点的左侧 */
+    if (tx < mx0 + 6) tx = mx0 + 6;
+    if (ty < my0 + 6) ty = py + 26;                   /* 顶边：翻到点下方 */
+    for (k = 0; k < OPE_MAX_STEPS; k++) {             /* 避让：与已放标签重叠 → 下移一行 */
+        hit = 0;
+        for (i = 0; i < *nl; i++)
+            if (tx - lx[i] > -110 && tx - lx[i] < 110 && ty - ly[i] > -46 && ty - ly[i] < 46) { hit = 1; break; }
+        if (!hit) break;
+        ty += 46;
+    }
+    if (ty > my1 - 40) ty = my1 - 40;                 /* 兜底贴底（极端多标签才到） */
+    if (*nl < OPE_MAX_STEPS) { lx[*nl] = tx; ly[*nl] = ty; (*nl)++; }
+    if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tx, ty), IM_COL32(24, 24, 27, 255), t);
+    else             dl->AddText(ImVec2(tx, ty), IM_COL32(24, 24, 27, 255), t);
+}
+
+/* 小地图（T2.5）：竖屏逻辑比例图 —— g_w×g_h 等比缩入矩形 (mx0,my0,mw,mh)。
+ * 标记：点按 = 蓝点 / 按下 = 橙点 / 区域判断判定点 = 紫叉 / 滑动 = 带箭头连线（箭头 = 终点）；
+ * 每点旁标步号；越界坐标贴边 + 标签加「越界」；坐标格是变量引用（-1..-5）→ 不画该点（列表照显示）。 */
+static void draw_preview_map(float mx0, float my0, float mw, float mh)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float lx[OPE_MAX_STEPS], ly[OPE_MAX_STEPS];
+    int nl = 0, i;
+    dl->AddRectFilled(ImVec2(mx0, my0), ImVec2(mx0 + mw, my0 + mh), IM_COL32(250, 250, 250, 255), 10.0f);
+    dl->AddRect(ImVec2(mx0, my0), ImVec2(mx0 + mw, my0 + mh), IM_COL32(212, 212, 216, 255), 10.0f, 0, 2.0f);
+    for (i = 0; i < g_ope_nsteps; i++) {
+        const int *s6 = g_ope_steps[i];
+        int t = s6[0], oob1 = 0, oob2 = 0;
+        float px1 = 0, py1 = 0, px2 = 0, py2 = 0;
+        if (t == OP_STEP_TAP || t == OP_STEP_DOWN || t == OP_STEP_COND_REGION) {
+            if (ope_vname(s6[1]) || ope_vname(s6[2])) continue;   /* 变量引用坐标 → 不画该点 */
+            pv_xy(s6[1], s6[2], mx0, my0, mw, mh, &px1, &py1, &oob1);
+            if (t == OP_STEP_TAP) {
+                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_BLUE);
+            } else if (t == OP_STEP_DOWN) {
+                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_ORANGE);
+            } else {
+                dl->AddLine(ImVec2(px1 - 14, py1 - 14), ImVec2(px1 + 14, py1 + 14), PV_PURPLE, 6.0f);
+                dl->AddLine(ImVec2(px1 - 14, py1 + 14), ImVec2(px1 + 14, py1 - 14), PV_PURPLE, 6.0f);
+            }
+            pv_label(lx, ly, &nl, px1, py1, i + 1, oob1, mx0, mx0 + mw, my0, my0 + mh);
+        } else if (t == OP_STEP_SWIPE) {
+            float dx, dy, len;
+            if (ope_vname(s6[1]) || ope_vname(s6[2]) || ope_vname(s6[3]) || ope_vname(s6[4])) continue;
+            pv_xy(s6[1], s6[2], mx0, my0, mw, mh, &px1, &py1, &oob1);
+            pv_xy(s6[3], s6[4], mx0, my0, mw, mh, &px2, &py2, &oob2);
+            dx = px2 - px1; dy = py2 - py1; len = sqrtf(dx * dx + dy * dy);
+            if (len >= 1.0f) {
+                float ux = dx / len, uy = dy / len, ah = 24.0f;   /* 箭头长（沿单位向量 u） */
+                dl->AddLine(ImVec2(px1, py1), ImVec2(px2, py2), PV_BLUE, 6.0f);
+                dl->AddTriangleFilled(ImVec2(px2, py2),
+                                      ImVec2(px2 - ux * ah - uy * ah * 0.55f, py2 - uy * ah + ux * ah * 0.55f),
+                                      ImVec2(px2 - ux * ah + uy * ah * 0.55f, py2 - uy * ah - ux * ah * 0.55f),
+                                      PV_BLUE);
+            } else {
+                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_BLUE);   /* 零长滑动兜底：画成点 */
+            }
+            pv_label(lx, ly, &nl, px1, py1, i + 1, oob1 || oob2, mx0, mx0 + mw, my0, my0 + mh);
+        }
+        /* 等待 / 弹起 / 开关判断 / 跳转：无坐标 → 图上无标记 */
+    }
+}
+
+/* 预览页小字（meta 字体；无 meta 字体时退回默认字体，同其它手绘文字）。 */
+static void pv_text(float x, float y, const char *s)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(x, y), IM_COL32(63, 63, 70, 255), s);
+    else             dl->AddText(ImVec2(x, y), IM_COL32(63, 63, 70, 255), s);
+}
+
+/* 小地图图例（预览页地图右侧）：左边画与地图同款的样本形状，右边文字说明
+ * （形状自绘，不依赖特殊字形；特殊字形只有 ├ / └ / → / 「」，字库随源码自动收录）。 */
+static void pv_legend(float x, float y)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float cy = y;
+    pv_text(x, cy, "小地图 · 竖屏逻辑坐标等比");
+    cy += 46;
+    dl->AddCircleFilled(ImVec2(x + 16, cy + 14), 13.0f, PV_BLUE);
+    pv_text(x + 44, cy, "点按");
+    cy += 52;
+    dl->AddCircleFilled(ImVec2(x + 16, cy + 14), 13.0f, PV_ORANGE);
+    pv_text(x + 44, cy, "按下");
+    cy += 52;
+    dl->AddLine(ImVec2(x + 4, cy + 2), ImVec2(x + 28, cy + 26), PV_PURPLE, 6.0f);
+    dl->AddLine(ImVec2(x + 4, cy + 26), ImVec2(x + 28, cy + 2), PV_PURPLE, 6.0f);
+    pv_text(x + 44, cy, "区域判断 判定点");
+    cy += 52;
+    dl->AddLine(ImVec2(x + 2, cy + 14), ImVec2(x + 26, cy + 14), PV_BLUE, 6.0f);
+    dl->AddTriangleFilled(ImVec2(x + 44, cy + 14), ImVec2(x + 24, cy + 6), ImVec2(x + 24, cy + 22), PV_BLUE);
+    pv_text(x + 60, cy, "滑动（箭头 = 终点）");
+    cy += 52;
+    pv_text(x, cy, "每点旁标步号；越界点标签带「越界」");
+    cy += 40;
+    pv_text(x, cy, "变量引用坐标不画点（列表照显示）");
+}
+
+/* 预览页（T2.5，spec §5）：编辑层 [预览] → 全屏**只读**页（无编辑 / 无取点）——
+ * 上 = 步骤总览（全宽可滚；摘要逐字 ope_step_text；条件双行分支；跳转行 → 第 N 步 / 结束）；
+ * 下 = 小地图带（竖屏逻辑 g_w×g_h 等比缩入 + 图例）；[关闭] 回编辑层。
+ * 只读口径：本页只画文本/图形 + 一个 [关闭]；不改 g_ope_steps、不碰取点态。
+ * 吞触摸矩形照旧：三态判据只看 g_ope_i / g_ope_coll（编辑层开 = 整屏），本页不改它们。 */
+static void draw_op_preview(void)
+{
+    ImDrawList *dl;
+    ImVec2 wp, a, b;
+    float ww, wh, x0, y0, cw, content_top, content_bot, content_h, band_h, list_h;
+    int i;
+    if (g_ope_i < 0) { g_ope_pv = 0; return; }       /* 防御：编辑层关着不该进这 */
+    dl = ImGui::GetWindowDrawList();
+    wp = ImGui::GetWindowPos();
+    ww = ImGui::GetWindowWidth();
+    wh = ImGui::GetWindowHeight();
+    a = ImVec2(wp.x + 12, wp.y + 12);                /* T2.4 整屏窗：顶边距 12 */
+    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
+    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
+    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+    {
+        char t[96];
+        snprintf(t, sizeof t, "预览 · %s · %d 步 · 只读", g_ope_name, g_ope_nsteps);
+        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+        text_meta_s(t);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
+    text_meta_s("清单与编辑层同口径；小地图 = 竖屏逻辑坐标等比图（[关闭] 返回编辑）");
+
+    content_top = y0 + 76;
+    content_bot = b.y - 24 - 92 - 12;                /* 底部 [关闭] 92 高 + 12 缝 */
+    content_h = content_bot - content_top;
+    if (content_h < 320) content_h = 320;            /* 极窄窗兜底（正常 ≥2000） */
+    band_h = content_h * 0.42f;                      /* 下带（小地图）自适应；上限防大屏空耗 */
+    if (band_h < 340) band_h = 340;
+    if (band_h > 1100) band_h = 1100;
+    list_h = content_h - band_h - 12;
+    if (list_h < 140) { list_h = 140; band_h = content_h - list_h - 12; if (band_h < 200) band_h = 200; }
+
+    /* 上：步骤总览（全宽、可滚；只读文本 —— 拖列表滚动照常） */
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::SetCursorScreenPos(ImVec2(x0, content_top));
+    ImGui::BeginChild("##opvlist", ImVec2(cw, list_h), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    for (i = 0; i < g_ope_nsteps; i++) ope_preview_row(i);
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    /* 下：小地图带（地图按 g_w:g_h 等比缩入左半区；右半区图例） */
+    {
+        float by0 = content_top + list_h + 12, bh = band_h;
+        float legw = cw * 0.5f, mapw0 = cw - legw - 12;
+        float sc = mapw0 / (float)g_w, sy = bh / (float)g_h, mw2, mh2, mx0, my0;
+        if (sy < sc) sc = sy;                        /* 等比：取小者（缩入可用区域） */
+        mw2 = (float)g_w * sc; mh2 = (float)g_h * sc;
+        mx0 = x0 + (mapw0 - mw2) * 0.5f;             /* 地图在左半区居中 */
+        my0 = by0 + (bh - mh2) * 0.5f;
+        draw_preview_map(mx0, my0, mw2, mh2);
+        pv_legend(x0 + mapw0 + 24, by0 + 6);
+    }
+
+    /* [关闭] 回编辑层 */
+    ImGui::PushID(5100);
+    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
+    if (btn_light("关闭", ImVec2(cw, 92))) {
+        g_ope_pv = 0;
+        g_need = 1; g_force_frames = 2;
+        ALOGI("op edit 预览关（回编辑层）");
+    }
+    ImGui::PopID();
+}
+
+/* 编辑层主屏（T2.4 起按**当前屏整屏**绘制，见 build_edit_layer）：头部（名字行 + [预览][收起]）/
  * 步骤列表（可滚）/ 加步（两行八类型 4+4）/ 门控循环 / 跑完自动关 / [取消][完成]。
- * 子层（名字键盘、数字弹层、变量选择、区域选择）开着时本屏不画（子层整面盖住）。 */
+ * 子层（名字键盘、数字弹层、变量选择、区域选择、预览页）开着时本屏不画（子层整面盖住）。 */
 static void draw_op_edit(void)
 {
     ImDrawList *dl;
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, msg_h, ly, by_bottom, done_y, autooff_y, gate_y, add_y, add_y2, list_top, list_bot, list_h;
 
+    if (g_ope_pv) { draw_op_preview(); return; }     /* 预览页（T2.5）：只读层，最高优先（编辑层头 [预览] 进） */
     if (g_ope_kb) { draw_ope_name_kb(); return; }
     if (g_ope_vl) { draw_ope_vlist(); return; }      /* 变量选择弹层（数字弹层之上） */
     if (g_ope_rl >= 0) { draw_ope_rlist(); return; } /* 区域选择弹层（条件步） */
@@ -3678,7 +3950,13 @@ static void draw_op_edit(void)
     ImGui::SetCursorScreenPos(ImVec2(x0, y0));
     text_meta_s("名字（脚本按名字认它；与别的操作重名会被拒）");
     {
-        float bw = 168.0f;
+        float bw = 150.0f;                       /* 头排两钮：预览 + 收起（窄屏也放得下） */
+        ImGui::SetCursorScreenPos(ImVec2(x0 + cw - 2 * bw - 12, y0 - 8));
+        if (btn_light("预览", ImVec2(bw, 64))) {
+            g_ope_pv = 1;                        /* 全屏只读页（T2.5）；吞触摸矩形照旧整屏（ui_rect_now 只看 g_ope_i/g_ope_coll） */
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 预览开（%d 步）", g_ope_nsteps);
+        }
         ImGui::SetCursorScreenPos(ImVec2(x0 + cw - bw, y0 - 8));
         if (btn_light("收起", ImVec2(bw, 64))) {
             g_ope_coll = 1;
