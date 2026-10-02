@@ -108,7 +108,7 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
 - [ ] **Step 1: 改 `vt_internal.h` / `vt_shm.h`**（如上；`vt_step` 加 `ref` 后 `vt_op`/`vt_shm_edit` 随动，区 B 断言由构建期核对）。
 - [ ] **Step 2: 改 `vtouchd.c` 初值表**（新字段补 0；确认"默认/引导副本"两处初始化表达式逐字一致）。
 - [ ] **Step 3: 改 `vt_ops.c` `op_valid`**（逐条落实上表；`why` 人话文案同步各档）。
-- [ ] **Step 4: 门**：`sh scripts/build.sh`（**默认 md5 变更属预期**——共享结构改了；记录新旧值）+ `sh scripts/build.sh ui`（新 md5 记录）；`python scripts/apply_funcdoc.py --check`（0 处）。
+- [ ] **Step 4: 门**：`sh scripts/build.sh`（**默认 md5 变更属预期**——共享结构改了；记录新旧值）+ `sh scripts/build.sh ui`（新 md5 记录）；`python scripts/apply_funcdoc.py --check`（0 处）；`op_valid` 文档块/`funcdoc_data.py` 文案如含区间/规则描述则同步（先文案后代码）。
 - [ ] **Step 5: 实测尺寸记录**（spec §6.1）：从启动日志 `共享内存就绪 … state@…(…)` 读区 A/total 新值，写进报告。
 - [ ] **Step 6: 提交**：`feat: 契约 v5 —— 步骤 ref/触发数据/op_valid v2（变量编码）`。
 
@@ -183,7 +183,7 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
 ### Task 2.4: 胶水 API v2
 
 **Files:**
-- Modify: `src-ui/ui_glue.c`, `src-ui/ui_stubs.c`, `scripts/funcdoc_data.py`
+- Modify: `src-ui/ui_glue.c`, `src-ui/ui_stubs.c`, `src-ui/vtouch_ui.cpp`（仅调用点同步，编译期暴露）, `scripts/funcdoc_data.py`
 
 **Interfaces:**
 - Produces: `int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn);`（尾部扩参；`ref` 空写空串；`refn<=0` 或 NULL 可省略）。
