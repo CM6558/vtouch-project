@@ -265,9 +265,11 @@ void vt_ops_clear(void)
  *   step    当前步下标（0 起）；t0 = 本步名义开始时刻；deadline = 下一次动作的到点（单调毫秒）
  *   phase   步内阶段（PH_*）；slot = 全程占用的虚拟槽
  *   hold/dur/nsamp/sample  点按按住时长 / 滑动时长、采样点数、下一个采样点下标
+ *   sx1..sy2  滑动本步解析后的起终点（负数编码在起一步时解析；采样点用它插值）
  *   rx/ry   上一次写进 g.virt[slot] 的 raw 坐标（撞槽检测：别人动过它就知道）
  *   conflict  撞槽日志只打一次（v1 不做避让，spec §3.5）
  *   trig_seen  已消费到的触发序号（触发槽 SPSC 的消费者一侧）
+ *   trig    触发数据快照（起跑时整组拷入，运行中不回填；td=NULL 的手动运行 = 全零 ⇒ 全部变量无值）
  *   t_start   起跑时刻（完成日志的「用时」）
  *   frozen / frozen_since  帧冻结标记与冻结起点（帧窗内暂停推进；帧关后把 t0/deadline/t_start
  *              一起平移暂停时长 —— 见 vt_ops_tick）；起跑 / 完成 / 中止都清零，不泄漏到下一次运行
@@ -293,9 +295,11 @@ static struct {
     int      dur;
     int      nsamp;
     int      sample;
+    int      sx1, sy1, sx2, sy2;                             /* 滑动本步解析后的起终点（变量快照的解析结果） */
     int      rx, ry;
     int      conflict;
     uint32_t trig_seen;
+    struct vt_trig_data trig;                                /* 触发数据快照（起跑时整组拷入；spec §1.5） */
     uint64_t t_start;
     int      frozen;                                         /* 帧冻结中（R1 封口）：帧窗内暂停推进 */
     uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
@@ -398,6 +402,27 @@ static int op_finger_ll(const char *act, int lx, int ly)
 /* 线性插值：滑动的第 k 个采样点（k=0..n；k=n 时精确落在终点）。 */
 static int op_lerp(int a, int b, int k, int n) { return a + (b - a) * k / n; }
 
+/**
+ * (vtouch-doc: op_resolve)
+ * @brief 解析一个可变量字段：字面值原样出；负数编码查本次触发快照的 mask 位。
+ * @param   v        字段原值：字面值（≥0）或变量引用 -1..-5（OP_VAR_*）
+ * @param   out      成功时写入解析结果
+ * @return  0 成功；-1 变量无值（调用方按 `原因=变量无值` 中止）。
+ * @note    **静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），未设即无值 —— **不静默当 0**（spec §1.3/D6）；越界负值不会到达（op_valid 已拒，防御按无值返回 -1）。
+ */
+static int op_resolve(int v, int *out)
+{
+    const int val[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
+    int idx;
+
+    if (v >= 0) { *out = v; return 0; }                      /* 字面值：原样出 */
+    if (v < OP_VAR_TMS || v > OP_VAR_TDX) return -1;         /* 不会到达：op_valid 只放行 -5..-1；防御按无值 */
+    idx = OP_VAR_TDX - v;                                    /* -1→0(tdx) … -5→4(tms)，与 OP_TRIGB_* 位序一致 */
+    if (!(R.trig.mask & (OP_TRIGB_TDX << idx))) return -1;   /* 本次触发没带这个变量 ⇒ 无值（绝不静默当 0） */
+    *out = val[idx];
+    return 0;
+}
+
 /* 撞槽收场：记一行 `op 槽冲突 k`（只记一次）+ 顺带中止。原因只能记到「reset/断连」这一层：
  * 能外力动我们手指的只有 WS 客户端侧（reset 命令 / 断连被踢抬掉全部虚拟触点 / 对同槽注入 up），
  * 执行器侧分不出是哪一个。 */
@@ -466,7 +491,8 @@ static void op_next_step(void)
     R.deadline = R.t0;
 }
 
-/* 起一步：打步日志 + 发这一步的起始动作（点按 / 滑动先 down；等待不动手）。 */
+/* 起一步：解析本步数值字段（字面值 / 变量引用；引用无值变量 → 中止 `变量无值`）+ 打步日志 +
+ * 发这一步的起始动作（点按 / 滑动先 down；等待不动手）。 */
 static void op_begin_step(void)
 {
     const struct vt_step *st;
@@ -474,30 +500,52 @@ static void op_begin_step(void)
     st = &R.steps[R.step];
     g.op_run_step = R.step;                                  /* 面板进度（0 起） */
     switch (st->type) {
-    case OP_STEP_TAP:
+    case OP_STEP_TAP: {
+        int x, y, ms;
+        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0 ||
+            op_resolve(st->ms, &ms) != 0) {
+            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6）；步号 = 当前步 */
+            return;
+        }
         fprintf(stderr, "vtouchd: op 步 %d/%d 点按 %d,%d 按住%dms\n",
-                R.step + 1, R.nsteps, st->a1, st->a2, st->ms);
-        R.hold = st->ms;
-        if (op_finger_ll("down", st->a1, st->a2) != 0) { op_conflict_abort(); return; }
+                R.step + 1, R.nsteps, x, y, ms);
+        R.hold = ms;
+        if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return; }
         R.phase = PH_TAP_UP;
         R.deadline = R.t0 + (uint64_t)R.hold;
         break;
-    case OP_STEP_SWIPE:
+    }
+    case OP_STEP_SWIPE: {
+        int x1, y1, x2, y2, ms;
+        if (op_resolve(st->a1, &x1) != 0 || op_resolve(st->a2, &y1) != 0 ||
+            op_resolve(st->a3, &x2) != 0 || op_resolve(st->a4, &y2) != 0 ||
+            op_resolve(st->ms, &ms) != 0) {
+            vt_ops_abort("变量无值");
+            return;
+        }
         fprintf(stderr, "vtouchd: op 步 %d/%d 滑动 %d,%d→%d,%d %dms\n",
-                R.step + 1, R.nsteps, st->a1, st->a2, st->a3, st->a4, st->ms);
-        R.dur = st->ms;
-        R.nsamp = st->ms / 10;                               /* N = max(2, dur/10)：10ms 一采样 */
+                R.step + 1, R.nsteps, x1, y1, x2, y2, ms);
+        R.sx1 = x1; R.sy1 = y1; R.sx2 = x2; R.sy2 = y2;      /* 采样点插值用解析结果（负数编码已展开） */
+        R.dur = ms;
+        R.nsamp = ms / 10;                                   /* N = max(2, dur/10)：10ms 一采样 */
         if (R.nsamp < 2) R.nsamp = 2;
-        if (op_finger_ll("down", st->a1, st->a2) != 0) { op_conflict_abort(); return; }
+        if (op_finger_ll("down", x1, y1) != 0) { op_conflict_abort(); return; }
         R.sample = 1;
         R.phase = PH_SWIPE_MOVE;
         R.deadline = R.t0 + (uint64_t)R.sample * (uint64_t)R.dur / (uint64_t)R.nsamp;
         break;
-    case OP_STEP_WAIT:
-        fprintf(stderr, "vtouchd: op 步 %d/%d 等待 %dms\n", R.step + 1, R.nsteps, st->ms);
+    }
+    case OP_STEP_WAIT: {
+        int ms;
+        if (op_resolve(st->ms, &ms) != 0) {
+            vt_ops_abort("变量无值");
+            return;
+        }
+        fprintf(stderr, "vtouchd: op 步 %d/%d 等待 %dms\n", R.step + 1, R.nsteps, ms);
         R.phase = PH_WAIT;
-        R.deadline = R.t0 + (uint64_t)st->ms;
+        R.deadline = R.t0 + (uint64_t)ms;
         break;
+    }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
         R.phase = PH_WAIT;
         R.deadline = R.t0;
@@ -510,7 +558,6 @@ static void op_begin_step(void)
  * 落后于时间表时也一样一拍一个动作地追（第四档的 0ms 超时把拍子拉满，不会一口气堆一串帧）。 */
 static void op_advance(void)
 {
-    const struct vt_step *st;
     int lx, ly;
     switch (R.phase) {
     case PH_BEGIN:
@@ -521,9 +568,8 @@ static void op_advance(void)
         op_next_step();
         break;
     case PH_SWIPE_MOVE:
-        st = &R.steps[R.step];
-        lx = op_lerp(st->a1, st->a3, R.sample, R.nsamp);
-        ly = op_lerp(st->a2, st->a4, R.sample, R.nsamp);
+        lx = op_lerp(R.sx1, R.sx2, R.sample, R.nsamp);       /* 起终点 = 起一步解析后的快照值 */
+        ly = op_lerp(R.sy1, R.sy2, R.sample, R.nsamp);
         if (op_finger_ll("move", lx, ly) != 0) { op_conflict_abort(); return; }
         if (op_trace_on())                                   /* L9：默认零输出（判定只一次分支） */
             fprintf(stderr, "vtouchd: op 采样 %s %d/%d %d,%d\n", R.name, R.sample, R.nsamp, lx, ly);
@@ -564,7 +610,7 @@ static void op_selfcheck(void)
 }
 
 /* 触发槽消费：单槽覆盖、只保留最新（spec §3.4）；主线程按 seq 的差值分辨「被盖掉的」那几发。
- * 名字读取与生产者写入之间有个纳秒级窗口：混读最多让这一发起跑查无此名（丢弃 + 日志），
+ * 名字/触发数据读取与生产者写入之间有个纳秒级窗口：混读最多让这一发起跑查无此名（丢弃 + 日志），
  * 不会跑去动别的状态 —— 触发是物理手指级别的低频事件，值不当 seqlock。 */
 static void op_consume_trigger(void)
 {
@@ -572,17 +618,25 @@ static void op_consume_trigger(void)
     uint32_t delta, k;
     char name[OP_NAME_MAX + 1];
     size_t n;
+    struct vt_trig_data td;
     if (seq == R.trig_seen) return;                          /* 没有新触发：热路径零成本 */
     delta = seq - R.trig_seen;
     R.trig_seen = seq;
-    /* 生产者先写 name/slot、release 才自增 seq ⇒ acquire 看到新 seq 就一定能看到它们 */
+    /* 生产者先写 name/slot/触发数据、release 才自增 seq ⇒ acquire 看到新 seq 就一定能看到它们 */
     n = strnlen(g.op_trig_name, OP_NAME_MAX + 1);
     if (n > OP_NAME_MAX) n = OP_NAME_MAX;
     memcpy(name, g.op_trig_name, n); name[n] = 0;
+    /* 触发数据（v2）：acquire 之后一次读全 6 个字段（写序由 vt_ops_trigger_post 保证） */
+    td.mask = g.op_trig_mask;
+    td.dx = g.op_trig_dx;
+    td.dy = g.op_trig_dy;
+    td.ux = g.op_trig_ux;
+    td.uy = g.op_trig_uy;
+    td.ms = g.op_trig_ms;
     for (k = 1; k < delta; k++) fprintf(stderr, "vtouchd: op 丢弃 覆盖\n");
     if (op_trace_on())                                       /* L9：默认零输出（判定只一次分支） */
         fprintf(stderr, "vtouchd: op 触发 %s 槽=%d\n", name, g.op_trig_slot);
-    vt_ops_run(name);                                        /* 忙 / 不存在 / 没空闲槽由它丢弃 + 日志 */
+    vt_ops_run(name, &td);                                   /* 忙 / 不存在 / 没空闲槽由它丢弃 + 日志 */
 }
 
 /**
@@ -693,12 +747,13 @@ int vt_ops_next_deadline_ms(void)
  * (vtouch-doc: vt_ops_run)
  * @brief 起跑一条操作（忙时丢弃 + 日志）。
  * @param   name     操作名；表里查不到 / 没空闲槽 / 已有操作在跑 = 丢弃 + 对应日志
- * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
+ * @param   td       触发数据快照（mask/dx/dy/ux/uy/ms；spec §1.5）；NULL = 手动运行（全零 ⇒ 全部变量无值）
+ * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 触发数据拷进 R.trig（起跑瞬间快照、运行中不回填，spec §1.2）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`；VTOUCH_OPS_TRACE=1 时再一行 `op 变量 tdx=… tdy=… tux=… tuy=… tms=…`（未设字段打 `-`，值取快照）。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   起跑的三件事（顺序有讲究）：
  *   ① 忙就先丢（一次只跑一条，spec §3.2）—— 忙检查放最前：「运行中」本身就是明确的拒绝理由；
- *   ② 查表命中后整条**快照**进 R（步骤表一起抄）：运行中面板改表 / 删表都影响不到本次（spec §7）；
+ *   ② 查表命中后整条**快照**进 R（步骤表 + 触发数据一起抄）：运行中面板改表 / 删表、再触发都影响不到本次（spec §7）；
  *   ③ 挑槽同时看 virt[] / staged[] / pending_up —— 帧内暂存与待抬的触点都还占着槽（down 会被
  *   set_virtual 拒），全空才真的空闲；挑不到就丢弃（不排队、不等待）。
  *   门控（gate / auto_off）批 3 起生效：gate 非空先过门控检查 —— 锁内判定（必须存在且
@@ -706,7 +761,7 @@ int vt_ops_next_deadline_ms(void)
  *   先问「能不能跑」，再问「有没有槽」。auto_off 只在正常完成（op_finish）翻回门控开关，
  *   中止不翻（中止≠跑完）；翻回的锁纪律与 T3.1 §4.2 同款（锁内改值、锁外环行/日志）。
  */
-void vt_ops_run(const char *name)
+void vt_ops_run(const char *name, const struct vt_trig_data *td)
 {
     char nm[OP_NAME_MAX + 1];
     size_t n;
@@ -755,12 +810,14 @@ void vt_ops_run(const char *name)
     memcpy(R.steps, g.ops[i].steps, sizeof R.steps);
     memcpy(R.gate, g.ops[i].gate, sizeof R.gate);
     R.auto_off = g.ops[i].auto_off;
+    R.trig = td ? *td : (struct vt_trig_data){0};            /* 触发数据快照：NULL = 手动运行（全零 ⇒ 全部变量无值） */
     R.slot = slot;
     R.step = 0;
     R.conflict = 0;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.hold = R.dur = R.nsamp = R.sample = 0;
+    R.sx1 = R.sy1 = R.sx2 = R.sy2 = 0;
     R.t_start = op_now_ms();
     R.t0 = R.t_start;
     R.deadline = R.t0;                                       /* 到点：本拍末尾就进入第 1 步 */
@@ -770,6 +827,17 @@ void vt_ops_run(const char *name)
     g.op_run_state = 1;
     fprintf(stderr, "vtouchd: op 启动 %s 步数=%d 槽=%d 门控=%s\n",
             R.name, R.nsteps, R.slot, R.gate[0] ? R.gate : "无");
+    if (op_trace_on()) {                                     /* TRACE：起跑一行变量快照（未设打 `-`；L9 默认零输出） */
+        const int val[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
+        char b[OP_VAR_N][16];
+        int k;
+        for (k = 0; k < OP_VAR_N; k++) {
+            if (R.trig.mask & (OP_TRIGB_TDX << k)) snprintf(b[k], sizeof b[k], "%d", val[k]);
+            else snprintf(b[k], sizeof b[k], "-");
+        }
+        fprintf(stderr, "vtouchd: op 变量 tdx=%s tdy=%s tux=%s tuy=%s tms=%s\n",
+                b[0], b[1], b[2], b[3], b[4]);
+    }
     op_ev_push("run", 1, R.nsteps);
 }
 

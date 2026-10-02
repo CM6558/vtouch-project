@@ -316,7 +316,7 @@ void vt_ops_tick(void);
 /* 下一步到点的剩余毫秒数（下限 0）；-1 = 空闲。 (vtouch-doc: vt_ops_next_deadline_ms) */
 int  vt_ops_next_deadline_ms(void);
 /* 起跑一条操作（忙时丢弃 + 日志）。 (vtouch-doc: vt_ops_run) */
-void vt_ops_run(const char *name);
+void vt_ops_run(const char *name, const struct vt_trig_data *td);
 /* 中止运行中的操作（抬指 + 状态归位 + 日志原因）。 (vtouch-doc: vt_ops_abort) */
 void vt_ops_abort(const char *why);
 /* 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。 (vtouch-doc: vt_ops_put) */

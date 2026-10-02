@@ -159,7 +159,7 @@ void vt_shm_edit_apply(void)
         if (nn > OP_NAME_MAX) nn = OP_NAME_MAX;
         memcpy(nm, e.id, nn); nm[nn] = 0;
         fprintf(stderr, "vtouchd: op 编辑 run %s\n", nm);
-        vt_ops_run(e.id);
+        vt_ops_run(e.id, NULL);                              /* 手动运行：无触发数据（全部变量无值） */
         break;
     }
     case VT_EDIT_OP_STOP:
