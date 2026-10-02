@@ -157,7 +157,7 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
     return 0;
 }
 
-int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms)
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn)
 {
     seed_ops();
     if (i < 0 || i >= ON || s < 0 || s >= O[i].nsteps) return -1;
@@ -167,6 +167,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
     if (a3) *a3 = O[i].steps[s][3];
     if (a4) *a4 = O[i].steps[s][4];
     if (ms) *ms = O[i].steps[s][5];
+    if (ref && refn > 0) ref[0] = 0;             /* 桩没有 ref 存储：恒空串（=无 ref，镜像核心口径） */
     return 0;
 }
 

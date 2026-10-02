@@ -53,7 +53,7 @@ void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, 
  * 已接线；绑定读/写（trig/bind/kind）T3.3 已接线。 */
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
-int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms);
+int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn);
 int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps);
 int  vtouch_op_del(const char *name);
 void vtouch_op_clear(void);
@@ -758,7 +758,7 @@ static int save_ops(void)
         fprintf(f, "op %s gate %s autooff %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0);
         for (s = 0; s < steps; s++) {
             int t, a1, a2, a3, a4, ms;
-            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms) != 0) continue;
+            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, NULL, 0) != 0) continue;
             fprintf(f, "step %d %d %d %d %d %d\n", t, a1, a2, a3, a4, ms);
         }
     }
@@ -2630,7 +2630,7 @@ static void op_edit_open(int i, const char *name)
     }
     for (s = 0; s < steps; s++) {
         if (vtouch_get_op_step(i, s, &g_ope_steps[s][0], &g_ope_steps[s][1], &g_ope_steps[s][2],
-                               &g_ope_steps[s][3], &g_ope_steps[s][4], &g_ope_steps[s][5]) != 0) {
+                               &g_ope_steps[s][3], &g_ope_steps[s][4], &g_ope_steps[s][5], NULL, 0) != 0) {
             ALOGW("op edit 读第 %d 步失败 %s", s + 1, name);
             ev_note("打开编辑失败：%s", name);
             return;

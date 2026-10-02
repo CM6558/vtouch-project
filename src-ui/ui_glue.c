@@ -409,7 +409,7 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
 
 /**
  * (vtouch-doc: vtouch_get_op_step)
- * @brief 取一条操作的某一步（类型 / 四个参数 / 时长；只读区 A）。
+ * @brief 取一条操作的某一步（类型 / 四个参数 / 时长 / 区域引用；只读区 A）。
  * @param   i        操作下标
  * @param   s        步下标（0..步数-1）
  * @param   type     输出步骤类型 OP_STEP_*（可 NULL）
@@ -418,12 +418,20 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
  * @param   a3       输出参数 3（可 NULL）
  * @param   a4       输出参数 4（可 NULL）
  * @param   ms       输出时长毫秒（可 NULL）
+ * @param   ref      输出区域引用缓冲（条件步的区域 id；可 NULL）
+ * @param   refn     区域引用缓冲容量
  * @return  0 成功；-1 没接共享内存或下标越界。
- * @note    点按：a1,a2 = 坐标、ms = 按住时长；滑动：a1,a2 → a3,a4 = 起终点、ms = 时长；等待：只用 ms。
+ * @note    点按：a1,a2 = 坐标、ms = 按住时长；滑动：a1,a2 → a3,a4 = 起终点、ms = 时长；等待：只用 ms；
+ *          按下：a1,a2 = 坐标（按下并保持）；弹起：无字段；
+ *          区域判断：a1,a2 = 判定点、a3 = 不成立行为（0=中止 1=跳过下一步）、ref = 区域 id；
+ *          开关判断：a3 = 不成立行为、ref = 区域 id（须开关型）。
+ *          坐标 / 时长字段可为字面值或变量引用（-1..-5 = tdx/tdy/tux/tuy/tms）。
+ *          ref 出参：写空串 = 无 ref；空 / 未终止（防御）也写空串；refn<=0 或 ref=NULL 可省略。
  */
-int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms)
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn)
 {
     const struct vt_step *st;
+    size_t rn;
     if (!S || i < 0 || i >= S->op_count || i >= MAX_OPS) return -1;
     if (s < 0 || s >= S->ops[i].step_count || s >= MAX_STEPS) return -1;
     st = &S->ops[i].steps[s];
@@ -433,6 +441,11 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
     if (a3) *a3 = st->a3;
     if (a4) *a4 = st->a4;
     if (ms) *ms = st->ms;
+    if (ref && refn > 0) {                        /* ref 出参：空写空串；未终止（防御）也写空串 */
+        rn = strnlen(st->ref, sizeof st->ref);    /* 未终止 = strnlen 顶到数组尾 */
+        if (rn >= sizeof st->ref) ref[0] = 0;
+        else snprintf(ref, (size_t)refn, "%s", st->ref);
+    }
     return 0;
 }
 
@@ -445,7 +458,8 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  * @param   steps6   扁平步表：每 6 个 int 一组，顺序 type,a1,a2,a3,a4,ms
  * @param   nsteps   步数（1..32；越界当场拒，不投）
  * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
- * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；核心的校验是单点（名字 / 步数 / 坐标 / 时长），被拒时回读失败、面板走现有错误提示路径。
+ * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；
+ *          核心的校验是单点（名字 / 步数 / 类型 1..7 / 坐标 / 时长 / 变量编码 -5..-1 / 条件步 a3+ref），被拒时回读失败、面板走现有错误提示路径。
  */
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6, int nsteps)
 {
