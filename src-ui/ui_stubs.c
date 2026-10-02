@@ -130,8 +130,8 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
  * 与 ui_glue.c 逐个同签名；行为是「够画出来、够点」的桩（运行态停在「第 1 步」，点停止才归位）。 */
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；桩文件不 include 核心头，独立定义）。 */
 #define REGION_ID_MAX 15
-struct stu_op { char name[16]; char gate[16]; int autoff, nsteps, steps[8][6];
-                char refs[8][REGION_ID_MAX + 1]; };   /* T3.1：每步 ref（存得下、读得回，编辑层往返用） */
+struct stu_op { char name[16]; char gate[16]; int autoff, nsteps, steps[8][8];
+                char refs[8][REGION_ID_MAX + 1]; };   /* v3：每步 8 int（type,a1..a4,ms,j1,j2）+ ref（存得下、读得回，编辑层往返用） */
 static struct stu_op O[32];
 static int ON;
 static int ORUN = -1, ORSTEP = 0, ORSTATE = 0;
@@ -160,7 +160,8 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
     return 0;
 }
 
-int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn)
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
+                       int *j1, int *j2)
 {
     seed_ops();
     if (i < 0 || i >= ON || s < 0 || s >= O[i].nsteps) return -1;
@@ -170,27 +171,33 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
     if (a3) *a3 = O[i].steps[s][3];
     if (a4) *a4 = O[i].steps[s][4];
     if (ms) *ms = O[i].steps[s][5];
+    if (j1) *j1 = O[i].steps[s][6];
+    if (j2) *j2 = O[i].steps[s][7];
     if (ref && refn > 0) snprintf(ref, (size_t)refn, "%s", O[i].refs[s]);   /* T3.1：回读存的 ref（空 = 无） */
     return 0;
 }
 
-int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6,
-                  const char (*refs)[REGION_ID_MAX + 1], int nsteps)
+int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
+                  const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err)
 {
     int i, k;
     size_t rn;
     seed_ops();
-    if (!name || !*name || !steps6 || nsteps < 1 || nsteps > 8) return -1;   /* 桩上限与 steps[8] 对齐 */
+    if (out_err) *out_err = 0;
+    if (!name || !*name || !steps8 || nsteps < 1 || nsteps > 8) {   /* 桩上限与 steps[8] 对齐 */
+        if (out_err) *out_err = 1;
+        return -1;
+    }
     for (i = 0; i < ON; i++) if (!strcmp(O[i].name, name)) break;
     if (i >= ON) {
-        if (ON >= (int)(sizeof O / sizeof O[0])) return -1;
+        if (ON >= (int)(sizeof O / sizeof O[0])) { if (out_err) *out_err = 1; return -1; }
         i = ON++;
     }
     snprintf(O[i].name, sizeof O[i].name, "%s", name);
     snprintf(O[i].gate, sizeof O[i].gate, "%s", gate ? gate : "");
     O[i].autoff = autoff ? 1 : 0;
     O[i].nsteps = nsteps;
-    memcpy(O[i].steps, steps6, (size_t)nsteps * 6 * sizeof(int));
+    memcpy(O[i].steps, steps8, (size_t)nsteps * 8 * sizeof(int));
     memset(O[i].refs, 0, sizeof O[i].refs);            /* 每步 ref 先清（不带上一任残留） */
     if (refs) {                                        /* ref 通道镜像：NULL = 全空；每步空串 = 无 */
         for (k = 0; k < nsteps; k++) {

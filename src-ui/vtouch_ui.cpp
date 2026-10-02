@@ -57,9 +57,10 @@ void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, 
  * 已接线；绑定读/写（trig/bind/kind）T3.3 已接线。 */
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
-int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn);
-int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6,
-                   const char (*refs)[REGION_ID_MAX + 1], int nsteps);   /* refs 可 NULL = 全空；每步空串 = 无 */
+int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
+                        int *j1, int *j2);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL） */
+int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
+                   const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
 int  vtouch_op_del(const char *name);
 void vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
@@ -721,17 +722,38 @@ static void load_regions(void)
     if (migrated) save_regions();     /* 迁移完立刻写回持久路径（老 tmpfs 文件留着无害） */
 }
 
-/* ---- 操作表落盘（ops.conf，T2.7；v2 T3.3）----------------------------------------------
- * 格式（docs/OPS_PLAN_V2.md §6.2，逐字）：`#vtouch-ops v2` 起头；一条操作 = op 行 + N 条 step 行 ——
+/* 步骤类型 / 条件档位 / 变量编码：与核心常量（src/vt_internal.h）同值；面板不 include 核心头，独立定义。
+ * 位置注定在这里（ops.conf 段之前）：load_ops 的**类型感知翻译**（旧行条件步 a4 缺省 → 继续）也用它。 */
+#define OP_STEP_TAP   1
+#define OP_STEP_SWIPE 2
+#define OP_STEP_WAIT  3
+#define OP_STEP_DOWN        4          /* 按下（按下并保持） */
+#define OP_STEP_UP          5          /* 弹起（松开当前按住的手指） */
+#define OP_STEP_COND_REGION 6          /* 区域判断（a1,a2 的点 ∈ ref 区域） */
+#define OP_STEP_COND_TOGGLE 7          /* 开关判断（ref 区域须开关型且开着） */
+#define OP_STEP_JUMP        8          /* 跳转（a1 = 目标步骤：0 = 结束、1..步数 = 目标） */
+#define OP_COND_ABORT       0          /* 档位：中止（条件步成立/不成立侧共用；不成立侧默认） */
+#define OP_COND_SKIP        1          /* 档位：跳过下一步 */
+#define OP_COND_CONT        2          /* 档位：继续下一步（成立侧默认） */
+#define OP_COND_JUMP        3          /* 档位：跳到…（目标 = 该侧 j1/j2：0 = 结束；跑前守卫兜底） */
+#define OP_VAR_TDX (-1)                /* 变量编码：-1..-5 = 触发按下x / 触发按下y / 触发弹起x / 触发弹起y / 触发时长 */
+#define OP_VAR_TDY (-2)
+#define OP_VAR_TUX (-3)
+#define OP_VAR_TUY (-4)
+#define OP_VAR_TMS (-5)
+
+/* ---- 操作表落盘（ops.conf，T2.7；v2 T3.3；v3 T2.1）------------------------------------
+ * 格式（docs/OPS_PLAN_V3.md §7，逐字）：`#vtouch-ops v3` 起头；一条操作 = op 行 + N 条 step 行 ——
  *   op <名> gate <门控区域id|-> autooff <0|1>
- *   step <type> <a1> <a2> <a3> <a4> <ms> <ref>
- * ref 空写 `-`（读回还原空串）；变量照写负数（如 -1）；读端兼容 v1（6 字段 step 行：ref 缺省空、
- * a3 照读——v1 滑动步的 a3 = x2，不能按缺省丢）。
+ *   step <type> <a1> <a2> <a3> <a4> <ms> <ref> <j1> <j2>
+ * ref 空写 `-`（读回还原空串）；变量照写负数（如 -1）。读端兼容 v1（6 字段行）/ v2（7 字段行）：
+ * 缺省 j1=j2=0；**类型感知翻译**：旧行的条件步（t=6/7）成立档 a4 缺省 → OP_COND_CONT（继续下一步，
+ * 老文件里 a4=0 只是「没有该字段」）；非条件步照读——尤其滑动步 a3/a4 = 终点坐标，绝不能动。
  * 保存：.tmp + rename（同 save_regions，掉电不会留半截文件）；失败挂 g_ops_save_pending、
  * 1s 后退避重试（节奏同 save_failed）；成功一行「ops.conf 已存 N 条」。
- * 加载：版本门（v1 兼容读入 / v2 本格式；其余 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；
+ * 加载：版本门（v1/v2 兼容读入 / v3 本格式；其余 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；
  * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
-#define OPS_CONF_VER  2
+#define OPS_CONF_VER  3
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
 #define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS / 编辑层 OPE_MAX_STEPS（面板不 include 核心头） */
 
@@ -771,11 +793,12 @@ static int save_ops(void)
         /* gate 空串 = 无门控 → 按 spec 写占位符 `-`（读回时还原空串）；悬空 id 原样写（核心允悬空） */
         fprintf(f, "op %s gate %s autooff %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0);
         for (s = 0; s < steps; s++) {
-            int t, a1, a2, a3, a4, ms;
+            int t, a1, a2, a3, a4, ms, j1, j2;
             char ref[REGION_ID_MAX + 1];
-            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref) != 0) continue;
-            /* ref 空 = 无引用 → 写占位符 `-`（读回时还原空串，同 gate 口径）；变量（负数）照写 */
-            fprintf(f, "step %d %d %d %d %d %d %s\n", t, a1, a2, a3, a4, ms, ref[0] ? ref : "-");
+            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref, &j1, &j2) != 0) continue;
+            /* ref 空 = 无引用 → 写占位符 `-`（读回时还原空串，同 gate 口径）；变量（负数）照写；
+             * j1/j2 = 条件步跳转目标（v3 第 8/9 字段，非条件步恒 0） */
+            fprintf(f, "step %d %d %d %d %d %d %s %d %d\n", t, a1, a2, a3, a4, ms, ref[0] ? ref : "-", j1, j2);
         }
     }
     if (fclose(f) != 0) { ALOGE("ops.conf 落盘失败: %s", strerror(errno)); return ops_save_failed(); }
@@ -802,7 +825,7 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
         ALOGI("ops.conf %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
         return 1;
     }
-    if (vtouch_op_put(name, gate, autoff, flat, refs, nsteps) != 0) {   /* refs = 每步 ref（v1 行读入时缺省空） */
+    if (vtouch_op_put(name, gate, autoff, flat, refs, nsteps, NULL) != 0) {   /* refs = 每步 ref（旧版行读入时缺省空）；out_err=NULL：沿用「见上一行 glue 日志」口径 */
         ALOGW("ops.conf 跳过 %s（核心拒收或编辑超时，见上一行 glue 日志, %d 步）", name, nsteps);
         return -1;
     }
@@ -816,14 +839,14 @@ static void load_ops(void)
     char nm[16] = {0};
     char gt[16] = {0};
     int  ao = 0, nst = 0, bad = 0;
-    int  flat[OPS_MAX_STEPS * 6];
-    char refs[OPS_MAX_STEPS][REGION_ID_MAX + 1];   /* v2 每步 ref（v1 行读入时缺省空） */
+    int  flat[OPS_MAX_STEPS * 8];
+    char refs[OPS_MAX_STEPS][REGION_ID_MAX + 1];   /* v3 每步 ref（旧版行读入时缺省空） */
     FILE *f = fopen(OPS_CONF_FILE, "r");
     if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
-    /* 版本门：v1（兼容读入，spec §6.2）与 v2（本格式）都认；无版本行 / 其他版本 = 旧版本残留 →
+    /* 版本门：v1 / v2（兼容读入，spec §7）与 v3（本格式）都认；无版本行 / 其他版本 = 旧版本残留 →
      * 整份丢弃；照 regions.conf 口径改写当前表 */
     if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 ||
-        (ver != 1 && ver != OPS_CONF_VER)) {
+        (ver != 1 && ver != 2 && ver != OPS_CONF_VER)) {
         fclose(f);
         ALOGI("ops.conf 旧格式/版本不符 → 丢弃清空");
         save_ops();
@@ -853,20 +876,26 @@ static void load_ops(void)
             }
         } else {
             char rf[REGION_ID_MAX + 1];
-            int sn;
+            int sn, j1 = 0, j2 = 0;
             rf[0] = 0;                     /* ref 缺省空（v1 6 字段行） */
-            sn = sscanf(line, "step %d %d %d %d %d %d %15s", &t, &a1, &a2, &a3, &a4, &ms, rf);
-            if (sn == 6 || sn == 7) {      /* 6 字段 = v1 行（a3 照读：v1 滑动步 a3=x2，不按缺省丢）；
-                                            * 7 字段 = v2 行 */
+            /* v3 行 9 字段：step <t> <a1> <a2> <a3> <a4> <ms> <ref> <j1> <j2>；v2 = 7、v1 = 6 ——
+             * 短行 sscanf 提前收工（sn = 实际匹配数），缺的 ref/j1/j2 照上面的缺省留空 / 0 */
+            sn = sscanf(line, "step %d %d %d %d %d %d %15s %d %d", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2);
+            if (sn == 6 || sn == 7 || sn == 9) {   /* 6 = v1 行（a3 照读：v1 滑动步 a3=x2，不按缺省丢）；
+                                                    * 7 = v2 行；9 = v3 行（含 j1/j2） */
                 if (!nm[0]) {
                     if (!orphan) { ALOGW("ops.conf 有一行 step 不属于任何 op → 忽略"); orphan = 1; }
                     continue;
                 }
                 orphan = 0;
                 if (rf[0] == '-' && rf[1] == 0) rf[0] = 0;   /* ref `-` = 空（写端占位符）→ 还原空串 */
+                /* 类型感知翻译（spec §7）：旧行（sn<9）的条件步成立档 → OP_COND_CONT（继续下一步）——
+                 * 老文件里 a4=0 只是「没有该字段」；其余类型照读不动（尤其滑动 a3/a4 = 终点坐标） */
+                if (sn < 9 && (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE)) a4 = OP_COND_CONT;
                 if (nst < OPS_MAX_STEPS) {
-                    flat[nst * 6 + 0] = t; flat[nst * 6 + 1] = a1; flat[nst * 6 + 2] = a2;
-                    flat[nst * 6 + 3] = a3; flat[nst * 6 + 4] = a4; flat[nst * 6 + 5] = ms;
+                    flat[nst * 8 + 0] = t; flat[nst * 8 + 1] = a1; flat[nst * 8 + 2] = a2;
+                    flat[nst * 8 + 3] = a3; flat[nst * 8 + 4] = a4; flat[nst * 8 + 5] = ms;
+                    flat[nst * 8 + 6] = j1; flat[nst * 8 + 7] = j2;
                     snprintf(refs[nst], sizeof refs[nst], "%s", rf);
                     nst++;
                 } else bad = 1;            /* 步数越上限：整条按坏记录处理（核心只收 1..32） */
@@ -2114,22 +2143,6 @@ static void page_regions(void)
  * 运行状态由渲染线程每拍看一眼（ops_run_watch）：一变就请求重画 —— 不然面板静止不重绘，
  * 「运行中 · 第 k/n 步」会永远停在按下那一刻的读数上。 */
 
-/* 步骤类型 / 条件行为 / 变量编码：与核心常量（src/vt_internal.h）同值；面板不 include 核心头，独立定义。 */
-#define OP_STEP_TAP   1
-#define OP_STEP_SWIPE 2
-#define OP_STEP_WAIT  3
-#define OP_STEP_DOWN        4          /* 按下（按下并保持） */
-#define OP_STEP_UP          5          /* 弹起（松开当前按住的手指） */
-#define OP_STEP_COND_REGION 6          /* 区域判断（a1,a2 的点 ∈ ref 区域） */
-#define OP_STEP_COND_TOGGLE 7          /* 开关判断（ref 区域须开关型且开着） */
-#define OP_COND_ABORT       0          /* 不成立行为：中止（默认） */
-#define OP_COND_SKIP        1          /* 不成立行为：跳过下一步 */
-#define OP_VAR_TDX (-1)                /* 变量编码：-1..-5 = 触发按下x / 触发按下y / 触发弹起x / 触发弹起y / 触发时长 */
-#define OP_VAR_TDY (-2)
-#define OP_VAR_TUX (-3)
-#define OP_VAR_TUY (-4)
-#define OP_VAR_TMS (-5)
-
 /* 操作运行状态看门（渲染线程每拍调）：op_status 的（运行下标, 当前步, 状态）一变就请求重画。 */
 static void ops_run_watch(void)
 {
@@ -2166,10 +2179,10 @@ static void gen_op_name(char *out)
  * 默认值；等待既不碰坐标也不占虚拟槽），参数交给编辑层（T2.6）再改。 */
 static void op_new(void)
 {
-    const int wait100[6] = { OP_STEP_WAIT, 0, 0, 0, 0, 100 };
+    const int wait100[8] = { OP_STEP_WAIT, 0, 0, 0, 0, 100, 0, 0 };
     char nm[16];
     gen_op_name(nm);
-    if (vtouch_op_put(nm, "", 0, wait100, NULL, 1) == 0) {   /* refs=NULL：无区域引用（快速路径） */
+    if (vtouch_op_put(nm, "", 0, wait100, NULL, 1, NULL) == 0) {   /* refs=NULL：无区域引用（快速路径）；out_err=NULL */
         ALOGI("op new %s", nm);
         g_ops_save_pending = 1;      /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
         g_force_frames = 3;
@@ -2316,7 +2329,8 @@ static void page_ops(void)
  * 编辑对象是**打开那一刻的快照**（面板本地副本）：改名/增删排序步骤/换参数都只动副本，
  * [完成] 才由 vtouch_op_put 整条落表 —— 编辑半途核心表怎么动都不会把这轮编辑甩掉。
  * 范围口径照核心单点校验（src/vt_ops.c 的 op_valid）：名字 1..15 [A-Za-z0-9_-]（裸 `-` 除外）；步数 1..32；
- * 坐标 0..竖屏逻辑宽高-1；时长 点按 0..60000 / 滑动 1..60000 / 等待 0..600000。
+ * 坐标 0..竖屏逻辑宽高-1；时长 点按 0..60000 / 滑动 1..60000 / 等待 0..600000；
+ * v3 增量：条件步两档位 0..3（档位 = 跳转 → 该侧目标 0..当前步数）；跳转步目标 0..当前步数（0 = 结束）。
  * 面板预检是**硬门**：非法值拒收 + 就地提示（不只提示）；最终仍以核心为准（put 回读失败
  * 就地提示、覆盖层不关）。 */
 
@@ -2328,7 +2342,7 @@ static char g_ope_name[16] = {0};       /* 编辑中的名字（名字子层改�
 static char g_ope_gate[16] = {0};       /* 门控区域 id（空 = 无） */
 static int  g_ope_autoff = 0;           /* 跑完自动关 */
 static int  g_ope_nsteps = 0;           /* 步骤数（本地副本 1..32） */
-static int  g_ope_steps[OPE_MAX_STEPS][6];   /* 本地副本：每步 type,a1,a2,a3,a4,ms */
+static int  g_ope_steps[OPE_MAX_STEPS][8];   /* 本地副本：每步 type,a1,a2,a3,a4,ms,j1,j2（v3 模型 [8]，字段序同核心 vt_step；ref 另存 g_ope_refs） */
 static char g_ope_refs[OPE_MAX_STEPS][REGION_ID_MAX + 1];   /* 本地副本：每步区域引用（条件步 ref；空 = 无） */
 static char g_ope_msg[128] = {0};       /* [完成] 拒收/失败的就地提示（红字；放得下 v2 长文案） */
 static int  g_ope_kb = 0;               /* 名字子层（字符键盘）开 */
@@ -2467,11 +2481,11 @@ static const char *ope_name_why(int rc)
            rc == 3 ? "只能用 a-z A-Z 0-9 _ -" : "这个名字已经被别的操作用了";
 }
 
-/* 字段模型（v2 七类型）：字段序号 → steps6 下标（0=type、1..4=坐标参数、5=ms）；-1 = 该类型没这个字段。
+/* 字段模型（v3 八类型）：字段序号 → g_ope_steps 下标（0=type、1..4=坐标参数、5=ms）；-1 = 该类型没这个字段。
  * 坐标字段（下标 1..4）在数字弹层里会多画一个 [取点]（T2.8 已接线：核心吞一次触摸回填）；
- * 可变量的字段（spec §2.1）多画一个 [变量]（ope_var_ok 判）。条件步的 a3/ref 不在字段表里 ——
- * 它们是步骤行上的行内控件（不成立行为两键 + 区域下拉）。 */
-static const int ope_fidx[7][5] = {
+ * 可变量的字段（spec §2.1）多画一个 [变量]（ope_var_ok 判）。条件步的 a3/a4/j1/j2/ref 不在字段表里 ——
+ * 它们是步骤行上的行内控件（档位 + 目标格 + 区域下拉）；跳转步的「目标」= a1，走字段表（1 格）。 */
+static const int ope_fidx[8][5] = {
     { 1, 2, 5, -1, -1 },       /* 点按：x, y, 按住 ms */
     { 1, 2, 3, 4, 5 },         /* 滑动：起点 x, 起点 y, 终点 x, 终点 y, 时长 ms */
     { 5, -1, -1, -1, -1 },     /* 等待：ms */
@@ -2479,8 +2493,9 @@ static const int ope_fidx[7][5] = {
     { -1, -1, -1, -1, -1 },    /* 弹起：无字段 */
     { 1, 2, -1, -1, -1 },      /* 区域判断：判定点 x, 判定点 y */
     { -1, -1, -1, -1, -1 },    /* 开关判断：无数字字段 */
+    { 1, -1, -1, -1, -1 },     /* 跳转：目标步骤（0 = 结束） */
 };
-static const char *const ope_flabel[7][5] = {
+static const char *const ope_flabel[8][5] = {
     { "坐标 x", "坐标 y", "按住时长 ms", "", "" },
     { "起点 x", "起点 y", "终点 x", "终点 y", "滑动时长 ms" },
     { "等待时长 ms", "", "", "", "" },
@@ -2488,11 +2503,12 @@ static const char *const ope_flabel[7][5] = {
     { "", "", "", "", "" },
     { "判定点 x", "判定点 y", "", "", "" },
     { "", "", "", "", "" },
+    { "目标", "", "", "", "" },
 };
 static int ope_nfields(int type)
 {
     return type == OP_STEP_TAP ? 3 : type == OP_STEP_SWIPE ? 5 : type == OP_STEP_WAIT ? 1 :
-           type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : 0;
+           type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : type == OP_STEP_JUMP ? 1 : 0;
 }
 static const char *ope_tname(int type)
 {
@@ -2504,6 +2520,7 @@ static const char *ope_tname(int type)
     case OP_STEP_UP:          return "弹起";
     case OP_STEP_COND_REGION: return "区域判断";
     case OP_STEP_COND_TOGGLE: return "开关判断";
+    case OP_STEP_JUMP:        return "跳转";
     default:                  return "?";
     }
 }
@@ -2533,15 +2550,23 @@ static int ope_var_ok(int type, int idx)
 }
 
 /* 参数字段的范围硬门（照核心 op_valid 的尺子）：1 = 合法；不然 why 写人话（字段名 + 范围）。
- * v2：数值字段可为变量引用（-1..-5），放行；字面值照旧按类型/坐标轴分档。 */
+ * v3：数值字段可为变量引用（-1..-5），放行（跳转目标除外——它是控制流编号，不可变量）；字面值照旧按
+ * 类型/坐标轴分档；跳转步目标在字段层先按 0..OPE_MAX_STEPS 收（0 = 结束），保存预检再按当前步数收紧。 */
 static int ne_check(const char *label, int type, int fi, int v, char *why, int whycap)
 {
     int idx;
-    if (type < OP_STEP_TAP || type > OP_STEP_COND_TOGGLE || fi < 0 || fi >= ope_nfields(type)) {
+    if (type < OP_STEP_TAP || type > OP_STEP_JUMP || fi < 0 || fi >= ope_nfields(type)) {
         snprintf(why, (size_t)whycap, "步骤类型非法");
         return 0;
     }
     idx = ope_fidx[type - 1][fi];
+    if (type == OP_STEP_JUMP) {                       /* 跳转目标：0..32（0 = 结束） */
+        if (v < 0 || v > OPE_MAX_STEPS) {
+            snprintf(why, (size_t)whycap, "%s 必须在 0..%d（0 = 结束）", label, OPE_MAX_STEPS);
+            return 0;
+        }
+        return 1;
+    }
     if (ope_vname(v)) return 1;                       /* -1..-5：变量引用（v2 数值字段全可变量） */
     if (idx >= 1 && idx <= 4) {                       /* 坐标字段：x 看逻辑宽、y 看逻辑高 */
         int lim = (idx == 1 || idx == 3) ? g_w : g_h;
@@ -2559,11 +2584,12 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
 }
 
 /* 整步校验（[完成] 预检用；单点仍是核心 op_valid，这里只是不让明显非法的载荷出门）。
- * 条件步：不成立行为 a3 ∈ {0,1}、ref 必须已选（缺区域 = 明显非法，面板先拦）。 */
+ * 条件步：两档位 a3/a4 ∈ 0..3；档位 = 跳转 → 该侧目标（不成立侧 = j2、成立侧 = j1）∈ 0..当前步数；ref 必须已选。
+ * 跳转步：目标 a1 ∈ 0..当前步数（0 = 结束）。其余档位的目标忽略（照核心 op_valid 口径）。 */
 static int ope_step_check(int si, const int *s6, char *why, int whycap)
 {
     int t = s6[0], nf, fi;
-    if (t < OP_STEP_TAP || t > OP_STEP_COND_TOGGLE) {
+    if (t < OP_STEP_TAP || t > OP_STEP_JUMP) {
         snprintf(why, (size_t)whycap, "第 %d 步类型非法", si + 1);
         return 0;
     }
@@ -2576,24 +2602,53 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
         }
     }
     if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
-        if (s6[3] != OP_COND_ABORT && s6[3] != OP_COND_SKIP) {
+        if (s6[3] < OP_COND_ABORT || s6[3] > OP_COND_JUMP) {
             snprintf(why, (size_t)whycap, "第 %d 步：不成立行为非法", si + 1);
+            return 0;
+        }
+        if (s6[4] < OP_COND_ABORT || s6[4] > OP_COND_JUMP) {
+            snprintf(why, (size_t)whycap, "第 %d 步：成立行为非法", si + 1);
+            return 0;
+        }
+        if (s6[4] == OP_COND_JUMP && (s6[6] < 0 || s6[6] > g_ope_nsteps)) {   /* 成立侧目标 = j1 */
+            snprintf(why, (size_t)whycap, "第 %d 步成立侧跳转目标超出步数", si + 1);
+            return 0;
+        }
+        if (s6[3] == OP_COND_JUMP && (s6[7] < 0 || s6[7] > g_ope_nsteps)) {   /* 不成立侧目标 = j2 */
+            snprintf(why, (size_t)whycap, "第 %d 步不成立侧跳转目标超出步数", si + 1);
             return 0;
         }
         if (!g_ope_refs[si][0]) {
             snprintf(why, (size_t)whycap, "第 %d 步：请选择区域", si + 1);
             return 0;
         }
+    } else if (t == OP_STEP_JUMP) {
+        if (s6[1] < 0 || s6[1] > g_ope_nsteps) {         /* 目标 0 = 结束；1..当前步数 = 目标步骤 */
+            snprintf(why, (size_t)whycap, "第 %d 步跳转目标超出步数", si + 1);
+            return 0;
+        }
     }
     return 1;
 }
 
-/* 步骤行参数文本（T3.1 摘要）：坐标/时长格显示变量中文名或原值；条件步带区域名与不成立行为。 */
+/* 档位 + 目标 → 人话（摘要用；目标 0 = 结束）。词表照 spec §8 / 计划 Global Constraints。 */
+static void ope_tier_text(int tier, int target, char *out, int outcap)
+{
+    switch (tier) {
+    case OP_COND_CONT: snprintf(out, (size_t)outcap, "继续下一步"); break;
+    case OP_COND_SKIP: snprintf(out, (size_t)outcap, "跳过下一步"); break;
+    case OP_COND_JUMP: snprintf(out, (size_t)outcap, target == 0 ? "跳到结束" : "跳到第 %d 步", target); break;
+    default:           snprintf(out, (size_t)outcap, "中止"); break;   /* OP_COND_ABORT（非法值兜底同款） */
+    }
+}
+
+/* 步骤行参数文本（T3.1 摘要；v3 起两档全显）：坐标/时长格显示变量中文名或原值；条件步 = 区域名 +
+ * 成立/不成立两档（跳转档带目标）；跳转步 = 目标（「跳到 第 N 步」/「跳到 结束」）。 */
 static void ope_step_text(int si, char *out, int outcap)
 {
     const int *s6 = g_ope_steps[si];
     const char *ref = g_ope_refs[si];
-    char x1[24], y1[24], x2[24], y2[24], ms[24];
+    char x1[24], y1[24], x2[24], y2[24], ms[24], t1[24], t2[24];
     switch (s6[0]) {
     case OP_STEP_TAP:
         ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
@@ -2619,12 +2674,20 @@ static void ope_step_text(int si, char *out, int outcap)
         break;
     case OP_STEP_COND_REGION:
         ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
-        snprintf(out, (size_t)outcap, "%s,%s · %s · %s", x1, y1,
-                 ref[0] ? ref : "未选区域", s6[3] == OP_COND_SKIP ? "跳过下一步" : "中止");
+        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);       /* 成立侧：档 a4、目标 j1 */
+        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);       /* 不成立侧：档 a3、目标 j2 */
+        snprintf(out, (size_t)outcap, "%s,%s · %s · 成立 → %s / 不成立 → %s", x1, y1,
+                 ref[0] ? ref : "未选区域", t1, t2);
         break;
     case OP_STEP_COND_TOGGLE:
-        snprintf(out, (size_t)outcap, "%s · %s",
-                 ref[0] ? ref : "未选区域", s6[3] == OP_COND_SKIP ? "跳过下一步" : "中止");
+        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
+        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
+        snprintf(out, (size_t)outcap, "%s · 成立 → %s / 不成立 → %s",
+                 ref[0] ? ref : "未选区域", t1, t2);
+        break;
+    case OP_STEP_JUMP:
+        if (s6[1] == 0) snprintf(out, (size_t)outcap, "跳到 结束");
+        else snprintf(out, (size_t)outcap, "跳到 第 %d 步", s6[1]);
         break;
     default:
         snprintf(out, (size_t)outcap, "类型非法（%d）", s6[0]);
@@ -2666,7 +2729,7 @@ static void pick_ev_apply(int px, int py)
             t = g_ope_steps[se][0];
             if (sf >= 0 && sf < ope_nfields(t)) {
                 idx = ope_fidx[t - 1][sf];
-                if (idx >= 1 && idx <= 4) {                 /* 坐标格：1/3 = x 格，2/4 = y 格 */
+                if (idx >= 1 && idx <= 4 && t != OP_STEP_JUMP) {   /* 坐标格：1/3 = x 格，2/4 = y 格（跳转的 a1=目标是编号，不是坐标） */
                     int v = (idx == 1 || idx == 3) ? px : py;
                     g_ope_steps[se][idx] = v;
                     g_ne_lit = 1;                           /* 取点结果 = 字面值 */
@@ -2683,7 +2746,8 @@ static void pick_ev_apply(int px, int py)
 }
 
 /* 加一步：默认值必须核心必过 —— 点按 = 逻辑屏中心按住 50ms；滑动 = 中心 → 中心下方 200px、300ms；
- * 等待 = 100ms；按下 / 区域判断 = 中心点（区域判断还须选区域，默认空、[完成] 预检拦）；弹起 / 开关判断 = 无字段。
+ * 等待 = 100ms；按下 / 区域判断 = 中心点（区域判断还须选区域，默认空、[完成] 预检拦）；弹起 / 开关判断 = 无字段；
+ * 跳转 = 目标 1（spec §2.1 缺省）；条件步默认 成立继续 / 不成立中止（spec §1.1）。
  * 坐标默认取屏中心是唯一「任何逻辑尺寸都必合法」的取法（精确落点交给 [参数]/[取点]）。 */
 static void ope_add_step(int type)
 {
@@ -2706,8 +2770,11 @@ static void ope_add_step(int type)
         s6[1] = cx; s6[2] = cy;
     } else if (type == OP_STEP_WAIT) {
         s6[5] = 100;
+    } else if (type == OP_STEP_JUMP) {
+        s6[1] = 1;                                   /* 跳转目标默认 1（spec §2.1 缺省） */
     }
-    /* 弹起 / 开关判断：无字段（s6 已清零；条件步 a3=0 = 不成立中止，默认） */
+    /* 弹起 / 开关判断：无字段（s6 已清零）。条件步默认：不成立中止（a3=0）/ 成立继续（a4=CONT，spec §1.1）。 */
+    if (type == OP_STEP_COND_REGION || type == OP_STEP_COND_TOGGLE) s6[4] = OP_COND_CONT;
     g_ope_nsteps++;
     g_ope_msg[0] = 0;
     g_need = 1; g_force_frames = 2;
@@ -2717,7 +2784,7 @@ static void ope_add_step(int type)
 /* 步骤上移/下移（±1）：行序 = 执行序（核心按表顺序跑）；到头不动。 */
 static void ope_move(int i, int d)
 {
-    int j = i + d, t6[6];
+    int j = i + d, t6[8];
     char tr[REGION_ID_MAX + 1];
     if (j < 0 || j >= g_ope_nsteps) return;
     memcpy(t6, g_ope_steps[i], sizeof t6);
@@ -2808,7 +2875,8 @@ static void op_edit_open(int i, const char *name)
     for (s = 0; s < steps; s++) {
         if (vtouch_get_op_step(i, s, &g_ope_steps[s][0], &g_ope_steps[s][1], &g_ope_steps[s][2],
                                &g_ope_steps[s][3], &g_ope_steps[s][4], &g_ope_steps[s][5],
-                               g_ope_refs[s], (int)sizeof g_ope_refs[s]) != 0) {
+                               g_ope_refs[s], (int)sizeof g_ope_refs[s],
+                               &g_ope_steps[s][6], &g_ope_steps[s][7]) != 0) {   /* v3：j1/j2（成立/不成立侧跳转目标） */
             ALOGW("op edit 读第 %d 步失败 %s", s + 1, name);
             ev_note("打开编辑失败：%s", name);
             return;
@@ -2834,8 +2902,8 @@ static void op_edit_open(int i, const char *name)
  * 刚 put 的新名判成「被别人用了」而走不通，saved_as 豁免 + 补删台账一起把它接通。 */
 static void op_edit_save(void)
 {
-    int flat[OPE_MAX_STEPS * 6];
-    int s, k, rc;
+    int flat[OPE_MAX_STEPS * 8];
+    int s, k, rc, perr = 0;
     int old_settled = 0;             /* 头顶补删删掉的正是 g_ope_orig：底部「old≠del_owed」门槛的落点 */
     char why[96];
 
@@ -2872,11 +2940,14 @@ static void op_edit_save(void)
         }
     }
     for (s = 0; s < g_ope_nsteps; s++)
-        for (k = 0; k < 6; k++) flat[s * 6 + k] = g_ope_steps[s][k];
+        for (k = 0; k < 8; k++) flat[s * 8 + k] = g_ope_steps[s][k];   /* v3：flat 8/步（含 j1/j2） */
     /* ref 通道（T3.1）：g_ope_refs 直接递（每步一格，空串 = 无）；条件步的 ref 由此进核心 */
-    if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_refs, g_ope_nsteps) != 0) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/步类型/坐标/时长/区域引用照核心校验，含表满）或编辑未送达");
-        ALOGW("op edit put 失败 %s", g_ope_name);
+    if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_refs, g_ope_nsteps, &perr) != 0) {
+        if (perr == 3)   /* out_err 3 = 核心拒收（投递成功但回读不通过） */
+            snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/步类型/坐标/时长/区域引用照核心校验，含表满）");
+        else             /* 1 = 未投递（参数非法）/ 2 = 编辑未送达（超时） */
+            snprintf(g_ope_msg, sizeof g_ope_msg, "保存未送达（编辑超时或面板未接共享内存）");
+        ALOGW("op edit put 失败 %s（原因码 %d）", g_ope_name, perr);
         g_force_frames = 2;
         return;
     }
@@ -3013,7 +3084,7 @@ static void draw_num_edit(void)
     idx = ope_fidx[type - 1][g_ope_sf];
     if (idx < 0) { g_ope_se = -1; return; }          /* 防御：字段表里没有这一格 */
     label = ope_flabel[type - 1][g_ope_sf];
-    is_coord = (idx >= 1 && idx <= 4);
+    is_coord = (idx >= 1 && idx <= 4) && type != OP_STEP_JUMP;   /* 跳转的 a1=目标编号，不是坐标：不给 [取点] */
     var_ok = ope_var_ok(type, idx);
 
     dl = ImGui::GetWindowDrawList();

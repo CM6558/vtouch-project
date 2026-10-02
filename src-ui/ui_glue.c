@@ -409,7 +409,7 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
 
 /**
  * (vtouch-doc: vtouch_get_op_step)
- * @brief 取一条操作的某一步（类型 / 四个参数 / 时长 / 区域引用；只读区 A）。
+ * @brief 取一条操作的某一步（类型 / 四个参数 / 时长 / 跳转目标 / 区域引用；只读区 A）。
  * @param   i        操作下标
  * @param   s        步下标（0..步数-1）
  * @param   type     输出步骤类型 OP_STEP_*（可 NULL）
@@ -420,15 +420,20 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
  * @param   ms       输出时长毫秒（可 NULL）
  * @param   ref      输出区域引用缓冲（条件步的区域 id；可 NULL）
  * @param   refn     区域引用缓冲容量
+ * @param   j1       输出成立侧跳转目标（条件步档位=跳转时有效；0 = 结束；可 NULL）
+ * @param   j2       输出不成立侧跳转目标（同 j1；可 NULL）
  * @return  0 成功；-1 没接共享内存或下标越界。
  * @note    点按：a1,a2 = 坐标、ms = 按住时长；滑动：a1,a2 → a3,a4 = 起终点、ms = 时长；等待：只用 ms；
  *          按下：a1,a2 = 坐标（按下并保持）；弹起：无字段；
- *          区域判断：a1,a2 = 判定点、a3 = 不成立行为（0=中止 1=跳过下一步）、ref = 区域 id；
- *          开关判断：a3 = 不成立行为、ref = 区域 id（须开关型）。
+ *          区域判断：a1,a2 = 判定点、a3 = 不成立档位、a4 = 成立档位（0=中止 1=跳过下一步 2=继续下一步 3=跳转）、
+ *          j1 = 成立侧 / j2 = 不成立侧跳转目标（仅该侧档位=跳转时有意义；0 = 结束）、ref = 区域 id；
+ *          开关判断：a3 = 不成立档位、a4 = 成立档位、j1/j2 同款、ref = 区域 id（须开关型）；
+ *          跳转步：a1 = 目标步骤（0 = 结束）、其余字段忽略。
  *          坐标 / 时长字段可为字面值或变量引用（-1..-5 = tdx/tdy/tux/tuy/tms）。
- *          ref 出参：写空串 = 无 ref；空 / 未终止（防御）也写空串；refn<=0 或 ref=NULL 可省略。
+ *          ref 出参：写空串 = 无 ref；空 / 未终止（防御）也写空串；refn<=0 或 ref=NULL 可省略；j1/j2 可 NULL。
  */
-int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn)
+int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
+                       int *j1, int *j2)
 {
     const struct vt_step *st;
     size_t rn;
@@ -441,6 +446,8 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
     if (a3) *a3 = st->a3;
     if (a4) *a4 = st->a4;
     if (ms) *ms = st->ms;
+    if (j1) *j1 = st->j1;                         /* v3：条件步跳转目标（j1=成立侧、j2=不成立侧；其余类型恒 0） */
+    if (j2) *j2 = st->j2;
     if (ref && refn > 0) {                        /* ref 出参：空写空串；未终止（防御）也写空串 */
         rn = strnlen(st->ref, sizeof st->ref);    /* 未终止 = strnlen 顶到数组尾 */
         if (rn >= sizeof st->ref) ref[0] = 0;
@@ -455,24 +462,27 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  * @param   name     操作名（核心再校验：1..15、[A-Za-z0-9_-]；裸 `-` 除外）
  * @param   gate     门控开关区域 id；NULL 或空串 = 无
  * @param   autoff   跑完自动关门控（非 0 视为 1）
- * @param   steps6   扁平步表：每 6 个 int 一组，顺序 type,a1,a2,a3,a4,ms
+ * @param   steps8   扁平步表：每 8 个 int 一组，顺序 type,a1,a2,a3,a4,ms,j1,j2
  * @param   refs     每步的区域引用表（条件步的 ref；可 NULL = 全空）；refs[i] 空串 = 第 i 步无引用
  * @param   nsteps   步数（1..32；越界当场拒，不投）
- * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 没接共享内存 / 超时 / 被核心拒（回读不通过）。
+ * @param   out_err  失败原因码（可 NULL）：0=成功；1=没接共享内存 / 载荷非法（未投递）；2=投递超时（未送达）；3=核心拒收（投递成功但回读不通过）
+ * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 失败（原因见 out_err）。
  * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；
  *          refs 逐步拷进 op.steps[i].ref（strnlen 防御照款：未终止按空串处理，同 vtouch_get_op_step 口径）；
- *          核心的校验是单点（名字 / 步数 / 类型 1..7 / 坐标 / 时长 / 变量编码 -5..-1 / 条件步 a3+ref），被拒时回读失败、面板走现有错误提示路径。
+ *          核心的校验是单点（名字 / 步数 / 类型 1..8 / 坐标 / 时长 / 变量编码 -5..-1 / 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
  */
-int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps6,
-                  const char (*refs)[REGION_ID_MAX + 1], int nsteps)
+int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
+                  const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err)
 {
     struct vt_op op;
     size_t rn;
     int i, r;
-    if (!B || !name || !*name) return -1;
-    if (!steps6) { fprintf(stderr, "vtouch-ui: 操作载荷缺步表\n"); return -1; }
-    if (nsteps < 1 || nsteps > MAX_STEPS) {          /* 越界不读 steps6：步表在面板侧，读越界就是 UB */
+    if (out_err) *out_err = 0;                       /* 先定成成功；每个失败路径逐处改写 */
+    if (!B || !name || !*name) { if (out_err) *out_err = 1; return -1; }
+    if (!steps8) { fprintf(stderr, "vtouch-ui: 操作载荷缺步表\n"); if (out_err) *out_err = 1; return -1; }
+    if (nsteps < 1 || nsteps > MAX_STEPS) {          /* 越界不读 steps8：步表在面板侧，读越界就是 UB */
         fprintf(stderr, "vtouch-ui: 操作载荷步数非法（%d，应在 1..%d）\n", nsteps, MAX_STEPS);
+        if (out_err) *out_err = 1;
         return -1;
     }
     memset(&op, 0, sizeof op);
@@ -480,23 +490,25 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
     snprintf(op.gate, sizeof op.gate, "%s", gate ? gate : "");
     op.auto_off = autoff ? 1 : 0;
     op.step_count = nsteps;
-    for (i = 0; i < nsteps; i++) {                   /* 扁平步表：每 6 个 int 一组（type,a1..a4,ms） */
-        op.steps[i].type = steps6[i * 6 + 0];
-        op.steps[i].a1   = steps6[i * 6 + 1];
-        op.steps[i].a2   = steps6[i * 6 + 2];
-        op.steps[i].a3   = steps6[i * 6 + 3];
-        op.steps[i].a4   = steps6[i * 6 + 4];
-        op.steps[i].ms   = steps6[i * 6 + 5];
+    for (i = 0; i < nsteps; i++) {                   /* 扁平步表：每 8 个 int 一组（type,a1..a4,ms,j1,j2） */
+        op.steps[i].type = steps8[i * 8 + 0];
+        op.steps[i].a1   = steps8[i * 8 + 1];
+        op.steps[i].a2   = steps8[i * 8 + 2];
+        op.steps[i].a3   = steps8[i * 8 + 3];
+        op.steps[i].a4   = steps8[i * 8 + 4];
+        op.steps[i].ms   = steps8[i * 8 + 5];
+        op.steps[i].j1   = steps8[i * 8 + 6];        /* v3：条件步跳转目标（j1=成立侧、j2=不成立侧） */
+        op.steps[i].j2   = steps8[i * 8 + 7];
         if (refs) {                                  /* ref 通道（T3.1）：NULL = 全空；每步空串 = 无 */
             rn = strnlen(refs[i], REGION_ID_MAX + 1);
             if (rn <= REGION_ID_MAX)                 /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
                 snprintf(op.steps[i].ref, sizeof op.steps[i].ref, "%s", refs[i]);
         }
     }
-    if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) return -1;
+    if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) { if (out_err) *out_err = 2; return -1; }
     /* 回读校验（spec §2.6）：核心不给逐条回执 —— 找到同名且步数一致才算真落地。 */
     r = glue_op_find(name);
-    if (r < 0 || S->ops[r].step_count != nsteps) return -1;
+    if (r < 0 || S->ops[r].step_count != nsteps) { if (out_err) *out_err = 3; return -1; }
     return 0;
 }
 
