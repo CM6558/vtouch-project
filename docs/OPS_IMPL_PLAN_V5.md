@@ -121,7 +121,7 @@ int vt_expr_eval(const char *s, const int trig_vals[5], unsigned trig_mask,
 ## Task 4.1 — 文档同步（README / AGENTS 双份）
 
 **产出**：README.md + 仓库根 AGENTS.md + `C:/Users/21102/AGENTS.md` 三份同步（后两者逐字节一致，md5 自查）。
-- 更新点（照 spec 与实现）：步骤类型 8→9（+计算）；ops.conf v3→v4（10 字段、expr、兼容 v1/v2/v3）；契约 v6→v7；中止词 +表达式错/结果无值；加步 3×3；说明页 16 条；日志增量（`op 步 k/n 计算` / TRACE `op 计算`）；「操作表落盘」段、`VT_SHM_VERSION` 段、面板段（如有固定表述）。
+- 更新点（照 spec 与实现）：步骤类型 8→9（+计算）；ops.conf v3→v4（10 字段、expr、兼容 v1/v2/v3）；契约 v6→v7；中止词 +表达式错/结果无值；加步 3×3；说明页 16 条；日志增量（`op 步 k/n 计算` / TRACE `op 计算`）；「操作表落盘」段、`VT_SHM_VERSION` 段、面板段（如有固定表述）；**另核对 spec §2 空白口径（空格/Tab/换行，已与实现对齐）**。
 - **验收**：三份 md5 对齐（`md5sum` 回读）；README 内引用行号抽查。
 
 ## Task 5.1 — 收尾：全量门 + 重打包 + 真机端到端 + 台账（控制方/收尾子代理）
