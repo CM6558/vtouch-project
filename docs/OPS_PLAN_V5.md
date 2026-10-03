@@ -83,7 +83,7 @@ args    := expr { "," expr }
   - **变量图例行**（显示框下方，逐字）：`tdx,tdy 按下 · tux,tuy 弹起 · tms 按压时长(ms) · r1..r4 结果槽`。
   - 字符键（6×3，语法全字符集）：`123456` / `7890+-` / `*/().,`（含逗号 `,`——函数多参数分隔）。
   - 插入 chips（2 行）：`tdx tdy tux tuy tms`、`r1 r2 r3 r4`、`atan2( sin( cos( abs( min( max( sqrt(`（函数 chip 自带左括号；token 原样追加，空白无所谓）。
-  - **公式快捷行**（5 键，小字，追加式插入整条公式）：`释放角度`=`atan2(tuy-tdy, tux-tdx)`；`偏移X`=`tux + 50`；`偏移Y`=`tuy - 30`；`延伸X`=`tdx + cos(atan2(tuy-tdy, tux-tdx)) * 300`；`延伸Y`=`tdy + sin(atan2(tuy-tdy, tux-tdx)) * 300`。
+  - **公式快捷行**（5 键，小字，追加式插入整条公式）：`释放角度`=`atan2(tuy-tdy, tux-tdx)`；`偏移X`=`tux-tdx`；`偏移Y`=`tuy-tdy`；`延伸X`=`tdx + cos(atan2(tuy-tdy, tux-tdx)) * 300`；`延伸Y`=`tdy + sin(atan2(tuy-tdy, tux-tdx)) * 300`。
   - 底：`[取消][确定]`；确定 → 面板校验（同源）→ 写本地缓冲 + 日志；拒收就地提示、层不关。
   - 计算步在步骤行里的 `[参数]` = 表达式子层入口（与「＋计算」同）。
 - **步摘要 / 预览**：`计算 → r1 = <表达式>`（超宽截断显示，完整表达式进子层看）。
