@@ -409,7 +409,7 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
 
 /**
  * (vtouch-doc: vtouch_get_op_step)
- * @brief 取一条操作的某一步（类型 / 四个参数 / 时长 / 跳转目标 / 区域引用；只读区 A）。
+ * @brief 取一条操作的某一步（类型 / 四个参数 / 时长 / 跳转目标 / 区域引用 / 表达式；只读区 A）。
  * @param   i        操作下标
  * @param   s        步下标（0..步数-1）
  * @param   type     输出步骤类型 OP_STEP_*（可 NULL）
@@ -422,18 +422,20 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
  * @param   refn     区域引用缓冲容量
  * @param   j1       输出成立侧跳转目标（条件步档位=跳转时有效；0 = 结束；可 NULL）
  * @param   j2       输出不成立侧跳转目标（同 j1；可 NULL）
+ * @param   expr     输出表达式缓冲（计算步的表达式；可 NULL）
+ * @param   exprn    表达式缓冲容量
  * @return  0 成功；-1 没接共享内存或下标越界。
  * @note    点按：a1,a2 = 坐标、ms = 按住时长；滑动：a1,a2 → a3,a4 = 起终点、ms = 时长；等待：只用 ms；
  *          按下：a1,a2 = 坐标（按下并保持）；弹起：无字段；
  *          区域判断：a1,a2 = 判定点、a3 = 不成立档位、a4 = 成立档位（0=中止 1=跳过下一步 2=继续下一步 3=跳转）、
  *          j1 = 成立侧 / j2 = 不成立侧跳转目标（仅该侧档位=跳转时有意义；0 = 结束）、ref = 区域 id；
  *          开关判断：a3 = 不成立档位、a4 = 成立档位、j1/j2 同款、ref = 区域 id（须开关型）；
- *          跳转步：a1 = 目标步骤（0 = 结束）、其余字段忽略。
- *          坐标 / 时长字段可为字面值或变量引用（-1..-5 = tdx/tdy/tux/tuy/tms）。
- *          ref 出参：写空串 = 无 ref；空 / 未终止（防御）也写空串；refn<=0 或 ref=NULL 可省略；j1/j2 可 NULL。
+ *          跳转步：a1 = 目标步骤（0 = 结束）、其余字段忽略；计算步：a1 = 槽号 1..4、expr = 表达式。
+ *          坐标 / 时长字段可为字面值或负数编码引用（-9..-1：-1..-5 = tdx/tdy/tux/tuy/tms、-6..-9 = r1..r4）。
+ *          ref / expr 出参：写空串 = 无；空 / 未终止（防御）也写空串；n<=0 或指针 NULL 可省略；j1/j2 可 NULL。
  */
 int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
-                       int *j1, int *j2)
+                       int *j1, int *j2, char *expr, int exprn)
 {
     const struct vt_step *st;
     size_t rn;
@@ -453,6 +455,11 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
         if (rn >= sizeof st->ref) ref[0] = 0;
         else snprintf(ref, (size_t)refn, "%s", st->ref);
     }
+    if (expr && exprn > 0) {                      /* expr 出参（v5）：口径同 ref —— 空写空串；未终止（防御）也写空串 */
+        rn = strnlen(st->expr, sizeof st->expr);
+        if (rn >= sizeof st->expr) expr[0] = 0;
+        else snprintf(expr, (size_t)exprn, "%s", st->expr);
+    }
     return 0;
 }
 
@@ -464,15 +471,16 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  * @param   autoff   跑完自动关门控（非 0 视为 1）
  * @param   steps8   扁平步表：每 8 个 int 一组，顺序 type,a1,a2,a3,a4,ms,j1,j2
  * @param   refs     每步的区域引用表（条件步的 ref；可 NULL = 全空）；refs[i] 空串 = 第 i 步无引用
+ * @param   exprs    每步的表达式表（计算步的 expr；可 NULL = 全空）；exprs[i] 空串 = 第 i 步无表达式
  * @param   nsteps   步数（1..32；越界当场拒，不投）
  * @param   out_err  失败原因码（可 NULL）：0=成功；1=没接共享内存 / 载荷非法（未投递）；2=投递超时（未送达）；3=核心拒收（投递成功但回读不通过）
  * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 失败（原因见 out_err）。
  * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；
- *          refs 逐步拷进 op.steps[i].ref（strnlen 防御照款：未终止按空串处理，同 vtouch_get_op_step 口径）；
- *          核心的校验是单点（名字 / 步数 / 类型 1..8 / 坐标 / 时长 / 变量编码 -5..-1 / 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
+ *          refs / exprs 逐步拷进 op.steps[i].ref / .expr（strnlen 防御照款：未终止按空串处理，同 vtouch_get_op_step 口径）；
+ *          核心的校验是单点（名字 / 步数 / 类型 1..9 / 坐标 / 时长 / 变量编码 -9..-1 / 计算步 expr 过 vt_expr_check / 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
  */
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                  const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err)
+                  const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
 {
     struct vt_op op;
     size_t rn;
@@ -503,6 +511,11 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
             rn = strnlen(refs[i], REGION_ID_MAX + 1);
             if (rn <= REGION_ID_MAX)                 /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
                 snprintf(op.steps[i].ref, sizeof op.steps[i].ref, "%s", refs[i]);
+        }
+        if (exprs) {                                 /* expr 通道（v5 T2.1）：NULL = 全空；每步空串 = 无 */
+            rn = strnlen(exprs[i], VT_EXPR_MAX + 1);
+            if (rn <= VT_EXPR_MAX)                   /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
+                snprintf(op.steps[i].expr, sizeof op.steps[i].expr, "%s", exprs[i]);
         }
     }
     if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) { if (out_err) *out_err = 2; return -1; }
@@ -580,6 +593,20 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
     if (run_step) *run_step = S->op_run_step;
     if (run_state) *run_state = S->op_run_state;
     return 0;
+}
+
+/**
+ * (vtouch-doc: vtouch_expr_check)
+ * @brief 校验计算步表达式（转发核心 vt_expr_check；面板 real 构建链核心源码，同一实现）。
+ * @param   s        表达式文本（可 NULL / 空）
+ * @param   why      非法时写入短中文原因（可 NULL / 0 容）
+ * @param   whycap   why 缓冲长度
+ * @return  0 合法；-1 非法（why 已填原因）。
+ * @note    面板表达式子层的 [确定] 走它（spec V5 §4：不过 → 就地拒收、层不关）。
+ */
+int vtouch_expr_check(const char *s, char *why, int whycap)
+{
+    return vt_expr_check(s, why, whycap > 0 ? (size_t)whycap : 0);
 }
 
 /**

@@ -28,6 +28,9 @@
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；面板不 include 核心头，独立定义）——
  * vtouch_op_put 的每步区域引用表与编辑层本地 ref 副本（g_ope_refs）按它定宽。 */
 #define REGION_ID_MAX 15
+/* 计算步表达式上限（= 核心 src/vt_internal.h 的 VT_EXPR_MAX；同上独立定义）——
+ * vtouch_op_put 的每步表达式表按它定宽（3.1 的编辑层本地副本 g_ope_exprs 同款）。 */
+#define VT_EXPR_MAX 63
 
 extern "C" {
 struct vtouch_hooks {   /* 与 src/vtouchd.c 同一份定义：一处注册，见 vtouch_set_hooks */
@@ -59,9 +62,9 @@ void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, 
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
-                        int *j1, int *j2);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL） */
+                        int *j1, int *j2, char *expr, int exprn);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL）；expr = 计算步表达式（v5；可 NULL） */
 int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                   const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
+                   const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs/exprs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
 int  vtouch_op_del(const char *name);
 void vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
@@ -869,7 +872,8 @@ static int save_ops(void)
         for (s = 0; s < steps; s++) {
             int t, a1, a2, a3, a4, ms, j1, j2;
             char ref[REGION_ID_MAX + 1];
-            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref, &j1, &j2) != 0) continue;
+            /* expr=NULL：占位（v5 T2.1 最小接线，3.1 接真实数据） */
+            if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref, &j1, &j2, NULL, 0) != 0) continue;
             /* ref 空 = 无引用 → 写占位符 `-`（读回时还原空串，同 gate 口径）；变量（负数）照写；
              * j1/j2 = 条件步跳转目标（v3 第 8/9 字段，非条件步恒 0） */
             fprintf(f, "step %d %d %d %d %d %d %s %d %d\n", t, a1, a2, a3, a4, ms, ref[0] ? ref : "-", j1, j2);
@@ -900,7 +904,9 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
         ALOGI("ops.conf %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
         return 1;
     }
-    if (vtouch_op_put(name, gate, autoff, flat, refs, nsteps, NULL) != 0) {   /* refs = 每步 ref（旧版行读入时缺省空）；out_err=NULL：沿用「见上一行 glue 日志」口径 */
+    /* refs = 每步 ref（旧版行读入时缺省空）；exprs=NULL：占位（v5 T2.1 最小接线，3.1 接真实数据）；
+     * out_err=NULL：沿用「见上一行 glue 日志」口径 */
+    if (vtouch_op_put(name, gate, autoff, flat, refs, NULL, nsteps, NULL) != 0) {
         ALOGW("ops.conf 跳过 %s（核心拒收或编辑超时，见上一行 glue 日志, %d 步）", name, nsteps);
         return -1;
     }
@@ -2788,7 +2794,7 @@ static void op_new(void)
     const int wait100[8] = { OP_STEP_WAIT, 0, 0, 0, 0, 100, 0, 0 };
     char nm[16];
     gen_op_name(nm);
-    if (vtouch_op_put(nm, "", 0, wait100, NULL, 1, NULL) == 0) {   /* refs=NULL：无区域引用（快速路径）；out_err=NULL */
+    if (vtouch_op_put(nm, "", 0, wait100, NULL, NULL, 1, NULL) == 0) {   /* refs=NULL：无区域引用（快速路径）；exprs=NULL：占位（v5 T2.1，3.1 接）；out_err=NULL */
         ALOGI("op new %s", nm);
         g_ops_save_pending = 1;      /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
         g_force_frames = 3;
@@ -3621,10 +3627,11 @@ static void op_edit_open(int i, const char *name)
     }
     memset(g_ope_refs, 0, sizeof g_ope_refs);        /* 本地 ref 副本先清（读入逐步覆盖） */
     for (s = 0; s < steps; s++) {
+        /* expr=NULL：占位（v5 T2.1 最小接线，3.1 接真实数据） */
         if (vtouch_get_op_step(i, s, &g_ope_steps[s][0], &g_ope_steps[s][1], &g_ope_steps[s][2],
                                &g_ope_steps[s][3], &g_ope_steps[s][4], &g_ope_steps[s][5],
                                g_ope_refs[s], (int)sizeof g_ope_refs[s],
-                               &g_ope_steps[s][6], &g_ope_steps[s][7]) != 0) {   /* v3：j1/j2（成立/不成立侧跳转目标） */
+                               &g_ope_steps[s][6], &g_ope_steps[s][7], NULL, 0) != 0) {   /* v3：j1/j2（成立/不成立侧跳转目标） */
             ALOGW("op edit 读第 %d 步失败 %s", s + 1, name);
             ev_note("打开编辑失败：%s", name);
             return;
@@ -3691,8 +3698,9 @@ static void op_edit_save(void)
     }
     for (s = 0; s < g_ope_nsteps; s++)
         for (k = 0; k < 8; k++) flat[s * 8 + k] = g_ope_steps[s][k];   /* v3：flat 8/步（含 j1/j2） */
-    /* ref 通道（T3.1）：g_ope_refs 直接递（每步一格，空串 = 无）；条件步的 ref 由此进核心 */
-    if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_refs, g_ope_nsteps, &perr) != 0) {
+    /* ref 通道（T3.1）：g_ope_refs 直接递（每步一格，空串 = 无）；条件步的 ref 由此进核心。
+     * exprs=NULL：占位（v5 T2.1 最小接线，3.1 接真实数据） */
+    if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_refs, NULL, g_ope_nsteps, &perr) != 0) {
         if (perr == 3)   /* out_err 3 = 核心拒收（投递成功但回读不通过） */
             snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/步类型/坐标/时长/区域引用照核心校验，含表满）");
         else             /* 1 = 未投递（参数非法）/ 2 = 编辑未送达（超时） */

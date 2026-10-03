@@ -26,30 +26,36 @@
 #ifdef VT_UI
 
 #include <sys/eventfd.h>     /* 执行器的触发唤醒 fd（eventfd：写一下就叫醒主循环） */
+#include <math.h>            /* llround：槽引用取整（v5；spec §5.3） */
 
-/* 允许变量的数值字段判据（op_valid v2）：字段 = 字面值 v ∈ [lo, hi]，或变量引用 -5..-1（OP_VAR_*）。
+/* 允许变量的数值字段判据（op_valid v2；v5 扩 -9..-1）：字段 = 字面值 v ∈ [lo, hi]，或负数编码引用
+ * -9..-1（-1..-5 = 触发变量 OP_VAR_TDX..TMS、-6..-9 = 结果槽 OP_VAR_R1..R4）。
  * 坐标与时长共用（lo/hi 每档不同：坐标 = 0..逻辑尺寸-1；时长 = 各类型区间，见下）。 */
 static int op_num_ok(int v, int lo, int hi)
 {
     if (v >= lo && v <= hi) return 1;
-    if (v >= OP_VAR_TMS && v <= OP_VAR_TDX) return 1;
+    if (v >= OP_VAR_R4 && v <= OP_VAR_TDX) return 1;
     return 0;
 }
 
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3）：名字与区域 id 同一把尺子
- * （vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..8
- * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转）。
+ * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4）：名字与区域 id 同一把尺子
+ * （vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..9
+ * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算）。
  * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
  * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
- * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或变量引用 -1..-5（负数编码，spec V2 §1.4）——
- * 操作的手指是**注入**的，屏外的点没有意义：收下来也只是静默不命中，不如当场拒掉让面板报错。
+ * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -9..-1（-1..-5 = 触发变量、
+ * -6..-9 = 结果槽；spec V2 §1.4 / V5 §4）——操作的手指是**注入**的，屏外的点没有意义：收下来也只是
+ * 静默不命中，不如当场拒掉让面板报错。
  * 条件步（6/7）：两档位 a3/a4 ∈ 0..3（不成立侧/成立侧）；档位 = 跳转时该侧目标 ∈ 0..step_count
  * （0 = 结束、1..step_count = 目标步骤；j1 = 成立侧、j2 = 不成立侧），其余档位目标**忽略**（不校验、不拒收）；
  * ref 长度 1..REGION_ID_MAX 且过 vt_id_ok —— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
  * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
+ * 计算步（9，v5）：a1 ∈ 1..4（槽号）；expr 非空、≤63、且过 vt_expr_check（不过 → 拒收 `表达式错: <why>`）；
+ * 防御：a2..a4/ms/j1/j2 必须 0、ref 必须空。**其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——
+ * 表达式只属于计算步，别让它静默挂在别的步上（spec V5 §4）。
  * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
@@ -77,6 +83,11 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     }
     for (i = 0; i < op->step_count; i++) {
         const struct vt_step *st = &op->steps[i];
+        /* v5 防御：表达式只属于计算步 —— 其余类型带 expr 一律拒收 `表达式错`（spec V5 §4）。 */
+        if (st->type != OP_STEP_CALC && st->expr[0] != 0) {
+            snprintf(why, whycap, "表达式错");
+            return 0;
+        }
         switch (st->type) {
         case OP_STEP_TAP:
             if (!op_num_ok(st->a1, 0, g.logical_width - 1) ||
@@ -168,6 +179,31 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             break;
+        case OP_STEP_CALC: {                     /* 计算（v5）：a1 = 槽号 1..4；expr 非空且可解析；其余字段/ref 必须空（spec V5 §4） */
+            char w[40];
+            if (st->a1 < 1 || st->a1 > 4) {
+                snprintf(why, whycap, "第 %d 步槽号非法（1..4）", i + 1);
+                return 0;
+            }
+            if (st->a2 || st->a3 || st->a4 || st->ms || st->j1 || st->j2) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            if (st->ref[0]) {
+                snprintf(why, whycap, "第 %d 步区域引用必须为空", i + 1);
+                return 0;
+            }
+            n = strnlen(st->expr, sizeof st->expr);
+            if (n >= sizeof st->expr) {          /* 未终止（防御，载荷来自邮箱字节）→ 不喂给解析器 */
+                snprintf(why, whycap, "表达式错: 未终止");
+                return 0;
+            }
+            if (vt_expr_check(st->expr, w, sizeof w) != 0) {   /* 空 / 超长 / 语法 / 未知名字都由它拦（spec V5 §4） */
+                snprintf(why, whycap, "表达式错: %s", w);
+                return 0;
+            }
+            break;
+        }
         default:
             snprintf(why, whycap, "第 %d 步类型非法", i + 1);
             return 0;
@@ -196,7 +232,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或变量引用（负数编码 -1..-5）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或变量引用（负数编码 -1..-5）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -298,6 +334,7 @@ void vt_ops_clear(void)
  *   jumps   本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用一枚；超限中止 `跳转超限`，spec §2.3）
  *   trig_seen  已消费到的触发序号（触发槽 SPSC 的消费者一侧）
  *   trig    触发数据快照（起跑时整组拷入，运行中不回填；td=NULL 的手动运行 = 全零 ⇒ 全部变量无值）
+ *   slots/slot_mask  结果槽 r1..r4 与已写位（v5）：起跑清零；计算步写、槽引用（-6..-9）读（spec V5 §5）
  *   t_start   起跑时刻（完成日志的「用时」）
  *   frozen / frozen_since  帧冻结标记与冻结起点（帧窗内暂停推进；帧关后把 t0/deadline/t_start
  *              一起平移暂停时长 —— 见 vt_ops_tick）；起跑 / 完成 / 中止都清零，不泄漏到下一次运行
@@ -333,6 +370,9 @@ static struct {
     int      jumps;                                          /* 本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用；spec §2.3）：超限中止 `跳转超限` */
     uint32_t trig_seen;
     struct vt_trig_data trig;                                /* 触发数据快照（起跑时整组拷入；spec §1.5） */
+    double   slots[4];                                       /* 结果槽 r1..r4（v5 计算步写、槽引用读；起跑清零，spec V5 §5.1）——
+                                                              * 名字用复数避与上面的虚拟槽号 R.slot 撞名 */
+    unsigned slot_mask;                                      /* 槽已写位（位 0..3 = r1..r4；1=已写；起跑清零） */
     uint64_t t_start;
     int      frozen;                                         /* 帧冻结中（R1 封口）：帧窗内暂停推进 */
     uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
@@ -449,21 +489,43 @@ static void op_release_held(void)
 
 /**
  * (vtouch-doc: op_resolve)
- * @brief 解析一个可变量字段：字面值原样出；负数编码查本次触发快照的 mask 位。
- * @param   v        字段原值：字面值（≥0）或变量引用 -1..-5（OP_VAR_*）
+ * @brief 解析一个可变量字段：字面值原样出；负数编码查触发快照或结果槽。
+ * @param   v        字段原值：字面值（≥0）或负数编码引用 -9..-1（-1..-5 = 触发变量、-6..-9 = 结果槽）
+ * @param   lo       结果槽取整后的夹取下界（坐标 0 / 时长按类型档；spec V5 §5.3）
+ * @param   hi       夹取上界（坐标 逻辑尺寸-1 / 时长按类型档）
  * @param   out      成功时写入解析结果
- * @return  0 成功；-1 变量无值（调用方按 `原因=变量无值` 中止）。
- * @note    **静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），未设即无值 —— **不静默当 0**（spec §1.3/D6）；越界负值不会到达（op_valid 已拒，防御按无值返回 -1）。
+ * @return  0 成功；-1 失败（已按码中止：`变量无值` / `结果无值`）。
+ * @note    **静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），未设即中止 `变量无值` —— **不静默当 0**（spec §1.3/D6）；-6..-9 查 R.slot_mask（未写即中止 `结果无值`），已写则 llround 取整后夹取 [lo,hi]（静默语义，spec V5 §5.3）；越界负值不会到达（op_valid 已拒，防御按无值中止）。
  */
-static int op_resolve(int v, int *out)
+static int op_resolve(int v, int lo, int hi, int *out)
 {
     const int val[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
     int idx;
 
     if (v >= 0) { *out = v; return 0; }                      /* 字面值：原样出 */
-    if (v < OP_VAR_TMS || v > OP_VAR_TDX) return -1;         /* 不会到达：op_valid 只放行 -5..-1；防御按无值 */
+    if (v >= OP_VAR_R4 && v <= OP_VAR_R1) {                  /* -6..-9 = r1..r4（v5 结果槽引用；spec §5.3） */
+        idx = OP_VAR_R1 - v;                                 /* -6→0(r1) … -9→3(r4) */
+        if (!(R.slot_mask & (1u << idx))) {                  /* 槽未写 ⇒ 结果无值（绝不静默当 0；spec V5 §5.2） */
+            vt_ops_abort("结果无值");
+            return -1;
+        }
+        {
+            long long r = llround(R.slots[idx]);             /* 四舍五入取整（llround；spec §5.3） */
+            if (r < lo) r = lo;                              /* 夹取 [lo,hi]：静默语义，不因越界中止（spec §5.3） */
+            if (r > hi) r = hi;
+            *out = (int)r;
+        }
+        return 0;
+    }
+    if (v < OP_VAR_TMS || v > OP_VAR_TDX) {                  /* 不会到达：op_valid 只放行 -9..-1；防御按无值 */
+        vt_ops_abort("变量无值");
+        return -1;
+    }
     idx = OP_VAR_TDX - v;                                    /* -1→0(tdx) … -5→4(tms)，与 OP_TRIGB_* 位序一致 */
-    if (!(R.trig.mask & (OP_TRIGB_TDX << idx))) return -1;   /* 本次触发没带这个变量 ⇒ 无值（绝不静默当 0） */
+    if (!(R.trig.mask & (OP_TRIGB_TDX << idx))) {            /* 本次触发没带这个变量 ⇒ 无值（绝不静默当 0） */
+        vt_ops_abort("变量无值");
+        return -1;
+    }
     *out = val[idx];
     return 0;
 }
@@ -616,17 +678,18 @@ static void op_cond_apply(const struct vt_step *st, int hit, const char *word)
     }
 }
 
-/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步）；点按 / 滑动 / 按下 → 中止 `槽占用`）
- * + 解析本步数值字段（字面值 / 变量引用；引用无值变量 → 中止 `变量无值`）+ 打步日志 +
- * 发这一步的起始动作（点按 / 滑动 / 按下先 down；弹起 up；等待不动手）。 */
+/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算）；点按 / 滑动 / 按下 →
+ * 中止 `槽占用`）+ 解析本步数值字段（字面值 / 负数编码引用；变量无值 → 中止 `变量无值`、
+ * 槽未写 → 中止 `结果无值`）+ 打步日志 + 发这一步的起始动作（点按 / 滑动 / 按下先 down；
+ * 弹起 up；等待 / 条件步 / 跳转 / 计算不动手）。 */
 static void op_begin_step(void)
 {
     const struct vt_step *st;
     if (R.step >= R.nsteps) { op_finish(); return; }
     st = &R.steps[R.step];
     g.op_run_step = R.step;                                  /* 面板进度（0 起） */
-    /* 按住期门禁（spec §2.2/D4）：持有中只允许 等待 / 弹起（及条件步）—— 点按 / 滑动 / 按下
-     * 都会另起一根手指，统一在步入口中止 `槽占用`（判定不逐 case 散落）。 */
+    /* 按住期门禁（spec §2.2/D4 + V5 §5.2）：持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算）——
+     * 点按 / 滑动 / 按下 都会另起一根手指，统一在步入口中止 `槽占用`（判定不逐 case 散落）。 */
     if (R.held && (st->type == OP_STEP_TAP || st->type == OP_STEP_SWIPE || st->type == OP_STEP_DOWN)) {
         vt_ops_abort("槽占用");
         return;
@@ -634,11 +697,10 @@ static void op_begin_step(void)
     switch (st->type) {
     case OP_STEP_TAP: {
         int x, y, ms;
-        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0 ||
-            op_resolve(st->ms, &ms) != 0) {
-            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6）；步号 = 当前步 */
-            return;
-        }
+        if (op_resolve(st->a1, 0, g.logical_width - 1, &x) != 0 ||
+            op_resolve(st->a2, 0, g.logical_height - 1, &y) != 0 ||
+            op_resolve(st->ms, 0, 60000, &ms) != 0)
+            return;                                          /* 失败已中止（变量无值 / 结果无值；不静默当 0，spec §1.3/D6） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 点按 %d,%d 按住%dms\n",
                 R.step + 1, R.nsteps, x, y, ms);
         R.hold = ms;
@@ -649,12 +711,12 @@ static void op_begin_step(void)
     }
     case OP_STEP_SWIPE: {
         int x1, y1, x2, y2, ms;
-        if (op_resolve(st->a1, &x1) != 0 || op_resolve(st->a2, &y1) != 0 ||
-            op_resolve(st->a3, &x2) != 0 || op_resolve(st->a4, &y2) != 0 ||
-            op_resolve(st->ms, &ms) != 0) {
-            vt_ops_abort("变量无值");
-            return;
-        }
+        if (op_resolve(st->a1, 0, g.logical_width - 1, &x1) != 0 ||
+            op_resolve(st->a2, 0, g.logical_height - 1, &y1) != 0 ||
+            op_resolve(st->a3, 0, g.logical_width - 1, &x2) != 0 ||
+            op_resolve(st->a4, 0, g.logical_height - 1, &y2) != 0 ||
+            op_resolve(st->ms, 1, 60000, &ms) != 0)
+            return;                                          /* 失败已中止（变量无值 / 结果无值）；滑动 ms 域 ≥1（spec §4） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 滑动 %d,%d→%d,%d %dms\n",
                 R.step + 1, R.nsteps, x1, y1, x2, y2, ms);
         R.sx1 = x1; R.sy1 = y1; R.sx2 = x2; R.sy2 = y2;      /* 采样点插值用解析结果（负数编码已展开） */
@@ -669,10 +731,8 @@ static void op_begin_step(void)
     }
     case OP_STEP_WAIT: {
         int ms;
-        if (op_resolve(st->ms, &ms) != 0) {
-            vt_ops_abort("变量无值");
-            return;
-        }
+        if (op_resolve(st->ms, 0, 600000, &ms) != 0)
+            return;                                          /* 失败已中止（变量无值 / 结果无值） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 等待 %dms\n", R.step + 1, R.nsteps, ms);
         R.phase = PH_WAIT;
         R.deadline = R.t0 + (uint64_t)ms;
@@ -680,10 +740,9 @@ static void op_begin_step(void)
     }
     case OP_STEP_DOWN: {                                     /* 按下：a1,a2 = 坐标（可变量），按下并保持（spec §2.2） */
         int x, y;
-        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0) {
-            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6） */
-            return;
-        }
+        if (op_resolve(st->a1, 0, g.logical_width - 1, &x) != 0 ||
+            op_resolve(st->a2, 0, g.logical_height - 1, &y) != 0)
+            return;                                          /* 失败已中止（变量无值 / 结果无值；不静默当 0，spec §1.3/D6） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 按下 %d,%d\n", R.step + 1, R.nsteps, x, y);
         if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return; }
         R.held = 1;                                          /* 持有态：弹起步 / 收尾释放负责清（spec §2.2） */
@@ -705,10 +764,9 @@ static void op_begin_step(void)
     }
     case OP_STEP_COND_REGION: {                              /* 区域判断：a1,a2 的点 ∈ ref 区域？（spec §3.1） */
         int x, y, k, found = 0, hit = 0;
-        if (op_resolve(st->a1, &x) != 0 || op_resolve(st->a2, &y) != 0) {
-            vt_ops_abort("变量无值");                         /* 不静默当 0（spec §1.3/D6） */
-            return;
-        }
+        if (op_resolve(st->a1, 0, g.logical_width - 1, &x) != 0 ||
+            op_resolve(st->a2, 0, g.logical_height - 1, &y) != 0)
+            return;                                          /* 失败已中止（变量无值 / 结果无值；不静默当 0，spec §1.3/D6） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 区域判断 %s %d,%d\n",
                 R.step + 1, R.nsteps, st->ref, x, y);
         pthread_mutex_lock(&g.region_lock);                  /* 锁纪律（spec §3.2）：持锁判定、解锁后记日志（锁内不 I/O） */
@@ -747,6 +805,23 @@ static void op_begin_step(void)
         else
             fprintf(stderr, "vtouchd: op 步 %d/%d 跳转 第 %d 步\n", R.step + 1, R.nsteps, target);
         op_jump_apply(target);                               /* 0 = 结束（op_finish）/ 否则守卫 + 落位（spec §2.3） */
+        break;
+    }
+    case OP_STEP_CALC: {                                     /* 计算（v5）：结果槽 rN = 表达式（spec §5.2） */
+        const int vals[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
+        double out;
+        int v, rc = vt_expr_eval(st->expr, vals, R.trig.mask, R.slots, R.slot_mask, &out);
+        if (rc == VT_EXPR_NO_VAR)  { vt_ops_abort("变量无值"); return; }   /* 触发数据无值（沿用 v2 词；spec §5.2） */
+        if (rc == VT_EXPR_NO_SLOT) { vt_ops_abort("结果无值"); return; }   /* 槽未写（v5 新词；spec §5.2） */
+        if (rc != VT_EXPR_OK)      { vt_ops_abort("表达式错"); return; }   /* 防御：除零/域错/非有限——编辑期已拦（spec §5.2） */
+        R.slots[st->a1 - 1] = out;                           /* 写槽（覆盖；spec §5.2） */
+        R.slot_mask |= 1u << (st->a1 - 1);
+        v = (int)llround(out);                               /* 日志值 = 取整显示（spec §7） */
+        fprintf(stderr, "vtouchd: op 步 %d/%d 计算 r%d = %d\n", R.step + 1, R.nsteps, st->a1, v);
+        if (op_trace_on())                                   /* TRACE：回显表达式原文（spec §7；L9 默认零输出） */
+            fprintf(stderr, "vtouchd: op 计算 r%d = %s = %d\n", st->a1, st->expr, v);
+        R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
+        R.deadline = R.t0;
         break;
     }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
@@ -951,7 +1026,7 @@ int vt_ops_next_deadline_ms(void)
  * @brief 起跑一条操作（忙时丢弃 + 日志）。
  * @param   name     操作名；表里查不到 / 没空闲槽 / 已有操作在跑 = 丢弃 + 对应日志
  * @param   td       触发数据快照（mask/dx/dy/ux/uy/ms；spec §1.5）；NULL = 手动运行（全零 ⇒ 全部变量无值）
- * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 触发数据拷进 R.trig（起跑瞬间快照、运行中不回填，spec §1.2）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`；VTOUCH_OPS_TRACE=1 时再一行 `op 变量 tdx=… tdy=… tux=… tuy=… tms=…`（未设字段打 `-`，值取快照）。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
+ * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 触发数据拷进 R.trig（起跑瞬间快照、运行中不回填，spec §1.2）+ 结果槽清零（值 + 未写标记，spec V5 §5.1）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`；VTOUCH_OPS_TRACE=1 时再一行 `op 变量 tdx=… tdy=… tux=… tuy=… tms=…`（未设字段打 `-`，值取快照）。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   起跑的三件事（顺序有讲究）：
@@ -1021,6 +1096,8 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
+    memset(R.slots, 0, sizeof R.slots);                      /* 结果槽起跑清零（值 + 未写标记；spec V5 §5.1） */
+    R.slot_mask = 0;
     R.hold = R.dur = R.nsamp = R.sample = 0;
     R.sx1 = R.sy1 = R.sx2 = R.sy2 = 0;
     R.t_start = op_now_ms();

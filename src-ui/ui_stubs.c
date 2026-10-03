@@ -130,8 +130,11 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
  * 与 ui_glue.c 逐个同签名；行为是「够画出来、够点」的桩（运行态停在「第 1 步」，点停止才归位）。 */
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；桩文件不 include 核心头，独立定义）。 */
 #define REGION_ID_MAX 15
+/* 计算步表达式上限（= 核心 src/vt_internal.h 的 VT_EXPR_MAX；同上独立定义）。 */
+#define VT_EXPR_MAX 63
 struct stu_op { char name[16]; char gate[16]; int autoff, nsteps, steps[8][8];
-                char refs[8][REGION_ID_MAX + 1]; };   /* v3：每步 8 int（type,a1..a4,ms,j1,j2）+ ref（存得下、读得回，编辑层往返用） */
+                char refs[8][REGION_ID_MAX + 1]; char exprs[8][VT_EXPR_MAX + 1]; };
+                /* v3：每步 8 int（type,a1..a4,ms,j1,j2）+ ref；v5：+ expr（都存得下、读得回，编辑层往返用） */
 static struct stu_op O[32];
 static int ON;
 static int ORUN = -1, ORSTEP = 0, ORSTATE = 0;
@@ -161,7 +164,7 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
 }
 
 int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
-                       int *j1, int *j2)
+                       int *j1, int *j2, char *expr, int exprn)
 {
     seed_ops();
     if (i < 0 || i >= ON || s < 0 || s >= O[i].nsteps) return -1;
@@ -173,12 +176,13 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
     if (ms) *ms = O[i].steps[s][5];
     if (j1) *j1 = O[i].steps[s][6];
     if (j2) *j2 = O[i].steps[s][7];
-    if (ref && refn > 0) snprintf(ref, (size_t)refn, "%s", O[i].refs[s]);   /* T3.1：回读存的 ref（空 = 无） */
+    if (ref && refn > 0) snprintf(ref, (size_t)refn, "%s", O[i].refs[s]);       /* T3.1：回读存的 ref（空 = 无） */
+    if (expr && exprn > 0) snprintf(expr, (size_t)exprn, "%s", O[i].exprs[s]);  /* v5：回读存的 expr（空 = 无） */
     return 0;
 }
 
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                  const char (*refs)[REGION_ID_MAX + 1], int nsteps, int *out_err)
+                  const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
 {
     int i, k;
     size_t rn;
@@ -204,6 +208,14 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
             rn = strnlen(refs[k], REGION_ID_MAX + 1);
             if (rn <= REGION_ID_MAX)                   /* 未终止（防御照款）→ 留空 */
                 snprintf(O[i].refs[k], sizeof O[i].refs[k], "%s", refs[k]);
+        }
+    }
+    memset(O[i].exprs, 0, sizeof O[i].exprs);          /* 每步 expr 先清（同上） */
+    if (exprs) {                                       /* expr 通道镜像（v5）：NULL = 全空；每步空串 = 无 */
+        for (k = 0; k < nsteps; k++) {
+            rn = strnlen(exprs[k], VT_EXPR_MAX + 1);
+            if (rn <= VT_EXPR_MAX)                     /* 未终止（防御照款）→ 留空 */
+                snprintf(O[i].exprs[k], sizeof O[i].exprs[k], "%s", exprs[k]);
         }
     }
     return 0;
@@ -251,6 +263,14 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
     if (run_i) *run_i = ORUN;
     if (run_step) *run_step = ORSTEP;
     if (run_state) *run_state = ORSTATE;
+    return 0;
+}
+
+/* 表达式校验（v5）：单跑模式没有核心解析器 —— 恒放行（桩行为：面板画得出来、点得动就行）。 */
+int vtouch_expr_check(const char *s, char *why, int whycap)
+{
+    (void)s;
+    if (why && whycap > 0) why[0] = 0;
     return 0;
 }
 

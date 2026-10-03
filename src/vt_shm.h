@@ -26,7 +26,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  6u            /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  7u            /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -34,7 +34,8 @@
                                        *     struct region 增绑定/开关字段、编辑邮箱增 struct vt_op 载荷、
                                        *     区 B 增取点字段（pick_*）——此后只加逻辑/UI，布局不再变。
                                        * 5 = v2 操作扩展：step.ref / 触发数据槽。
-                                       * 6 = v3 操作扩展：step.j1/j2（条件双分支 + 跳转步）。 */
+                                       * 6 = v3 操作扩展：step.j1/j2（条件双分支 + 跳转步）。
+                                       * 7 = v5 操作扩展：step.expr（计算步骤表达式）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0

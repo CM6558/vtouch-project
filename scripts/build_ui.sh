@@ -78,6 +78,8 @@ if [ "${VTOUCH_UI_CORE:-stub}" = "real" ]; then
   # 引擎在核心进程里跑（scripts/build.sh ui → build/vtouchd_ui），面板不再托管它。
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_util.c -o build/ui/obj/vt_util.o
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_shm.c  -o build/ui/obj/vt_shm.o
+  # v5：表达式引擎（计算步；面板 real 与核心同源 —— vtouch_expr_check 转发它，spec §4）
+  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_expr.c -o build/ui/obj/vt_expr.o
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -Isrc-ui -c src-ui/ui_glue.c -o build/ui/obj/ui_glue.o
 else
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -Isrc-ui -c src-ui/ui_stubs.c -o build/ui/obj/ui_stubs.o

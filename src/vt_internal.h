@@ -38,6 +38,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "vt_expr.h"     /* v5「计算」步骤的表达式引擎（vt_expr_check / vt_expr_eval；默认构建里 vt_expr.c 是空 TU） */
+
 #define MAX_PHYS 64
 #define MAX_VIRT 32
 #define VT_POINTS_MAX 16  /* 一条 `points` 命令里的最大点数（单帧多点；报文受 MAX_PAYLOAD 限制，16 组 ≈ 220 字节） */
@@ -79,6 +81,8 @@
 #define OP_STEP_COND_REGION 6    /* 步骤类型：区域判断（a1,a2 的点 ∈ ref 区域） */
 #define OP_STEP_COND_TOGGLE 7    /* 步骤类型：开关判断（ref 区域须开关型且开着） */
 #define OP_STEP_JUMP        8    /* 步骤类型：跳转（a1 = 目标步骤：0 = 结束、1..步数 = 目标） */
+#define OP_STEP_CALC        9    /* 步骤类型：计算（a1 = 槽号 1..4、expr = 表达式；结果写槽 rN，spec OPS_PLAN_V5 §5） */
+#define VT_EXPR_MAX         63   /* 计算步表达式长度上限（字符；= vt_expr.c 的 VT_EXPR_LEN_MAX，spec V5 §2/§3） */
 /* 条件步两侧档位（a3=不成立侧、a4=成立侧）：0=中止（默认）、1=跳过下一步、2=继续下一步、3=跳转
  * （档位 = 跳转时该侧目标看 j1/j2：0 = 结束、1..步数 = 目标步骤；非跳转档位目标忽略）。 */
 #define OP_COND_ABORT       0
@@ -87,14 +91,19 @@
 #define OP_COND_JUMP        3
 /* 单次运行跳转计数上限（条件跳转 + 跳转步共用一枚，起跑清零）：超限中止 `跳转超限`，防死循环。 */
 #define VT_OPS_JUMP_MAX 200
-/* 变量编码（v2 契约，spec OPS_PLAN_V2 §1.4）：字段取负数 = 引用触发数据；字面值恒 ≥0。
- * op_valid 只对「允许变量的字段」放行 [-5, max]，其余字段照旧拒负值。 */
+/* 变量编码（v2 契约，spec OPS_PLAN_V2 §1.4；v5 扩展 -6..-9，spec OPS_PLAN_V5 §4）：字段取负数 = 引用
+ * 触发数据（-1..-5）或结果槽（-6..-9）；字面值恒 ≥0。
+ * op_valid 只对「允许变量的字段」放行 [-9, max]，其余字段照旧拒负值。 */
 #define OP_VAR_TDX (-1)          /* tdx：触发按下 x */
 #define OP_VAR_TDY (-2)          /* tdy：触发按下 y */
 #define OP_VAR_TUX (-3)          /* tux：触发弹起 x */
 #define OP_VAR_TUY (-4)          /* tuy：触发弹起 y */
 #define OP_VAR_TMS (-5)          /* tms：触发时长（按下→抬起的毫秒数） */
-#define OP_VAR_N    5            /* 变量个数 */
+#define OP_VAR_R1  (-6)          /* r1：结果槽 1（v5 计算步写入；槽引用 -6..-9，spec V5 §5.3） */
+#define OP_VAR_R2  (-7)          /* r2：结果槽 2 */
+#define OP_VAR_R3  (-8)          /* r3：结果槽 3 */
+#define OP_VAR_R4  (-9)          /* r4：结果槽 4 */
+#define OP_VAR_N    5            /* 触发变量个数（不变；结果槽不在此列） */
 /* 触发数据可用位（struct vt_trig_data.mask / g.op_trig_mask）：哪些变量这次有值。
  * 完整按压全置；按下触发只置 TDX|TDY；面板手动运行全清（无数据）。 */
 #define OP_TRIGB_TDX 1u
@@ -146,14 +155,16 @@ struct region {
 };
 
 struct vt_step {
-    int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断 8=跳转（OP_STEP_*） */
+    int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断 8=跳转 9=计算（OP_STEP_*） */
     int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用；按下: x,y；
                                     * 区域判断: 判定点 x,y + a3=不成立档位、a4=成立档位；开关判断: a3/a4=两侧档位；
-                                    * 跳转: a1 = 目标步骤（0 = 结束、1..步数 = 目标） */
-    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长（弹起/条件步/跳转不用） */
+                                    * 跳转: a1 = 目标步骤（0 = 结束、1..步数 = 目标）；
+                                    * 计算: a1 = 槽号 1..4（其余字段不用，spec OPS_PLAN_V5 §3） */
+    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长（弹起/条件步/跳转/计算不用） */
     int j1, j2;                    /* 条件步跳转目标（仅该侧档位=OP_COND_JUMP 时有意义）：j1=成立侧、j2=不成立侧；
                                     * 0 = 结束、1..步数 = 目标步骤（spec OPS_PLAN_V3 §6.1） */
     char ref[REGION_ID_MAX + 1];   /* 条件步（区域判断/开关判断）的区域 id；"" = 不用 */
+    char expr[VT_EXPR_MAX + 1];    /* 计算步的表达式（type=9；其余类型恒空，spec OPS_PLAN_V5 §3） */
 };
 
 /* 触发数据（区域线程捕获 → 触发槽投递 → 执行器起跑快照，spec §1.5）：
