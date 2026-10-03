@@ -841,6 +841,7 @@ static void load_regions(void)
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
 #define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS / 编辑层 OPE_MAX_STEPS（面板不 include 核心头） */
 #define OPS_EXPR_MAX  63        /* 计算步表达式上限（同核心 VT_EXPR_MAX；编辑层 g_ope_exprs 与 conf v4 第 10 字段按它定宽） */
+static_assert(OPS_EXPR_MAX == VT_EXPR_MAX, "同核心 VT_EXPR_MAX");
 
 /* 核心操作表里有没有这个名字（启动回灌「只补缺」靠它；与 region_exists 同款）。 */
 static int op_exists(const char *name)
@@ -3079,6 +3080,7 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
         float kb_ch = 6.0f * (kh + gap) + sph + gap + 12.0f + bth;   /* 键区内容总高 */
         float kb_max = kb_ch - (b.y - (y0 + 196.0f));
         if (kb_max < 0) kb_max = 0;
+        if (g_kb_sc < 0) g_kb_sc = 0;                                /* 下限 clamp：与上限对称（拖滚不为负） */
         if (g_kb_sc > kb_max) g_kb_sc = kb_max;
         pub_zone(g_zone_kb);                                         /* 拖键区滚（超高时） */
         ImGui::PushClipRect(ImVec2(a.x + 4, y0 + 192.0f), ImVec2(b.x - 4, b.y - 4), true);
@@ -3240,7 +3242,7 @@ static int ope_var_ok(int type, int idx)
 static int ne_check(const char *label, int type, int fi, int v, char *why, int whycap)
 {
     int idx;
-    if (type < OP_STEP_TAP || type > OP_STEP_JUMP || fi < 0 || fi >= ope_nfields(type)) {
+    if (type < OP_STEP_TAP || type > OP_STEP_CALC || fi < 0 || fi >= ope_nfields(type)) {
         snprintf(why, (size_t)whycap, "步骤类型非法");
         return 0;
     }
@@ -4427,6 +4429,7 @@ static void draw_ope_expr(void)
         lf = ImGui::GetFrameCount();
         if (g_scroll_acc != 0 && g_scr_target == SCR_KB) { g_kb_sc += g_scroll_acc; g_scroll_acc = 0; }
         if (kb_max < 0) kb_max = 0;
+        if (g_kb_sc < 0) g_kb_sc = 0;                  /* 下限 clamp：与上限对称（拖滚不为负） */
         if (g_kb_sc > kb_max) g_kb_sc = kb_max;
         pub_zone(g_zone_kb);
         ImGui::PushClipRect(ImVec2(a.x + 4, ky0 - 4), ImVec2(b.x - 4, b.y - 4), true);
@@ -4479,7 +4482,6 @@ static void draw_ope_expr(void)
         }
         if (g_font_meta) ImGui::PopFont();
     }
-    ImGui::PopClipRect();                  /* 键区裁剪到此（含 [取消][确定]，同 draw_char_kb） */
     /* 底：[取消] 丢弃 / [确定] 同源校验 → 写回（随键区块滚） */
     bw2 = (cw - 12.0f) * 0.5f;
     by = ky + 3.0f * kh + 2.0f * gap + 12.0f + 2.0f * chh + gap + 12.0f;
@@ -4507,6 +4509,7 @@ static void draw_ope_expr(void)
         }
     }
     ImGui::PopID();
+    ImGui::PopClipRect();                  /* 键区裁剪到此（含 [取消][确定]，同 draw_char_kb） */
 }
 
 /* 区域选择弹层（条件步的 [区域] 按钮）：列表读区域表实时、可滚动；开关判断只列开关型
@@ -4727,7 +4730,7 @@ static void draw_preview_map(float mx0, float my0, float mw, float mh)
             }
             pv_label(lx, ly, &nl, px1, py1, i + 1, oob1 || oob2, mx0, mx0 + mw, my0, my0 + mh);
         }
-        /* 等待 / 弹起 / 开关判断 / 跳转：无坐标 → 图上无标记 */
+        /* 等待 / 弹起 / 开关判断 / 跳转 / 计算：无坐标 → 图上无标记 */
     }
 }
 
@@ -4763,7 +4766,7 @@ static void pv_legend(float x, float y)
     cy += 52;
     pv_text(x, cy, "每点旁标步号；越界点标签带「越界」");
     cy += 40;
-    pv_text(x, cy, "变量引用坐标不画点（列表照显示）");
+    pv_text(x, cy, "变量/结果槽引用坐标不画点（列表照显示）");
 }
 
 /* 预览页（T2.5，spec §5）：编辑层 [预览] → 全屏**只读**页（无编辑 / 无取点）——

@@ -510,10 +510,10 @@ static int op_resolve(int v, int lo, int hi, int *out)
             return -1;
         }
         {
-            long long r = llround(R.slots[idx]);             /* 四舍五入取整（llround；spec §5.3） */
-            if (r < lo) r = lo;                              /* 夹取 [lo,hi]：静默语义，不因越界中止（spec §5.3） */
-            if (r > hi) r = hi;
-            *out = (int)r;
+            double d = R.slots[idx];                         /* 先夹 double 域再取整：llround 超范围行为未指定（spec §5.3） */
+            if (d < (double)lo) d = lo;                      /* 夹取 [lo,hi]：静默语义，不因越界中止（spec §5.3） */
+            else if (d > (double)hi) d = hi;
+            *out = (int)llround(d);
         }
         return 0;
     }
@@ -816,7 +816,12 @@ static void op_begin_step(void)
         if (rc != VT_EXPR_OK)      { vt_ops_abort("表达式错"); return; }   /* 防御：除零/域错/非有限——编辑期已拦（spec §5.2） */
         R.slots[st->a1 - 1] = out;                           /* 写槽（覆盖；spec §5.2） */
         R.slot_mask |= 1u << (st->a1 - 1);
-        v = (int)llround(out);                               /* 日志值 = 取整显示（spec §7） */
+        {
+            double dv = out;                                 /* 日志值 = 取整显示（spec §7） */
+            if (dv < (double)INT_MIN) dv = INT_MIN;          /* 先夹 int 域再取整：llround 超范围行为未指定（spec §5.3） */
+            else if (dv > (double)INT_MAX) dv = INT_MAX;
+            v = (int)llround(dv);
+        }
         fprintf(stderr, "vtouchd: op 步 %d/%d 计算 r%d = %d\n", R.step + 1, R.nsteps, st->a1, v);
         if (op_trace_on())                                   /* TRACE：回显表达式原文（spec §7；L9 默认零输出） */
             fprintf(stderr, "vtouchd: op 计算 r%d = %s = %d\n", st->a1, st->expr, v);

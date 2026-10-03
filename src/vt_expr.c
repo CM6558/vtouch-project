@@ -219,7 +219,10 @@ static void ex_call(struct ex_ctx *c, int f)
         c->known = ak[0] && ak[1];
         if (c->known) {
             if (av[0] == 0.0 && av[1] == 0.0) c->v = 0.0;
-            else c->v = atan2(av[0], av[1]) / VT_EXPR_PI * 180.0;
+            else {
+                c->v = atan2(av[0], av[1]) / VT_EXPR_PI * 180.0;
+                if (c->v == -180.0) c->v = 180.0;    /* -180 规范为 180：±180 同向（spec §2 字面 (-180,180]） */
+            }
         }
         break;
     case XF_SIN:

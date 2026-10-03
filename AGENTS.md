@@ -129,11 +129,13 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   （变量无值 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立）、TRACE 级起跑一行 `op 变量 …`。
   v3 增量：条件行两侧化（不成立侧恒打、成立侧 ≠ 继续才打，选项含 `跳到第 N 步` / `跳到结束`）、`条件中止` /
   `跳转超限` 中止词、步级 `op 步 k/n 跳转 …`、TRACE `op 跳转 <名> 第 A 步 → 第 B 步`、取点回填
-  `取点 回填 第 N 步 参数 x,y = a,b`（面板侧）。v5 增量：步级 `op 步 k/n 计算 rN = 值`、TRACE
+  `取点 回填 第 N 步 参数 x,y = a,b`（面板侧）。
+  v4 增量（面板侧）：方案族 —— `方案 切换 / 新建 / 另存为 / 改名 / 删除 / 兜底迁移 / 镜像失败`（核心零新增）。
+  v5 增量：步级 `op 步 k/n 计算 rN = 值`、TRACE
   `op 计算 rN = <表达式> = 值`、中止新词 `表达式错` / `结果无值`、面板侧 `op edit 计算 第 N 步 rN = <表达式>` /
   `op edit 计算拒收 第 N 步：<原因>`。高频明细（滑动每采样点等）默认**不打**，`VTOUCH_OPS_TRACE=1`
   才开（首次用到时多一行 `op trace 开`）。完整清单见 `docs/OPS_PLAN.md` §8 + `docs/OPS_PLAN_V2.md` §8 +
-  `docs/OPS_PLAN_V3.md` §8 + `docs/OPS_PLAN_V5.md` §7。
+  `docs/OPS_PLAN_V3.md` §8 + `docs/OPS_PLAN_V4.md` §8 + `docs/OPS_PLAN_V5.md` §7。
 - **说明页**：面板「说明」= `docs/OPS_PLAN_V5.md` §9 全量 **16 条逐字**（1–15 承 v4 §12、其中第 12 条更新；
   面板文案唯一来源；改文案先改 spec、再按同规则重提；落在 `src-ui/vtouch_ui.cpp` 的 `g_help_lines[]`）。
 
