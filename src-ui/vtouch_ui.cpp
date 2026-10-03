@@ -119,7 +119,7 @@ static int g_diag_frames = 0;
 static volatile int g_pend_disp = 0;
 static volatile int g_pend_w = 0, g_pend_h = 0, g_pend_rot = 0;
 
-/* 面板几何（唯一来源：下面 #define + panel_w()/in_panel() + build_panel() 三处同公式）
+/* 面板几何（唯一来源：下面 #define + panel_w()/panel_h()（定义在 g_scr 声明之后）+ in_panel() + build_panel() 同公式）
  * sidebar-fixed 骨架：固定侧栏 w-64(256) 不随内容滚，内容页自己滚。 */
 static float g_pan_x = 780, g_pan_y = 200;
 static int g_sheet = 1;                   /* 内容页开/合（合 = 只留侧栏） */
@@ -134,6 +134,9 @@ static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日
 #define WIN_W (PAD_X * 2 + SIDE_W + COL_GAP + SHEET_W)   /* 864 */
 #define SIDE_ONLY_W (PAD_X * 2 + SIDE_W)                 /* 288 */
 #define WIN_H 1180
+#define WIN_Y_REF 200                                    /* 默认顶距（高度上限按它折算） */
+#define WIN_BOTTOM_PAD 32                                /* 窗口底与屏底的留白 */
+#define WIN_MIN_H 420                                    /* 矮屏保底高度（低于此不再压） */
 #define MINI_W 224                                       /* 收起态悬浮小条宽（越小越不显眼） */
 #define MINI_H 68                                        /* 收起态条高 = 44 按钮 + 上下 12 */
 #define ZINC50  ImVec4(0.980f, 0.980f, 0.984f, 1.00f)   /* sidebar-fixed bg-zinc-50 */
@@ -147,8 +150,6 @@ static int g_nav = 0;                     /* 0=区域列表 1=操作 2=事件日
 #define PV_BLUE   IM_COL32(59, 130, 246, 255)
 #define PV_ORANGE IM_COL32(255, 140, 0, 255)
 #define PV_PURPLE IM_COL32(147, 51, 234, 255)
-static float panel_w(void) { return (float)(g_min ? MINI_W : (g_sheet ? WIN_W : SIDE_ONLY_W)); }
-static float panel_h(void) { return (float)(g_min ? MINI_H : WIN_H); }
 
 /* 触摸快照 */
 struct Dot { int on, x, y, tx[12], ty[12], tn; };
@@ -301,6 +302,24 @@ static volatile int g_rot = 0;        /* 0/1/2/3：Java 线程写、poll 线程�
 static volatile int g_scr_w = 0, g_scr_h = 0;  /* 当前方向屏幕尺寸（= 图层 buffer 尺寸） */
 static volatile long g_rot_settle_t = 0;       /* 转屏后「不吞触摸」的稳定窗口截止时刻 */
 static int g_pan_moved = 0;           /* 用户拖过面板：换方向时不再自动回右上角 */
+
+/* 面板几何（宽度公式见上面 #define；高度 = 设计高 WIN_H，矮屏自动压缩）。
+ * 高度必须与「实际窗口尺寸 / 命中判定 / 吞触摸矩形」同源 —— 三处都调这里：
+ * 屏幕比 WIN_H 矮（横屏 / 小屏）时压进「屏高 − 默认顶距 − 底部留白」，保底 WIN_MIN_H；
+ * 内容页全部按运行时窗口高自适应（wh = GetWindowHeight、列表填满剩余空间 + 内部滚动），
+ * 压矮后自动缩短，底边不再出屏。收起态（MINI_H）不变。 */
+static float panel_w(void) { return (float)(g_min ? MINI_W : (g_sheet ? WIN_W : SIDE_ONLY_W)); }
+static float panel_h(void)
+{
+    if (g_min) return (float)MINI_H;
+    float h = (float)WIN_H;
+    if (g_scr_h > 0) {
+        float avail = (float)g_scr_h - WIN_Y_REF - WIN_BOTTOM_PAD;
+        if (avail < WIN_MIN_H) avail = (float)WIN_MIN_H;
+        if (h > avail) h = avail;
+    }
+    return h;
+}
 static void p2c_rot(int r, int x, int y, int *ox, int *oy)   /* 竖屏逻辑 → 指定方向的屏坐标 */
 {
     switch (r) {
@@ -520,6 +539,11 @@ static void on_display(int w, int h, int rot)
         if (!g_pan_moved) {
             g_pan_x = (float)(w - WIN_W - 40); if (g_pan_x < 0) g_pan_x = 0;
             g_pan_y = 200;
+            {   /* 矮屏（横屏 / 小屏）：默认顶距放不下整窗时上移，尽量多留高度（保底 16） */
+                float ny = (float)h - panel_h() - WIN_BOTTOM_PAD;
+                if (ny < 16) ny = 16;
+                if (g_pan_y > ny) g_pan_y = ny;
+            }
         } else {
             if (g_pan_x + panel_w() > (float)w) g_pan_x = (float)w - panel_w();
             if (g_pan_y + panel_h() > (float)h) g_pan_y = (float)h - panel_h();
@@ -4491,7 +4515,7 @@ static void draw_op_edit(void)
     list_top = ly + 36;
     list_bot = add_y - 12;
     list_h = list_bot - list_top;
-    if (list_h < 140) list_h = 140;                  /* 极窄窗兜底（正常 864x1180、两行加步下 ~400） */
+    if (list_h < 140) list_h = 140;                  /* 极窄窗兜底（正常 864x1180；矮屏按可用高压缩、两行加步下 ~400） */
     ImGui::SetCursorScreenPos(ImVec2(x0, ly));
     {
         char t[80];
@@ -5587,6 +5611,11 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     g_scr_w = w; g_scr_h = h;
     g_pan_x = (float)(w - WIN_W - 40); if (g_pan_x < 0) g_pan_x = 0;
     g_pan_y = 200;
+    {   /* 矮屏（横屏 / 小屏）：默认顶距放不下整窗时上移，尽量多留高度（保底 16） */
+        float ny = (float)h - panel_h() - WIN_BOTTOM_PAD;
+        if (ny < 16) ny = 16;
+        if (g_pan_y > ny) g_pan_y = ny;
+    }
     /* 帧 0 之前的兜底拖动区（渲染后每帧由实区覆盖） */
     g_zone_title[0] = g_pan_x + PAD_X; g_zone_title[1] = g_pan_y + PAD_Y;
     g_zone_title[2] = g_pan_x + WIN_W - PAD_X; g_zone_title[3] = g_pan_y + PAD_Y + TITLE_H;
