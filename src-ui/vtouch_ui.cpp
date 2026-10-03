@@ -2990,8 +2990,8 @@ static int  g_ne_tgt = 0;               /* 参数弹层模式：0 = 全字段一
 static int  g_ope_vl = 0;               /* 变量选择弹层开（参数弹层的 [变量]；1 = 开） */
 static int  g_ope_rl = -1;              /* 区域选择弹层：正在选第几步的 ref（-1 = 关） */
 static int  g_ope_pv = 0;               /* 预览页（T2.5）：全屏只读层开（编辑层头 [预览] 进、[关闭] 返回） */
-/* 表达式子层（v5 计算步）：T3.1 建状态 + 入口 + 最小壳（整屏卡片/显示框/[清空][取消][确定]/提示行）；
- * 完整键位 / 变量 chips / 矮屏自适应由 T3.2 替换。 */
+/* 表达式子层（v5 计算步）：T3.1 建状态 + 入口；完整 UI（槽 chips / 字符键盘 6×3 / 插入 chips 2×8 /
+ * 矮屏自适应 + 拖滚兜底）在 draw_ope_expr。 */
 static int  g_ope_ex = 0;               /* 1 = 开（子层分发在 draw_op_edit 顶部 g_ope_se 之前） */
 static char g_ope_expr_buf[OPS_EXPR_MAX + 1];   /* 子层编辑缓冲：进入时从 g_ope_exprs[g_ope_se] 快照；[确定] 校验过写回 */
 static int  g_ope_expr_slot = 1;        /* 子层槽选择 r1..r4（写回该步 a1；进入时从 g_ope_steps[g_ope_se][1] 快照） */
@@ -3845,7 +3845,7 @@ static void ope_cond_side(int i, int slot)
     ImGui::PopID();
 }
 
-/* 表达式子层入口（v5 T3.1：状态 + 入口；完整键位 / 变量 chips 由 T3.2 替换）：
+/* 表达式子层入口（v5 计算步）：
  * 计算步的 [参数] 与「＋计算」都走它 —— g_ope_se = 该步、g_ope_ex = 1（子层分发在 draw_op_edit 顶部）、
  * 表达式与槽选择从该步快照进子层缓冲（[确定] 才写回）。 */
 static void ope_expr_open(int se)
@@ -4291,16 +4291,37 @@ static void draw_ope_vlist(void)
     ImGui::PopID();
 }
 
-/* 表达式子层（v5 T3.1：状态 + 入口 + 最小可用壳；完整键位 / 变量 chips / 矮屏自适应由 T3.2 替换）。
- * 整屏卡片 + 标题 + 显示框（当前文本 /「(空)」）+ [清空] + 一行提示 + [取消][确定]：
- * [确定] 走同源 vtouch_expr_check（不过 → 红字 why、层不关；过 → 写回 g_ope_exprs[g_ope_se] 与槽选择
- * → 该步 a1，日志 `op edit 计算 第 N 步 r1 = <表达式>` 后关层）；[取消] 丢弃 + 日志。 */
+/* 表达式缓冲追加（字符键 / 插入 chips 共用）：token 原样追加（空白无所谓，spec §6）；追加后超
+ * 63 字符 → 红字拒收提示、缓冲不动。 */
+static void ope_expr_add(const char *tok)
+{
+    int n = (int)strlen(g_ope_expr_buf);
+    int tl = (int)strlen(tok);
+    if (n + tl > OPS_EXPR_MAX) {
+        snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "最多 %d 个字符", OPS_EXPR_MAX);
+        return;
+    }
+    memcpy(g_ope_expr_buf + n, tok, (size_t)tl + 1);
+    g_ope_ex_msg[0] = 0;
+}
+
+/* 表达式子层（v5 计算步，spec §6）：整屏卡片（照 draw_num_edit 的 T2.4 口径）——
+ * 标题 + 槽 chips [r1..r4]（单选高亮）+ 显示框（当前文本 /「(空)」）+ [清空]
+ * + 字符键 6×3（1..6 / 7 8 9 0 + - / * / ( ) . 退格；追加式，退格删末字符）
+ * + 插入 chips 2×8（tdx..r3 / r4 atan2( sin( cos( abs( min( max( sqrt(；token 原样追加）
+ * + 底 [取消][确定]。
+ * 矮屏自适应/拖滚兜底照 draw_char_kb（g_kb_sc / g_zone_kb / SCR_KB 互斥复用）：键高按键区
+ * 可用高算、两级紧凑；仍放不下 → 键区手动拖滚（内容随 g_kb_sc 整体位移、裁剪在卡片内、隔帧重置）。
+ * [确定] 走同源 vtouch_expr_check（不过 → 红字 why、层不关；过 → 写回 g_ope_exprs[g_ope_se]
+ * 与槽选择 → 该步 a1，日志 `op edit 计算 第 N 步 r1 = <表达式>` 后关层）；[取消] 丢弃 + 日志。 */
 static void draw_ope_expr(void)
 {
     ImDrawList *dl;
     ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, vy, vbh, boxw, btnw, bw2, by;
+    float ww, wh, x0, y0, cw, sy, vy, vbh, boxw, btnw, msg_y, ky0, ky, kh, chh, bth, slot_h, msg_h, gap, kw, cw2, bw2, by;
+    float khn, bbot, avail, content, kb_max;
     int se = g_ope_se;
+    int k, r, c;
     if (se < 0 || se >= g_ope_nsteps || !g_ope_ex) { g_ope_ex = 0; return; }
     if (g_ope_steps[se][0] != OP_STEP_CALC) { g_ope_ex = 0; return; }   /* 防御：非计算步不该开这层 */
 
@@ -4313,17 +4334,54 @@ static void draw_ope_expr(void)
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
     x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+
+    /* —— 矮屏自适应（照 draw_char_kb 口径）：键高按键区可用高算、两级紧凑；仍放不下 → 拖滚兜底 —— */
+    slot_h = 64.0f; vbh = 96.0f; msg_h = 46.0f; chh = 64.0f; bth = 92.0f; gap = 10.0f;
+    bbot = b.y - 12.0f;                    /* 键区可见底（内容贴不到卡边，留 12 边距） */
+    ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + msg_h;
+    khn = (bbot - ky0 - (2.0f * chh + gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
+    if (khn > 88.0f) khn = 88.0f;
+    if (khn < 56.0f) {                     /* 紧凑档：槽行 / 显示框 / 插入 chips 全收一档 */
+        slot_h = 56.0f; vbh = 72.0f; chh = 40.0f; bth = 70.0f;
+        ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + msg_h;
+        khn = (bbot - ky0 - (2.0f * chh + gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
+        if (khn > 88.0f) khn = 88.0f;
+    }
+    if (khn < 40.0f) khn = 40.0f;          /* 再矮由手动拖滚兜底 */
+    kh = khn;
+
+    /* 标题 */
     {
         char t[64];
         snprintf(t, sizeof t, "第 %d 步 · 计算 · 表达式", se + 1);
         ImGui::SetCursorScreenPos(ImVec2(x0, y0));
         text_meta_s(t);
     }
+    /* 槽 chips [r1][r2][r3][r4]：单选，选中高亮（蓝）；写 g_ope_expr_slot（[确定] 才落该步 a1） */
+    sy = y0 + 44.0f;
+    {
+        float sg = 12.0f, sw = (cw - 3.0f * sg) / 4.0f;
+        for (k = 0; k < 4; k++) {
+            char lab[8];
+            snprintf(lab, sizeof lab, "r%d", k + 1);
+            ImGui::PushID(5200 + k);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + k * (sw + sg), sy));
+            if ((g_ope_expr_slot == k + 1) ? btn_blue(lab, ImVec2(sw, slot_h))
+                                           : btn_light(lab, ImVec2(sw, slot_h))) {
+                if (g_ope_expr_slot != k + 1) {
+                    g_ope_expr_slot = k + 1;
+                    ALOGI("op edit 表达式槽选 第 %d 步 → r%d", se + 1, k + 1);
+                }
+                g_ope_ex_msg[0] = 0;
+                g_need = 1; g_force_frames = 2;
+            }
+            ImGui::PopID();
+        }
+    }
     /* 显示框（当前文本 /「(空)」）+ 右侧 [清空]（框宽 = cw − (btnw+12)，同 draw_num_edit 的值框口径） */
-    vy = y0 + 44;
-    vbh = 96.0f;
+    vy = sy + slot_h + 12.0f;
     btnw = 210.0f;
-    boxw = cw - btnw - 12;
+    boxw = cw - btnw - 12.0f;
     ImGui::PushStyleColor(ImGuiCol_Border, BLUE500);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.976f, 0.980f, 0.984f, 1.00f));
     ImGui::SetCursorScreenPos(ImVec2(x0, vy));
@@ -4332,11 +4390,15 @@ static void draw_ope_expr(void)
         ImVec2 tp = ImGui::GetCursorScreenPos();
         ImDrawList *d2 = ImGui::GetWindowDrawList();
         char show[OPS_EXPR_MAX + 8];
-        if (g_font_meta) d2->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tp.x + 18, tp.y + 8),
-                                     IM_COL32(113, 113, 122, 255), "表达式");
-        else d2->AddText(ImVec2(tp.x + 18, tp.y + 8), IM_COL32(113, 113, 122, 255), "表达式");
         snprintf(show, sizeof show, "%s", g_ope_expr_buf[0] ? g_ope_expr_buf : "(空)");
-        d2->AddText(ImVec2(tp.x + 18, tp.y + 40), IM_COL32(24, 24, 27, 255), show);
+        if (vbh >= 88.0f) {                /* 全尺寸：标签 + 值两行（T3.1 壳口径） */
+            if (g_font_meta) d2->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tp.x + 18, tp.y + 8),
+                                         IM_COL32(113, 113, 122, 255), "表达式");
+            else d2->AddText(ImVec2(tp.x + 18, tp.y + 8), IM_COL32(113, 113, 122, 255), "表达式");
+            d2->AddText(ImVec2(tp.x + 18, tp.y + 40), IM_COL32(24, 24, 27, 255), show);
+        } else {                           /* 紧凑档：单行值（框矮，标签省） */
+            d2->AddText(ImVec2(tp.x + 18, tp.y + 12), IM_COL32(24, 24, 27, 255), show);
+        }
     }
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
@@ -4347,25 +4409,89 @@ static void draw_ope_expr(void)
         g_need = 1; g_force_frames = 2;
         ALOGI("op edit 表达式清空 第 %d 步", se + 1);
     }
-    /* 一行提示（T3.1 壳；T3.2 换成字符键盘 + 变量 chips）+ 拒收提示槽 */
-    ImGui::SetCursorScreenPos(ImVec2(x0, vy + vbh + 14));
-    text_meta_s("字符键盘与变量 chips 于后续任务接入");
+    /* 拒收提示固定槽（出现/消失不动键区，防误点） */
+    msg_y = vy + vbh + 12.0f;
     if (g_ope_ex_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, vy + vbh + 54));
+        ImGui::SetCursorScreenPos(ImVec2(x0, msg_y));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_ex_msg);
     }
-    /* 底：[取消] 丢弃 / [确定] 同源校验 → 写回 */
-    bw2 = (cw - 12) * 0.5f;
-    by = b.y - 24 - 92;
-    ImGui::PushID(5200);
+    ky0 = msg_y + msg_h;
+    /* —— 键区：字符键 6×3 + 插入 chips 2×8 + 底行（超高时手动拖滚：g_zone_kb + SCR_KB；
+     * 整块随 g_kb_sc 位移，[取消][确定] 随块滚，同 draw_char_kb）—— */
+    avail = bbot - ky0;
+    content = 3.0f * kh + 2.0f * gap + 12.0f + 2.0f * chh + gap + 12.0f + bth;   /* 字符键 + 缝 + 插入 chips + 缝 + 底行 */
+    kb_max = content - avail;
+    {
+        static int lf = -1;                    /* 隔帧重置：重开/换层 = 回顶（同 draw_char_kb） */
+        if (ImGui::GetFrameCount() - lf > 1) g_kb_sc = 0;
+        lf = ImGui::GetFrameCount();
+        if (g_scroll_acc != 0 && g_scr_target == SCR_KB) { g_kb_sc += g_scroll_acc; g_scroll_acc = 0; }
+        if (kb_max < 0) kb_max = 0;
+        if (g_kb_sc > kb_max) g_kb_sc = kb_max;
+        pub_zone(g_zone_kb);
+        ImGui::PushClipRect(ImVec2(a.x + 4, ky0 - 4), ImVec2(b.x - 4, b.y - 4), true);
+    }
+    ky = ky0 - g_kb_sc;
+    {
+        static const char *krow[3] = { "123456", "7890+-", "*/()." };
+        kw = (cw - 5.0f * gap) / 6.0f;
+        for (r = 0; r < 3; r++) {
+            for (c = 0; c < 6; c++) {
+                char lab[8];
+                ImGui::PushID(5300 + r * 6 + c);
+                ImGui::SetCursorScreenPos(ImVec2(x0 + c * (kw + gap), ky + r * (kh + gap)));
+                if (r == 2 && c == 5) snprintf(lab, sizeof lab, "退格");
+                else snprintf(lab, sizeof lab, "%c", krow[r][c]);
+                if (btn_light(lab, ImVec2(kw, kh))) {
+                    if (r == 2 && c == 5) {        /* 退格：删末字符（追加式，无光标移动） */
+                        int n = (int)strlen(g_ope_expr_buf);
+                        if (n > 0) g_ope_expr_buf[n - 1] = 0;
+                        g_ope_ex_msg[0] = 0;
+                    } else {
+                        char ch2[2];
+                        ch2[0] = krow[r][c]; ch2[1] = 0;
+                        ope_expr_add(ch2);
+                    }
+                    g_need = 1; g_force_frames = 2;
+                }
+                ImGui::PopID();
+            }
+        }
+    }
+    {
+        static const char *crow[2][8] = {
+            { "tdx", "tdy", "tux", "tuy", "tms", "r1", "r2", "r3" },
+            { "r4", "atan2(", "sin(", "cos(", "abs(", "min(", "max(", "sqrt(" },
+        };
+        float cy = ky + 3.0f * kh + 2.0f * gap + 12.0f;
+        cw2 = (cw - 7.0f * gap) / 8.0f;
+        if (g_font_meta) ImGui::PushFont(g_font_meta);   /* 小字层级：一排 8 枚，长 token 也放得下 */
+        for (r = 0; r < 2; r++) {
+            for (c = 0; c < 8; c++) {
+                ImGui::PushID(5400 + r * 8 + c);
+                ImGui::SetCursorScreenPos(ImVec2(x0 + c * (cw2 + gap), cy + r * (chh + gap)));
+                if (btn_light(crow[r][c], ImVec2(cw2, chh))) {
+                    ope_expr_add(crow[r][c]);
+                    g_need = 1; g_force_frames = 2;
+                }
+                ImGui::PopID();
+            }
+        }
+        if (g_font_meta) ImGui::PopFont();
+    }
+    ImGui::PopClipRect();                  /* 键区裁剪到此（含 [取消][确定]，同 draw_char_kb） */
+    /* 底：[取消] 丢弃 / [确定] 同源校验 → 写回（随键区块滚） */
+    bw2 = (cw - 12.0f) * 0.5f;
+    by = ky + 3.0f * kh + 2.0f * gap + 12.0f + 2.0f * chh + gap + 12.0f;
+    ImGui::PushID(5500);
     ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if (btn_light("取消", ImVec2(bw2, 92))) {
+    if (btn_light("取消", ImVec2(bw2, bth))) {
         ALOGI("op edit 表达式取消 第 %d 步", se + 1);
         g_ope_ex = 0; g_ope_ex_msg[0] = 0; g_ope_se = -1;
         g_need = 1; g_force_frames = 3;
     }
     ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
-    if (btn_blue("确定", ImVec2(bw2, 92))) {
+    if (btn_blue("确定", ImVec2(bw2, bth))) {
         char why[72];
         why[0] = 0;
         if (vtouch_expr_check(g_ope_expr_buf, why, (int)sizeof why) != 0) {
@@ -4374,7 +4500,7 @@ static void draw_ope_expr(void)
             g_need = 1; g_force_frames = 2;
         } else {
             snprintf(g_ope_exprs[se], sizeof g_ope_exprs[se], "%s", g_ope_expr_buf);
-            g_ope_steps[se][1] = g_ope_expr_slot;      /* 槽选择写回（T3.2 chips 改它；现为进入时快照值） */
+            g_ope_steps[se][1] = g_ope_expr_slot;      /* 槽选择（chips）写回该步 a1 */
             ALOGI("op edit 计算 第 %d 步 r%d = %s", se + 1, g_ope_expr_slot, g_ope_exprs[se]);
             g_ope_ex = 0; g_ope_ex_msg[0] = 0; g_ope_se = -1;
             g_need = 1; g_force_frames = 3;
@@ -4730,7 +4856,7 @@ static void draw_op_edit(void)
     if (g_ope_kb) { draw_ope_name_kb(); return; }
     if (g_ope_vl) { draw_ope_vlist(); return; }      /* 变量选择弹层（数字弹层之上） */
     if (g_ope_rl >= 0) { draw_ope_rlist(); return; } /* 区域选择弹层（条件步） */
-    if (g_ope_ex) { draw_ope_expr(); return; }       /* 表达式子层（v5 计算步；T3.1 最小壳）—— 在 g_ope_se 之前 */
+    if (g_ope_ex) { draw_ope_expr(); return; }       /* 表达式子层（v5 计算步）—— 在 g_ope_se 之前 */
     if (g_ope_se >= 0) { draw_num_edit(); return; }
 
     dl = ImGui::GetWindowDrawList();
@@ -4894,8 +5020,8 @@ static void page_settings(void)
     ImGui::TextWrapped("改完自动存 regions.conf，重启还在");
 }
 
-/* 说明页（v4）：15 条术语（docs/OPS_PLAN_V4.md §12 逐字 = 面板文案唯一来源；1–13 承 v3 §9）。数组内容从
- * docs/OPS_PLAN_V4.md §12 机器提取（条目为单行、无加粗标记，按行原样），
+/* 说明页（v5）：16 条术语（docs/OPS_PLAN_V5.md §9 逐字 = 面板文案唯一来源；1–15 承 v4 §12，其中第 12 条
+ * 更新、16 为 v5 新增）。数组内容从 spec 机器提取（条目为单行、无加粗标记，按行原样），
  * 提取结果逐字节复核 —— 改文案先改 spec、再按同一规则重提，别手改这里。 */
 static const char *const g_help_lines[] = {
     "1. 触发：给区域绑一条操作；手指碰到这个区域就会跑那条操作。",
@@ -4909,10 +5035,11 @@ static const char *const g_help_lines[] = {
     "9. 按下 / 弹起：两条分开的步骤——按下 = 按住不放；弹起 = 松开。中间可以夹「等待」「判断」。",
     "10. 区域判断：检查一个点在不在某个区域内；成立 / 不成立两侧各选接下来做什么：继续下一步、跳过下一步、跳到第 N 步、中止（可以只配一侧，另一侧走默认）。",
     "11. 开关判断：检查某个开关型区域现在是不是「开」；成立 / 不成立两侧的选项同「区域判断」。",
-    "12. 中止原因速查：变量无值 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立 / 条件中止 / 跳转超限。",
+    "12. 中止原因速查：变量无值 / 结果无值 / 表达式错 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立 / 条件中止 / 跳转超限。",
     "13. 跳转：直接跳到指定步骤继续——往前跳 = 跳过中间步骤；往后跳 = 循环（比如跳回第 1 步重来）。目标也可以选「结束」直接完成操作；单次运行跳转超过 200 次会自动中止（防死循环）。",
     "14. 方案：把当前的区域和操作整体存成一个命名方案；切换方案 = 换成那一套（编辑会自动存回当前方案）。",
     "15. 方案管理：「方案」页可以新建（空白）、从当前另存为、重命名、删除；当前方案不能删（先切到别的方案再删）。",
+    "16. 计算：算一个数存进结果槽（r1–r4）——用触发数据（tdx/tdy/tux/tuy/tms）、数字和结果槽做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。算好的槽可以当坐标、时长用在后面的步骤里。",
 };
 static void page_help(void)
 {
