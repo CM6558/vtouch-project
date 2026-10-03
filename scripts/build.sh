@@ -48,7 +48,8 @@ if [ "${1:-}" = "ui" ]; then
   else
     DEFS="-DVT_UI -DVT_UI_NO_EMBED"
   fi
-  "$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $DEFS src/*.c $LINK_EXTRA -o build/vtouchd_ui
+  # -lm：VT_UI 下 vt_expr.c 用 libm（sin/cos/atan2/sqrt/fabs）；默认核心里它是空 TU、不引用、无需加。
+  "$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $DEFS src/*.c $LINK_EXTRA -lm -o build/vtouchd_ui
   ls -l build/vtouchd_ui
   md5sum build/vtouchd_ui
   if [ -n "$LINK_EXTRA" ]; then echo "构建完成: build/vtouchd_ui（arm64，带 UI 的核心，**已内嵌面板三件套**）"; else echo "构建完成: build/vtouchd_ui（arm64，带 UI 的核心，未内嵌面板）"; fi

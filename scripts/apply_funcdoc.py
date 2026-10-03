@@ -18,7 +18,7 @@ SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, HERE)
 from funcdoc_data import DOCS
 
-C_FILES = ["vt_util.c", "vt_queue.c", "vt_region.c", "vt_input.c", "vt_frame.c", "vt_ws.c", "vtouchd.c", "vt_ops.c"]
+C_FILES = ["vt_util.c", "vt_queue.c", "vt_region.c", "vt_input.c", "vt_frame.c", "vt_ws.c", "vtouchd.c", "vt_ops.c", "vt_expr.c"]
 MARK = "(vtouch-doc: %s)"
 CHECK_ONLY = "--check" in sys.argv
 
