@@ -170,6 +170,8 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   不要用 `ANativeWindow_getWidth/Height`（图层 default 几何，换绑后是陈旧的）。
 - **转屏**：核心不感知旋转；面板走**双图层原子翻转**（备用图层按新尺寸准备好、画满两帧后，
   一个事务里旧层 alpha→0 / 新层 alpha→1）。单图层遮挡模式保留为 `VTOUCH_UI_ROT_MODE=hide`。
+  区域**跟随视口**（默认）：转屏/启动时按当前方向重算区域坐标并写回（保持「当前方向左上角 xy」不变、
+  显示=命中；基准帧记进 `regions.conf` 的 `#frame`，重启不偏移）；`VTOUCH_REGION_ROT=off` 回到「粘玻璃」。
 - **AutoJs6**：`sleep()` 在主线程会堵住 WebSocket 回调（用 `setInterval` 或 `threads.start()`）；
   `new Shell(true)` 初始化慢（~2s），一次性 root 命令用 `shell(cmd, true)`；
   `events.on("exit")` 里要 `stopService()`，强杀不会走退出回调。

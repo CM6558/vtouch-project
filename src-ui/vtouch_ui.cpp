@@ -333,8 +333,10 @@ static void c2p_rot(int r, int x, int y, int *ox, int *oy)   /* 指定方向的�
  * 与「屏幕上看到哪块」同时跟着新方向走。
  * 节奏：**每帧一条**。编辑邮箱是单槽覆盖式，连投多条会互相覆盖（本项目实测丢 2/3），所以按帧切片，
  * 3 条区域 ≈ 3 帧（~50ms），32 条 ≈ 0.5s 渐进完成，渲染线程一秒都不卡。
- * 开关：默认**停用**（2026-09-19 用户口径「已设区域不因非人为操作改变」；见函数开头）。要回到旧的
- * 「区域跟着视口走、转屏后视觉位置不变」用 VTOUCH_REGION_ROT=on；不设=区域粘在玻璃上（坐标不动）。 */
+ * 开关：**默认启用**（2026-10-03 用户口径「区域应当始终和当前方向的左上角保持同一 xy」——跟随视口；
+ * 覆盖 2026-09-19 的「已设区域不因非人为操作改变」：核心零改动时，xy 不变式只能靠重算写回保证，
+ * 且必须写回才能让「显示的位置 = 检测的位置」同时成立）。VTOUCH_REGION_ROT=off 回到「粘在玻璃上」档。
+ * 写回与重启：基准帧随重算批推进、落盘 #frame 如实记录 —— 重启后按同一帧解释，不偏移。 */
 static int g_rr_active = 0, g_rr_i = 0, g_rr_n = 0, g_rr_fail = 0, g_rr_done = 0;
 static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几何当前对应的「屏」 */
 /* 批次状态机（评审 2026-09-18 修）：批首**锁存目标帧**并对整表**快照**，批内一律从快照重算。
@@ -398,28 +400,27 @@ static int region_rot_map(int br, int bw, int bh, int tr, int tw, int th,
     return 0;
 }
 /* 每帧调一次（几个整数比较，极便宜）：把「区域几何所对应的屏」推进到当前屏。
- * ⚠️ **默认停用**（`g_rr_off`，见函数开头的用户口径）：只有这条路径会把区域坐标「写回」核心表与
- * regions.conf —— 触发者是转屏/启动这类非人为事件，所以默认不跑。下面对基准帧/批次的全部讲究，
- * 仅在 VTOUCH_REGION_ROT=on（恢复旧语义）时才生效。
+ * 默认**启用**（`g_rr_off`，2026-10-03 用户口径「区域应当始终和当前方向的左上角保持同一 xy」）：
+ * 这条路径会把区域坐标「写回」核心表与 regions.conf（触发者是转屏/启动这类非人为事件）——
+ * 写回是必须的：核心零改动的前提下，只有表里的几何跟着方向走，才能同时保证
+ * 「以当前方向左上角为原点的 xy 不变」与「显示的位置 = 检测的位置」。VTOUCH_REGION_ROT=off 回旧档。
  * ⚠️ 基准必须固定成**竖屏帧**（区域表 / regions.conf 的规范坐标系，也是旧文件的约定），
  * **不能**记成「面板启动时看到的方向」—— 否则启动方向不同，同一份表会被解释成不同的相对位置
  * （真机报过：同一批区域，横屏启动与竖屏启动显示在不同的相对位置）。
- * 表还空时不推进基准（区域可能还没载入完），等有区域了下一帧再转。 */
+ * 空表时基准跟住当前屏（见下方分支）：第一条画进来的区域锚在当前帧，基准停旧帧会把它错算一次。 */
 static void region_rot_step(void)
 {
     char id[16];
-    int type, a1, a2, a3, a4, en, n1, n2, n3, n4, n;
-    /* 用户口径 2026-09-19：**已经设置的区域不因任何非人为操作改变**。跟随旋转会在转屏/面板启动/屏尺寸
-     * 变化时按屏帧重算整表、并把新几何经 vtouch_region_add 写回核心表与 regions.conf —— 等于用内部维护
-     * 动作改用户数据；且换算一旦遇上不自洽屏帧或 #frame 归属错判，区域会被算到屏外并落盘、重启不自愈。
-     * 默认**停用**：区域表就是「用户设了多少就是多少」，显示按原有坐标、以当前屏左上角为原点画（下面的
-     * p2c 绘制），不为「显示位置」反推数据。要恢复旧语义（区域跟随视口、转屏后视觉位置不变）用
-     * VTOUCH_REGION_ROT=on —— 那条路会把坐标写回，属已知的非人为写入。 */
+    int n1, n2, n3, n4, n;      /* 2026-09-18 快照重构后 type/a1..a4/en 不再直用（-Wall 清理） */
+    /* 2026-10-03 用户口径：「区域应当始终和当前方向的左上角保持同一 xy」= 跟随视口 ⇒ **默认启用**。
+     * 该口径覆盖 2026-09-19 的「已设区域不因非人为操作改变」——两者不可兼得（核心零改动时，只有写回
+     * 才能让「视口 xy 不变」与「显示=命中」同时成立）；当时叫停的另一半原因（不自洽屏帧 / #frame 归属
+     * 错判 → 算到屏外且重启不自愈）已由 frame_sane 门、批首快照状态机、失败重跑、#frame 如实落盘封住。 */
     if (g_rr_off < 0) {
         const char *v = getenv("VTOUCH_REGION_ROT");
-        g_rr_off = (v && !strcmp(v, "on")) ? 0 : 1;
-        ALOGI(g_rr_off ? "区域跟随旋转：停用（默认；VTOUCH_REGION_ROT=on 可恢复旧语义）"
-                       : "区域跟随旋转：启用（VTOUCH_REGION_ROT=on，转屏会重算并写回区域坐标）");
+        g_rr_off = (v && !strcmp(v, "off")) ? 1 : 0;
+        ALOGI(g_rr_off ? "区域跟随旋转：停用（VTOUCH_REGION_ROT=off，区域粘在玻璃上、坐标不动）"
+                       : "区域跟随旋转：启用（默认；区域始终与当前方向左上角保持同一 xy，转屏重算写回）");
     }
     /* 排障逃生门：VTOUCH_REGION_BASE=rot,w,h 直接指定「表里的数字属于哪个屏」，覆盖 regions.conf 的 #frame。
      * 用在「表是横屏加的、但文件里没记」这种历史数据上（改一次不用重编）。 */
@@ -451,7 +452,15 @@ static void region_rot_step(void)
         if (g_rr_base_rot == g_rot && g_rr_base_w == g_scr_w && g_rr_base_h == g_scr_h) return;
         int si;
         n = vtouch_region_count();
-        if (n <= 0) return;                            /* 表还空 → 基准保持竖屏，等有区域再转 */
+        if (n <= 0) {
+            /* 空表：基准跟住当前屏 —— 之后第一条画进来的区域锚在当前帧（框选/拖动都按当屏换算存值），
+             * 基准若停在旧帧，下一帧会把它当旧帧错算一次（场景：清空 / 新方案后横屏画第一笔）。
+             * 敢在这里推进的理由：载入路径（load_regions）总是**先把基准定死**（#frame 或竖屏规范帧）
+             * 再投 add，且 add 等生效才返回（ui_glue.c 的 glue_post 等 edit_applied）——
+             * 与渲染循环同线程的这里观察不到「载入中」的空表。 */
+            g_rr_base_rot = g_rot; g_rr_base_w = g_scr_w; g_rr_base_h = g_scr_h;
+            return;
+        }
         if (n > RR_MAX_SNAP) n = RR_MAX_SNAP;          /* 核心表上限就是 RR_MAX_SNAP */
         /* 批首：① 锁存目标帧（批内不再看当帧）② 整表快照（id + 几何 + en）。
          * 之后一律从快照取源、按 id 在活表里定位 —— 批中转屏/删除/改名都不会让条目错位或二次换算。 */
@@ -614,12 +623,18 @@ static int save_regions(void)
     if (!f) { ALOGE("regions.conf 写入失败 %s: %s", tmppath, strerror(errno)); return save_failed(); }
     fprintf(f, "#vtouch-regions v%d\n", REGION_CONF_VER);
     n = vtouch_region_count();
-    /* #frame：**只记事实** —— 下面那些 region 行的数字一律是**竖屏逻辑坐标**（面板投编辑前
-     * 就做过「当前屏 → 竖屏逻辑」的逆变换），所以「这些数字属于哪个屏」恒等于竖屏逻辑帧。
-     * 历史上这里写「录制时的屏」（横屏加的表写 rot1 3168x1440，读数的人得猜 + 还要配合跟随旋转
-     * 换算）；跟随旋转 2026-09-19 停用之后那句话既不成立、也永远不会再参与换算 ⇒ 现在只写
-     * rot0 + 竖屏逻辑尺寸。老文件里的 `#frame 1 …` 仍能读进来（只当诊断），写完一次即自我纠正。 */
-    if (g_w > 0 && g_h > 0) fprintf(f, "#frame 0 %d %d\n", g_w, g_h);
+    /* #frame：记「下面那些 region 行的数字**属于哪个屏帧**」—— 载入端拿它当跟随旋转的基准帧
+     * （见 load_regions 的 #frame 分支与 region_rot_step）。基准随重算批推进（批内写盘被推迟、
+     * 收尾后才落），这里如实记录同一值：
+     *   · 基准是竖屏（缺省 / 从未转过）→ 输出与旧行为一致（rot0 + 竖屏逻辑尺寸）；
+     *   · 基准被推进过（如横屏用过 → rot1 3168x1440）→ 记 rot1：重启后按同一帧解释，
+     *     **不会被当竖屏多算一次**（2026-10-03 修的「横屏用过之后重启偏移」缝）。
+     * 老文件里的 `#frame 1 …` 照读照留 —— 它是那批数字的解释依据（拖动/重画会按当前帧重新锚定）。 */
+    if (g_w > 0 && g_h > 0) {
+        int br = 0, bw = g_w, bh = g_h;
+        if (g_rr_base_w > 0) { br = g_rr_base_rot; bw = g_rr_base_w; bh = g_rr_base_h; }
+        fprintf(f, "#frame %d %d %d\n", br, bw, bh);
+    }
     for (i = 0; i < n; i++) {
         char id[16]; int t, a1, a2, a3, a4, en;
         char op[16]; int ev, kd;
@@ -686,7 +701,7 @@ static void load_regions(void)
             if (fw > 0 && fh > 0 && fr >= 0 && fr <= 3) {
                 g_rr_base_rot = fr; g_rr_base_w = fw; g_rr_base_h = fh;
                 frame_seen = 1;
-                ALOGI("regions.conf #frame rot%d %dx%d（表里数字所属的屏；跟随旋转默认停用 → 原样使用，不换算）",
+                ALOGI("regions.conf #frame rot%d %dx%d（表里数字所属的屏帧 —— 跟随旋转的基准帧，转屏按它换算）",
                       fr, fw, fh);
             } else {
                 ALOGW("regions.conf #frame 非法（rot%d %dx%d）→ 按竖屏规范帧解释", fr, fw, fh);
@@ -734,9 +749,12 @@ static void load_regions(void)
         }
     }
     fclose(f);
+    /* 无 #frame（旧文件）：**显式钉死**竖屏规范帧 —— 载入是基准帧的权威来源（region_rot_step 的空表
+     * 分支会把基准推向当前屏；这里不钉的话，横屏启动时这批数字会被当成当前帧锚而错位）。 */
+    if (!frame_seen && g_w > 0 && g_h > 0) { g_rr_base_rot = 0; g_rr_base_w = g_w; g_rr_base_h = g_h; }
     if (!frame_seen && nreg > 0)
         ALOGI("区域跟随旋转：regions.conf 无 #frame（旧文件，%d 条）→ 按**竖屏规范帧**解释；"
-              "若这批区域其实是横屏时加的，它们会出现在「相对位置转 90°」的地方 —— 用面板拖动/重画一次即可写下 #frame",
+              "若这批区域其实是横屏时加的，可用 VTOUCH_REGION_BASE=rot,w,h 指定基准帧（或删除重画）",
               nreg);
     if (nreg > 0 && nskip)
         ALOGI("regions.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 ⇒ 不覆盖现役几何）",
