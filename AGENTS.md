@@ -65,6 +65,7 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 - 面板目录：`/data/local/tmp/vtouch-ui/`（核心每次启动**无条件**覆盖解包，日志 `面板自解包 <名> <字节> fnv=`）。
 - 区域表落盘：`/data/local/vtouch-runtime/regions.conf`（重启保留；含触发绑定 `bind` / 开关型 `kind` 增量行）。
 - 操作表落盘：`/data/local/vtouch-runtime/ops.conf`（`#vtouch-ops v3`：step 行固定 9 字段、ref 空写 `-`；读端兼容 v1/v2/v3 并按类型感知翻译；面板编辑后存，启动只补缺）。
+- 方案落盘：`/data/local/vtouch-runtime/schemes/<名>/{regions.conf,ops.conf}` + `current`（一行方案名）；live 两文件与 `schemes/<current>/` 内容恒等（`live == schemes/<current>` 不变量 —— 启动强制同步 + 编辑保存镜像 + 切换直写共同保证）；首启把既有 live 收进「默认」（名字冲突自增 `默认2 / 默认3 …`）。
 - WebSocket：`ws://127.0.0.1:27183`（loopback，单客户端，新连接踢旧连接）。
 - **没有开机自启**（按用户口径不做）；手机重启后需要重新起核心。
 
@@ -102,6 +103,12 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   v1 滑动行 a3/a4 照读不动；一条 = op 行 + N 条 step 行）；
   触发绑定 / 开关型 = `regions.conf` **增量行**（`bind <区域id> <操作名|-> <down|press>`、`kind <区域id> <0|1>`；
   文件版本不升、旧读方静默忽略）。两表同口径：面板编辑后存、启动加载**区域几何/操作定义只补缺；触发绑定与开关型是面板单源、加载时照灌（不覆盖几何）**、坏记录只跳过单条。
+- **方案（v4）**：区域 + 操作打包成命名方案（面板「方案」页；文件与 UI 都归面板，核心不感知）。**切换 = 清空 + 重放**：
+  `vtouch_region_clear()` → 逐条重放区域（含 `bind` / `kind`）→ `vtouch_op_clear()` → 逐条重放操作 ——
+  **先区域后操作**（复用编辑邮箱，核心 / 契约零改动；成功日志 `方案 切换 <旧> → <新>（区域 N / 操作 M）`，失败按码拒切 / 回滚，rc=9 / 10 已回滚）。
+  CRUD = 新建（空，**不自动切**）/ 从当前另存为 / 重命名 / 删除（**当前方案不能删**，先切走再删）。
+- **方案名规则**：与区域 id / 操作名同一把尺子（`vt_id_ok` 同款 `[A-Za-z0-9_-]`、1..15、裸 `-` 除外；面板侧
+  `scheme_name_ok`）；目录名 = 方案名。
 - **契约 v6**：`VT_SHM_VERSION` 5→6（`step` 增 `j1/j2`：条件两侧跳转目标 + 跳转步目标）；触发槽（v5 的
   mask + 按下/抬起坐标与时长 6 字段）不变；核心/面板版本不符照旧拒绝启动面板。
 - **名字规则**：区域 id / 操作名同一把尺子 `[A-Za-z0-9_-]`、1..15，**裸 `-` 除外**（`-` 是邮箱/落盘的
@@ -117,8 +124,8 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   `取点 回填 第 N 步 参数 x,y = a,b`（面板侧）。高频明细（滑动每采样点等）默认**不打**，`VTOUCH_OPS_TRACE=1`
   才开（首次用到时多一行 `op trace 开`）。完整清单见 `docs/OPS_PLAN.md` §8 + `docs/OPS_PLAN_V2.md` §8 +
   `docs/OPS_PLAN_V3.md` §8。
-- **说明页**：面板「说明」= `docs/OPS_PLAN_V3.md` §9 全量 **13 条逐字**（面板文案唯一来源；改文案先改 spec、
-  再按同规则重提；落在 `src-ui/vtouch_ui.cpp` 的 `g_help_lines[]`）。
+- **说明页**：面板「说明」= `docs/OPS_PLAN_V4.md` §12 全量 **15 条逐字**（1–13 承 v3 §9；面板文案唯一来源；
+  改文案先改 spec、再按同规则重提；落在 `src-ui/vtouch_ui.cpp` 的 `g_help_lines[]`）。
 
 ## 约定
 
