@@ -241,9 +241,11 @@ static int g_scr_on = 0;                 /* 面板内非标题按下：潜在滚
 #define SCR_NONE 0
 #define SCR_SIDE 1                       /* 侧栏 */
 #define SCR_LIST 2                       /* 区域列表（区域页） */
-#define SCR_SHEET 3                      /* 内容页 */
+#define SCR_SHEET 3                       /* 内容页 */
+#define SCR_KB 4                         /* 名称/数字键盘（内容超高时手动拖滚） */
 static int g_scr_target = SCR_NONE;      /* 按下时按实区锁定滚动容器 */
 static volatile float g_dbg_scroll = 0;  /* 最近一次应用到的滚动位置（日志用） */
+static float g_kb_sc = 0;                /* 键盘（名称/数字）手动滚动偏移：内容超出可用高时生效 */
 static volatile float g_list_scroll = 0; /* 区域列表子窗真实 ScrollY（渲染侧回读） */
 static volatile float g_list_max = 0;    /* 区域列表子窗 ScrollMaxY（判断是否真的可滚） */
 static volatile float g_card0_y = 0;     /* 首卡提交时的屏幕 Y（验证滚动是否真作用到内容） */
@@ -254,7 +256,7 @@ static volatile float g_list_w = 0;      /* 区域列表子窗宽 */
 static volatile float g_pan_r[4] = {0, 0, 0, 0};   /* 面板窗口真实屏幕矩形 */
 /* 各容器实区（渲染侧每帧发布，快照侧按下时读；单帧竞态最坏错判一次命中，
  * 与既有遥测同风格，纯交互判定不做严格同步） */
-static volatile float g_zone_title[4], g_zone_side[4], g_zone_sheet[4], g_zone_list[4];
+static volatile float g_zone_title[4], g_zone_side[4], g_zone_sheet[4], g_zone_list[4], g_zone_kb[4];
 static int in_zone(const volatile float *z, float x, float y)
 {
     return x >= z[0] && x < z[2] && y >= z[1] && y < z[3];
@@ -308,7 +310,15 @@ static int g_pan_moved = 0;           /* 用户拖过面板：换方向时不再
  * 屏幕比 WIN_H 矮（横屏 / 小屏）时压进「屏高 − 默认顶距 − 底部留白」，保底 WIN_MIN_H；
  * 内容页全部按运行时窗口高自适应（wh = GetWindowHeight、列表填满剩余空间 + 内部滚动），
  * 压矮后自动缩短，底边不再出屏。收起态（MINI_H）不变。 */
-static float panel_w(void) { return (float)(g_min ? MINI_W : (g_sheet ? WIN_W : SIDE_ONLY_W)); }
+static float panel_w(void)
+{
+    float w = (float)(g_min ? MINI_W : (g_sheet ? WIN_W : SIDE_ONLY_W));
+    if (!g_min && g_scr_w > 0) {   /* 窄屏（小分辨率）：面板宽压进屏内（sheet 子窗填满剩余宽，自动跟随） */
+        float cap = (float)g_scr_w - 24.0f;
+        if (w > cap) w = cap;
+    }
+    return w;
+}
 static float panel_h(void)
 {
     if (g_min) return (float)MINI_H;
@@ -537,7 +547,7 @@ static void on_display(int w, int h, int rot)
     g_rot_settle_t = now_ms() + 500;
     if (w > 0 && h > 0) {
         if (!g_pan_moved) {
-            g_pan_x = (float)(w - WIN_W - 40); if (g_pan_x < 0) g_pan_x = 0;
+            g_pan_x = (float)(w - panel_w() - 40); if (g_pan_x < 0) g_pan_x = 0;
             g_pan_y = 200;
             {   /* 矮屏（横屏 / 小屏）：默认顶距放不下整窗时上移，尽量多留高度（保底 16） */
                 float ny = (float)h - panel_h() - WIN_BOTTOM_PAD;
@@ -1707,10 +1717,13 @@ static void panel_press(int slot, int x, int y)
         g_scr_on = 0; g_scr_target = SCR_NONE;
     } else {
         g_drag = 0;
-        g_scr_target = in_zone(g_zone_list, fx, fy) ? SCR_LIST
+        g_scr_target = in_zone(g_zone_kb, fx, fy) ? SCR_KB
+                     : in_zone(g_zone_list, fx, fy) ? SCR_LIST
                      : in_zone(g_zone_sheet, fx, fy) ? SCR_SHEET
                      : in_zone(g_zone_side, fx, fy) ? SCR_SIDE : SCR_NONE;
-        g_scr_on = g_scr_target != SCR_NONE && g_name_i < 0;   /* 改名弹层里只点不滚 */
+        /* 键盘（名称/数字）里允许拖滚（内容超高时的兜底）；其它覆盖层照旧「只点不滚」 */
+        g_scr_on = (g_scr_target == SCR_KB) ||
+                   (g_scr_target != SCR_NONE && g_name_i < 0);
         g_scr_lx = fx; g_scr_ly = fy; g_scr_moved = 0;
     }
     ALOGI("panel down %d,%d drag=%d scr=%d", x, y, g_drag, g_scr_target);
@@ -2972,6 +2985,13 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
     float ww = ImGui::GetWindowWidth(), wh = ImGui::GetWindowHeight();
     ImVec2 a(wp.x + 12, wp.y + top), b(wp.x + ww - 12, wp.y + wh - 12);
     int act = 0;
+    /* —— 矮屏/横屏兜底（1）：超高内容手动拖滚的状态（隔帧重开 = 回顶）—— */
+    {
+        static int lf = -1;
+        if (ImGui::GetFrameCount() - lf > 1) g_kb_sc = 0;
+        lf = ImGui::GetFrameCount();
+        if (g_scroll_acc != 0 && g_scr_target == SCR_KB) { g_kb_sc += g_scroll_acc; g_scroll_acc = 0; }
+    }
     int cap = bufc - 1;
     if (cap > 15) cap = 15;
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
@@ -3002,10 +3022,32 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
         ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 146));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", msg);
     }
-    /* 字符键：6 列 x 6 行 = a-z + 0-9 */
+    /* 字符键：6 列 x 6 行 = a-z + 0-9。高度自适应（矮屏/横屏）：键高按可用高算、两档紧凑；
+     * 仍放不下 → 键区手动拖滚（g_zone_kb + SCR_KB：内容随 g_kb_sc 整体位移、裁剪在卡片内）。 */
     static const char *krow[6] = { "abcdef", "ghijkl", "mnopqr", "stuvwx", "yz0123", "456789" };
-    float gap = 10.0f, kw = (cw - 5 * gap) / 6.0f, kh = 76.0f;
-    float ky = y0 + 196;
+    float gap = 10.0f, kw = (cw - 5 * gap) / 6.0f;
+    float sph = 76.0f, bth = 92.0f, kh = 76.0f;
+    {
+        float avail_kb = b.y - (y0 + 196.0f);                        /* 键区可用高 */
+        float fixed_bot = sph + gap + 12.0f + bth + 6.0f * gap;     /* 特殊行+按钮行+缝 */
+        float khn = (avail_kb - fixed_bot) / 6.0f;
+        if (khn < 56.0f) {
+            sph = 62.0f; bth = 70.0f;
+            fixed_bot = sph + gap + 12.0f + bth + 6.0f * gap;
+            khn = (avail_kb - fixed_bot) / 6.0f;
+        }
+        kh = khn < 76.0f ? khn : 76.0f;
+        if (kh < 40.0f) kh = 40.0f;                                  /* 再矮由手动滚动兜底 */
+    }
+    {
+        float kb_ch = 6.0f * (kh + gap) + sph + gap + 12.0f + bth;   /* 键区内容总高 */
+        float kb_max = kb_ch - (b.y - (y0 + 196.0f));
+        if (kb_max < 0) kb_max = 0;
+        if (g_kb_sc > kb_max) g_kb_sc = kb_max;
+        pub_zone(g_zone_kb);                                         /* 拖键区滚（超高时） */
+        ImGui::PushClipRect(ImVec2(a.x + 4, y0 + 192.0f), ImVec2(b.x - 4, b.y - 4), true);
+    }
+    float ky = y0 + 196 - g_kb_sc;
     for (int r = 0; r < 6; r++) {
         for (int c = 0; c < 6; c++) {
             char lab[2] = { krow[r][c], 0 };
@@ -3029,7 +3071,7 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
         for (int c = 0; c < 4; c++) {
             ImGui::PushID(200 + c);
             ImGui::SetCursorScreenPos(ImVec2(x0 + c * (sw2 + gap), fy));
-            if (btn_light(sp[c], ImVec2(sw2, 76))) {
+            if (btn_light(sp[c], ImVec2(sw2, sph))) {
                 if (c == 0 || c == 1) {
                     int n = (int)strlen(buf);
                     if (n < cap) { buf[n] = sp[c][0]; buf[n + 1] = 0; }
@@ -3046,13 +3088,14 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
         }
     }
     /* 取消 / 确定 */
-    float by = fy + 76 + gap + 12, bw2 = (cw - gap) * 0.5f;
+    float by = fy + sph + gap + 12, bw2 = (cw - gap) * 0.5f;
     ImGui::PushID(300);
     ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if (btn_light("取消", ImVec2(bw2, 92))) act = 1;
+    if (btn_light("取消", ImVec2(bw2, bth))) act = 1;
     ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + gap, by));
-    if (btn_blue("确定", ImVec2(bw2, 92))) act = 2;
+    if (btn_blue("确定", ImVec2(bw2, bth))) act = 2;
     ImGui::PopID();
+    ImGui::PopClipRect();                        /* 键区裁剪到此（含取消/确定） */
     return act;
 }
 
@@ -3843,10 +3886,22 @@ static void draw_num_edit(void)
     }
     /* 全字段一屏：格 = 标签 + 值文本；点格 = 激活（高亮） */
     cellgap = 12.0f;
-    cellh = 88.0f;
     ncol = (nf >= 2) ? 2 : 1;
     cellw = (cw - (float)(ncol - 1) * cellgap) / (float)ncol;
     nrow = (nf + ncol - 1) / ncol;
+    /* —— 矮屏自适应（横屏/小屏）：格子/值框/按钮/键高按可用高收缩（两级；正常全尺寸）—— */
+    float span = ry - y0;
+    float cellh_a = 88.0f, vbh_a = 96.0f, bth_a = 92.0f, kh_a;
+    {
+        float fixed0 = 44.0f + 12.0f + 58.0f + 24.0f + 3.0f * 10.0f;   /* 标题/缝/提示槽/底缝/键缝 */
+        float fx1 = fixed0 + (float)nrow * 88.0f + (float)(nrow - 1) * 12.0f + 96.0f + 92.0f;
+        float fx2 = fixed0 + (float)nrow * 72.0f + (float)(nrow - 1) * 12.0f + 72.0f + 70.0f;
+        kh_a = (span - fx1) / 4.0f;
+        if (kh_a < 44.0f) { cellh_a = 72.0f; vbh_a = 72.0f; bth_a = 70.0f; kh_a = (span - fx2) / 4.0f; }
+        if (kh_a > 88.0f) kh_a = 88.0f;
+        if (kh_a < 44.0f) kh_a = 44.0f;
+    }
+    cellh = cellh_a;
     cy0 = y0 + 44;
     for (fi = 0; fi < nf; fi++) {
         char vt[24];
@@ -3881,7 +3936,7 @@ static void draw_num_edit(void)
     is_coord = !g_ne_tgt && idx >= 1 && idx <= 4 && type != OP_STEP_JUMP;   /* 跳转的 a1=目标编号：不给 [取点] */
     var_ok = !g_ne_tgt && ope_var_ok(type, idx);
     vy = cy0 + (float)nrow * cellh + (float)(nrow - 1) * cellgap + 12;
-    vbh = 96;
+    vbh = vbh_a;
     btnw = 210;
     nbtn = (is_coord ? 1 : 0) + (var_ok ? 1 : 0);
     boxw = cw - (float)nbtn * (btnw + 12);
@@ -3949,9 +4004,9 @@ static void draw_num_edit(void)
     {
         static const char *nrow2[3] = { "123", "456", "789" };
         float gap = 10.0f, bw2;
-        kh = 88.0f;
+        kh = kh_a;                                       /* 矮屏自适应键高（上算） */
         kw = (cw - 2 * gap) / 3.0f;
-        by = ry - 24 - 92;                               /* [取消][完成] 行 */
+        by = ry - 24 - bth_a;                            /* [取消][完成] 行 */
         ky = by - 12 - (4 * kh + 3 * gap);               /* 键盘顶 */
         for (row = 0; row < 3; row++) {
             for (col = 0; col < 3; col++) {
@@ -3973,7 +4028,7 @@ static void draw_num_edit(void)
         /* 第 4 行：退格 + 0（右格留空） */
         ImGui::PushID(430);
         ImGui::SetCursorScreenPos(ImVec2(x0, ky + 3 * (kh + gap)));
-        if (btn_light("⌫", ImVec2(kw, kh))) {
+        if (btn_light("退格", ImVec2(kw, kh))) {
             if (g_ne_vals[g_ope_sf] < 0) { g_ne_vals[g_ope_sf] = 0; g_ne_text[g_ope_sf][0] = 0; }      /* 同上：切回字面输入 */
             n = (int)strlen(g_ne_text[g_ope_sf]);
             if (n > 0) g_ne_text[g_ope_sf][n - 1] = 0;
@@ -3998,14 +4053,14 @@ static void draw_num_edit(void)
         bw2 = (cw - gap) * 0.5f;
         ImGui::PushID(450);
         ImGui::SetCursorScreenPos(ImVec2(x0, by));
-        if (btn_light("取消", ImVec2(bw2, 92))) {
+        if (btn_light("取消", ImVec2(bw2, bth_a))) {
             ALOGI("op edit 参数取消 第 %d 步", g_ope_se + 1);
             if (g_pick) { g_pick = 0; g_pick_t0 = 0; g_ope_coll = 0; vtouch_pick_cancel(); }   /* 防御：未回的取点请求也一并撤（全丢） */
             g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
             g_need = 1; g_force_frames = 3;
         }
         ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + gap, by));
-        if (btn_blue("完成", ImVec2(bw2, 92))) {
+        if (btn_blue("完成", ImVec2(bw2, bth_a))) {
             bad = -1;
             {
                 char why[72];
@@ -4079,12 +4134,16 @@ static void draw_ope_vlist(void)
     }
     ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
     text_meta_s("选一个变量（触发数据）；「数值」= 回退数字键盘输入");
+    /* 矮屏自适应：条目高按窗高收缩（全屏层 wh = 屏高；矮横屏 5 条+数值+取消要全部在屏内） */
+    float ih = 84.0f;
+    if (wh < 1000.0f) ih = 64.0f;
+    if (wh < 760.0f) ih = 52.0f;
     by = y0 + 100;
     for (k = 0; k < 5; k++) {
         ImGui::PushID(600 + k);
-        ImGui::SetCursorScreenPos(ImVec2(x0, by + k * (84 + 12)));
-        if ((v == -(k + 1)) ? btn_blue(ope_vname_tab[k], ImVec2(cw, 84))
-                            : btn_light(ope_vname_tab[k], ImVec2(cw, 84))) {
+        ImGui::SetCursorScreenPos(ImVec2(x0, by + k * (ih + 12)));
+        if ((v == -(k + 1)) ? btn_blue(ope_vname_tab[k], ImVec2(cw, ih))
+                            : btn_light(ope_vname_tab[k], ImVec2(cw, ih))) {
             g_ne_vals[g_ope_sf] = -(k + 1);          /* 缓冲存 -1..-5；显示交给中文名表 */
             g_ne_text[g_ope_sf][0] = 0;
             g_ope_vl = 0;
@@ -4094,10 +4153,10 @@ static void draw_ope_vlist(void)
         }
         ImGui::PopID();
     }
-    by += 5 * (84 + 12);
+    by += 5 * (ih + 12);
     ImGui::PushID(610);
     ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if ((v >= 0 ? btn_blue("数值", ImVec2(cw, 84)) : btn_light("数值", ImVec2(cw, 84)))) {
+    if ((v >= 0 ? btn_blue("数值", ImVec2(cw, ih)) : btn_light("数值", ImVec2(cw, ih)))) {
         if (v < 0) { g_ne_text[g_ope_sf][0] = 0; g_ne_vals[g_ope_sf] = 0; }   /* 变量 → 字面：清文本重新输入；本来就是字面则保留 */
         g_ope_vl = 0;
         g_need = 1; g_force_frames = 3;
@@ -4105,8 +4164,8 @@ static void draw_ope_vlist(void)
     }
     ImGui::PopID();
     ImGui::PushID(611);
-    ImGui::SetCursorScreenPos(ImVec2(x0, by + 84 + 12));
-    if (btn_light("取消", ImVec2(cw, 84))) {
+    ImGui::SetCursorScreenPos(ImVec2(x0, by + ih + 12));
+    if (btn_light("取消", ImVec2(cw, ih))) {
         g_ope_vl = 0;
         g_need = 1; g_force_frames = 2;
         ALOGI("op edit 变量列表取消 第 %d 步", g_ope_se + 1);
@@ -4145,7 +4204,7 @@ static void draw_ope_rlist(void)
     list_top = y0 + 76;
     list_bot = b.y - 24 - 92 - 12;                   /* 底部给 [取消] 留位 */
     list_h = list_bot - list_top;
-    if (list_h < 120) list_h = 120;
+    if (list_h < 0) list_h = 0;                      /* 矮屏：列表让位（按钮优先；列表本就可滚） */
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
     ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
@@ -4506,16 +4565,24 @@ static void draw_op_edit(void)
     }
     /* 步骤区标题 + 底部按钮锚点（从底往上排，列表拿中间剩下的高度） */
     ly = y0 + 68 + 84 + 12 + msg_h;
+    /* 底部按钮行高自适应（矮屏/横屏）：先压矮按钮、再让列表，保证 [取消]/[完成]/加步/门控/自动关
+     * 永远在屏内可点（列表内部本就可滚）。两档紧凑，阈值按「底锚区可用高」算。 */
+    float bh_row = 76.0f, bh_done = 92.0f;
+    {
+        float avail_b = (b.y - 24.0f) - (ly + 36.0f);
+        if (avail_b < 140.0f + 92.0f + 4.0f * (76.0f + 12.0f)) { bh_row = 58.0f; bh_done = 70.0f; }
+        if (avail_b < 80.0f + 70.0f + 4.0f * (58.0f + 12.0f)) { bh_row = 48.0f; bh_done = 60.0f; }
+    }
     by_bottom = b.y - 24;
-    done_y = by_bottom - 92;
-    autooff_y = done_y - 12 - 76;
-    gate_y = autooff_y - 12 - 76;
-    add_y2 = gate_y - 12 - 76;               /* 加步第二行：弹起 / 区域判断 / 开关判断 */
-    add_y = add_y2 - 12 - 76;                /* 加步第一行：点按 / 滑动 / 等待 / 按下 */
+    done_y = by_bottom - bh_done;
+    autooff_y = done_y - 12 - bh_row;
+    gate_y = autooff_y - 12 - bh_row;
+    add_y2 = gate_y - 12 - bh_row;           /* 加步第二行：弹起 / 区域判断 / 开关判断 */
+    add_y = add_y2 - 12 - bh_row;            /* 加步第一行：点按 / 滑动 / 等待 / 按下 */
     list_top = ly + 36;
     list_bot = add_y - 12;
     list_h = list_bot - list_top;
-    if (list_h < 140) list_h = 140;                  /* 极窄窗兜底（正常 864x1180；矮屏按可用高压缩、两行加步下 ~400） */
+    if (list_h < 0) list_h = 0;              /* 极矮：列表让位（按钮优先可达；正常屏不受影响） */
     ImGui::SetCursorScreenPos(ImVec2(x0, ly));
     {
         char t[80];
@@ -4537,31 +4604,31 @@ static void draw_op_edit(void)
     {
         float bw4 = (cw - 3 * 12) / 4.0f;
         ImGui::SetCursorScreenPos(ImVec2(x0, add_y));
-        if (btn_light("＋点按", ImVec2(bw4, 76))) ope_add_step(OP_STEP_TAP);
+        if (btn_light("＋点按", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_TAP);
         ImGui::SetCursorScreenPos(ImVec2(x0 + bw4 + 12, add_y));
-        if (btn_light("＋滑动", ImVec2(bw4, 76))) ope_add_step(OP_STEP_SWIPE);
+        if (btn_light("＋滑动", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_SWIPE);
         ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw4 + 12), add_y));
-        if (btn_light("＋等待", ImVec2(bw4, 76))) ope_add_step(OP_STEP_WAIT);
+        if (btn_light("＋等待", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_WAIT);
         ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw4 + 12), add_y));
-        if (btn_light("＋按下", ImVec2(bw4, 76))) ope_add_step(OP_STEP_DOWN);
+        if (btn_light("＋按下", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_DOWN);
         {
             ImGui::SetCursorScreenPos(ImVec2(x0, add_y2));
-            if (btn_light("＋弹起", ImVec2(bw4, 76))) ope_add_step(OP_STEP_UP);
+            if (btn_light("＋弹起", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_UP);
             ImGui::SetCursorScreenPos(ImVec2(x0 + bw4 + 12, add_y2));
-            if (btn_light("＋区域判断", ImVec2(bw4, 76))) ope_add_step(OP_STEP_COND_REGION);
+            if (btn_light(cw < 850.0f ? "区域判断" : "＋区域判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_REGION);
             ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw4 + 12), add_y2));
-            if (btn_light("＋开关判断", ImVec2(bw4, 76))) ope_add_step(OP_STEP_COND_TOGGLE);
+            if (btn_light(cw < 850.0f ? "开关判断" : "＋开关判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_TOGGLE);
             ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw4 + 12), add_y2));
-            if (btn_light("＋跳转", ImVec2(bw4, 76))) ope_add_step(OP_STEP_JUMP);
+            if (btn_light("＋跳转", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_JUMP);
         }
     }
     {
         char g[72];
         snprintf(g, sizeof g, "门控开关：%s", g_ope_gate[0] ? g_ope_gate : "无");
         ImGui::SetCursorScreenPos(ImVec2(x0, gate_y));
-        if (btn_light(g, ImVec2(cw, 76))) ope_gate_cycle();
+        if (btn_light(g, ImVec2(cw, bh_row))) ope_gate_cycle();
         ImGui::SetCursorScreenPos(ImVec2(x0, autooff_y));
-        if (btn_light(g_ope_autoff ? "跑完自动关：开" : "跑完自动关：关", ImVec2(cw, 76))) {
+        if (btn_light(g_ope_autoff ? "跑完自动关：开" : "跑完自动关：关", ImVec2(cw, bh_row))) {
             g_ope_autoff = !g_ope_autoff;
             g_need = 1; g_force_frames = 2;
             ALOGI("op edit 自动关 %s", g_ope_autoff ? "开" : "关");
@@ -4570,12 +4637,12 @@ static void draw_op_edit(void)
     {
         float bw2 = (cw - 12) * 0.5f;
         ImGui::SetCursorScreenPos(ImVec2(x0, done_y));
-        if (btn_light("取消", ImVec2(bw2, 92))) {    /* 取消 = 丢本轮编辑回操作页（改名弹层同款语义） */
+        if (btn_light("取消", ImVec2(bw2, bh_done))) {    /* 取消 = 丢本轮编辑回操作页（改名弹层同款语义） */
             ALOGI("op edit 取消（丢编辑）");
             op_edit_close();
         }
         ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, done_y));
-        if (btn_blue("完成", ImVec2(bw2, 92))) op_edit_save();
+        if (btn_blue("完成", ImVec2(bw2, bh_done))) op_edit_save();
     }
 }
 
@@ -4946,7 +5013,7 @@ static void page_scheme(void)
     /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
     {
         float list_h = ImGui::GetContentRegionAvail().y - (84.0f * 2 + 12.0f + 12.0f);
-        if (list_h < 180) list_h = 180;
+        if (list_h < 0) list_h = 0;   /* 矮屏：列表让位（底部四键优先可达；正常高屏不受影响） */
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
         ImGui::BeginChild("##schemes", ImVec2(0, list_h), ImGuiChildFlags_None,
@@ -5097,6 +5164,7 @@ static void build_panel(void)
     }
     /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作 / 编辑层步骤表 / 说明），其它页不命中 → 不会误滚 */
     g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
+    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;   /* 键盘区：只在键盘帧发布 */
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
     build_titlebar(ww);
@@ -5189,6 +5257,7 @@ static void build_edit_layer(void)
     g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
     g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
     g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
+    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;   /* 键盘区：只在键盘帧发布 */
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
     if (g_ope_coll) draw_ope_bar();          /* 收起条（取点 / 手动共用渲染） */
@@ -5609,7 +5678,7 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     g_w = w; g_h = h;
     /* 初始按竖屏假设落位；Java 拿到真实 display 尺寸后会立刻调 nativeOnDisplay 校正 */
     g_scr_w = w; g_scr_h = h;
-    g_pan_x = (float)(w - WIN_W - 40); if (g_pan_x < 0) g_pan_x = 0;
+    g_pan_x = (float)(w - panel_w() - 40); if (g_pan_x < 0) g_pan_x = 0;
     g_pan_y = 200;
     {   /* 矮屏（横屏 / 小屏）：默认顶距放不下整窗时上移，尽量多留高度（保底 16） */
         float ny = (float)h - panel_h() - WIN_BOTTOM_PAD;
