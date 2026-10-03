@@ -2992,7 +2992,7 @@ static int  g_ope_vl = 0;               /* 变量选择弹层开（参数弹层�
 static int  g_ope_rl = -1;              /* 区域选择弹层：正在选第几步的 ref（-1 = 关） */
 static int  g_ope_pv = 0;               /* 预览页（T2.5）：全屏只读层开（编辑层头 [预览] 进、[关闭] 返回） */
 /* 表达式子层（v5 计算步）：T3.1 建状态 + 入口；完整 UI（槽 chips / 字符键盘 6×3 / 插入 chips 2×8 /
- * 矮屏自适应 + 拖滚兜底）在 draw_ope_expr。 */
+ * 公式快捷行 / 变量图例 / 矮屏自适应 + 拖滚兜底）在 draw_ope_expr。 */
 static int  g_ope_ex = 0;               /* 1 = 开（子层分发在 draw_op_edit 顶部 g_ope_se 之前） */
 static char g_ope_expr_buf[OPS_EXPR_MAX + 1];   /* 子层编辑缓冲：进入时从 g_ope_exprs[g_ope_se] 快照；[确定] 校验过写回 */
 static int  g_ope_expr_slot = 1;        /* 子层槽选择 r1..r4（写回该步 a1；进入时从 g_ope_steps[g_ope_se][1] 快照） */
@@ -4307,11 +4307,11 @@ static void ope_expr_add(const char *tok)
     g_ope_ex_msg[0] = 0;
 }
 
-/* 表达式子层（v5 计算步，spec §6）：整屏卡片（照 draw_num_edit 的 T2.4 口径）——
- * 标题 + 槽 chips [r1..r4]（单选高亮）+ 显示框（当前文本 /「(空)」）+ [清空]
- * + 字符键 6×3（1..6 / 7 8 9 0 + - / * / ( ) . 退格；追加式，退格删末字符）
- * + 插入 chips 2×8（tdx..r3 / r4 atan2( sin( cos( abs( min( max( sqrt(；token 原样追加）
- * + 底 [取消][确定]。
+/* 表达式子层（v5 计算步，spec §6；v5.1 修订：键区补 `,`、退格移到 [清空] 旁、+ 变量图例与公式快捷行）：
+ * 整屏卡片（照 draw_num_edit 的 T2.4 口径）——标题 + 槽 chips [r1..r4]（单选高亮）+ 显示框（当前文本 /
+ * 「(空)」）+ 右侧 [清空] [退格] 并排（退格 = 删末字符）+ 变量图例行（小字，逐字照 spec）
+ * + 字符键 6×3（1..6 / 7 8 9 0 + - / * / ( ) . ,；追加式）+ 插入 chips 2×8（tdx..r3 / r4 atan2( sin(
+ * cos( abs( min( max( sqrt(；token 原样追加）+ 公式快捷行 5 键（小字；追加式插入整条公式）+ 底 [取消][确定]。
  * 矮屏自适应/拖滚兜底照 draw_char_kb（g_kb_sc / g_zone_kb / SCR_KB 互斥复用）：键高按键区
  * 可用高算、两级紧凑；仍放不下 → 键区手动拖滚（内容随 g_kb_sc 整体位移、裁剪在卡片内、隔帧重置）。
  * [确定] 走同源 vtouch_expr_check（不过 → 红字 why、层不关；过 → 写回 g_ope_exprs[g_ope_se]
@@ -4321,7 +4321,7 @@ static void draw_ope_expr(void)
     ImDrawList *dl;
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, sy, vy, vbh, boxw, btnw, msg_y, ky0, ky, kh, chh, bth, slot_h, msg_h, gap, kw, cw2, bw2, by;
-    float khn, bbot, avail, content, kb_max;
+    float khn, bbot, avail, content, kb_max, leg_h, leg_y, fy, fw5;
     int se = g_ope_se;
     int k, r, c;
     if (se < 0 || se >= g_ope_nsteps || !g_ope_ex) { g_ope_ex = 0; return; }
@@ -4338,15 +4338,15 @@ static void draw_ope_expr(void)
     x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
 
     /* —— 矮屏自适应（照 draw_char_kb 口径）：键高按键区可用高算、两级紧凑；仍放不下 → 拖滚兜底 —— */
-    slot_h = 64.0f; vbh = 96.0f; msg_h = 46.0f; chh = 64.0f; bth = 92.0f; gap = 10.0f;
+    slot_h = 64.0f; vbh = 96.0f; msg_h = 46.0f; chh = 64.0f; bth = 92.0f; gap = 10.0f; leg_h = 24.0f;
     bbot = b.y - 12.0f;                    /* 键区可见底（内容贴不到卡边，留 12 边距） */
-    ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + msg_h;
-    khn = (bbot - ky0 - (2.0f * chh + gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
+    ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + leg_h + msg_h;
+    khn = (bbot - ky0 - (3.0f * chh + 2.0f * gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
     if (khn > 88.0f) khn = 88.0f;
-    if (khn < 56.0f) {                     /* 紧凑档：槽行 / 显示框 / 插入 chips 全收一档 */
+    if (khn < 56.0f) {                     /* 紧凑档：槽行 / 显示框 / 小字行（chips/公式）全收一档 */
         slot_h = 56.0f; vbh = 72.0f; chh = 40.0f; bth = 70.0f;
-        ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + msg_h;
-        khn = (bbot - ky0 - (2.0f * chh + gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
+        ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + leg_h + msg_h;
+        khn = (bbot - ky0 - (3.0f * chh + 2.0f * gap) - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
         if (khn > 88.0f) khn = 88.0f;
     }
     if (khn < 40.0f) khn = 40.0f;          /* 再矮由手动拖滚兜底 */
@@ -4380,10 +4380,11 @@ static void draw_ope_expr(void)
             ImGui::PopID();
         }
     }
-    /* 显示框（当前文本 /「(空)」）+ 右侧 [清空]（框宽 = cw − (btnw+12)，同 draw_num_edit 的值框口径） */
+    /* 显示框（当前文本 /「(空)」）+ 右侧 [清空] [退格] 并排两键（框宽 = cw − 2×btnw − 2×gap；
+     * 退格 = 删末字符，与旧键区退格同逻辑） */
     vy = sy + slot_h + 12.0f;
     btnw = 210.0f;
-    boxw = cw - btnw - 12.0f;
+    boxw = cw - 2.0f * btnw - 2.0f * gap;
     ImGui::PushStyleColor(ImGuiCol_Border, BLUE500);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.976f, 0.980f, 0.984f, 1.00f));
     ImGui::SetCursorScreenPos(ImVec2(x0, vy));
@@ -4404,24 +4405,38 @@ static void draw_ope_expr(void)
     }
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
-    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + 12, vy));
+    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + gap, vy));
     if (btn_light("清空", ImVec2(btnw, vbh))) {
         g_ope_expr_buf[0] = 0;
         g_ope_ex_msg[0] = 0;
         g_need = 1; g_force_frames = 2;
         ALOGI("op edit 表达式清空 第 %d 步", se + 1);
     }
+    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + gap + btnw + gap, vy));
+    if (btn_light("退格", ImVec2(btnw, vbh))) {    /* 删末字符（追加式，无光标移动） */
+        int n = (int)strlen(g_ope_expr_buf);
+        if (n > 0) g_ope_expr_buf[n - 1] = 0;
+        g_ope_ex_msg[0] = 0;
+        g_need = 1; g_force_frames = 2;
+    }
+    /* 变量图例行（spec §6 v5.1 逐字；小字层级，框下、键区上） */
+    leg_y = vy + vbh + 12.0f;
+    {
+        const char *lg = "tdx,tdy 按下 · tux,tuy 弹起 · tms 按压时长(ms) · r1..r4 结果槽";
+        if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(x0, leg_y), IM_COL32(113, 113, 122, 255), lg);
+        else             dl->AddText(ImVec2(x0, leg_y), IM_COL32(113, 113, 122, 255), lg);
+    }
     /* 拒收提示固定槽（出现/消失不动键区，防误点） */
-    msg_y = vy + vbh + 12.0f;
+    msg_y = leg_y + leg_h;
     if (g_ope_ex_msg[0]) {
         ImGui::SetCursorScreenPos(ImVec2(x0, msg_y));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_ex_msg);
     }
     ky0 = msg_y + msg_h;
-    /* —— 键区：字符键 6×3 + 插入 chips 2×8 + 底行（超高时手动拖滚：g_zone_kb + SCR_KB；
+    /* —— 键区：字符键 6×3 + 插入 chips 2×8 + 公式快捷行 + 底行（超高时手动拖滚：g_zone_kb + SCR_KB；
      * 整块随 g_kb_sc 位移，[取消][确定] 随块滚，同 draw_char_kb）—— */
     avail = bbot - ky0;
-    content = 3.0f * kh + 2.0f * gap + 12.0f + 2.0f * chh + gap + 12.0f + bth;   /* 字符键 + 缝 + 插入 chips + 缝 + 底行 */
+    content = 3.0f * kh + 2.0f * gap + 12.0f + 3.0f * chh + 2.0f * gap + 12.0f + bth;   /* 字符键 + 缝 + 插入 chips + 公式行 + 缝 + 底行 */
     kb_max = content - avail;
     {
         static int lf = -1;                    /* 隔帧重置：重开/换层 = 回顶（同 draw_char_kb） */
@@ -4436,25 +4451,15 @@ static void draw_ope_expr(void)
     }
     ky = ky0 - g_kb_sc;
     {
-        static const char *krow[3] = { "123456", "7890+-", "*/()." };
+        static const char *krow[3] = { "123456", "7890+-", "*/().," };   /* v5.1：补 `,`（语法全字符集 6×3）；退格移出键区 */
         kw = (cw - 5.0f * gap) / 6.0f;
         for (r = 0; r < 3; r++) {
             for (c = 0; c < 6; c++) {
-                char lab[8];
+                char lab[2] = { krow[r][c], 0 };
                 ImGui::PushID(5300 + r * 6 + c);
                 ImGui::SetCursorScreenPos(ImVec2(x0 + c * (kw + gap), ky + r * (kh + gap)));
-                if (r == 2 && c == 5) snprintf(lab, sizeof lab, "退格");
-                else snprintf(lab, sizeof lab, "%c", krow[r][c]);
                 if (btn_light(lab, ImVec2(kw, kh))) {
-                    if (r == 2 && c == 5) {        /* 退格：删末字符（追加式，无光标移动） */
-                        int n = (int)strlen(g_ope_expr_buf);
-                        if (n > 0) g_ope_expr_buf[n - 1] = 0;
-                        g_ope_ex_msg[0] = 0;
-                    } else {
-                        char ch2[2];
-                        ch2[0] = krow[r][c]; ch2[1] = 0;
-                        ope_expr_add(ch2);
-                    }
+                    ope_expr_add(lab);
                     g_need = 1; g_force_frames = 2;
                 }
                 ImGui::PopID();
@@ -4480,11 +4485,31 @@ static void draw_ope_expr(void)
                 ImGui::PopID();
             }
         }
+        /* 公式快捷行（5 键，小字；追加式插入整条公式 —— spec §6 v5.1 模板逐字） */
+        {
+            static const char *frow[5] = { "释放角度", "偏移X", "偏移Y", "延伸X", "延伸Y" };
+            static const char *ftok[5] = {
+                "atan2(tuy-tdy, tux-tdx)", "tux-tdx", "tuy-tdy",
+                "tdx + cos(atan2(tuy-tdy, tux-tdx)) * 300",
+                "tdy + sin(atan2(tuy-tdy, tux-tdx)) * 300",
+            };
+            fy = cy + 2.0f * (chh + gap);
+            fw5 = (cw - 4.0f * gap) / 5.0f;
+            for (c = 0; c < 5; c++) {
+                ImGui::PushID(5600 + c);
+                ImGui::SetCursorScreenPos(ImVec2(x0 + c * (fw5 + gap), fy));
+                if (btn_light(frow[c], ImVec2(fw5, chh))) {
+                    ope_expr_add(ftok[c]);
+                    g_need = 1; g_force_frames = 2;
+                }
+                ImGui::PopID();
+            }
+        }
         if (g_font_meta) ImGui::PopFont();
     }
     /* 底：[取消] 丢弃 / [确定] 同源校验 → 写回（随键区块滚） */
     bw2 = (cw - 12.0f) * 0.5f;
-    by = ky + 3.0f * kh + 2.0f * gap + 12.0f + 2.0f * chh + gap + 12.0f;
+    by = ky + 3.0f * kh + 2.0f * gap + 12.0f + 3.0f * chh + 2.0f * gap + 12.0f;   /* v5.1：+ 公式行 */
     ImGui::PushID(5500);
     ImGui::SetCursorScreenPos(ImVec2(x0, by));
     if (btn_light("取消", ImVec2(bw2, bth))) {
@@ -5042,7 +5067,7 @@ static const char *const g_help_lines[] = {
     "13. 跳转：直接跳到指定步骤继续——往前跳 = 跳过中间步骤；往后跳 = 循环（比如跳回第 1 步重来）。目标也可以选「结束」直接完成操作；单次运行跳转超过 200 次会自动中止（防死循环）。",
     "14. 方案：把当前的区域和操作整体存成一个命名方案；切换方案 = 换成那一套（编辑会自动存回当前方案）。",
     "15. 方案管理：「方案」页可以新建（空白）、从当前另存为、重命名、删除；当前方案不能删（先切到别的方案再删）。",
-    "16. 计算：算一个数存进结果槽（r1–r4）——用触发数据（tdx/tdy/tux/tuy/tms）、数字和结果槽做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。算好的槽可以当坐标、时长用在后面的步骤里。",
+    "16. 计算：算一个数存进结果槽（r1–r4）——用触发数据（tdx/tdy=按下坐标、tux/tuy=弹起坐标、tms=按压时长毫秒）、数字和结果槽做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。算好的槽可以当坐标、时长用在后面的步骤里。",
 };
 static void page_help(void)
 {
