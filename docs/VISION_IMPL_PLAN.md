@@ -78,21 +78,21 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
 - **funcdoc**：所有对外函数 + 关键 static 加 `scripts/funcdoc_data.py` 条目；`apply_funcdoc.py --check` 0/0。
 - **验收**：默认构建 md5 **不变**（空 TU）；`sh scripts/build.sh ui` rc=0（已含 vt_vision.c）；宿主单测两种编译全过；funcdoc 0/0。
 
-## Task 2.1 — 契约 v8 + 核心集成（vt_shm.h / vt_shm.c / vt_internal.h / vt_ops.c / ui_glue.c / vtouch_ui.cpp 最小）
+## Task 2.1 — 契约 v8 + 核心集成（vt_shm.h / vt_shm.c / vt_internal.h / vt_ops.c）
 
-**产出**：契约 8（帧区 + `step.ref2` + 新步骤类型）；核心可跑视觉步骤（请求→等待→匹配→结果槽→四档）；胶水扩展；面板最小接线（编译通过）。
+**产出**：契约 8（帧区；步骤结构不变）+ 新步骤类型；核心可跑视觉步骤（请求→等待→匹配→结果槽→四档）；胶水/面板无需签名变更（区域名随 expr 列）。
 
 **点**：
 1. `src/vt_shm.h`：`VT_SHM_VERSION 7u → 8u`（+版本注释行）；新增帧区（照 spec §3.1）：`struct vt_shm_frame_hdr`（magic `VFRM`/version/seq(seqlock)/width/height/stride/format/rotation/req_seq/req_pending/buf_idx/flags/err/ts_ns）+ 双缓冲（各 w×h×4，w/h = 逻辑尺寸——**两方向同字节数**）。
 2. `src/vt_shm.c`：memfd total 计算 + 帧区（头 + 2 缓冲）；面板半边可见帧区访问；初始清零；尺寸断言（同现有区纪律）。
-3. `src/vt_internal.h`：`#define OP_STEP_FINDIMAGE 10` / `#define OP_STEP_FINDCOLOR 11`（注释：字段映射照 spec §6.1 定稿）；`struct vt_step` += `char ref2[16]`（注释：区域限定，空 = 全屏）；`#define VT_STEP_REF2_MAX 15`；视觉常量（抓帧超时默认 1000ms；找图阈值默认 8）。
+3. `src/vt_internal.h`：`#define OP_STEP_FINDIMAGE 10` / `#define OP_STEP_FINDCOLOR 11`（注释：字段映射照 spec §6.1 定稿；**区域限定复用 expr 列**，不新增字段——保 4096 页限）；视觉常量（抓帧超时默认 1000ms）。
 4. `src/vt_ops.c`：
-   - `op_valid`：+ `case OP_STEP_FINDIMAGE`（ref=模板名合法非空；ref2 空或合法；a1=0..255；a2/a3/a4/ms=0；j1/j2 四档校验同条件步——含跳转目标域）；+ `case OP_STEP_FINDCOLOR`（a1=0/1 模式；ref 多点必填/单点必空；ref2 同；单点 a2=0..255、a3=0..0xFFFFFF；多点 a2/a3=0）；**其余所有 case** 防御：ref2 非空 → 拒收（照 expr 先例）。
-   - 执行器：视觉步骤 = static `op_vis_run()`：写 `req_pending = ++请求序号` → 轮询等待（`usleep(1000)`，总超时 1000ms）→ 校验（req_seq 匹配 + flags 无错 + 尺寸合法）→ `vt_vis_frame_prepare` → 区域换算（ref2 区域几何 → 逻辑矩形 → `vt_vis_logic_rect_to_frame`；空 = 全屏）→ 匹配（找图先读 `.tmpl`、找色多点先读 `.pts`——读失败 → 中止 `模板不存在`）→ 命中：`r1/r2 = vt_vis_frame_to_logic(命中帧坐标)`（**逻辑坐标**）+ 四档「成立」侧；未命中：四档「不成立」侧；抓帧失败 → 中止 `无画面`；内部错 → 中止 `视觉错`。
+   - `op_valid`：+ `case OP_STEP_FINDIMAGE`（ref=模板名合法非空；expr 空或合法区域名；a1=0..255；a2/a3/a4/ms=0；j1/j2 四档校验同条件步——含跳转目标域）；+ `case OP_STEP_FINDCOLOR`（a1=0/1 模式；ref 多点必填/单点必空；expr 同；单点 a2=0..255、a3=0..0xFFFFFF；多点 a2/a3=0）；**其余所有 case** 防御：expr 非空 → 拒收（calc 与视觉两类除外——防御口径随类型表更新）。
+   - 执行器：视觉步骤 = static `op_vis_run()`：写 `req_pending = ++请求序号` → 轮询等待（`usleep(1000)`，总超时 1000ms）→ 校验（req_seq 匹配 + flags 无错 + 尺寸合法）→ `vt_vis_frame_prepare` → 区域换算（expr 区域名 → 区域几何 → 逻辑矩形 → `vt_vis_logic_rect_to_frame`；空 = 全屏）→ 匹配（找图先读 `.tmpl`、找色多点先读 `.pts`——读失败 → 中止 `模板不存在`）→ 命中：`r1/r2 = vt_vis_frame_to_logic(命中帧坐标)`（**逻辑坐标**）+ 四档「成立」侧；未命中：四档「不成立」侧；抓帧失败 → 中止 `无画面`；内部错 → 中止 `视觉错`。一帧多步复用：`now-ts<50ms` 且帧有效/方向一致 → 复用不重抓（spec §9 行）。
    - 模板方向：`.tmpl` 记录 rot；匹配前若与当前帧 rot 不同 → 旋转模板灰度（90° 数组变换）再匹配（spec §11-#7）。
    - 分支复用：把条件步的分支助手（vt_ops.c:645 附近 static）抽成可复用（或按同款参数调用）；**不改条件步行为**；日志照 spec §8（`vis 找图 <模板> 命中 x,y (耗时 <ms>)` 等 + TRACE `vis 抓帧 请求 → 完成 <ms>`）。
    - 按住期允许集 += 视觉步骤（spec §6.2）。
-5. `src-ui/ui_glue.c`：`vtouch_get_op_step` / `vtouch_op_put` 链加 `ref2` 尾参（照 expr 先例）；`src-ui/vtouch_ui.cpp` 声明点同步 + `g_ope_refs2[32][16]` 占位 + 调用点传空占位（编译通过；真实数据 3.2 接）。
+5. 胶水/面板：**无需签名变更**（expr 已在 get/put 链上，区域名随 expr 传）——原「加 ref2 尾参」项取消；面板真实数据接线在 3.2。
 6. `scripts/build.sh`：确认 ui 分支已含 `src/vt_vision.c`（1.1 已加）；默认分支保持空 TU 口径。
 - **验收**：默认核心可编译（md5 变化记录）；`build.sh ui` rc=0；面板 real rc=0；funcdoc 0/0。**真机留 5.1**。
 
@@ -112,12 +112,12 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
 3. 构建：`<android/hardware_buffer.h>`（NDK）+ 链接 `-landroid`（查 `scripts/build_ui.sh` 现有链接清单补）。
 - **验收**：`VTOUCH_UI_CORE=real sh scripts/build_ui.sh` rc=0（0 告警）；`build.sh ui` rc=0；**真机冒烟统一在 5.1**（本任务静态对账 + 编译）。
 
-## Task 3.2 — 面板：编辑 + 模板管理 + 说明页 18 条 + ops.conf v5
+## Task 3.2 — 面板：编辑 + 模板管理 + 说明页 18 条
 
-**产出**：找图/找色步骤可编辑；模板页（截帧/框选/存/删/列 + 点集吸色点选）；说明页 18 条；ops.conf v5 读写 + 兼容 v1..v4。
+**产出**：找图/找色步骤可编辑；模板页（截帧/框选/存/删/列 + 点集吸色点选）；说明页 18 条；ops.conf 保持 v4（区域名随 expr 列）。
 
 **点**：
-1. ops.conf：`#vtouch-ops v5`；step 行 **11 字段**（末位 + `ref2`，空写 `-`）；load 兼容 v1..v4（缺 ref2 → 空）。
+1. ops.conf：**保持 v4**（视觉步区域名随现有 `expr` 列；无需升版/兼容改动）。
 2. 加步区 **4×3**（11 键：点按/滑动/等待/找图 · 按下/弹起/跳转/找色 · 区域判断/开关判断/计算）；自适应阈值行数同步（现有 5 行口径不动，新增按钮进现有行结构）。
 3. 步骤编辑子层：找图（模板下拉枚举 `templates/*.tmpl`、区域下拉枚举区域表、阈值数字）；找色（模式切换单点/多点、单点：颜色十六进制输入 + [取点]吸色 + 容差、多点：点集下拉）；复用数字/字符键盘子层与字段校验口径。
 4. 模板页：截帧（复用 3.1 抓帧 → 面板侧缓冲）→ ImGui 纹理显示（缩放）→ 手指框选 → 命名（字符键盘）→ 存 `.tmpl`（格式照本计划「模板/点集文件格式」）；列表/删除；点集：截帧上吸基准色 + 点选参考点（点击加点、显示偏移/色）→ 命名存 `.pts`。
@@ -140,6 +140,6 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
 
 ## 预检要点（控制方已核）
 
-- 串行依赖：1.1 → 2.1 → 3.1 → 3.2 → 4.1 → 5.1；同文件（`vtouch_ui.cpp`：2.1 最小 → 3.2 大块；`ui_glue.c`：2.1 签名 → 3.1 JNI）串行。
-- 接口对账：1.1 引擎 API → 2.1 调用；2.1 帧区契约/文件格式 → 3.1（帧头）/3.2（模板存盘）；2.1 胶水签名 → 3.2 调用。
-- 风险点：契约 v8 中间态（核心新面板旧 → 拒启；开发期同树同升）；默认核心 md5 变化（state 增长，有意，记录）；T3.1 是唯一不可宿主自测的任务（真机冒烟在 5.1）。
+- 串行依赖：1.1 → 2.1 → 3.1 → 3.2 → 4.1 → 5.1；同文件串行：`ui_glue.c`/`vtouch_ui.cpp`（3.1 JNI → 3.2 大块）；`vt_ops.c` 由 2.1 独享。
+- 接口对账：1.1 引擎 API → 2.1 调用；2.1 帧区契约/文件格式 → 3.1（帧头）/3.2（模板存盘）；expr 列语义（视觉 = 区域名）→ 3.2 编辑。
+- 风险点：契约 v8 中间态（核心新面板旧 → 拒启；开发期同树同升）；默认核心 md5 变化（**仅 symtab 元数据级**——vt_vision.c FILE 符号；.text 不变，记录）；T3.1 是唯一不可宿主自测的任务（真机冒烟在 5.1）。
