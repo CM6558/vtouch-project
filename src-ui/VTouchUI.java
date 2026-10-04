@@ -54,7 +54,7 @@ public class VTouchUI {
                                 if ("onDisplayChanged".equals(m.getName())) {
                                     settleUntil = System.currentTimeMillis() + 500;
                                     /* 这一步是"位置切换看起来自然"的关键：回调**早于**状态更新（实测），
-                                     * 等真值就要多等 5~40ms —— 那段时间面板还停在旧位置铺在新朝向里，
+                                     * 等真值就要多等 5~10ms —— 那段时间面板还停在旧位置铺在新朝向里，
                                      * 正是用户看到的"位置闪现"。所以：
                                      *   ① 立刻把图层 alpha 归 0（此后任何错位帧都看不见）；
                                      *   ② 立刻按**预测**朝向重排面板：90° 旋转时尺寸必然交换
@@ -468,9 +468,10 @@ public class VTouchUI {
                     }
                 }
             } catch (Throwable t) { Log.e(TAG, "visibility poll", t); }
-            /* ③ 显示方向/尺寸：观察窗内每轮查；否则按兜底周期（注册成功 2s / 失败 320ms）。 */
+            /* ③ 显示方向/尺寸：观察窗内每轮查；否则按兜底周期（注册成功 2s / 失败 320ms）。
+             * 10ms 拍折算：200 拍 = 2s、32 拍 = 320ms（原 40ms 拍下为 50 / 8，墙钟节奏不变）。 */
             boolean settling = System.currentTimeMillis() < settleUntil;
-            int period = (listenerOk && !settling) ? 50 : 8;
+            int period = (listenerOk && !settling) ? 200 : 32;
             if (settling || (tick++ % period) == 0) {
                 try {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
