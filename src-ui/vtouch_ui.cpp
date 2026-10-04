@@ -248,6 +248,13 @@ static long g_vis_cap_t0 = 0;            /* 请求时刻（超时判据；now_ms
 static const unsigned char *g_vis_img = 0;   /* 面板侧帧缓冲（ui_glue.c 内；只读，紧排 w*4） */
 static int g_vis_img_w = 0, g_vis_img_h = 0, g_vis_img_rot = 0;
 static int g_vis_drag = 0;               /* 采集层拖动中（模板框选 / 点选轻点判据共用） */
+static int g_vis_gest = 0;               /* 采集层手势（Task 7.2）：0 无/待定 1 新框 2 移动 3 角缩放 4 平移 */
+static int g_vis_gest_corner = 0;        /* 角缩放：0..3 = 左上/右上/左下/右下 */
+static int g_vis_gest_box[4] = {0, 0, 0, 0};   /* 手势起点框（帧坐标；移动/角缩放用） */
+static float g_vis_zoom = 1.0f;          /* 采集层缩放（Task 7.2）：1x..8x（1 = 适应）；步进 0.25 */
+static float g_vis_pan_x = 0, g_vis_pan_y = 0;   /* 采集层平移（屏像素；缩放 >1x 时有效；锚点 = 画面中心） */
+static float g_vis_pmx = 0, g_vis_pmy = 0;       /* 平移增量基准（屏坐标） */
+static int g_vis_magf = -1;              /* 已应用放大滤波（-1 未设 0 线性 1 最近邻；纹理重建后复位） */
 static float g_vis_dx0 = 0, g_vis_dy0 = 0;   /* 拖动起点（屏坐标） */
 static int g_vis_sel[4] = {0, 0, 0, 0};  /* 已定框选（帧坐标 x0,y0,x1,y1 含端点） */
 static int g_vis_sel_on = 0;             /* 框选有效 */
@@ -5899,7 +5906,8 @@ static void vis_cap_close(void)
     g_vis_cap = 0;
     g_vis_cap_wait = 0; g_vis_cap_err = 0;
     g_vis_kb = 0; g_vis_kb_msg[0] = 0;
-    g_vis_drag = 0; g_vis_sel_on = 0;
+    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
+    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
     g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
     g_vis_pts_n = 0;
     g_vis_cap_msg[0] = 0;
@@ -5913,7 +5921,8 @@ static void vis_cap_start(int mode)
     g_vis_cap = mode;
     g_vis_cap_wait = 1; g_vis_cap_err = 0; g_vis_cap_t0 = now_ms();
     g_vis_kb = 0; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
-    g_vis_drag = 0; g_vis_sel_on = 0;
+    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
+    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
     g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
     g_vis_pts_n = 0;
     g_vis_cap_msg[0] = 0;
@@ -5933,6 +5942,14 @@ static void vis_cap_tick(void)
         g_vis_img = buf; g_vis_img_w = w; g_vis_img_h = h; g_vis_img_rot = rot;
         g_vis_cap_wait = 0; g_vis_cap_err = 0;
         g_vis_tex_dirty = 1;
+        if (g_vis_sel_on) {   /* 新帧尺寸可能变（转屏后重新截帧）：已选框夹回图内（Task 7.2：框保留） */
+            if (g_vis_sel[2] > g_vis_img_w - 1) g_vis_sel[2] = g_vis_img_w - 1;
+            if (g_vis_sel[3] > g_vis_img_h - 1) g_vis_sel[3] = g_vis_img_h - 1;
+            if (g_vis_sel[0] > g_vis_sel[2] - 7) g_vis_sel[0] = g_vis_sel[2] - 7;
+            if (g_vis_sel[1] > g_vis_sel[3] - 7) g_vis_sel[1] = g_vis_sel[3] - 7;
+            if (g_vis_sel[0] < 0) g_vis_sel[0] = 0;
+            if (g_vis_sel[1] < 0) g_vis_sel[1] = 0;
+        }
         ALOGI("vis 采集 帧就绪 %dx%d rot=%d", w, h, rot);
         g_need = 1; g_force_frames = 3;
         return;
@@ -6099,6 +6116,7 @@ static void vis_tex_update(const unsigned char *rgba, int w, int h)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g_vis_magf = 0;                       /* 滤波被重置为线性；缩放滤波（Task 7.2）下帧按需重设 */
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     if (w != g_vis_tex_w || h != g_vis_tex_h) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
@@ -6281,8 +6299,79 @@ static void draw_vis_cap_kb(void)
         g_need = 1; g_force_frames = 2;
     }
 }
-/* 采集覆盖层（整屏；T3.2）：三态 —— 等帧（wait）/ 失败（err）/ 图像就绪。
- * 图像等比缩放居中；模板 = 拖动框选（松手 ≥8×8 → 命名）；点集 = 首点吸基准色、其后加点（显示偏移/色）；
+
+/* ---- 采集层缩放/平移 + 选择框调整（Task 7.2） ---- */
+
+/* 缩放值文本（步进 0.25 ⇒ 至多两位小数、尾零去掉）：1 → "1x"、1.25 → "1.25x"、1.5 → "1.5x"。 */
+static void vis_zoom_str(char *b, int n)
+{
+    int v = (int)(g_vis_zoom * 100.0f + 0.5f);
+    if (v % 100 == 0) snprintf(b, n, "%dx", v / 100);
+    else if (v % 10 == 0) snprintf(b, n, "%d.%dx", v / 100, (v / 10) % 10);
+    else snprintf(b, n, "%d.%02dx", v / 100, v % 100);
+}
+/* 缩放步进（[＋]/[－]）：步长 0.25、范围 1x..8x；锚点 = 画面中心 ⇒ 平移量按比例同步（视口中心那一点不动）；
+ * 平移夹取留给每帧换算（那里才知道当前视口几何）。 */
+static void vis_zoom_step(int dir)
+{
+    float nz = g_vis_zoom + (dir > 0 ? 0.25f : -0.25f);
+    if (nz < 1.0f) nz = 1.0f;
+    if (nz > 8.0f) nz = 8.0f;
+    if (nz == g_vis_zoom) return;
+    g_vis_pan_x *= nz / g_vis_zoom;
+    g_vis_pan_y *= nz / g_vis_zoom;
+    g_vis_zoom = nz;
+    if (g_vis_zoom <= 1.0f) { g_vis_pan_x = 0; g_vis_pan_y = 0; }
+    g_need = 1; g_force_frames = 2;
+    {
+        char zv[16];
+        vis_zoom_str(zv, sizeof zv);
+        ALOGI("vis 采集 缩放 %s", zv);
+    }
+}
+/* 适应（1x）：缩放与平移一起复位。 */
+static void vis_zoom_fit(void)
+{
+    if (g_vis_zoom == 1.0f && g_vis_pan_x == 0 && g_vis_pan_y == 0) return;
+    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
+    g_need = 1; g_force_frames = 2;
+    ALOGI("vis 采集 适应（1x）");
+}
+/* 四角手柄命中（屏距口径）：命中半径 VIS_HANDLE_R（≥24px 要求）内取最近角；无 → -1。 */
+#define VIS_HANDLE_R 28.0f
+static int vis_sel_corner_hit(float mx, float my, float ix, float iy, float sc)
+{
+    float ex[4], ey[4], best = VIS_HANDLE_R * VIS_HANDLE_R;
+    int c, hit = -1;
+    ex[0] = ix + g_vis_sel[0] * sc;         ey[0] = iy + g_vis_sel[1] * sc;
+    ex[1] = ix + (g_vis_sel[2] + 1) * sc;   ey[1] = iy + g_vis_sel[1] * sc;
+    ex[2] = ix + g_vis_sel[0] * sc;         ey[2] = iy + (g_vis_sel[3] + 1) * sc;
+    ex[3] = ix + (g_vis_sel[2] + 1) * sc;   ey[3] = iy + (g_vis_sel[3] + 1) * sc;
+    for (c = 0; c < 4; c++) {
+        float dx = mx - ex[c], dy = my - ey[c], d2 = dx * dx + dy * dy;
+        if (d2 <= best) { best = d2; hit = c; }
+    }
+    return hit;
+}
+/* 框内命中（屏距口径）：整框（含端点像素边缘）。 */
+static int vis_sel_hit(float mx, float my, float ix, float iy, float sc)
+{
+    float x0 = ix + g_vis_sel[0] * sc, y0 = iy + g_vis_sel[1] * sc;
+    float x1 = ix + (g_vis_sel[2] + 1) * sc, y1 = iy + (g_vis_sel[3] + 1) * sc;
+    return mx >= x0 && mx <= x1 && my >= y0 && my <= y1;
+}
+/* 放大时用最近邻（看清像素边界 = 精细选择）；1x 回线性。只在状态变化时动 GL（纹理重建会复位）。 */
+static void vis_tex_magf(void)
+{
+    int want = g_vis_zoom > 1.0f ? 1 : 0;
+    if (!g_vis_tex || want == g_vis_magf) return;
+    glBindTexture(GL_TEXTURE_2D, g_vis_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, want ? GL_NEAREST : GL_LINEAR);
+    g_vis_magf = want;
+}
+/* 采集覆盖层（整屏；T3.2；缩放/平移 + 框调整 = Task 7.2）：三态 —— 等帧（wait）/ 失败（err）/ 图像就绪。
+ * 图像等比缩放居中（模板/点集可 [＋]/[－]/[适应] 缩放 1x..8x、>1x 拖画面平移）；模板 = 拖框选（松手 ≥8×8
+ * 落定、不弹命名；四角手柄/框内拖动调整，[确认] 才命名保存）；点集 = 首点吸基准色、其后加点（显示偏移/色）；
  * 吸色 = 点一下回填找色步颜色。整屏吞触摸（ui_rect_now）；子层 = 命名键盘。 */
 static void build_vis_cap(void)
 {
@@ -6321,7 +6410,7 @@ static void build_vis_cap(void)
         dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
         x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
         ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-        text_meta_s(mode == 1 ? "模板采集 · 在画面上拖动框选一块图案，松手后命名保存"
+        text_meta_s(mode == 1 ? "模板采集 · 拖动框选一块图案（拖四角调整），[确认] 命名保存"
                    : mode == 2 ? "点集编辑 · 先点一下吸基准色，再点参考点（最多 16 个）"
                                : "吸色 · 点画面里要取的颜色（回填找色步骤）");
         if (g_vis_cap_msg[0]) {
@@ -6331,6 +6420,22 @@ static void build_vis_cap(void)
         img_top = y0 + 96.0f;
         img_bot = b.y - 24.0f - 104.0f - (mode == 2 ? 88.0f : 0.0f);   /* 底：按钮 92+缝 12；点集再让容差行 76+12 */
         if (img_bot < img_top + 120.0f) img_bot = img_top + 120.0f;    /* 极矮兜底 */
+        /* 缩放行（Task 7.2；模板/点集）：[＋] [－] [适应] + 当前值；插在标题/提示与画面之间（矮屏收一档） */
+        if (mode != 3) {
+            float zh = (img_bot - img_top) < 300.0f ? 46.0f : 64.0f;
+            float zw = (cw - 3 * 12.0f) / 4.0f;
+            char zv[16];
+            ImGui::SetCursorScreenPos(ImVec2(x0, img_top));
+            if (btn_light("＋", ImVec2(zw, zh))) vis_zoom_step(+1);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + zw + 12, img_top));
+            if (btn_light("－", ImVec2(zw, zh))) vis_zoom_step(-1);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (zw + 12), img_top));
+            if (btn_light("适应", ImVec2(zw, zh))) vis_zoom_fit();
+            vis_zoom_str(zv, sizeof zv);
+            ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (zw + 12), img_top));
+            btn_light(zv, ImVec2(zw, zh));     /* 当前值（只显示） */
+            img_top += zh + 12.0f;
+        }
         if (g_vis_cap_wait) {
             ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
             text_meta_w("抓帧中…（面板向系统要一帧；通常 5~25ms）");
@@ -6341,57 +6446,156 @@ static void build_vis_cap(void)
             ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
             text_meta_w(m);
         } else if (g_vis_img && g_vis_img_w > 0 && g_vis_img_h > 0) {
+            float vh = img_bot - img_top;
             sc = cw / (float)g_vis_img_w;
             {
-                float sy = (img_bot - img_top) / (float)g_vis_img_h;
+                float sy = vh / (float)g_vis_img_h;
                 if (sy < sc) sc = sy;
             }
+            sc *= g_vis_zoom;                        /* 显示比例 = 适应比例 × 缩放（Task 7.2） */
             iw = (float)g_vis_img_w * sc;
             ih = (float)g_vis_img_h * sc;
-            ix = x0 + (cw - iw) * 0.5f;
-            iy = img_top + (img_bot - img_top - ih) * 0.5f;
+            {   /* 平移夹取：画面不许比视口小（顶到边即停）；每帧按当前视口算（转屏/换窗自动纠正） */
+                float mpx = (iw - cw) * 0.5f, mpy = (ih - vh) * 0.5f;
+                if (mpx < 0) mpx = 0;
+                if (mpy < 0) mpy = 0;
+                if (g_vis_pan_x < -mpx) g_vis_pan_x = -mpx;
+                if (g_vis_pan_x > mpx) g_vis_pan_x = mpx;
+                if (g_vis_pan_y < -mpy) g_vis_pan_y = -mpy;
+                if (g_vis_pan_y > mpy) g_vis_pan_y = mpy;
+            }
+            ix = x0 + (cw - iw) * 0.5f + g_vis_pan_x;
+            iy = img_top + (vh - ih) * 0.5f + g_vis_pan_y;
             if (g_vis_tex_dirty) { vis_tex_update(g_vis_img, g_vis_img_w, g_vis_img_h); g_vis_tex_dirty = 0; }
+            vis_tex_magf();                          /* 放大 → 最近邻（像素边界可见） */
+            dl->PushClipRect(ImVec2(x0, img_top), ImVec2(x0 + cw, img_bot), true);   /* 放大时画面裁在视口内 */
             dl->AddRectFilled(ImVec2(ix - 2, iy - 2), ImVec2(ix + iw + 2, iy + ih + 2), IM_COL32(228, 228, 231, 255), 4);
             if (g_vis_tex)
                 dl->AddImage((ImTextureID)(intptr_t)g_vis_tex, ImVec2(ix, iy), ImVec2(ix + iw, iy + ih));
             ImGui::PushID(9100);
-            ImGui::SetCursorScreenPos(ImVec2(ix, iy));
-            ImGui::InvisibleButton("##img", ImVec2(iw, ih));
+            {
+                /* 交互区 = 画面 ∩ 视口（1x 下与原来一致 = 画面本身；>1x 时铺满被画面盖住的视口） */
+                float bx0 = ix > x0 ? ix : x0;
+                float by0 = iy > img_top ? iy : img_top;
+                float bx1 = (ix + iw) < (x0 + cw) ? (ix + iw) : (x0 + cw);
+                float by1 = (iy + ih) < img_bot ? (iy + ih) : img_bot;
+                ImGui::SetCursorScreenPos(ImVec2(bx0, by0));
+                ImGui::InvisibleButton("##img", ImVec2(bx1 - bx0, by1 - by0));
+            }
             {
                 ImVec2 mp = ImGui::GetIO().MousePos;
                 int act = ImGui::IsItemActive();
                 int deact = ImGui::IsItemDeactivated();
-                if (act && !g_vis_drag) { g_vis_drag = 1; g_vis_dx0 = mp.x; g_vis_dy0 = mp.y; }
+                if (act && !g_vis_drag) {
+                    /* 起手判手势（Task 7.2）：手柄 > 框内 > （缩放 >1x ? 平移 : 新框）；点集/吸色：待定（轻点 or 平移） */
+                    g_vis_drag = 1;
+                    g_vis_dx0 = mp.x; g_vis_dy0 = mp.y;
+                    g_vis_pmx = mp.x; g_vis_pmy = mp.y;
+                    g_vis_gest = 0;
+                    if (mode == 1) {
+                        int corner = -1;
+                        if (g_vis_sel_on) corner = vis_sel_corner_hit(mp.x, mp.y, ix, iy, sc);
+                        if (corner >= 0) {
+                            g_vis_gest = 3; g_vis_gest_corner = corner;
+                            g_vis_gest_box[0] = g_vis_sel[0]; g_vis_gest_box[1] = g_vis_sel[1];
+                            g_vis_gest_box[2] = g_vis_sel[2]; g_vis_gest_box[3] = g_vis_sel[3];
+                        } else if (g_vis_sel_on && vis_sel_hit(mp.x, mp.y, ix, iy, sc)) {
+                            g_vis_gest = 2;
+                            g_vis_gest_box[0] = g_vis_sel[0]; g_vis_gest_box[1] = g_vis_sel[1];
+                            g_vis_gest_box[2] = g_vis_sel[2]; g_vis_gest_box[3] = g_vis_sel[3];
+                        } else {
+                            g_vis_gest = g_vis_zoom > 1.0f ? 4 : 1;
+                        }
+                    }
+                }
                 if (g_vis_drag && act) {
-                    float rx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
-                    float rx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
-                    float ry0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
-                    float ry1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
-                    dl->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1), IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                    if (g_vis_gest == 1) {
+                        float rx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
+                        float rx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
+                        float ry0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
+                        float ry1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
+                        dl->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1), IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                    } else if (g_vis_gest == 2) {
+                        /* 框内拖动 = 整体移动（起点框 + 总位移，帧坐标；夹在图内、尺寸不变） */
+                        int w0 = g_vis_gest_box[2] - g_vis_gest_box[0], h0 = g_vis_gest_box[3] - g_vis_gest_box[1];
+                        int nx = (int)lroundf(g_vis_gest_box[0] + (mp.x - g_vis_dx0) / sc);
+                        int ny = (int)lroundf(g_vis_gest_box[1] + (mp.y - g_vis_dy0) / sc);
+                        if (nx < 0) nx = 0;
+                        if (nx > g_vis_img_w - 1 - w0) nx = g_vis_img_w - 1 - w0;
+                        if (ny < 0) ny = 0;
+                        if (ny > g_vis_img_h - 1 - h0) ny = g_vis_img_h - 1 - h0;
+                        g_vis_sel[0] = nx; g_vis_sel[1] = ny;
+                        g_vis_sel[2] = nx + w0; g_vis_sel[3] = ny + h0;
+                        g_need = 1; g_force_frames = 2;
+                    } else if (g_vis_gest == 3) {
+                        /* 四角手柄拖动 = 缩放框（帧坐标取整、夹在图内、最小 8×8 含端点） */
+                        int fx = (int)floorf((mp.x - ix) / sc), fy = (int)floorf((mp.y - iy) / sc);
+                        int x0b = g_vis_gest_box[0], y0b = g_vis_gest_box[1];
+                        int x1b = g_vis_gest_box[2], y1b = g_vis_gest_box[3];
+                        if (fx < 0) fx = 0;
+                        if (fx > g_vis_img_w - 1) fx = g_vis_img_w - 1;
+                        if (fy < 0) fy = 0;
+                        if (fy > g_vis_img_h - 1) fy = g_vis_img_h - 1;
+                        if (g_vis_gest_corner == 0) { x0b = fx; y0b = fy; }
+                        else if (g_vis_gest_corner == 1) { x1b = fx; y0b = fy; }
+                        else if (g_vis_gest_corner == 2) { x0b = fx; y1b = fy; }
+                        else { x1b = fx; y1b = fy; }
+                        if (x1b - x0b < 7) { if (g_vis_gest_corner & 1) x1b = x0b + 7; else x0b = x1b - 7; }
+                        if (y1b - y0b < 7) { if (g_vis_gest_corner & 2) y1b = y0b + 7; else y0b = y1b - 7; }
+                        g_vis_sel[0] = x0b; g_vis_sel[1] = y0b;
+                        g_vis_sel[2] = x1b; g_vis_sel[3] = y1b;
+                        g_need = 1; g_force_frames = 2;
+                    } else if (g_vis_gest == 4) {
+                        /* 平移（缩放 >1x 时拖画面）：增量跟手；夹取交给每帧换算 */
+                        g_vis_pan_x += mp.x - g_vis_pmx;
+                        g_vis_pan_y += mp.y - g_vis_pmy;
+                        g_need = 1; g_force_frames = 2;
+                    } else if (mode != 1) {
+                        /* 点集/吸色：位移超轻点阈值（14px）且缩放 >1x → 转平移（越阈前的位移不算） */
+                        float ddx = mp.x - g_vis_dx0, ddy = mp.y - g_vis_dy0;
+                        if (g_vis_zoom > 1.0f && ddx * ddx + ddy * ddy > 14.0f * 14.0f) {
+                            g_vis_gest = 4;
+                            g_vis_pmx = mp.x; g_vis_pmy = mp.y;
+                        }
+                    }
+                    g_vis_pmx = mp.x; g_vis_pmy = mp.y;
                 }
                 if (deact && g_vis_drag) {
                     float ddx = mp.x - g_vis_dx0, ddy = mp.y - g_vis_dy0;
-                    g_vis_drag = 0;
+                    int gest = g_vis_gest;
+                    g_vis_drag = 0; g_vis_gest = 0;
                     if (mode == 1) {
-                        /* 模板：松手提交框选（显示坐标 → 帧坐标 floor + 夹取；≥8×8 才收） */
-                        float mx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
-                        float mx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
-                        float my0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
-                        float my1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
-                        int fx0 = (int)((mx0 - ix) / sc), fx1 = (int)((mx1 - ix) / sc);
-                        int fy0 = (int)((my0 - iy) / sc), fy1 = (int)((my1 - iy) / sc);
-                        if (fx0 < 0) fx0 = 0;
-                        if (fy0 < 0) fy0 = 0;
-                        if (fx1 > g_vis_img_w - 1) fx1 = g_vis_img_w - 1;
-                        if (fy1 > g_vis_img_h - 1) fy1 = g_vis_img_h - 1;
-                        if (fx0 <= fx1 && fy0 <= fy1 && fx1 - fx0 + 1 >= 8 && fy1 - fy0 + 1 >= 8) {
-                            g_vis_sel[0] = fx0; g_vis_sel[1] = fy0;
-                            g_vis_sel[2] = fx1; g_vis_sel[3] = fy1;
-                            g_vis_sel_on = 1;
-                            g_vis_kb = 1; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
-                            ALOGI("vis 采集 框选 %d,%d-%d,%d（%dx%d）", fx0, fy0, fx1, fy1,
-                                  fx1 - fx0 + 1, fy1 - fy0 + 1);
+                        if (gest == 1) {
+                            /* 新框落定：显示坐标 → 帧坐标 floor + 夹取；≥8×8 才收（照旧）。不弹命名键盘
+                             * （Task 7.2：框保留、可继续调整，[确认] 才进命名）。 */
+                            float mx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
+                            float mx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
+                            float my0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
+                            float my1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
+                            int fx0 = (int)((mx0 - ix) / sc), fx1 = (int)((mx1 - ix) / sc);
+                            int fy0 = (int)((my0 - iy) / sc), fy1 = (int)((my1 - iy) / sc);
+                            if (fx0 < 0) fx0 = 0;
+                            if (fy0 < 0) fy0 = 0;
+                            if (fx1 > g_vis_img_w - 1) fx1 = g_vis_img_w - 1;
+                            if (fy1 > g_vis_img_h - 1) fy1 = g_vis_img_h - 1;
+                            if (fx0 <= fx1 && fy0 <= fy1 && fx1 - fx0 + 1 >= 8 && fy1 - fy0 + 1 >= 8) {
+                                g_vis_sel[0] = fx0; g_vis_sel[1] = fy0;
+                                g_vis_sel[2] = fx1; g_vis_sel[3] = fy1;
+                                g_vis_sel_on = 1;
+                                ALOGI("vis 采集 框选 %d,%d-%d,%d（%dx%d）", fx0, fy0, fx1, fy1,
+                                      fx1 - fx0 + 1, fy1 - fy0 + 1);
+                            }
+                        } else if ((gest == 2 || gest == 3) &&
+                                   (g_vis_sel[0] != g_vis_gest_box[0] || g_vis_sel[1] != g_vis_gest_box[1] ||
+                                    g_vis_sel[2] != g_vis_gest_box[2] || g_vis_sel[3] != g_vis_gest_box[3])) {
+                            ALOGI("vis 采集 调整框 %d,%d-%d,%d（%dx%d）", g_vis_sel[0], g_vis_sel[1],
+                                  g_vis_sel[2], g_vis_sel[3], g_vis_sel[2] - g_vis_sel[0] + 1,
+                                  g_vis_sel[3] - g_vis_sel[1] + 1);
+                        } else if (gest == 4) {
+                            ALOGI("vis 采集 平移 %.0f,%.0f", (double)g_vis_pan_x, (double)g_vis_pan_y);
                         }
+                    } else if (gest == 4) {
+                        ALOGI("vis 采集 平移 %.0f,%.0f", (double)g_vis_pan_x, (double)g_vis_pan_y);
                     } else if (ddx * ddx + ddy * ddy <= 14.0f * 14.0f) {
                         /* 点选（点集 / 吸色）：轻点才算（拖动不算） */
                         int fx = (int)((mp.x - ix) / sc), fy = (int)((mp.y - iy) / sc);
@@ -6404,10 +6608,20 @@ static void build_vis_cap(void)
                     }
                     g_need = 1; g_force_frames = 3;
                 }
-                if (mode == 1 && g_vis_sel_on) {          /* 已定框选高亮 */
-                    dl->AddRect(ImVec2(ix + g_vis_sel[0] * sc, iy + g_vis_sel[1] * sc),
-                                ImVec2(ix + (g_vis_sel[2] + 1) * sc, iy + (g_vis_sel[3] + 1) * sc),
-                                IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                if (mode == 1 && g_vis_sel_on) {          /* 已选态：框 + 四角手柄（16px 方块；命中半径见 VIS_HANDLE_R） */
+                    ImVec2 q0 = ImVec2(ix + g_vis_sel[0] * sc, iy + g_vis_sel[1] * sc);
+                    ImVec2 q1 = ImVec2(ix + (g_vis_sel[2] + 1) * sc, iy + (g_vis_sel[3] + 1) * sc);
+                    ImVec2 hc[4];
+                    int c;
+                    dl->AddRect(q0, q1, IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                    hc[0] = ImVec2(q0.x, q0.y); hc[1] = ImVec2(q1.x, q0.y);
+                    hc[2] = ImVec2(q0.x, q1.y); hc[3] = ImVec2(q1.x, q1.y);
+                    for (c = 0; c < 4; c++) {
+                        dl->AddRectFilled(ImVec2(hc[c].x - 8, hc[c].y - 8), ImVec2(hc[c].x + 8, hc[c].y + 8),
+                                          IM_COL32(255, 255, 255, 255), 2.0f);
+                        dl->AddRect(ImVec2(hc[c].x - 8, hc[c].y - 8), ImVec2(hc[c].x + 8, hc[c].y + 8),
+                                    IM_COL32(59, 130, 246, 255), 2.0f, 0, 2.5f);
+                    }
                 }
                 if (mode == 2) {
                     /* 基准 + 参考点标记（显示层；帧坐标 → 屏坐标 = ix + fx*sc） */
@@ -6438,6 +6652,7 @@ static void build_vis_cap(void)
                 }
             }
             ImGui::PopID();
+            dl->PopClipRect();                   /* 画面视口裁剪（Task 7.2）结束 */
         } else {
             ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
             text_meta_w("没有画面");
@@ -6495,15 +6710,27 @@ static void build_vis_cap(void)
                     }
                 }
             } else if (mode == 1) {
+                float bw3 = (cw - 2 * 12.0f) / 3.0f;
                 ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                if (btn_light("取消", ImVec2(bw2, 92))) { ALOGI("vis 采集 取消（模板）"); vis_cap_close(); }
-                ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
-                if (btn_light("重新截帧", ImVec2(bw2, 92))) {
+                if (btn_light("取消", ImVec2(bw3, 92))) { ALOGI("vis 采集 取消（模板）"); vis_cap_close(); }
+                ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, by));
+                if (btn_light("重新截帧", ImVec2(bw3, 92))) {
                     g_vis_cap_err = 0; g_vis_cap_wait = 1; g_vis_cap_t0 = now_ms();
-                    g_vis_sel_on = 0; g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;
+                    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;   /* 框保留（Task 7.2：已选态跨截帧保留、可继续调整） */
                     vtouch_vis_panel_capture_req();
                     g_need = 1; g_force_frames = 3;
                     ALOGI("vis 采集 重新截帧");
+                }
+                ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), by));
+                if (g_vis_sel_on) {
+                    if (btn_blue("确认", ImVec2(bw3, 92))) {   /* 确认 → 命名键盘；取消命名回采集视图、框保留 */
+                        g_vis_kb = 1; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
+                        ALOGI("vis 采集 确认（模板命名开）");
+                    }
+                } else {
+                    ImGui::BeginDisabled();
+                    btn_light("确认", ImVec2(bw3, 92));
+                    ImGui::EndDisabled();
                 }
             } else {
                 ImGui::SetCursorScreenPos(ImVec2(x0, by));
