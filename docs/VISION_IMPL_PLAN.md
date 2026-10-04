@@ -109,6 +109,7 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
    - `Java_VTouchUI_nativeVisCopyFrame(env, cls, jobject hb, jint rotation, jint w, jint h, jint stride)`：`AHardwareBuffer_fromHardwareBuffer` → `AHardwareBuffer_lock(CPU_READ_OFTEN)` → memcpy 进帧区**后备缓冲** → unlock → 返回耗时 ms。
    - `Java_VTouchUI_nativeVisPollRequest(env, cls)`：读帧头（req_pending vs req_seq）返回待抓标志。
    - shm 帧区指针：复用面板现有 shm 映射（`-DVT_UI_PANEL` 半边）。
+   - **帧区内存序契约（承 T2.1 评审 I-3）**：读 `req_pending` 用 acquire；写像素完成后 `req_seq` 用 release 存（或等价 store-store 屏障）——以 `vt_shm.h` 帧区注释为准（核心侧已按 release/acquire 配对实现）。
 3. 构建：`<android/hardware_buffer.h>`（NDK）+ 链接 `-landroid`（查 `scripts/build_ui.sh` 现有链接清单补）。
 - **验收**：`VTOUCH_UI_CORE=real sh scripts/build_ui.sh` rc=0（0 告警）；`build.sh ui` rc=0；**真机冒烟统一在 5.1**（本任务静态对账 + 编译）。
 
