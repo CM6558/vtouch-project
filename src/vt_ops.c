@@ -56,11 +56,11 @@ static int op_num_ok(int v, int lo, int hi)
  * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
  * 计算步（9，v5）：a1 ∈ 1..4（槽号）；expr 非空、≤63、且过 vt_expr_check（不过 → 拒收 `表达式错: <why>`）；
  * 防御：a2..a4/ms/j1/j2 必须 0、ref 必须空。
- * 视觉步（10/11，v8）：字段映射照 spec VISION §6.1 定稿 —— 找图 ref=模板名（必填）、找色 ref=点集名
+ * 视觉步（10/11，v8；T7.4 扩 ms）：字段映射照 spec VISION §6.1 定稿 —— 找图 ref=模板名（必填）、找色 ref=点集名
  * （多点必填、单点必空）、expr=区域名（空或 vt_id_ok 尺子；存在性不校验，运行时按 `区域不存在` 收场）、
  * 找图 a1=阈值 0..255、找色 a1=模式 0/1 且单点 a2=(颜色<<8)|容差（按无符号解读：打包域 = 全部 32 位，
  * 颜色高位使 int 为负 —— **不拒负值**，拒了会误杀纯红 0xFF0000 等）、多点 a2=0、a3/a4=不成立/成立档位（0..3）、
- * ms=0、j1/j2=该侧跳转目标（域同条件步）。
+ * ms=0..60000（0 = 单次；>0 = 持续查找超时毫秒，T7.4）、j1/j2=该侧跳转目标（域同条件步）。
  * **其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——表达式只属于计算步、区域名只属于视觉步，
  * 别让它们静默挂在别的步上（spec V5 §4 / VISION §6.1）。
  * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
@@ -212,15 +212,19 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             break;
         }
-        case OP_STEP_FINDIMAGE: {                /* 找图（v8）：ref = 模板名（必填）；expr = 区域名（空 = 全屏）；
-                                                  * a1 = 阈值 0..255；a2/ms = 0；a3/a4 = 不成立/成立档位；
-                                                  * j1/j2 = 该侧跳转目标（域同条件步）。spec VISION §6.1 */
+        case OP_STEP_FINDIMAGE: {                /* 找图（v8；T7.4 扩 ms）：ref = 模板名（必填）；expr = 区域名（空 = 全屏）；
+                                                  * a1 = 阈值 0..255；a2 = 0；ms = 0..60000（0 = 单次、>0 = 持续超时）；
+                                                  * a3/a4 = 不成立/成立档位；j1/j2 = 该侧跳转目标（域同条件步）。spec VISION §6.1 */
             if (st->a1 < 0 || st->a1 > 255) {
                 snprintf(why, whycap, "第 %d 步阈值越界（0..255）", i + 1);
                 return 0;
             }
-            if (st->a2 != 0 || st->ms != 0) {
+            if (st->a2 != 0) {
                 snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            if (st->ms < 0 || st->ms > 60000) {
+                snprintf(why, whycap, "第 %d 步超时越界（0..60000）", i + 1);
                 return 0;
             }
             if (st->a3 < OP_COND_ABORT || st->a3 > OP_COND_JUMP ||
@@ -248,17 +252,18 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             break;
         }
-        case OP_STEP_FINDCOLOR: {                /* 找色（v8）：a1 = 模式 0 单点 / 1 多点；ref = 点集名（多点必填、
+        case OP_STEP_FINDCOLOR: {                /* 找色（v8；T7.4 扩 ms）：a1 = 模式 0 单点 / 1 多点；ref = 点集名（多点必填、
                                                   * 单点必空）；expr = 区域名；单点 a2 = (颜色<<8)|容差（两段：
                                                   * 颜色 24 位 / 容差 8 位；按无符号解读 —— 颜色高位使 int 为负，
-                                                  * 不拒负值）；多点 a2 = 0；a3/a4 = 档位；ms = 0；j1/j2 = 目标 */
+                                                  * 不拒负值）；多点 a2 = 0；a3/a4 = 档位；ms = 0..60000（0 = 单次、>0 = 持续超时）；
+                                                  * j1/j2 = 目标 */
             uint32_t packed;
             if (st->a1 != 0 && st->a1 != 1) {
                 snprintf(why, whycap, "第 %d 步模式非法（0/1）", i + 1);
                 return 0;
             }
-            if (st->ms != 0) {
-                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+            if (st->ms < 0 || st->ms > 60000) {
+                snprintf(why, whycap, "第 %d 步超时越界（0..60000）", i + 1);
                 return 0;
             }
             if (st->a3 < OP_COND_ABORT || st->a3 > OP_COND_JUMP ||
@@ -333,7 +338,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -825,11 +830,12 @@ static int op_vis_panel_dead(void)
  * (vtouch-doc: op_vis_capture)
  * @brief 取帧：复用缓存（≤50ms / 帧未变 / 方向一致）或发抓帧请求并轮询等待完成。
  * @param   fr       输出：帧句柄（rgba 直指 shm 缓冲；调用方在使用期间保证不再发新请求）
+ * @param   force    1 = 强制抓新帧（持续查找用：复用缓存会原地空转同一画面）；0 = 允许复用（单次路径照旧）
  * @param   err      输出：失败原因词（`无画面` / `视觉错`）
  * @return  0 成功；-1 失败（err 已置原因词 —— 调用方中止或按码报错；本函数不再直接中止）。
  * @note    **静态**，只在执行器内用。协议（spec §2.2/§3.1）：写 req_pending = ++请求序号 → 轮询等 req_seq == 该序号（usleep(1000)，总超时 VT_VIS_CAPTURE_TIMEOUT_MS）→ 校验 flags 无错 + 尺寸合法 → 按 seqlock 读一次稳定帧（读 seq → 读字段 → 再读 seq；奇/变 → 重试至超时）。面板不在（ui_hb 冻结 ≥3s）→ 立即 `无画面`；超时 / flags 报错 → `无画面`；头损坏 / 尺寸非法 → `视觉错`。TRACE（VTOUCH_OPS_TRACE=1）：`vis 抓帧 请求 → 完成 <ms>`。
  */
-static int op_vis_capture(struct op_vis_frame *fr, const char **err)
+static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
 {
     struct vt_shm_frame_hdr *h = vt_shm_frame();
     uint64_t t0, t1, fbuf = (uint64_t)g.logical_width * (uint64_t)g.logical_height * 4u;
@@ -838,8 +844,9 @@ static int op_vis_capture(struct op_vis_frame *fr, const char **err)
 
     if (!h) { *err = "视觉错"; return -1; }
 
-    /* 一帧多步复用（spec §9）：≤50ms、帧仍有效、缓冲没被换过、方向一致（与面板上报的当前方向相同）。 */
-    if (S_vis_have &&
+    /* 一帧多步复用（spec §9）：≤50ms、帧仍有效、缓冲没被换过、方向一致（与面板上报的当前方向相同）。
+     * 持续查找（T7.4）force=1：每拍都要新帧 —— 复用同一帧会原地空转（匹配同一画面到 50ms 窗口过期）。 */
+    if (!force && S_vis_have &&
         now_ns() - S_vis_f.ts_ns < (uint64_t)VT_VIS_REUSE_MS * 1000000ull &&
         (h->flags & VT_FRAME_F_VALID) && !(h->flags & VT_FRAME_F_ERR) &&
         h->buf_idx == (uint32_t)S_vis_buf && h->rotation == (uint32_t)S_vis_f.rot &&
@@ -1073,108 +1080,153 @@ static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, i
 
 /**
  * (vtouch-doc: vis_exec_find)
- * @brief 查找执行（找图 / 找色；op 视觉步与面板试查共用）：抓帧（或复用）→ 帧视图 → 区域换算 → 匹配。
+ * @brief 查找执行（找图 / 找色；op 视觉步与面板试查共用）：抓帧（或复用）→ 帧视图 → 区域换算 → 匹配；持续模式循环到命中或超时。
  * @param   kind     0 = 找图 / 1 = 找色单点 / 2 = 找色多点
  * @param   ref      模板名（kind 0）/ 点集名（kind 2）；kind 1 忽略
  * @param   region   区域名（空 = 全屏）
  * @param   a1       找图 = 阈值 0..255；其余不用
  * @param   a2       找色单点 = (颜色<<8)|容差；其余不用
+ * @param   timeout_ms 持续查找超时毫秒：0 = 单次（现状）；1..60000 = 循环抓帧查到命中或超时（T7.4）
  * @param   x,y      输出：命中点**竖屏逻辑坐标**（仅命中有效）
- * @param   ms       输出：匹配耗时毫秒（可 NULL；只计匹配调用，不含抓帧等待 —— 保 op 路径 `耗时` 语义逐字不变）
+ * @param   ms       输出：单次 = 匹配耗时毫秒（只计匹配调用，不含抓帧等待 —— 保 op 路径 `耗时` 语义逐字不变）；持续 = 全程耗时（含抓帧等待；可 NULL）
+ * @param   attempts 输出：尝试次数（抓帧 + 匹配的轮数；单次 = 1；可 NULL）
  * @param   err      输出：失败原因词（`无画面` / `视觉错` / `区域不存在` / `模板不存在`；命中 / 未命中置 NULL）
  * @return  0 = 命中 / -1 = 未命中 / -2 = 失败（err 已置原因词，调用方中止或按码报错）。
- * @note    **静态**，op 执行器与面板「试一下」共用（op 路径行为逐字不变：中止词 / 日志 / 结果槽口径照旧）。链路（spec VISION §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`。命中点从帧坐标换算成竖屏逻辑坐标（vt_vis_frame_to_logic）；找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。
+ * @note    **静态**，op 执行器与面板「试一下」共用（op 路径单次行为逐字不变：中止词 / 日志 / 结果槽口径照旧）。持续模式（T7.4）：循环 { 抓新帧（force=1，不复用缓存）→ 匹配 → 命中 break } 到 deadline；硬失败（无画面 / 视觉错 / 区域不存在 / 模板不存在）立即按 -2 收场，不等超时；超时按未命中（-1）返回。持续循环占着主循环：每轮手动 vt_shm_tick 喂核心心跳（面板心跳停滞 ≥3s 会自杀退出；单次 ≤1s 不越线）。链路（spec VISION §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`。命中点从帧坐标换算成竖屏逻辑坐标（vt_vis_frame_to_logic）；找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。
  */
-static int vis_exec_find(int kind, const char *ref, const char *region, int a1, int a2,
-                         int *x, int *y, uint64_t *ms, const char **err)
+static int vis_exec_find(int kind, const char *ref, const char *region, int a1, int a2, int timeout_ms,
+                         int *x, int *y, uint64_t *ms, int *attempts, const char **err)
 {
     struct op_vis_frame fr;
-    int rx, ry, rw, rh, ox = 0, oy = 0, rc;
-    uint64_t t0, dt = 0;
+    int rx, ry, rw, rh, ox = 0, oy = 0, rc, tries = 0;
+    uint64_t t0, dt = 0, t_start;
 
     *err = NULL;
     if (ms) *ms = 0;
-    if (op_vis_capture(&fr, err) != 0) return -2;            /* 原因词已置（`无画面` / `视觉错`） */
-    if (vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride) != VT_VIS_OK) {
-        *err = "视觉错";
-        return -2;
-    }
-    if (op_vis_region(region, &fr, &rx, &ry, &rw, &rh) != 0) {     /* 区域名不存在（空 = 全屏） */
-        *err = "区域不存在";
-        return -2;
-    }
+    if (attempts) *attempts = 0;
+    if (timeout_ms < 0) timeout_ms = 0;                      /* 防御：域外值按单次（op_valid 已挡；试查恒传 0） */
+    t_start = op_now_ms();
+    for (;;) {                                               /* 持续（T7.4）：循环抓新帧查到命中或超时；单次跑一轮 */
+        tries++;
+        /* 持续循环占着主循环：手动喂核心心跳 —— 否则面板 vt_shm_ui_tick 见心跳停滞 ≥3s 判「核心死了」自杀退出
+         *（单次路径 ≤1s（抓帧超时）不越线，不动）。每轮一喂：轮间隔 ≤ 抓帧超时 1000ms + 匹配，恒 < 3s。 */
+        if (timeout_ms > 0) vt_shm_tick();
+        /* 持续 force=1：每轮都要新帧（复用缓存会原地空转同一画面）；单次照旧允许复用（行为逐字不变）。 */
+        if (op_vis_capture(&fr, timeout_ms > 0, err) != 0) break;   /* 原因词已置（`无画面` / `视觉错`） */
+        if (vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride) != VT_VIS_OK) {
+            *err = "视觉错";
+            break;
+        }
+        if (op_vis_region(region, &fr, &rx, &ry, &rw, &rh) != 0) {  /* 区域名不存在（空 = 全屏） */
+            *err = "区域不存在";
+            break;
+        }
 
-    if (kind == 0) {                                         /* 找图：ref = 模板名（spec §6.1） */
-        uint8_t *gray = NULL;
-        int tw = 0, th = 0, trot = 0, steps;
+        if (kind == 0) {                                     /* 找图：ref = 模板名（spec §6.1） */
+            uint8_t *gray = NULL;
+            int tw = 0, th = 0, trot = 0, steps;
 
-        rc = op_vis_read_tmpl(ref, &gray, &tw, &th, &trot);
-        if (rc != 0) { *err = (rc == -2) ? "视觉错" : "模板不存在"; return -2; }
-        steps = (trot - fr.rot) & 3;                         /* 模板 → 当前帧的顺时针步数（spec §11-#7） */
-        if (steps) {
-            int nw, nh;
-            uint8_t *rot = op_vis_rot_gray(gray, tw, th, steps, &nw, &nh);
+            rc = op_vis_read_tmpl(ref, &gray, &tw, &th, &trot);
+            if (rc != 0) { *err = (rc == -2) ? "视觉错" : "模板不存在"; break; }
+            steps = (trot - fr.rot) & 3;                     /* 模板 → 当前帧的顺时针步数（spec §11-#7） */
+            if (steps) {
+                int nw, nh;
+                uint8_t *rot = op_vis_rot_gray(gray, tw, th, steps, &nw, &nh);
+                free(gray);
+                if (!rot) { *err = "视觉错"; break; }
+                gray = rot; tw = nw; th = nh;
+            }
+            t0 = op_now_ms();
+            rc = vt_vis_find_image(rx, ry, rw, rh, gray, tw, th, a1, &ox, &oy);
+            dt = op_now_ms() - t0;
             free(gray);
-            if (!rot) { *err = "视觉错"; return -2; }
-            gray = rot; tw = nw; th = nh;
+        } else if (kind == 2) {                              /* 找色多点：ref = 点集名（spec §6.1） */
+            uint32_t base = 0;
+            int base_tol = 0, n = 0;
+            struct vt_vis_pt pts[VT_VIS_PTS_MAX];
+            if (op_vis_read_pts(ref, &base, &base_tol, pts, &n) != 0) {
+                *err = "模板不存在";
+                break;
+            }
+            t0 = op_now_ms();
+            rc = vt_vis_find_color_multi(rx, ry, rw, rh, base, base_tol, pts, n, &ox, &oy);
+            dt = op_now_ms() - t0;
+        } else {                                             /* 找色单点：a2 = (颜色<<8)|容差（spec §6.1） */
+            t0 = op_now_ms();
+            rc = vt_vis_find_color(rx, ry, rw, rh, (uint32_t)a2 >> 8, (int)((uint32_t)a2 & 0xffu), &ox, &oy);
+            dt = op_now_ms() - t0;
         }
-        t0 = op_now_ms();
-        rc = vt_vis_find_image(rx, ry, rw, rh, gray, tw, th, a1, &ox, &oy);
-        dt = op_now_ms() - t0;
-        free(gray);
-    } else if (kind == 2) {                                  /* 找色多点：ref = 点集名（spec §6.1） */
-        uint32_t base = 0;
-        int base_tol = 0, n = 0;
-        struct vt_vis_pt pts[VT_VIS_PTS_MAX];
-        if (op_vis_read_pts(ref, &base, &base_tol, pts, &n) != 0) {
-            *err = "模板不存在";
-            return -2;
+        if (rc == VT_VIS_BAD) { *err = "视觉错"; break; }    /* 防御：参数域已过门，真到这不硬撑 */
+        if (rc == VT_VIS_OK) {                               /* 命中：写坐标 + 返回（持续 = 命中即停） */
+            vt_vis_frame_to_logic(fr.rot, fr.w, fr.h, ox, oy, x, y); /* 命中点 → 竖屏逻辑坐标 */
+            if (ms) *ms = (timeout_ms > 0) ? op_now_ms() - t_start : dt;   /* 持续：耗时 = 全程（含抓帧等待） */
+            if (attempts) *attempts = tries;
+            return 0;
         }
-        t0 = op_now_ms();
-        rc = vt_vis_find_color_multi(rx, ry, rw, rh, base, base_tol, pts, n, &ox, &oy);
-        dt = op_now_ms() - t0;
-    } else {                                                 /* 找色单点：a2 = (颜色<<8)|容差（spec §6.1） */
-        t0 = op_now_ms();
-        rc = vt_vis_find_color(rx, ry, rw, rh, (uint32_t)a2 >> 8, (int)((uint32_t)a2 & 0xffu), &ox, &oy);
-        dt = op_now_ms() - t0;
+        if (timeout_ms <= 0) {                               /* 单次：未命中（不写坐标） */
+            if (ms) *ms = dt;
+            if (attempts) *attempts = tries;
+            return -1;
+        }
+        if (op_now_ms() - t_start >= (uint64_t)timeout_ms) { /* 持续：到 deadline 仍未见命中 → 未命中（超时） */
+            if (ms) *ms = op_now_ms() - t_start;
+            if (attempts) *attempts = tries;
+            return -1;
+        }
     }
-    if (rc == VT_VIS_BAD) { *err = "视觉错"; return -2; }    /* 防御：参数域已过门，真到这不硬撑 */
-    if (ms) *ms = dt;
-    if (rc != VT_VIS_OK) return -1;                          /* 未命中（不写坐标） */
-    vt_vis_frame_to_logic(fr.rot, fr.w, fr.h, ox, oy, x, y); /* 命中点 → 竖屏逻辑坐标 */
-    return 0;
+    if (attempts) *attempts = tries;                         /* 失败：-2（err 已置原因词） */
+    return -2;
 }
 
 /**
  * (vtouch-doc: op_vis_run)
  * @brief 视觉步骤执行（找图 / 找色）：转调 vis_exec_find → 结果槽 + 四档分支。
  * @param   st       当前视觉步（type = OP_STEP_FINDIMAGE / OP_STEP_FINDCOLOR）
- * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：失败 → 按 vis_exec_find 的原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → r1/r2 = 命中点**竖屏逻辑坐标** + 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`。按住期允许（纯读屏不碰手指，spec §6.2）。
+ * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：失败 → 按 vis_exec_find 的原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → r1/r2 = 命中点**竖屏逻辑坐标** + 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。ms > 0 = 持续查找（T7.4）：vis_exec_find 循环抓帧查到命中或超时（超时 = 未命中）；日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`；持续增量：`vis 找图 <模板> 持续 <ms> 命中 x,y（尝试 N 次 / 耗时 M ms）` / `… 未命中（超时 <ms>，尝试 N 次）`（找色同款去模板名）。按住期允许（纯读屏不碰手指，spec §6.2）。
  */
 static void op_vis_run(const struct vt_step *st)
 {
-    int kind, ox = 0, oy = 0, rc, hit;
+    int kind, ox = 0, oy = 0, rc, hit, n = 0;
     uint64_t dt = 0;
     const char *err = NULL;
 
-    /* kind：找图 = 0；找色按模式（a1 == 1 = 多点）。字段映射照 spec §6.1（a1 = 阈值 / 模式；a2 = 单点打包色容差）。 */
+    /* kind：找图 = 0；找色按模式（a1 == 1 = 多点）。字段映射照 spec §6.1（a1 = 阈值 / 模式；a2 = 单点打包色容差）。
+     * ms（T7.4）：0 = 单次（现状）；>0 = 持续查找超时 —— vis_exec_find 循环抓帧查到命中或超时。 */
     kind = (st->type == OP_STEP_FINDIMAGE) ? 0 : (st->a1 == 1 ? 2 : 1);
-    rc = vis_exec_find(kind, st->ref, st->expr, st->a1, st->a2, &ox, &oy, &dt, &err);
+    rc = vis_exec_find(kind, st->ref, st->expr, st->a1, st->a2, st->ms, &ox, &oy, &dt, &n, &err);
     if (rc == -2) { vt_ops_abort(err); return; }             /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
     hit = (rc == 0);
     if (hit) {
         R.slots[0] = ox; R.slots[1] = oy; R.slot_mask |= 1u | 2u;      /* r1/r2 = 命中点竖屏逻辑坐标（spec §6.2） */
-        if (st->type == OP_STEP_FINDIMAGE)
-            fprintf(stderr, "vtouchd: vis 找图 %s 命中 %d,%d (耗时 %llums)\n",
-                    st->ref, ox, oy, (unsigned long long)dt);
-        else
-            fprintf(stderr, "vtouchd: vis 找色 命中 %d,%d\n", ox, oy);
+        if (st->type == OP_STEP_FINDIMAGE) {
+            if (st->ms > 0)                                  /* 持续（T7.4）：尝试计数 + 全程耗时 */
+                fprintf(stderr, "vtouchd: vis 找图 %s 持续 %d 命中 %d,%d（尝试 %d 次 / 耗时 %llu ms）\n",
+                        st->ref, st->ms, ox, oy, n, (unsigned long long)dt);
+            else
+                fprintf(stderr, "vtouchd: vis 找图 %s 命中 %d,%d (耗时 %llums)\n",
+                        st->ref, ox, oy, (unsigned long long)dt);
+        } else {
+            if (st->ms > 0)
+                fprintf(stderr, "vtouchd: vis 找色 持续 %d 命中 %d,%d（尝试 %d 次 / 耗时 %llu ms）\n",
+                        st->ms, ox, oy, n, (unsigned long long)dt);
+            else
+                fprintf(stderr, "vtouchd: vis 找色 命中 %d,%d\n", ox, oy);
+        }
     } else {
-        if (st->type == OP_STEP_FINDIMAGE)
-            fprintf(stderr, "vtouchd: vis 找图 %s 未命中 (耗时 %llums)\n",
-                    st->ref, (unsigned long long)dt);
-        else
-            fprintf(stderr, "vtouchd: vis 找色 未命中\n");
+        if (st->type == OP_STEP_FINDIMAGE) {
+            if (st->ms > 0)                                  /* 持续超时：不成立档（未命中） */
+                fprintf(stderr, "vtouchd: vis 找图 %s 持续 %d 未命中（超时 %d，尝试 %d 次）\n",
+                        st->ref, st->ms, st->ms, n);
+            else
+                fprintf(stderr, "vtouchd: vis 找图 %s 未命中 (耗时 %llums)\n",
+                        st->ref, (unsigned long long)dt);
+        } else {
+            if (st->ms > 0)
+                fprintf(stderr, "vtouchd: vis 找色 持续 %d 未命中（超时 %d，尝试 %d 次）\n",
+                        st->ms, st->ms, n);
+            else
+                fprintf(stderr, "vtouchd: vis 找色 未命中\n");
+        }
     }
     op_cond_apply(st, hit, st->type == OP_STEP_FINDIMAGE ? "找图" : "找色",
                   st->type == OP_STEP_FINDIMAGE ? st->ref : NULL, "未命中");   /* 四档：成立/不成立（spec §6.2） */
@@ -1245,7 +1297,7 @@ void vt_ops_test_poll(void)
     /* 防御（面板已预检，真漏进来按词表收场，不硬撑）：kind 必须 0/1/2；找图 / 找色多点的 ref 过 vt_id_ok 尺子。 */
     if (kind != 0 && kind != 1 && kind != 2) { err = "视觉错"; rc = -2; }
     else if (kind != 1 && !vt_id_ok(ref, strnlen(ref, sizeof ref))) { err = "模板不存在"; rc = -2; }
-    else rc = vis_exec_find(kind, ref, region, a1, a2, &x, &y, &ms, &err);
+    else rc = vis_exec_find(kind, ref, region, a1, a2, 0, &x, &y, &ms, NULL, &err);   /* 试查恒单次（契约 v9 无 ms 字段） */
 
     if (rc == 0) {
         h->test_x = x; h->test_y = y; h->test_err = VT_TEST_HIT;
@@ -1412,7 +1464,7 @@ static void op_begin_step(void)
         R.deadline = R.t0;
         break;
     }
-    case OP_STEP_FINDIMAGE:                                  /* 找图（v8）：单拍（内部含抓帧等待；spec VISION §6.1） */
+    case OP_STEP_FINDIMAGE:                                  /* 找图（v8；T7.4：ms>0 持续=循环抓帧到命中/超时）：单拍（内部含抓帧等待；spec VISION §6.1） */
     case OP_STEP_FINDCOLOR:                                  /* 找色（同款） */
         op_vis_run(st);                                      /* 命中/未命中 → 槽 + 四档；失败已按码中止 */
         break;

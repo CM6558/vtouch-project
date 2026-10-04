@@ -204,9 +204,13 @@ public class VTouchUI {
     static boolean visWarned;
     static long visWarnT;
     /* 抓帧隐藏面板（2026-10-05 用户需求）：面板在合成画面里，抓帧前把可见图层 alpha 归 0、
-     * 等 SF 提交+合成更新再抓，抓完恢复 —— 帧里不再带面板 UI / 区域。沉降 40ms（120Hz ~5 vsync）。 */
+     * 等 SF 提交+合成更新再抓 —— 帧里不再带面板 UI / 区域。沉降 40ms（120Hz ~5 vsync）。
+     * 自动保持隐藏（T7.4）：抓完不立即恢复 —— 150ms 内又来请求 → 复用隐藏态（跳过隐藏 + 40ms 沉降，
+     * 支撑 ~60fps 持续搜索）；150ms 无请求 → 自动恢复（失败置 needShow 下轮补）。 */
     static final int VIS_HIDE_SETTLE_MS = 40;
+    static final int VIS_KEEP_HIDDEN_MS = 150;
     static boolean visHideLogged;
+    static boolean visKeepLogged;        /* 「复用保持隐藏」首次日志（限频，同 visHideLogged 口径） */
     static void visWarn(String msg, Throwable t) {
         long now0 = System.currentTimeMillis();
         if (!visWarned) {
@@ -441,6 +445,8 @@ public class VTouchUI {
         mainTh = Thread.currentThread();
         boolean vis = true;          /* 逻辑可见性（native 说的要不要显示） */
         boolean needShow = false;    /* 抓帧恢复失败：下一轮补恢复（否则面板会一直不可见） */
+        boolean capHide = false;     /* 抓帧保持隐藏中（T7.4）：窗口到期前不恢复；再抓时复用隐藏态 */
+        long capHideUntil = 0;       /* 保持隐藏窗口截止（墙钟 ms；到期无请求 → 自动恢复） */
         boolean guard = false;       /* 转屏遮挡中：此期间不碰 alpha（由遮挡逻辑管） */
         boolean changedSeen = false; /* 本轮遮挡期间是否真的查到了变化（没有就是伪事件，要尽快恢复） */
         long guardT0 = 0;
@@ -528,6 +534,7 @@ public class VTouchUI {
                     }
                     if (applied) {
                         vis = want;
+                        capHide = false;   /* T7.4：可见性被 ② 改写 —— 保持隐藏窗口作废（下轮抓帧重新走隐藏 + 沉降） */
                         Log.i(TAG, "layer visible=" + want);
                     }
                 }
@@ -580,31 +587,60 @@ public class VTouchUI {
                     }
                 }
             }
-            /* ④ 视觉抓帧（T3.1/T3.2）：核心有请求才抓 —— 轮询是廉价 JNI 读（帧区 req_pending vs req_seq）；
+            /* ④ 视觉抓帧（T3.1/T3.2/T7.4）：核心有请求才抓 —— 轮询是廉价 JNI 读（帧区 req_pending vs req_seq）；
              * 面板侧抓帧（模板/点集/吸色）同轮询、同同步做（capture 4–7ms + 读回，可承受；
              * 挂死由核心 1000ms 超时兜底 / 面板侧 3s 超时提示）。
              * **抓帧前隐藏面板**（2026-10-05）：面板在合成画面里，不隐藏则帧中带面板 UI 与区域；
-             * 可见图层 alpha 归 0 → 沉降 → 抓 → 恢复。转屏遮挡（guard）期间 alpha 归遮挡逻辑管，
-             * 不隐藏直接抓（面板彼时本就不可见/过渡中）。 */
+             * 可见图层 alpha 归 0 → 沉降 → 抓。转屏遮挡（guard）期间 alpha 归遮挡逻辑管，
+             * 不隐藏直接抓（面板彼时本就不可见/过渡中）。
+             * **自动保持隐藏**（T7.4）：抓完不立即恢复 —— 记 capHideUntil = now + 150ms；
+             * 窗内又来请求 → 复用隐藏态（跳过隐藏 + 40ms 沉降，~60fps 搜索）；150ms 无请求 → 自动恢复
+             * （失败置 needShow 下轮补，同旧口径）。单次查找 = 面板隐藏总时长 ~200ms（沉降 + 抓 + 窗口）。 */
+            if (capHide && (guard || System.currentTimeMillis() >= capHideUntil)) {
+                /* 保持隐藏窗口到期（或转屏遮挡接管 alpha）→ 恢复可见（失败置 needShow 下轮补） */
+                if (guard) {
+                    capHide = false;   /* 转屏遮挡接管：alpha 由 guard 收尾逻辑恢复 */
+                } else {
+                    try {
+                        Object tt = txnNew();
+                        txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], vis ? 1.0f : 0.0f);
+                        TXN.getMethod("apply").invoke(tt);
+                        capHide = false;
+                    } catch (Throwable t) {
+                        capHide = false;   /* 交给 needShow 下轮重试（否则面板会一直不可见） */
+                        needShow = true;
+                        long now3 = System.currentTimeMillis();
+                        if (now3 - visWarn > 3000) { visWarn = now3; Log.w(TAG, "vis 抓帧：面板恢复失败（下轮重试）", t); }
+                    }
+                }
+            }
             {
                 int vreq = nativeVisPollRequest();
                 boolean pneed = nativeVisPanelPoll() != 0;
                 if (vreq != 0 || pneed) {
                     boolean hid = false;
                     if (!guard) {
-                        try {
-                            Object tt = txnNew();
-                            txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], 0.0f);
-                            TXN.getMethod("apply").invoke(tt);
-                            hid = true;
-                            if (!visHideLogged) {
-                                visHideLogged = true;
-                                Log.i(TAG, "vis 抓帧：面板已隐藏（沉降 " + VIS_HIDE_SETTLE_MS + "ms）");
+                        if (capHide) {
+                            hid = true;    /* 复用隐藏态：跳过隐藏 + 沉降（保持隐藏窗口内） */
+                            if (!visKeepLogged) {
+                                visKeepLogged = true;
+                                Log.i(TAG, "vis 抓帧：保持隐藏窗口内再抓（跳过沉降 " + VIS_HIDE_SETTLE_MS + "ms）");
                             }
-                            Thread.sleep(VIS_HIDE_SETTLE_MS);
-                        } catch (Throwable t) {
-                            long now2 = System.currentTimeMillis();
-                            if (now2 - visWarn > 3000) { visWarn = now2; Log.w(TAG, "vis 抓帧：面板隐藏失败（照常抓帧）", t); }
+                        } else {
+                            try {
+                                Object tt = txnNew();
+                                txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], 0.0f);
+                                TXN.getMethod("apply").invoke(tt);
+                                hid = true;
+                                if (!visHideLogged) {
+                                    visHideLogged = true;
+                                    Log.i(TAG, "vis 抓帧：面板已隐藏（沉降 " + VIS_HIDE_SETTLE_MS + "ms）");
+                                }
+                                Thread.sleep(VIS_HIDE_SETTLE_MS);
+                            } catch (Throwable t) {
+                                long now2 = System.currentTimeMillis();
+                                if (now2 - visWarn > 3000) { visWarn = now2; Log.w(TAG, "vis 抓帧：面板隐藏失败（照常抓帧）", t); }
+                            }
                         }
                     }
                     try {
@@ -612,15 +648,8 @@ public class VTouchUI {
                         if (pneed) captureToPanel();
                     } finally {
                         if (hid) {
-                            try {
-                                Object tt = txnNew();
-                                txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], vis ? 1.0f : 0.0f);
-                                TXN.getMethod("apply").invoke(tt);
-                            } catch (Throwable t) {
-                                needShow = true;   /* 恢复失败：下轮重试（否则面板会一直不可见） */
-                                long now3 = System.currentTimeMillis();
-                                if (now3 - visWarn > 3000) { visWarn = now3; Log.w(TAG, "vis 抓帧：面板恢复失败（下轮重试）", t); }
-                            }
+                            capHide = true;    /* 抓完不立即恢复：保持隐藏到窗口到期（T7.4） */
+                            capHideUntil = System.currentTimeMillis() + VIS_KEEP_HIDDEN_MS;
                         }
                     }
                 }
