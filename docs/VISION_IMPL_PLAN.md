@@ -134,6 +134,8 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
 
 ## Task 5.1 — 收尾：全量门 + 重打包 + 真机端到端 + 台账（控制方/收尾子代理）
 
+> **用户指令（2026-10-05）：部署优先** —— T3.2 关闭后**立即**构建 + 部署真机（build_ui real / build.sh ui / pack_client+pack_su / ui-deploy all + 冒烟 + /sdcard 重打包），T4.1 与 T5.1 的其余部分（全量门复核 + 真机端到端 a–h + 性能表）排在其后。
+
 - 全量门（real ×3 / 默认 / funcdoc / syntax）+ `pack_client.py`/`pack_su.py` + `ci_check.py` 10/0 + 产物 md5 全表。
 - 真机端到端（**横屏游戏场景优先**；部署走现有 ui-deploy 流）：
   a) 找色单点：已知色块 → 命中 r1/r2 坐标与真实像素对账；b) 多点找色；c) 找图：存模板 → 命中/未命中两档；d) 四档分支（成立跳转 / 不成立中止 = `未命中`）；e) `无画面`（面板停掉跑视觉步骤）；f) `模板不存在`；g) **横屏坐标映射**（横屏命中坐标回竖屏逻辑验证）；h) 性能表实测（spec §9 全表填数）。
