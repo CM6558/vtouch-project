@@ -392,11 +392,11 @@ public class VTouchUI {
         int tick = 0;
         long visWarn = 0, dispWarn = 0;   /* 各失败路径的限频时刻 */
         for (;;) {
-            /* 平时 40ms（可见性判定跟手够了）；**转屏期间收紧到 5ms** ——
-             * 这两段等待（观察窗内查值、遮挡期内等首帧）直接决定"屏幕上看不到面板"的时长：
-             * 原来各要等最多一个 40ms 周期，收紧后各 ≤5ms。 */
+            /* 平时 10ms：视觉抓帧发现延迟 ≤10ms（满足 spec §2.2 ≤16ms / §9 全链 ≤25ms）；
+             * **转屏期间收紧到 5ms 不变** —— 这两段等待（观察窗内查值、遮挡期内等首帧）直接决定
+             * "屏幕上看不到面板"的时长：各等最多一个 10ms 周期，收紧后各 ≤5ms。 */
             boolean tight = guard || guardPending || System.currentTimeMillis() < settleUntil;
-            try { Thread.sleep(tight ? 5 : 40); } catch (Throwable t) {}
+            try { Thread.sleep(tight ? 5 : 10); } catch (Throwable t) {}
             /* 事件回调已经先遮挡 + 按预测朝向排好位置了：接管它的遮挡状态 */
             if (guardPending) {
                 guardPending = false;
