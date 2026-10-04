@@ -40,6 +40,7 @@
      - （Android 16 已删 Java 层 `getPhysicalDisplayToken`/`getInternalDisplayToken`；接口类不可反射加载 —— 只能用 binder 事务。）
   2. `ScreenCapture$DisplayCaptureArgs$Builder(token).build()` → `ScreenCapture.captureDisplay(args)` → `ScreenshotHardwareBuffer`。
   3. **JNI 读回**：`AHardwareBuffer_fromHardwareBuffer` → `AHardwareBuffer_lock(CPU_READ)` → memcpy 进 shm 帧区（跳过 Java 位图路径；实测 Java `copy(ARGB_8888)` 要 60–114ms，弃用）。
+- **抓帧前隐藏面板**（2026-10-05 用户需求）：面板在合成画面里（不隐藏则帧中带面板 UI 与区域）——可见图层 alpha 归 0 → 沉降 40ms → 抓 → 恢复；转屏遮挡期不干预；恢复失败下轮补（`VTouchUI.java` 主循环 ④ 段）。
 - **实测数字**：capture 调用 4–7ms/次（首次预热 25–84ms）；**100 连抓：avg 8.5ms / p95 10ms / 持续 110fps**（竖横屏一致）；帧 = 当前方向原生 RGBA（竖屏 1440×3168 / 横屏 3168×1440，已实测两向）；JNI 读回预计 +5–10ms（【实现期实测】）。
 
 ### 2.2 请求-应答协议（核心 ↔ 面板）
