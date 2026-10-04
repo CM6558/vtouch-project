@@ -28,6 +28,37 @@ static void shm_lock(struct vt_shm_b *b)
 }
 static void shm_unlock(struct vt_shm_b *b) { __sync_lock_release(&b->lock); }
 
+/* ===================== 帧区访问（核心 / 面板两侧共用） ===================== */
+/* 区 D 布局（两侧同一来源）：[帧头（页对齐）][缓冲 0][缓冲 1]；偏移与缓冲尺寸由头部字段记录
+ * （off_frame / off_fbuf / frame_buf_bytes），双方都按头部走、不写死（同全文件纪律）。 */
+
+/**
+ * (vtouch-doc: vt_shm_frame)
+ * @brief 帧区头指针（核心读 / 面板写；区 D 布局见 vt_shm.h 与 spec VISION §3.1）。
+ * @return  帧区头；未建 / 未附着时 NULL。
+ */
+struct vt_shm_frame_hdr *vt_shm_frame(void)
+{
+    struct vt_shm_header *h;
+    if (!S_base) return NULL;
+    h = (struct vt_shm_header *)S_base;
+    return (struct vt_shm_frame_hdr *)((char *)S_base + h->off_frame);
+}
+
+/**
+ * (vtouch-doc: vt_shm_frame_buf)
+ * @brief 第 idx 块帧缓冲基址（idx = 0/1；双缓冲，spec VISION §3.1）。
+ * @param   idx      缓冲下标：0 / 1
+ * @return  缓冲基址；越界或未附着时 NULL。
+ */
+uint8_t *vt_shm_frame_buf(int idx)
+{
+    struct vt_shm_header *h;
+    if (!S_base || idx < 0 || idx > 1) return NULL;
+    h = (struct vt_shm_header *)S_base;
+    return (uint8_t *)S_base + h->off_fbuf + (size_t)idx * h->frame_buf_bytes;
+}
+
 /* ===================== 核心侧 ===================== */
 #ifndef VT_UI_PANEL
 
@@ -47,10 +78,24 @@ int vt_shm_create(void)
     uint32_t size_b = pg_up((uint32_t)sizeof(struct vt_shm_b), p);
     uint32_t off_c = off_b + size_b;
     uint32_t size_c = pg_up((uint32_t)sizeof(struct vt_shm_c), p);
-    uint32_t total = off_c + size_c;
+    uint32_t off_frame = off_c + size_c;                 /* 区 D：帧区（帧头 + 双缓冲） */
+    uint32_t fhdr = pg_up((uint32_t)sizeof(struct vt_shm_frame_hdr), p);
+    uint64_t fbuf64 = (uint64_t)g.logical_width * (uint64_t)g.logical_height * 4u;
+    uint32_t fbuf_bytes, size_frame, total;
     struct vt_shm_header *h;
+    struct vt_shm_frame_hdr *fh;
     void *base;
     int fd;
+
+    /* 帧缓冲 = 逻辑宽 × 逻辑高 × 4（两方向同字节数；spec VISION §3.1）。尺寸防御：逻辑尺寸没拿到 /
+     * 荒唐大（uint32 偏移会回绕）就不建 —— 正常逻辑尺寸远小于上限（本机 1440×3168 → 18.2MB/块）。 */
+    if (fbuf64 == 0 || fbuf64 > 0x40000000ull) {
+        fprintf(stderr, "vtouchd: 逻辑尺寸异常（%dx%d）→ 共享内存不建\n", g.logical_width, g.logical_height);
+        return -1;
+    }
+    fbuf_bytes = (uint32_t)fbuf64;
+    size_frame = fhdr + 2u * fbuf_bytes;
+    total = off_frame + size_frame;
 
     fd = (int)syscall(SYS_memfd_create, "vtouch-shm", 0u);
     if (fd < 0) { fprintf(stderr, "vtouchd: memfd_create 失败: %s\n", strerror(errno)); return -1; }
@@ -70,8 +115,14 @@ int vt_shm_create(void)
     h->off_state = off_state; h->size_state = size_state;
     h->off_b = off_b; h->size_b = size_b;
     h->off_c = off_c; h->size_c = size_c;
+    h->off_frame = off_frame; h->size_frame = size_frame;
+    h->off_fbuf = off_frame + fhdr; h->frame_buf_bytes = fbuf_bytes;
     h->logical_w = g.logical_width; h->logical_h = g.logical_height;
     h->core_pid = (int32_t)getpid();
+    /* 帧头常量（核心建）：magic/version 标明「这一区已就绪」；其余字段由面板抓帧时写。 */
+    fh = (struct vt_shm_frame_hdr *)((char *)base + off_frame);
+    fh->magic = VT_FRAME_MAGIC;
+    fh->version = VT_FRAME_VER;
 
     S_state = (struct vt_state *)((char *)base + off_state);
     S_b = (struct vt_shm_b *)((char *)base + off_b);
@@ -83,8 +134,8 @@ int vt_shm_create(void)
     memcpy(S_state, g_ptr, sizeof(struct vt_state));
     g_ptr = S_state;
 
-    fprintf(stderr, "vtouchd: 共享内存就绪 fd=%d total=%u state@%u(%u) b@%u c@%u\n",
-            fd, total, off_state, size_state, off_b, off_c);
+    fprintf(stderr, "vtouchd: 共享内存就绪 fd=%d total=%u state@%u(%u) b@%u c@%u frame@%u(%u)\n",
+            fd, total, off_state, size_state, off_b, off_c, off_frame, size_frame);
     return fd;                                  /* 返回 fd：fork 时原样传给面板子进程 */
 }
 
@@ -114,6 +165,18 @@ uint32_t vt_shm_ui_hb(void)
     if (!S_base) return 0;
     h = (struct vt_shm_header *)S_base;
     return h->ui_hb;
+}
+
+/**
+ * (vtouch-doc: vt_shm_panel_rot)
+ * @brief 面板上报的当前显示方向（0..3；视觉帧复用/换算校验用）。
+ * @return  当前方向；-1 = 拿不到（没建共享内存）。
+ * @note    面板每帧经 publish_rect 上报（g_rot）；与帧头里的 rotation（抓帧时方向）是两回事。
+ */
+int vt_shm_panel_rot(void)
+{
+    if (!S_b) return -1;
+    return S_b->rot;                     /* 面板每帧经 publish_rect 上报的当前显示方向（0..3） */
 }
 
 int vt_shm_stop_req(void)
@@ -281,7 +344,8 @@ int vt_shm_attach(int fd)
                 h->magic, h->version, VT_SHM_MAGIC, VT_SHM_VERSION);
         munmap(base, total); return -1;
     }
-    if (h->off_state + h->size_state > total || h->off_b + h->size_b > total || h->off_c + h->size_c > total) {
+    if (h->off_state + h->size_state > total || h->off_b + h->size_b > total ||
+        h->off_c + h->size_c > total || h->off_frame + h->size_frame > total) {
         fprintf(stderr, "vtouch-ui: 共享内存偏移越界（头被写坏了）\n");
         munmap(base, total); return -1;
     }
@@ -304,8 +368,8 @@ int vt_shm_attach(int fd)
         munmap(base, total); S_b = NULL; return -1;
     }
     g_ptr = S_state;                       /* 只读辅助函数（raw_to_logical 等）直接用 g */
-    fprintf(stderr, "vtouch-ui: 共享内存附着成功 total=%u state@%u b@%u c@%u 逻辑=%dx%d core_pid=%d\n",
-            total, h->off_state, h->off_b, h->off_c, h->logical_w, h->logical_h, h->core_pid);
+    fprintf(stderr, "vtouch-ui: 共享内存附着成功 total=%u state@%u b@%u c@%u frame@%u 逻辑=%dx%d core_pid=%d\n",
+            total, h->off_state, h->off_b, h->off_c, h->off_frame, h->logical_w, h->logical_h, h->core_pid);
     return 0;
 }
 

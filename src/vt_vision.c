@@ -634,7 +634,7 @@ int vt_vis_find_color_multi(int rx, int ry, int rw, int rh, uint32_t base, int b
  * @param   thresh   阈值（0..255；平均绝对差上限）
  * @param   ox,oy    命中输出（帧坐标；未命中不写）
  * @return  VT_VIS_OK（命中）；VT_VIS_NO_MATCH；VT_VIS_BAD（未准备 / 参数非法）。
- * @note    比较用 64 位累加：SAD ≤ thresh×tw×th（含等号）。模板任一边 ≥ 8 走金字塔（1/4 粗筛 → 1/2 定位 → 全分辨率精修），否则全分辨率直搜；SAD 行级早退；命中即停。金字塔为启发式（细小纹理 / 极限边缘允许漏检；不命中不回退直搜）。
+ * @note    比较用 64 位累加：SAD ≤ thresh×tw×th（含等号）。模板两边都 ≥ 8 走金字塔（1/4 粗筛 → 1/2 定位 → 全分辨率精修），任一边 < 8 走全分辨率直搜；SAD 行级早退；命中即停。金字塔为启发式（细小纹理 / 极限边缘允许漏检；不命中不回退直搜）。
  */
 int vt_vis_find_image(int rx, int ry, int rw, int rh, const uint8_t *tmpl, int tw, int th,
                       int thresh, int *ox, int *oy)

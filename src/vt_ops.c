@@ -27,6 +27,7 @@
 
 #include <sys/eventfd.h>     /* 执行器的触发唤醒 fd（eventfd：写一下就叫醒主循环） */
 #include <math.h>            /* llround：槽引用取整（v5；spec §5.3） */
+#include "vt_vision.h"       /* 视觉匹配引擎（找图/找色 + 坐标映射；spec VISION §4/§6.1） */
 
 /* 允许变量的数值字段判据（op_valid v2；v5 扩 -9..-1）：字段 = 字面值 v ∈ [lo, hi]，或负数编码引用
  * -9..-1（-1..-5 = 触发变量 OP_VAR_TDX..TMS、-6..-9 = 结果槽 OP_VAR_R1..R4）。
@@ -41,9 +42,9 @@ static int op_num_ok(int v, int lo, int hi)
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4）：名字与区域 id 同一把尺子
- * （vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..9
- * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算）。
+ * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1）：名字与区域 id 同一把尺子
+ * （vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..11
+ * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色）。
  * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
  * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
  * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -9..-1（-1..-5 = 触发变量、
@@ -54,8 +55,14 @@ static int op_num_ok(int v, int lo, int hi)
  * ref 长度 1..REGION_ID_MAX 且过 vt_id_ok —— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
  * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
  * 计算步（9，v5）：a1 ∈ 1..4（槽号）；expr 非空、≤63、且过 vt_expr_check（不过 → 拒收 `表达式错: <why>`）；
- * 防御：a2..a4/ms/j1/j2 必须 0、ref 必须空。**其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——
- * 表达式只属于计算步，别让它静默挂在别的步上（spec V5 §4）。
+ * 防御：a2..a4/ms/j1/j2 必须 0、ref 必须空。
+ * 视觉步（10/11，v8）：字段映射照 spec VISION §6.1 定稿 —— 找图 ref=模板名（必填）、找色 ref=点集名
+ * （多点必填、单点必空）、expr=区域名（空或 vt_id_ok 尺子；存在性不校验，运行时按 `区域不存在` 收场）、
+ * 找图 a1=阈值 0..255、找色 a1=模式 0/1 且单点 a2=(颜色<<8)|容差（按无符号解读：打包域 = 全部 32 位，
+ * 颜色高位使 int 为负 —— **不拒负值**，拒了会误杀纯红 0xFF0000 等）、多点 a2=0、a3/a4=不成立/成立档位（0..3）、
+ * ms=0、j1/j2=该侧跳转目标（域同条件步）。
+ * **其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——表达式只属于计算步、区域名只属于视觉步，
+ * 别让它们静默挂在别的步上（spec V5 §4 / VISION §6.1）。
  * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
@@ -83,8 +90,9 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     }
     for (i = 0; i < op->step_count; i++) {
         const struct vt_step *st = &op->steps[i];
-        /* v5 防御：表达式只属于计算步 —— 其余类型带 expr 一律拒收 `表达式错`（spec V5 §4）。 */
-        if (st->type != OP_STEP_CALC && st->expr[0] != 0) {
+        /* v5/v8 防御：表达式只属于计算步、区域名只属于视觉步 —— 其余类型带 expr 一律拒收 `表达式错`。 */
+        if (st->type != OP_STEP_CALC && st->type != OP_STEP_FINDIMAGE &&
+            st->type != OP_STEP_FINDCOLOR && st->expr[0] != 0) {
             snprintf(why, whycap, "表达式错");
             return 0;
         }
@@ -204,6 +212,99 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             break;
         }
+        case OP_STEP_FINDIMAGE: {                /* 找图（v8）：ref = 模板名（必填）；expr = 区域名（空 = 全屏）；
+                                                  * a1 = 阈值 0..255；a2/ms = 0；a3/a4 = 不成立/成立档位；
+                                                  * j1/j2 = 该侧跳转目标（域同条件步）。spec VISION §6.1 */
+            if (st->a1 < 0 || st->a1 > 255) {
+                snprintf(why, whycap, "第 %d 步阈值越界（0..255）", i + 1);
+                return 0;
+            }
+            if (st->a2 != 0 || st->ms != 0) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            if (st->a3 < OP_COND_ABORT || st->a3 > OP_COND_JUMP ||
+                st->a4 < OP_COND_ABORT || st->a4 > OP_COND_JUMP) {
+                snprintf(why, whycap, "第 %d 步档位非法", i + 1);
+                return 0;
+            }
+            if (st->a4 == OP_COND_JUMP && (st->j1 < 0 || st->j1 > op->step_count)) {
+                snprintf(why, whycap, "第 %d 步跳转目标越界", i + 1);
+                return 0;
+            }
+            if (st->a3 == OP_COND_JUMP && (st->j2 < 0 || st->j2 > op->step_count)) {
+                snprintf(why, whycap, "第 %d 步跳转目标越界", i + 1);
+                return 0;
+            }
+            n = strnlen(st->ref, sizeof st->ref);
+            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步模板引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+                return 0;
+            }
+            n = strnlen(st->expr, sizeof st->expr);
+            if (n > 0 && (n > REGION_ID_MAX || !vt_id_ok(st->expr, n))) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+                return 0;
+            }
+            break;
+        }
+        case OP_STEP_FINDCOLOR: {                /* 找色（v8）：a1 = 模式 0 单点 / 1 多点；ref = 点集名（多点必填、
+                                                  * 单点必空）；expr = 区域名；单点 a2 = (颜色<<8)|容差（两段：
+                                                  * 颜色 24 位 / 容差 8 位；按无符号解读 —— 颜色高位使 int 为负，
+                                                  * 不拒负值）；多点 a2 = 0；a3/a4 = 档位；ms = 0；j1/j2 = 目标 */
+            uint32_t packed;
+            if (st->a1 != 0 && st->a1 != 1) {
+                snprintf(why, whycap, "第 %d 步模式非法（0/1）", i + 1);
+                return 0;
+            }
+            if (st->ms != 0) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            if (st->a3 < OP_COND_ABORT || st->a3 > OP_COND_JUMP ||
+                st->a4 < OP_COND_ABORT || st->a4 > OP_COND_JUMP) {
+                snprintf(why, whycap, "第 %d 步档位非法", i + 1);
+                return 0;
+            }
+            if (st->a4 == OP_COND_JUMP && (st->j1 < 0 || st->j1 > op->step_count)) {
+                snprintf(why, whycap, "第 %d 步跳转目标越界", i + 1);
+                return 0;
+            }
+            if (st->a3 == OP_COND_JUMP && (st->j2 < 0 || st->j2 > op->step_count)) {
+                snprintf(why, whycap, "第 %d 步跳转目标越界", i + 1);
+                return 0;
+            }
+            n = strnlen(st->ref, sizeof st->ref);
+            if (st->a1 == 1) {                   /* 多点：点集名必填 + a2 必须 0（基准色/容差/点表在 .pts） */
+                if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
+                    snprintf(why, whycap, "第 %d 步点集引用非法（多点必填；[A-Za-z0-9_-]、1..15）", i + 1);
+                    return 0;
+                }
+                if (st->a2 != 0) {
+                    snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                    return 0;
+                }
+            } else {                             /* 单点：点集名必须空；a2 = (颜色<<8)|容差 —— 两段校验：
+                                                  * 颜色段 = (uint32)a2>>8 ∈ 0..0xFFFFFF、容差段 = a2&0xFF ∈ 0..255。
+                                                  * 打包填满整个 32 位域 ⇒ 两段各自按无符号解读恒在域内（本检查是
+                                                  * 形式化留痕；实现口径 = 接受全部 32 位，含 int 为负的高颜色值）。 */
+                if (n != 0) {
+                    snprintf(why, whycap, "第 %d 步点集引用必须为空（单点）", i + 1);
+                    return 0;
+                }
+                packed = (uint32_t)st->a2;
+                if ((packed >> 8) > 0xffffffu || (packed & 0xffu) > 0xffu) {
+                    snprintf(why, whycap, "第 %d 步打包值非法", i + 1);
+                    return 0;
+                }
+            }
+            n = strnlen(st->expr, sizeof st->expr);
+            if (n > 0 && (n > REGION_ID_MAX || !vt_id_ok(st->expr, n))) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+                return 0;
+            }
+            break;
+        }
         default:
             snprintf(why, whycap, "第 %d 步类型非法", i + 1);
             return 0;
@@ -232,7 +333,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -342,8 +443,9 @@ void vt_ops_clear(void)
  *              安全截断，不存裸指针）；帧关后的第一次 tick 在解冻点补执行（见 vt_ops_tick）；
  *              起跑 / 完成 / 中止正常路径三处清零，不泄漏到下一次运行
  *   held    按下步的持有态（1 = 有按下步的手指还按着，等弹起步或收尾释放；spec §2.2）：
- *           按住期只允许 等待 / 弹起（及条件步）—— 点按 / 滑动 / 按下在步入口统一中止 `槽占用`；
- *           收尾（正常完成 / 中止）还按着 → 自动松开 + `op 收尾 松开`；起跑 / 完成 / 中止三处清零
+ *           按住期只允许 等待 / 弹起（及条件步 / 跳转 / 计算 / 视觉步）—— 点按 / 滑动 / 按下在步入口
+ *           统一中止 `槽占用`；收尾（正常完成 / 中止）还按着 → 自动松开 + `op 收尾 松开`；
+ *           起跑 / 完成 / 中止三处清零
  * 全部只有主线程碰（编辑邮箱在 poll_step 里吃、执行器也在主线程跑）—— 不需要锁。
  */
 static struct {
@@ -639,17 +741,21 @@ static void op_jump_apply(int target)
 /**
  * (vtouch-doc: op_cond_apply)
  * @brief 条件判定收口（两侧四档）：按侧记日志，再执行 继续 / 跳过 / 跳转 / 中止。
- * @param   st       当前条件步（读本侧档位与跳转目标）
+ * @param   st       当前条件 / 视觉步（读本侧档位与跳转目标）
  * @param   hit      判定结果：1 = 成立、0 = 不成立
- * @param   word     日志词：`区域判断` / `开关判断`
- * @note    **静态**，只在执行器内用（区域判断 / 开关判断两处共用：两侧四档一处实现防两处漂移）。档位与目标取本侧（成立侧 = a4/j1、不成立侧 = a3/j2）：继续（单拍结束，下一拍进下一步）；跳过（步序额外 +1：跳过的那一步不执行也不求值；越过末步 = 正常完成）；跳转（0 = 结束 → op_finish；其余交 op_jump_apply 过守卫后落位）；中止（不成立侧 `条件不成立` 承 v2 / 成立侧 `条件中止`）。日志（spec §1.3）：不成立侧恒打、成立侧档位 ≠ 继续才打；不成立行先于中止行。调用点都在 region_lock 之外（spec §3.2 锁纪律：持锁判定、解锁后记日志）。
+ * @param   word     日志词：`区域判断` / `开关判断` / `找图` / `找色`
+ * @param   arg      日志第二词：条件步 / 找图 = 区域 / 模板名；找色 = NULL（不打印）
+ * @param   no_word  不成立侧中止词：条件步 = `条件不成立`；视觉步 = `未命中`
+ * @note    **静态**，只在执行器内用（区域判断 / 开关判断 / 找图 / 找色共用：两侧四档一处实现防两处漂移）。档位与目标取本侧（成立侧 = a4/j1、不成立侧 = a3/j2）：继续（单拍结束，下一拍进下一步）；跳过（步序额外 +1：跳过的那一步不执行也不求值；越过末步 = 正常完成）；跳转（0 = 结束 → op_finish；其余交 op_jump_apply 过守卫后落位）；中止（不成立侧 = no_word 参数、成立侧 `条件中止`）。日志（spec §1.3 / VISION §8）：不成立侧恒打、成立侧档位 ≠ 继续才打；不成立行先于中止行。调用点都在 region_lock 之外（spec §3.2 锁纪律：持锁判定、解锁后记日志）。
  */
-static void op_cond_apply(const struct vt_step *st, int hit, const char *word)
+static void op_cond_apply(const struct vt_step *st, int hit, const char *word,
+                          const char *arg, const char *no_word)
 {
     int tier   = hit ? st->a4 : st->a3;                      /* 本侧档位（成立侧 = a4 / 不成立侧 = a3） */
     int target = hit ? st->j1 : st->j2;                      /* 本侧跳转目标（仅档位 = 跳转时有意义） */
 
-    /* 日志（spec §1.3）：不成立侧恒打（四档全列）；成立侧档位 ≠ 继续才打（三档）。 */
+    /* 日志（spec §1.3）：不成立侧恒打（四档全列）；成立侧档位 ≠ 继续才打（三档）。
+     * 第二词（arg）只有条件步与找图有（区域 / 模板名）；找色没有 —— 不打（spec VISION §8 逐字）。 */
     if (!hit || tier != OP_COND_CONT) {
         char act[32];
         if (tier == OP_COND_JUMP && target == 0) snprintf(act, sizeof act, "跳到结束");
@@ -657,7 +763,10 @@ static void op_cond_apply(const struct vt_step *st, int hit, const char *word)
         else if (tier == OP_COND_SKIP)           snprintf(act, sizeof act, "跳过下一步");
         else if (tier == OP_COND_CONT)           snprintf(act, sizeof act, "继续下一步");   /* 只可能到不成立侧（成立侧上面已滤掉） */
         else                                     snprintf(act, sizeof act, "中止");
-        fprintf(stderr, "vtouchd: op 条件 %s %s %s → %s\n", word, st->ref, hit ? "成立" : "不成立", act);
+        if (arg && arg[0])
+            fprintf(stderr, "vtouchd: op 条件 %s %s %s → %s\n", word, arg, hit ? "成立" : "不成立", act);
+        else
+            fprintf(stderr, "vtouchd: op 条件 %s %s → %s\n", word, hit ? "成立" : "不成立", act);
     }
     switch (tier) {
     case OP_COND_CONT:                                       /* 继续下一步：单拍动作到此为止（现状） */
@@ -673,23 +782,384 @@ static void op_cond_apply(const struct vt_step *st, int hit, const char *word)
         op_jump_apply(target);
         break;
     default:                                                 /* OP_COND_ABORT：不成立行已先记；中止走既有机制（spec §3.3） */
-        vt_ops_abort(hit ? "条件中止" : "条件不成立");         /* 成立侧新词 `条件中止`；不成立侧承 v2 `条件不成立` */
+        vt_ops_abort(hit ? "条件中止" : no_word);             /* 成立侧新词 `条件中止`；不成立侧按调用方给词（条件步 `条件不成立` / 视觉步 `未命中`） */
         break;
     }
 }
 
-/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算）；点按 / 滑动 / 按下 →
+/* ===================== 视觉步骤（找图 / 找色；spec VISION §6 / §8） ===================== */
+
+/* 一帧多步复用的缓存：上次成功帧的（时间 / 方向 / 缓冲 / 几何）。now-ts < VT_VIS_REUSE_MS 且
+ * 帧头没被换过（buf_idx 同）、方向一致（与面板上报的当前方向相同）→ 复用不重抓（spec §9）。
+ * 全部只有主线程碰（执行器在主循环里跑）—— 不需要锁。 */
+struct op_vis_frame {
+    const uint8_t *rgba;             /* 帧缓冲（直指 shm；原地匹配、不拷贝，spec §3.2） */
+    int w, h, stride;                /* 帧尺寸 / 行跨距（字节） */
+    int rot;                         /* 抓帧时方向（0..3） */
+    uint64_t ts_ns;                  /* 抓帧完成时刻（单调钟；复用窗口判据） */
+};
+static uint32_t S_vis_req;           /* 抓帧请求序号（单调递增；写进 req_pending） */
+static int      S_vis_have;          /* 有缓存帧（复用候选） */
+static int      S_vis_buf;           /* 缓存帧所在缓冲（0/1） */
+static struct op_vis_frame S_vis_f;  /* 缓存帧 */
+
+/**
+ * (vtouch-doc: op_vis_panel_dead)
+ * @brief 「面板不在」判据：ui_hb 冻结 ≥3s（或从未有过心跳）= 面板不在。
+ * @return  1 = 面板不在；0 = 心跳在动。
+ * @note    **静态**，只在执行器内用；判据同 vt_panel.c 看门狗（单调钟 3s，不是拍数；不扩 vt_panel 接口）。从未有过心跳（ui_hb == 0）直接算不在：面板没起来过，抓帧无从谈起 —— 视觉步立即 `无画面`，不空等。
+ */
+static int op_vis_panel_dead(void)
+{
+    static uint32_t last_hb;
+    static uint64_t hb_at_ms;
+    uint32_t hb = vt_shm_ui_hb();
+    uint64_t now = op_now_ms();
+
+    if (hb == 0) return 1;                                   /* 从未有过面板心跳：面板没起来过 */
+    if (hb != last_hb) { last_hb = hb; hb_at_ms = now; return 0; }
+    return now - hb_at_ms >= VT_VIS_PANEL_STALL_MS;
+}
+
+/**
+ * (vtouch-doc: op_vis_capture)
+ * @brief 取帧：复用缓存（≤50ms / 帧未变 / 方向一致）或发抓帧请求并轮询等待完成。
+ * @param   fr       输出：帧句柄（rgba 直指 shm 缓冲；调用方在使用期间保证不再发新请求）
+ * @return  0 成功；-1 失败（已按码中止：`无画面` / `视觉错`）。
+ * @note    **静态**，只在执行器内用。协议（spec §2.2/§3.1）：写 req_pending = ++请求序号 → 轮询等 req_seq == 该序号（usleep(1000)，总超时 VT_VIS_CAPTURE_TIMEOUT_MS）→ 校验 flags 无错 + 尺寸合法 → 按 seqlock 读一次稳定帧（读 seq → 读字段 → 再读 seq；奇/变 → 重试至超时）。面板不在（ui_hb 冻结 ≥3s）→ 立即 `无画面`；超时 / flags 报错 → `无画面`；头损坏 / 尺寸非法 → `视觉错`。TRACE（VTOUCH_OPS_TRACE=1）：`vis 抓帧 请求 → 完成 <ms>`。
+ */
+static int op_vis_capture(struct op_vis_frame *fr)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    uint64_t t0, t1, fbuf = (uint64_t)g.logical_width * (uint64_t)g.logical_height * 4u;
+    uint32_t req, s1, s2, buf, w, hh, stride, rot;
+    uint64_t ts;
+
+    if (!h) { vt_ops_abort("视觉错"); return -1; }
+
+    /* 一帧多步复用（spec §9）：≤50ms、帧仍有效、缓冲没被换过、方向一致（与面板上报的当前方向相同）。 */
+    if (S_vis_have &&
+        now_ns() - S_vis_f.ts_ns < (uint64_t)VT_VIS_REUSE_MS * 1000000ull &&
+        (h->flags & VT_FRAME_F_VALID) && !(h->flags & VT_FRAME_F_ERR) &&
+        h->buf_idx == (uint32_t)S_vis_buf && h->rotation == (uint32_t)S_vis_f.rot &&
+        vt_shm_panel_rot() == S_vis_f.rot) {
+        *fr = S_vis_f;
+        return 0;
+    }
+
+    if (op_vis_panel_dead()) { vt_ops_abort("无画面"); return -1; }
+    req = ++S_vis_req;                                       /* 单调请求序号（0 留给「无请求」初值） */
+    __atomic_store_n(&h->req_pending, req, __ATOMIC_RELEASE);
+    t0 = now_ns();
+    for (;;) {                                               /* 完成判定 = req_seq == 请求序号（最后写） */
+        if (__atomic_load_n(&h->req_seq, __ATOMIC_ACQUIRE) == req) break;
+        if (op_vis_panel_dead()) { vt_ops_abort("无画面"); return -1; }
+        if (now_ns() - t0 >= (uint64_t)VT_VIS_CAPTURE_TIMEOUT_MS * 1000000ull) {
+            vt_ops_abort("无画面");
+            return -1;
+        }
+        usleep(1000);
+    }
+    t1 = now_ns();
+    /* 抓帧失败（flags bit1）/ 没有有效帧（bit0 未置）→ `无画面`（spec §6.2：抓帧失败/超时/面板不在）。
+     * 只看完成之后的 flags：等待循环里不看 —— 上一发的失败码可能还挂着，等 req_seq 到了才可信
+     * （面板每次完成时两位一起重写，见 vt_shm.h 的 flags 契约）。 */
+    if (!(h->flags & VT_FRAME_F_VALID) || (h->flags & VT_FRAME_F_ERR)) {
+        vt_ops_abort("无画面");
+        return -1;
+    }
+    /* 按 seqlock 读一次稳定帧头（读 seq → 读字段 → 再读 seq；奇/变 → 重试至超时，spec §3.2）。
+     * 数据缓冲不拷贝：完成观察之后到下一次请求之前面板不会碰它（双缓冲 + 单请求在途），
+     * 直接原地匹配（spec §3.2「或直接原地匹配，匹配只读不改帧」）。 */
+    for (;;) {
+        s1 = __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE);
+        if (!(s1 & 1u)) {                                    /* 偶 = 稳定；奇 = 面板写入中 → 重试 */
+            buf = h->buf_idx;
+            w = h->width; hh = h->height; stride = h->stride; rot = h->rotation;
+            ts = h->ts_ns;
+            s2 = __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE);
+            if (s1 == s2) break;                             /* 读期间没变过：这份帧头可信 */
+        }
+        if (now_ns() - t0 >= (uint64_t)VT_VIS_CAPTURE_TIMEOUT_MS * 1000000ull) {
+            vt_ops_abort("无画面");
+            return -1;
+        }
+        usleep(1000);
+    }
+    /* 尺寸合法（spec §6.1「校验」；越界按「缓冲损坏 / 尺寸超限」中止 `视觉错`）。
+     * 帧按 1:1 口径（spec §3.3：物理 vs 逻辑通常 1:1）；帧字节跨度必须装进缓冲（两方向同字节数）。 */
+    if (w == 0 || hh == 0 || w > 4096 || hh > 4096 ||
+        stride < w * 4u || (uint64_t)stride * (hh - 1u) + (uint64_t)w * 4u > fbuf ||
+        buf > 1u || rot > 3u) {
+        vt_ops_abort("视觉错");
+        return -1;
+    }
+    fr->rgba = vt_shm_frame_buf((int)buf);
+    if (!fr->rgba) { vt_ops_abort("视觉错"); return -1; }
+    fr->w = (int)w; fr->h = (int)hh; fr->stride = (int)stride;
+    fr->rot = (int)rot; fr->ts_ns = ts;
+    S_vis_f = *fr; S_vis_buf = (int)buf; S_vis_have = 1;
+    if (op_trace_on())                                       /* TRACE：抓帧全链耗时（L9 默认零输出） */
+        fprintf(stderr, "vtouchd: vis 抓帧 请求 → 完成 %llums\n",
+                (unsigned long long)((t1 - t0) / 1000000ull));
+    return 0;
+}
+
+/**
+ * (vtouch-doc: op_vis_region)
+ * @brief 区域换算：expr 区域名 → 区域几何 → 逻辑矩形 → 帧矩形（空 = 全屏）。
+ * @param   st       当前视觉步（读 expr）
+ * @param   fr       帧句柄（读 rot / w / h）
+ * @param   rx,ry,rw,rh 输出帧矩形（含端点；空 expr = 全屏）
+ * @return  0 成功；-1 失败（已按码中止：`区域不存在`）。
+ * @note    **静态**，只在执行器内用。区域几何：矩形取两角归一（含端点）、圆取外接矩形（cx±r）；停用不影响（这里是「搜索范围」语义，不是判定）；锁纪律同条件步（持 region_lock 取几何、解锁后再换算）。
+ */
+static int op_vis_region(const struct vt_step *st, const struct op_vis_frame *fr,
+                         int *rx, int *ry, int *rw, int *rh)
+{
+    int lx, ly, lw, lh;
+    int i, found = 0;
+
+    *rx = 0; *ry = 0; *rw = fr->w; *rh = fr->h;              /* 空 = 全屏（帧坐标） */
+    if (!st->expr[0]) return 0;
+    pthread_mutex_lock(&g.region_lock);                      /* 锁纪律同条件步：持锁取几何、解锁后再换算 */
+    for (i = 0; i < g.region_count; i++) {
+        const struct region *rg = &g.regions[i];
+        if (strcmp(rg->id, st->expr) != 0) continue;
+        found = 1;
+        if (rg->type == 1) {                                 /* 圆：外接矩形（含端点） */
+            lx = rg->a1 - rg->a3; ly = rg->a2 - rg->a3;
+            lw = 2 * rg->a3 + 1; lh = 2 * rg->a3 + 1;
+        } else {                                             /* 矩形：两角归一（含端点；区域允许任意两角顺序） */
+            int x1 = rg->a1, y1 = rg->a2, x2 = rg->a3, y2 = rg->a4;
+            lx = x1 < x2 ? x1 : x2; ly = y1 < y2 ? y1 : y2;
+            lw = (x1 < x2 ? x2 - x1 : x1 - x2) + 1;
+            lh = (y1 < y2 ? y2 - y1 : y1 - y2) + 1;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    if (!found) { vt_ops_abort("区域不存在"); return -1; }    /* 悬空引用：运行时报（同条件步先例） */
+    vt_vis_logic_rect_to_frame(fr->rot, fr->w, fr->h, lx, ly, lw, lh, rx, ry, rw, rh);
+    return 0;
+}
+
+/**
+ * (vtouch-doc: op_vis_read_tmpl)
+ * @brief 读模板文件（.tmpl，小端）："VTM1" + ver=1 + w/h + rot + res + 灰度。
+ * @param   name     模板名（vt_id_ok 尺子；调用方已校验）
+ * @param   gray     输出：灰度缓冲（malloc；调用方 free）
+ * @param   tw,th    输出：模板尺寸
+ * @param   trot     输出：模板抓取方向（0..3）
+ * @return  0 成功；-1 文件问题（调用方中止 `模板不存在`）；-2 内存失败（调用方中止 `视觉错`）。
+ * @note    **静态**，只在执行器内用。目录 /data/local/vtouch-runtime/templates/（spec §5.1）；格式逐字照实施计划「模板/点集文件格式」（T2.1 读端）。
+ */
+static int op_vis_read_tmpl(const char *name, uint8_t **gray, int *tw, int *th, int *trot)
+{
+    char path[128];
+    unsigned char hdr[14];
+    uint8_t *buf;
+    size_t n;
+    uint32_t ver;
+    int w, h, rot;
+    FILE *f;
+
+    snprintf(path, sizeof path, "%s/%s.tmpl", VT_VIS_TMPL_DIR, name);
+    f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) { fclose(f); return -1; }
+    if (hdr[0] != 'V' || hdr[1] != 'T' || hdr[2] != 'M' || hdr[3] != '1') { fclose(f); return -1; }
+    ver = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+    if (ver != 1u) { fclose(f); return -1; }
+    w = (int)hdr[8] | ((int)hdr[9] << 8);
+    h = (int)hdr[10] | ((int)hdr[11] << 8);
+    rot = hdr[12];
+    /* hdr[13] = res（保留位；本版恒 0，不校验） */
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || rot > 3) { fclose(f); return -1; }
+    n = (size_t)w * (size_t)h;
+    buf = malloc(n);
+    if (!buf) { fclose(f); return -2; }                      /* 内存失败与文件问题分开（中止词不同） */
+    if (fread(buf, 1, n, f) != n) { free(buf); fclose(f); return -1; }
+    fclose(f);
+    *gray = buf; *tw = w; *th = h; *trot = rot;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: op_vis_read_pts)
+ * @brief 读点集文件（.pts，小端）："VTP1" + ver=1 + n + res + base_rgb + base_tol + n×{dx,dy,rgb,tol}。
+ * @param   name     点集名
+ * @param   base     输出：基准色
+ * @param   base_tol 输出：基准容差（0..255）
+ * @param   pts      输出：参考点数组（容量 ≥ VT_VIS_PTS_MAX）
+ * @param   n        输出：参考点个数（1..16）
+ * @return  0 成功；-1 失败（缺文件 / 格式坏 —— 调用方中止 `模板不存在`）。
+ * @note    **静态**，只在执行器内用；n / 容差 / 偏移越界都按格式坏拒收（引擎的域校验兜底相同，这里先拒 = 明确的 `模板不存在`）。
+ */
+static int op_vis_read_pts(const char *name, uint32_t *base, int *base_tol,
+                           struct vt_vis_pt *pts, int *n)
+{
+    char path[128];
+    unsigned char hdr[18];
+    FILE *f;
+    uint32_t ver, b;
+    int cnt, i, bt;
+
+    snprintf(path, sizeof path, "%s/%s.pts", VT_VIS_TMPL_DIR, name);
+    f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) { fclose(f); return -1; }
+    if (hdr[0] != 'V' || hdr[1] != 'T' || hdr[2] != 'P' || hdr[3] != '1') { fclose(f); return -1; }
+    ver = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+    if (ver != 1u) { fclose(f); return -1; }
+    cnt = (int)hdr[8] | ((int)hdr[9] << 8);
+    /* hdr[10..11] = res（保留位；不校验） */
+    b = (uint32_t)hdr[12] | ((uint32_t)hdr[13] << 8) | ((uint32_t)hdr[14] << 16) | ((uint32_t)hdr[15] << 24);
+    bt = (int)hdr[16] | ((int)hdr[17] << 8);
+    if (cnt < 1 || cnt > VT_VIS_PTS_MAX || bt > 255) { fclose(f); return -1; }
+    for (i = 0; i < cnt; i++) {
+        unsigned char p[12];
+        int dx, dy, tol;
+        uint32_t rgb;
+        if (fread(p, 1, sizeof p, f) != sizeof p) { fclose(f); return -1; }
+        dx = (int)((uint16_t)p[0] | ((uint16_t)p[1] << 8));      /* dx i16（小端） */
+        if (dx >= 32768) dx -= 65536;
+        dy = (int)((uint16_t)p[2] | ((uint16_t)p[3] << 8));
+        if (dy >= 32768) dy -= 65536;
+        rgb = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+        tol = (int)p[8] | ((int)p[9] << 8);
+        if (tol > 255 || dx < -4096 || dx > 4096 || dy < -4096 || dy > 4096) { fclose(f); return -1; }
+        pts[i].dx = dx; pts[i].dy = dy; pts[i].rgb = rgb; pts[i].tol = tol;
+    }
+    fclose(f);
+    *base = b; *base_tol = bt; *n = cnt;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: op_vis_rot_gray)
+ * @brief 灰度模板旋转（90° 数组变换；spec VISION §11-#7 模板方向对齐）。
+ * @param   src      源灰度（sw×sh 紧凑）
+ * @param   sw,sh    源尺寸
+ * @param   steps    顺时针步数：1 = 90°、2 = 180°、3 = 270°（调用方保证 1..3）
+ * @param   ow,oh    输出：旋转后尺寸
+ * @return  新缓冲（malloc；调用方 free）；内存失败 NULL。
+ * @note    **静态**，只在执行器内用。旋转方向 = (模板 rot - 帧 rot) & 3 顺时针步（推导：帧→逻辑的映射是纯旋转；模板先回逻辑再进当前帧 —— 两段相消后净旋转 = 两方向差）。
+ */
+static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, int *ow, int *oh)
+{
+    uint8_t *dst;
+    int x, y;
+
+    if (steps == 2) { *ow = sw; *oh = sh; }
+    else { *ow = sh; *oh = sw; }                             /* 90° / 270°：宽高互换 */
+    dst = malloc((size_t)*ow * (size_t)*oh);
+    if (!dst) return NULL;
+    for (y = 0; y < *oh; y++) {
+        for (x = 0; x < *ow; x++) {
+            int sx, sy;
+            if (steps == 1)      { sx = y;             sy = sh - 1 - x; }   /* 顺时针 90° */
+            else if (steps == 2) { sx = sw - 1 - x;    sy = sh - 1 - y; }   /* 180° */
+            else                 { sx = sw - 1 - y;    sy = x; }            /* 逆时针 90°（= 顺时针 270°） */
+            dst[(size_t)y * *ow + x] = src[(size_t)sy * sw + sx];
+        }
+    }
+    return dst;
+}
+
+/**
+ * (vtouch-doc: op_vis_run)
+ * @brief 视觉步骤执行（找图 / 找色）：抓帧（或复用）→ 帧视图 → 区域换算 → 匹配 → 结果槽 + 四档分支。
+ * @param   st       当前视觉步（type = OP_STEP_FINDIMAGE / OP_STEP_FINDCOLOR）
+ * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`；命中 → r1/r2 = 命中点**竖屏逻辑坐标** + 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`。找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。按住期允许（纯读屏不碰手指，spec §6.2）。
+ */
+static void op_vis_run(const struct vt_step *st)
+{
+    struct op_vis_frame fr;
+    int rx, ry, rw, rh, ox = 0, oy = 0, rc, hit;
+
+    if (op_vis_capture(&fr) != 0) return;                    /* 失败已中止（`无画面` / `视觉错`） */
+    if (vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride) != VT_VIS_OK) {
+        vt_ops_abort("视觉错");
+        return;
+    }
+    if (op_vis_region(st, &fr, &rx, &ry, &rw, &rh) != 0) return;   /* `区域不存在` 已中止 */
+
+    if (st->type == OP_STEP_FINDIMAGE) {                     /* 找图：ref = 模板名（spec §6.1） */
+        uint8_t *gray = NULL;
+        int tw = 0, th = 0, trot = 0, steps;
+        uint64_t t0, dt;
+
+        rc = op_vis_read_tmpl(st->ref, &gray, &tw, &th, &trot);
+        if (rc != 0) { vt_ops_abort(rc == -2 ? "视觉错" : "模板不存在"); return; }
+        steps = (trot - fr.rot) & 3;                         /* 模板 → 当前帧的顺时针步数（spec §11-#7） */
+        if (steps) {
+            int nw, nh;
+            uint8_t *rot = op_vis_rot_gray(gray, tw, th, steps, &nw, &nh);
+            free(gray);
+            if (!rot) { vt_ops_abort("视觉错"); return; }
+            gray = rot; tw = nw; th = nh;
+        }
+        t0 = op_now_ms();
+        rc = vt_vis_find_image(rx, ry, rw, rh, gray, tw, th, st->a1, &ox, &oy);
+        dt = op_now_ms() - t0;
+        free(gray);
+        if (rc == VT_VIS_BAD) { vt_ops_abort("视觉错"); return; }      /* 防御：参数域已过门，真到这不硬撑 */
+        hit = (rc == VT_VIS_OK);
+        if (hit) {
+            int lx, ly;
+            vt_vis_frame_to_logic(fr.rot, fr.w, fr.h, ox, oy, &lx, &ly);   /* 命中点 → 竖屏逻辑坐标 */
+            R.slots[0] = lx; R.slots[1] = ly; R.slot_mask |= 1u | 2u;      /* r1/r2（spec §6.2） */
+            fprintf(stderr, "vtouchd: vis 找图 %s 命中 %d,%d (耗时 %llums)\n",
+                    st->ref, lx, ly, (unsigned long long)dt);
+        } else {
+            fprintf(stderr, "vtouchd: vis 找图 %s 未命中 (耗时 %llums)\n",
+                    st->ref, (unsigned long long)dt);
+        }
+        op_cond_apply(st, hit, "找图", st->ref, "未命中");    /* 四档：成立/不成立（spec §6.2） */
+        return;
+    }
+
+    /* OP_STEP_FINDCOLOR（spec §6.1）：单点 a2 = (颜色<<8)|容差；多点走 .pts（基准色/容差/点表） */
+    if (st->a1 == 1) {
+        uint32_t base = 0;
+        int base_tol = 0, n = 0;
+        struct vt_vis_pt pts[VT_VIS_PTS_MAX];
+        if (op_vis_read_pts(st->ref, &base, &base_tol, pts, &n) != 0) {
+            vt_ops_abort("模板不存在");
+            return;
+        }
+        rc = vt_vis_find_color_multi(rx, ry, rw, rh, base, base_tol, pts, n, &ox, &oy);
+    } else {
+        rc = vt_vis_find_color(rx, ry, rw, rh, (uint32_t)st->a2 >> 8,
+                               (int)((uint32_t)st->a2 & 0xffu), &ox, &oy);
+    }
+    if (rc == VT_VIS_BAD) { vt_ops_abort("视觉错"); return; }
+    hit = (rc == VT_VIS_OK);
+    if (hit) {
+        int lx, ly;
+        vt_vis_frame_to_logic(fr.rot, fr.w, fr.h, ox, oy, &lx, &ly);
+        R.slots[0] = lx; R.slots[1] = ly; R.slot_mask |= 1u | 2u;
+        fprintf(stderr, "vtouchd: vis 找色 命中 %d,%d\n", lx, ly);
+    } else {
+        fprintf(stderr, "vtouchd: vis 找色 未命中\n");
+    }
+    op_cond_apply(st, hit, "找色", NULL, "未命中");
+}
+
+/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算 / 视觉步）；点按 / 滑动 / 按下 →
  * 中止 `槽占用`）+ 解析本步数值字段（字面值 / 负数编码引用；变量无值 → 中止 `变量无值`、
  * 槽未写 → 中止 `结果无值`）+ 打步日志 + 发这一步的起始动作（点按 / 滑动 / 按下先 down；
- * 弹起 up；等待 / 条件步 / 跳转 / 计算不动手）。 */
+ * 弹起 up；等待 / 条件步 / 跳转 / 计算 / 视觉步不动手）。 */
 static void op_begin_step(void)
 {
     const struct vt_step *st;
     if (R.step >= R.nsteps) { op_finish(); return; }
     st = &R.steps[R.step];
     g.op_run_step = R.step;                                  /* 面板进度（0 起） */
-    /* 按住期门禁（spec §2.2/D4 + V5 §5.2）：持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算）——
-     * 点按 / 滑动 / 按下 都会另起一根手指，统一在步入口中止 `槽占用`（判定不逐 case 散落）。 */
+    /* 按住期门禁（spec §2.2/D4 + V5 §5.2 + VISION §6.2）：持有中只允许 等待 / 弹起（及条件步 / 跳转 /
+     * 计算 / 视觉步——视觉步纯读屏不碰手指）——点按 / 滑动 / 按下 都会另起一根手指，统一在步入口中止
+     * `槽占用`（判定不逐 case 散落）。 */
     if (R.held && (st->type == OP_STEP_TAP || st->type == OP_STEP_SWIPE || st->type == OP_STEP_DOWN)) {
         vt_ops_abort("槽占用");
         return;
@@ -778,7 +1248,7 @@ static void op_begin_step(void)
         }
         pthread_mutex_unlock(&g.region_lock);
         if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
-        op_cond_apply(st, hit, "区域判断");                   /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
+        op_cond_apply(st, hit, "区域判断", st->ref, "条件不成立");   /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
         break;
     }
     case OP_STEP_COND_TOGGLE: {                              /* 开关判断：ref 区域须开关型且开着（spec §3.2） */
@@ -795,7 +1265,7 @@ static void op_begin_step(void)
         pthread_mutex_unlock(&g.region_lock);
         if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
         if (!is_toggle) { vt_ops_abort("非开关型"); return; } /* 运行时校验（编辑期不查 kind，spec §3.2） */
-        op_cond_apply(st, on, "开关判断");                    /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
+        op_cond_apply(st, on, "开关判断", st->ref, "条件不成立");    /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
         break;
     }
     case OP_STEP_JUMP: {                                     /* 跳转：a1 = 目标（0 = 结束、1..步数 = 目标）；spec §2.2 */
@@ -829,6 +1299,10 @@ static void op_begin_step(void)
         R.deadline = R.t0;
         break;
     }
+    case OP_STEP_FINDIMAGE:                                  /* 找图（v8）：单拍（内部含抓帧等待；spec VISION §6.1） */
+    case OP_STEP_FINDCOLOR:                                  /* 找色（同款） */
+        op_vis_run(st);                                      /* 命中/未命中 → 槽 + 四档；失败已按码中止 */
+        break;
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
         R.phase = PH_WAIT;
         R.deadline = R.t0;

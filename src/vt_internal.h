@@ -82,6 +82,16 @@
 #define OP_STEP_COND_TOGGLE 7    /* 步骤类型：开关判断（ref 区域须开关型且开着） */
 #define OP_STEP_JUMP        8    /* 步骤类型：跳转（a1 = 目标步骤：0 = 结束、1..步数 = 目标） */
 #define OP_STEP_CALC        9    /* 步骤类型：计算（a1 = 槽号 1..4、expr = 表达式；结果写槽 rN，spec OPS_PLAN_V5 §5） */
+#define OP_STEP_FINDIMAGE   10   /* 步骤类型：找图（spec VISION §6.1 定稿：ref=模板名、expr=区域名（空=全屏）、
+                                  * a1=阈值 0..255、a2=0、a3=不成立档、a4=成立档、ms=0、j1/j2=该侧跳转目标） */
+#define OP_STEP_FINDCOLOR   11   /* 步骤类型：找色（a1=模式 0 单点/1 多点；ref=点集名（多点必填/单点必空）；
+                                  * expr=区域名；单点 a2=(颜色<<8)|容差、多点 a2=0；a3=不成立档、a4=成立档；
+                                  * ms=0；j1/j2=该侧跳转目标） */
+#define VT_VIS_CAPTURE_TIMEOUT_MS 1000  /* 抓帧请求总超时（spec VISION §2.2；超时 → 中止 `无画面`） */
+#define VT_VIS_REUSE_MS     50   /* 一帧多步复用窗口（spec §9：同一帧 ≤50ms 内复用不重抓） */
+#define VT_VIS_PANEL_STALL_MS 3000  /* 「面板不在」判据：ui_hb 冻结 ≥3s（同 vt_panel.c 看门狗口径） */
+#define VT_VIS_PTS_MAX      16   /* 多点找色点集的参考点上限（.pts n ≤ 16，spec §4.2） */
+#define VT_VIS_TMPL_DIR     "/data/local/vtouch-runtime/templates"   /* 模板/点集目录（spec §5.1） */
 #define VT_EXPR_MAX         63   /* 计算步表达式长度上限（字符；= vt_expr.c 的 VT_EXPR_LEN_MAX，spec V5 §2/§3） */
 /* 条件步两侧档位（a3=不成立侧、a4=成立侧）：0=中止（默认）、1=跳过下一步、2=继续下一步、3=跳转
  * （档位 = 跳转时该侧目标看 j1/j2：0 = 结束、1..步数 = 目标步骤；非跳转档位目标忽略）。 */
@@ -155,16 +165,21 @@ struct region {
 };
 
 struct vt_step {
-    int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断 8=跳转 9=计算（OP_STEP_*） */
+    int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断 8=跳转 9=计算
+                                    * 10=找图 11=找色（OP_STEP_*） */
     int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用；按下: x,y；
                                     * 区域判断: 判定点 x,y + a3=不成立档位、a4=成立档位；开关判断: a3/a4=两侧档位；
                                     * 跳转: a1 = 目标步骤（0 = 结束、1..步数 = 目标）；
-                                    * 计算: a1 = 槽号 1..4（其余字段不用，spec OPS_PLAN_V5 §3） */
-    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长（弹起/条件步/跳转/计算不用） */
+                                    * 计算: a1 = 槽号 1..4（其余字段不用，spec OPS_PLAN_V5 §3）；
+                                    * 找图: a1 = 阈值 0..255、a2 = 0、a3/a4 = 不成立/成立档位；
+                                    * 找色: a1 = 模式 0/1、a2 = 单点 (颜色<<8)|容差（多点 = 0）、a3/a4 = 档位
+                                    * （spec VISION §6.1） */
+    int ms;                        /* 点按=按住时长；滑动=时长；等待=时长（弹起/条件步/跳转/计算/视觉步不用） */
     int j1, j2;                    /* 条件步跳转目标（仅该侧档位=OP_COND_JUMP 时有意义）：j1=成立侧、j2=不成立侧；
-                                    * 0 = 结束、1..步数 = 目标步骤（spec OPS_PLAN_V3 §6.1） */
-    char ref[REGION_ID_MAX + 1];   /* 条件步（区域判断/开关判断）的区域 id；"" = 不用 */
-    char expr[VT_EXPR_MAX + 1];    /* 计算步的表达式（type=9；其余类型恒空，spec OPS_PLAN_V5 §3） */
+                                    * 0 = 结束、1..步数 = 目标步骤（spec OPS_PLAN_V3 §6.1）；视觉步同款 */
+    char ref[REGION_ID_MAX + 1];   /* 条件步的区域 id；视觉步 = 模板名（找图）/ 点集名（找色多点）；"" = 不用 */
+    char expr[VT_EXPR_MAX + 1];    /* 计算步的表达式（type=9）；视觉步 = 区域名（type=10/11，空 = 全屏）；
+                                    * 其余类型恒空（spec OPS_PLAN_V5 §3 / VISION §6.1） */
 };
 
 /* 触发数据（区域线程捕获 → 触发槽投递 → 执行器起跑快照，spec §1.5）：

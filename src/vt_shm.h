@@ -16,6 +16,7 @@
  *   [off_state]             struct vt_state          （核心 RW / 面板 RO）
  *   [off_b]                 struct vt_shm_b          （核心 RW / 面板 RW）
  *   [off_c]                 struct vt_shm_c          （核心 W  / 面板 RO）
+ *   [off_frame]             struct vt_shm_frame_hdr + 2×帧缓冲（核心 RW / 面板 RW；spec VISION §3.1）
  *
  * 依赖：本文件必须在 struct vt_state 定义之后包含（见 vt_internal.h 末尾）。
  */
@@ -26,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  7u            /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  8u            /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -35,7 +36,8 @@
                                        *     区 B 增取点字段（pick_*）——此后只加逻辑/UI，布局不再变。
                                        * 5 = v2 操作扩展：step.ref / 触发数据槽。
                                        * 6 = v3 操作扩展：step.j1/j2（条件双分支 + 跳转步）。
-                                       * 7 = v5 操作扩展：step.expr（计算步骤表达式）。 */
+                                       * 7 = v5 操作扩展：step.expr（计算步骤表达式）。
+                                       * 8 = 视觉扩展：帧区（区 D：帧头 + 双缓冲；spec VISION §3.1）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -62,6 +64,9 @@ struct vt_shm_header {
     uint32_t off_state, size_state;   /* 区 A：状态 */
     uint32_t off_b, size_b;           /* 区 B：双方可写 */
     uint32_t off_c, size_c;           /* 区 C：事件环 */
+    uint32_t off_frame, size_frame;   /* 区 D：帧区（帧头 + 双缓冲；spec VISION §3.1） */
+    uint32_t off_fbuf;                /* 区 D 内第一块帧缓冲的偏移（帧头页对齐后） */
+    uint32_t frame_buf_bytes;         /* 单块帧缓冲字节数（逻辑宽 × 逻辑高 × 4；两方向同字节数） */
     volatile uint32_t hb;             /* 核心心跳（面板看它判断核心是否还活） */
     volatile uint32_t ui_hb;          /* 面板心跳（核心看它判断面板是否还活） */
     int32_t  logical_w, logical_h;    /* 竖屏逻辑尺寸（面板换算要用） */
@@ -116,6 +121,43 @@ struct vt_shm_c {
     char line[VT_RING_SLOTS][VT_RING_LINE];
 };
 
+/* 区 D：帧区（契约 v8 新增；spec VISION §3.1）。布局 = 帧头 + 双缓冲（各「逻辑宽 × 逻辑高 × 4」字节，
+ * 两方向同字节数）。面板写帧 / 核心读帧；请求协议（spec §2.2）：
+ *   核心：写 req_pending = ++请求序号（单调）→ 面板抓帧完成后写 req_seq = 该序号（**最后写**）
+ *         + buf_idx 翻转 + flags/ts/尺寸/rotation；
+ *   核心：完成判定 = req_seq == 请求序号；读帧头前后各读一次 seq（seqlock：奇 = 写入中、偶 = 稳定；
+ *         奇/变 → 重试至超时）。数据缓冲直接原地匹配（双缓冲：完成之后到下一次请求前，面板不碰当前
+ *         缓冲 —— spec §3.2「或直接原地匹配，匹配只读不改帧」）。 */
+#define VT_FRAME_MAGIC   0x4D524656u   /* 'V' 'F' 'R' 'M'（小端内存序 = "VFRM"） */
+#define VT_FRAME_VER     1u
+#define VT_FRAME_F_VALID 1u            /* flags bit0：帧有效 */
+#define VT_FRAME_F_ERR   2u            /* flags bit1：抓帧失败（错误码见 err） */
+
+struct vt_shm_frame_hdr {
+    uint32_t magic;                    /* 'VFRM' */
+    uint32_t version;
+    volatile uint32_t seq;             /* seqlock：奇 = 写入中，偶 = 稳定 */
+    uint32_t width, height;            /* 帧像素尺寸（当前方向！） */
+    uint32_t stride;                   /* 行跨距（字节） */
+    uint32_t format;                   /* 0 = RGBA8888 */
+    uint32_t rotation;                 /* 抓帧时屏幕方向（0..3） */
+    volatile uint32_t req_seq;         /* 面板写：已完成的抓帧请求序号 */
+    volatile uint32_t req_pending;     /* 核心写：请求序号（0 = 无请求） */
+    uint32_t buf_idx;                  /* 面板写：最近完成帧所在缓冲（0/1） */
+    volatile uint32_t flags;           /* 面板写：bit0 = 帧有效、bit1 = 抓帧失败。**每次完成时两位一起重写**
+                                        * （成功 = 只置 bit0；失败 = 置 bit1 并清 bit0）—— 核心按「VALID 且非 ERR」判成败 */
+    int32_t  err;                      /* 失败码 */
+    uint64_t ts_ns;                    /* 抓帧完成时刻（单调钟） */
+};
+/* 帧头必须装进一页（帧缓冲起点按页对齐，页对齐只留一页余量 —— 同区 B 的断言纪律）。 */
+_Static_assert(sizeof(struct vt_shm_frame_hdr) <= 4096, "帧头必须装进一页");
+
+/* ---- 帧区访问（核心 / 面板两侧共用；区 D 布局见 vt_shm.c） ---- */
+/* 帧区头指针（核心读 / 面板写；未建 / 未附着时 NULL）。 (vtouch-doc: vt_shm_frame) */
+struct vt_shm_frame_hdr *vt_shm_frame(void);
+/* 第 idx 块帧缓冲基址（idx = 0/1；越界或未附着 NULL）。 (vtouch-doc: vt_shm_frame_buf) */
+uint8_t *vt_shm_frame_buf(int idx);
+
 /* ---- 核心侧 ---- */
 /* 建 memfd、按契约映射、把初值状态拷进去，并把 g 指过来。 (vtouch-doc: vt_shm_create) */
 int  vt_shm_create(void);
@@ -135,6 +177,8 @@ int  vt_shm_panel_rect(int *x1, int *y1, int *x2, int *y2);
 int  vt_shm_should_eat(int lx, int ly);
 /* 面板心跳值（核心的看门狗用它判面板死活）。 (vtouch-doc: vt_shm_ui_hb) */
 uint32_t vt_shm_ui_hb(void);
+/* 面板上报的当前显示方向（0..3；视觉帧复用/换算校验用）；-1 = 拿不到。 (vtouch-doc: vt_shm_panel_rot) */
+int  vt_shm_panel_rot(void);
 /* 面板是否请求停引擎。 (vtouch-doc: vt_shm_stop_req) */
 int  vt_shm_stop_req(void);
 
