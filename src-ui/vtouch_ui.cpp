@@ -5172,14 +5172,15 @@ static void draw_op_edit_land(float x0, float y0, float cw, float wh)
     float lw = (cw - 12.0f) * 0.6f;          /* 左：步骤列表（主区） */
     float rw = cw - 12.0f - lw;              /* 右：控制栏（~40%） */
     float rx = x0 + lw + 12.0f;
-    float hn, hr, hd, bw3, gy;               /* 名字 / 通用行 / [取消][完成] 行高；加步钮宽；门控行 y */
+    float hn, hr, hd, bw3, gy, slot;         /* 名字 / 通用行 / [取消][完成] 行高；加步钮宽；门控行 y；提示槽高 */
     int sm, mini, plus, plus4, j4, sm2;
     char t[80];
 
-    /* 右栏三档自适应（同竖屏「按可用高定档」口径；内容 = 名字 + 提示槽 + 6 行 + [取消][完成] + 8 缝） */
-    hn = 84.0f; hr = 76.0f; hd = 92.0f;
-    if (by - y0 < 84.0f + 46.0f + 6.0f * 76.0f + 92.0f + 8.0f * 12.0f) { hn = 64.0f; hr = 58.0f; hd = 70.0f; }
-    if (by - y0 < 64.0f + 46.0f + 6.0f * 58.0f + 70.0f + 8.0f * 12.0f) { hn = 56.0f; hr = 48.0f; hd = 60.0f; }
+    /* 右栏三档自适应（同竖屏「按可用高定档」口径；内容 = 名字 + 提示槽 + 6 行 + [取消][完成] + 8 缝）。
+     * 提示槽：宽裕档 92（提示可两行换行，M-1 修复）；紧档 46（单行裁剪）。 */
+    hn = 84.0f; hr = 76.0f; hd = 92.0f; slot = 92.0f;
+    if (by - y0 < 84.0f + 92.0f + 6.0f * 76.0f + 92.0f + 8.0f * 12.0f) { hn = 64.0f; hr = 58.0f; hd = 70.0f; }
+    if (by - y0 < 64.0f + 92.0f + 6.0f * 58.0f + 70.0f + 8.0f * 12.0f) { hn = 56.0f; hr = 48.0f; hd = 60.0f; slot = 46.0f; }
     /* 窄档判定（按实算宽度反推：「放得下才用长文案」；44px 字形宽 = 字号、按钮内缝 32） */
     sm    = ((rw - 12.0f) * 0.545f < 252.0f);   /* 「自动关：开」（44px）放不下 → 降 30px 小字档 */
     mini  = ((rw - 12.0f) * 0.455f < 152.0f);   /* 「门控：无」（30px）也放不下 → 只留「门控 / 自动关」 */
@@ -5189,9 +5190,10 @@ static void draw_op_edit_land(float x0, float y0, float cw, float wh)
     j4    = (bw3 >= 208.0f);                    /* 「区域判断」（四字）放得下 */
     sm2   = ((rw - 12.0f) * 0.5f < 120.0f);     /* 两字钮（44px）放不下 → 降 30px */
 
-    /* 左栏：标题 + 列表（整高滚动） */
+    /* 左栏：标题 + 列表（整高滚动；窄档缩短文案，防越栏被右栏盖住 —— M-1 修复） */
     ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    snprintf(t, sizeof t, "步骤 · %d 步（最多 %d；列表可上下拖动滚）", g_ope_nsteps, OPE_MAX_STEPS);
+    if (lw < 640.0f) snprintf(t, sizeof t, "步骤 · %d 步", g_ope_nsteps);
+    else snprintf(t, sizeof t, "步骤 · %d 步（最多 %d；列表可上下拖动滚）", g_ope_nsteps, OPE_MAX_STEPS);
     text_meta_s(t);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
@@ -5212,13 +5214,18 @@ static void draw_op_edit_land(float x0, float y0, float cw, float wh)
         g_need = 1; g_force_frames = 2;
         ALOGI("op edit 改名子层开 %s", g_ope_name);
     }
-    /* 右栏 · 提示槽（固定占位：出现提示时下面整块不动，防误点；同竖屏口径） */
+    /* 右栏 · 提示槽（固定占位：出现提示时下面整块不动，防误点；宽裕档两行换行 + 槽内裁剪，M-1 修复） */
     if (g_ope_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(rx, y0 + hn + 12.0f));
+        float my0 = y0 + hn + 12.0f;
+        ImGui::PushClipRect(ImVec2(rx, my0), ImVec2(rx + rw, my0 + slot), true);
+        ImGui::SetCursorScreenPos(ImVec2(rx, my0));
+        if (slot >= 92.0f) ImGui::PushTextWrapPos(rx + rw);
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
+        if (slot >= 92.0f) ImGui::PopTextWrapPos();
+        ImGui::PopClipRect();
     }
     /* 右栏 · 门控 · 自动关 · 加步（窄档整组 30px 小字） */
-    gy = y0 + hn + 12.0f + 46.0f + 12.0f;
+    gy = y0 + hn + 12.0f + slot + 12.0f;
     if (sm) meta_push();
     if (mini) snprintf(t, sizeof t, "门控");
     else snprintf(t, sizeof t, "门控：%s", g_ope_gate[0] ? g_ope_gate : "无");
