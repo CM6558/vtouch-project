@@ -3315,6 +3315,7 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
         return 1;
     }
     if (type == OP_STEP_FINDIMAGE || type == OP_STEP_FINDCOLOR) {   /* 视觉步单字段（T3.2）：阈值 / 容差 */
+        if (type == OP_STEP_FINDCOLOR) v = (int)((uint32_t)v & 0xFFu);   /* 找色：a2 = (颜色<<8)|容差 打包，先拆低 8 位（修复轮） */
         if (v < 0 || v > 255) {
             snprintf(why, (size_t)whycap, "%s 必须在 0..255", label);
             return 0;
@@ -4799,9 +4800,9 @@ static void draw_ope_rlist(void)
     drag_scroll_for(SCR_LIST);
     if (vis) {                                       /* 视觉步：可清空区域引用 = 全屏（T3.2） */
         ImGui::PushID(3050);
-        if ((g_ope_refs[rli][0] == 0) ? btn_blue("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))
+        if ((g_ope_exprs[rli][0] == 0) ? btn_blue("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))
                                       : btn_light("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            g_ope_refs[rli][0] = 0;
+            g_ope_exprs[rli][0] = 0;
             g_ope_rl = -1;
             g_need = 1; g_force_frames = 3;
             ALOGI("vis edit 第 %d 步 区域=全屏", rli + 1);
@@ -4815,9 +4816,9 @@ static void draw_ope_rlist(void)
         if (vtouch_get_region(i, id, sizeof id, &t2, &a1, &a2, &a3, &a4, &en) != 0) continue;
         avail++;
         ImGui::PushID(3000 + i);
-        if ((strcmp(g_ope_refs[rli], id) == 0) ? btn_blue(id, ImVec2(ImGui::GetContentRegionAvail().x, 76))
+        if ((strcmp(vis ? g_ope_exprs[rli] : g_ope_refs[rli], id) == 0) ? btn_blue(id, ImVec2(ImGui::GetContentRegionAvail().x, 76))
                                                : btn_light(id, ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            snprintf(g_ope_refs[rli], sizeof g_ope_refs[rli], "%s", id);
+            snprintf(vis ? g_ope_exprs[rli] : g_ope_refs[rli], vis ? sizeof g_ope_exprs[rli] : sizeof g_ope_refs[rli], "%s", id);
             g_ope_rl = -1;
             g_need = 1; g_force_frames = 3;
             if (vis) ALOGI("vis edit 第 %d 步 区域=%s", rli + 1, id);
@@ -6562,6 +6563,7 @@ static void draw_vis_edit(void)
         if (btn_light(lab, ImVec2(cw, 84))) {        /* 模式循环：单点 ↔ 多点（切换时清/补 a2 的语义字段） */
             if (g_ope_steps[se][1] == 1) {
                 g_ope_steps[se][1] = 0;
+                g_ope_refs[se][0] = 0;                 /* 单点：清点集名（残留会拒保存「单点模式不能带点集」；修复轮） */
                 if (g_ope_steps[se][2] == 0) g_ope_steps[se][2] = 8;   /* 颜色 #000000、容差 8 */
             } else {
                 g_ope_steps[se][1] = 1;
