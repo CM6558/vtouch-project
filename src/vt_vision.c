@@ -655,7 +655,7 @@ int vt_vis_find_image(int rx, int ry, int rw, int rh, const uint8_t *tmpl, int t
 /**
  * (vtouch-doc: vt_vis_frame_to_logic)
  * @brief 帧坐标（当前方向）→ 竖屏逻辑坐标（单点）。
- * @param   rotation 0..3（r 语义同 Android getRotation / AutoJs6 device.rotation）
+ * @param   rotation 0..3（r 语义同 Android getRotation）
  * @param   fw,fh    帧尺寸（当前方向）
  * @param   fx,fy    帧坐标
  * @param   lx,ly    输出逻辑坐标（可 NULL = 跳过）

@@ -512,7 +512,7 @@ DOCS = {
          "全分辨率精修），任一边 < 8 走全分辨率直搜；SAD 行级早退；命中即停。金字塔为启发式（细小纹理 / 极限边缘"
          "允许漏检；不命中不回退直搜）。"),
 "vt_vis_frame_to_logic": dict(brief="帧坐标（当前方向）→ 竖屏逻辑坐标（单点）。",
-    params=[("rotation", "0..3（r 语义同 Android getRotation / AutoJs6 device.rotation）"),
+    params=[("rotation", "0..3（r 语义同 Android getRotation）"),
             ("fw,fh", "帧尺寸（当前方向）"), ("fx,fy", "帧坐标"),
             ("lx,ly", "输出逻辑坐标（可 NULL = 跳过）")],
     note="约定与面板 p2c/c2p 逐字同一套；rotation 越界按 r&3 归一。"),

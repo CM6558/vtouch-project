@@ -8,7 +8,7 @@
  *   - 帧坐标 = 抓帧返回的**当前方向**原生像素（左上原点；本机竖屏 1440×3168 / 横屏 3168×1440）。
  *   - 逻辑坐标 = 固定竖屏（现有契约：区域表 / 脚本 / 注入同一套）。
  *   - 旋转约定与面板 p2c/c2p（src-ui/ui_glue.c、src-ui/vtouch_ui.cpp）**逐字同一套**（r 语义同
- *     Android getRotation / AutoJs6 device.rotation）——帧坐标 (fx,fy) → 竖屏逻辑 (lx,ly)：
+ *     Android getRotation）——帧坐标 (fx,fy) → 竖屏逻辑 (lx,ly)：
  *       r=0（竖屏）：lx = fx,        ly = fy；
  *       r=1（横屏，帧宽=逻辑高）：lx = fh-1-fy,   ly = fx；
  *       r=2：lx = fw-1-fx,   ly = fh-1-fy；

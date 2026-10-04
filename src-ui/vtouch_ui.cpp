@@ -343,7 +343,7 @@ static int ui_show_cb(int want)
 /* ---- 旋转：两套坐标系，只在这里换算 ----------------------------------------
  * 竖屏逻辑坐标（g_w×g_h）= daemon 的坐标系 = 区域表 = 事件坐标 = 脚本看到的坐标，永远不变；
  * 当前屏坐标（g_scr_w×g_scr_h）= ImGui/面板布局/命中判定所在的空间，随方向变。
- * 换算公式与 JS 侧 vt.p2c 同一套（r 语义同 AutoJs6 device.rotation）。 */
+ * 换算公式与坐标契约同一套（r 语义同 Android getRotation）。 */
 static volatile int g_rot = 0;        /* 0/1/2/3：Java 线程写、poll 线程的吞触摸谓词无锁读 ⇒ 必须 volatile */
 static volatile int g_scr_w = 0, g_scr_h = 0;  /* 当前方向屏幕尺寸（= 图层 buffer 尺寸） */
 static volatile long g_rot_settle_t = 0;       /* 转屏后「不吞触摸」的稳定窗口截止时刻 */
