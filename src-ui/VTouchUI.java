@@ -497,7 +497,7 @@ public class VTouchUI {
                 }
             }
             /* ①b 抓帧恢复失败的重试（否则面板会一直不可见） */
-            if (needShow && !guard) {
+            if (needShow && !guard && !capHide) {   /* 窗口期不抢 alpha（评审 M-3：防窗口被不断续期+帧带面板） */
                 try {
                     Object tt = txnNew();
                     txnCall(tt, "setAlpha", new Class<?>[]{SCC, float.class}, layers[cur], vis ? 1.0f : 0.0f);

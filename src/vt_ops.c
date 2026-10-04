@@ -1110,9 +1110,13 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
         tries++;
         /* 持续循环占着主循环：手动喂核心心跳 —— 否则面板 vt_shm_ui_tick 见心跳停滞 ≥3s 判「核心死了」自杀退出
          *（单次路径 ≤1s（抓帧超时）不越线，不动）。每轮一喂：轮间隔 ≤ 抓帧超时 1000ms + 匹配，恒 < 3s。 */
-        if (timeout_ms > 0) vt_shm_tick();
+        if (timeout_ms > 0) {
+            vt_shm_tick();       /* 喂心跳（见上） */
+            physical_events();   /* drain 触摸 fd + 转发：搜索期间手指照常响应（评审 I-1 修复；单次路径不动） */
+        }
         /* 持续 force=1：每轮都要新帧（复用缓存会原地空转同一画面）；单次照旧允许复用（行为逐字不变）。 */
         if (op_vis_capture(&fr, timeout_ms > 0, err) != 0) break;   /* 原因词已置（`无画面` / `视觉错`） */
+        if (timeout_ms > 0) vt_shm_tick();   /* 轮内第二喂（评审 M-2）：抓帧段最坏 ~1s，缩心跳间隔 */
         if (vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride) != VT_VIS_OK) {
             *err = "视觉错";
             break;
