@@ -3411,7 +3411,7 @@ static void ope_num_text(int v, char *out, int outcap)
 {
     const char *n = ope_vname(v);
     if (n) { snprintf(out, (size_t)outcap, "%s", n); return; }
-    if (v >= OP_VAR_RET2 && v <= OP_VAR_V0) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名 */
+    if (v >= OP_VAR_V15 && v <= OP_VAR_RET1) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名（I1 修复：原条件 v>=-9&&v<=-10 恒假） */
         const char *cn = ope_var_name_at(OP_VAR_V0 - v);
         if (cn) snprintf(out, (size_t)outcap, "%s", cn);
         else snprintf(out, (size_t)outcap, "未定义变量");
@@ -3851,7 +3851,7 @@ static void ne_cell_text(int type, int fi, char *out, int outcap)
     int v = g_ne_vals[fi];
     const char *vn = ope_vname(v);
     if (vn) { snprintf(out, (size_t)outcap, "%s", vn); return; }
-    if (v >= OP_VAR_RET2 && v <= OP_VAR_V0) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名 */
+    if (v >= OP_VAR_V15 && v <= OP_VAR_RET1) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名（I1 修复：原条件 v>=-9&&v<=-10 恒假） */
         const char *cn = ope_var_name_at(OP_VAR_V0 - v);
         if (cn) snprintf(out, (size_t)outcap, "%s", cn);
         else snprintf(out, (size_t)outcap, "未定义变量");
@@ -4340,7 +4340,9 @@ static void ope_expr_open_field(int se, int sf)
 }
 
 /* 子层 [确定] 的名字表：把「待生效改名」（newname 非空 = 本步的新名字替代旧名字）算进去，
- * 供表达式校验用（引用新名字不误报）；newname = NULL = 原样收集。返回条数。 */
+ * 供表达式校验用（计算步改名后引用新名字不误报）；newname = NULL = 原样收集。返回条数。
+ * 注（评审 M1）：字段模式（se = 被编辑的非计算步）下 newname 恒不生效 —— 「将创建的自动名 eN」
+ * 不在表内，表达式里引用 eN 编辑期即按未知名字拒收（比「不误报」更严；运行期自引用亦必 结果无值）。 */
 static int ope_expr_names_for_check(int se, const char *newname, char (*names)[16])
 {
     int i, k, cnt = 0;
