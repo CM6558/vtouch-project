@@ -49,6 +49,7 @@ if [ "${1:-}" = "ui" ]; then
     DEFS="-DVT_UI -DVT_UI_NO_EMBED"
   fi
   # -lm：VT_UI 下 vt_expr.c 用 libm（sin/cos/atan2/sqrt/fabs）；默认核心里它是空 TU、不引用、无需加。
+  # 视觉引擎 src/vt_vision.c（Task 1.1）：src/*.c 通配自动收录 —— 不单独加行（同一文件两次上命令行会重复编译/重复符号）。
   "$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE $DEFS src/*.c $LINK_EXTRA -lm -o build/vtouchd_ui
   ls -l build/vtouchd_ui
   md5sum build/vtouchd_ui
