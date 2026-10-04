@@ -6528,10 +6528,18 @@ static void build_vis_cap(void)
                         g_vis_sel[2] = nx + w0; g_vis_sel[3] = ny + h0;
                         g_need = 1; g_force_frames = 2;
                     } else if (g_vis_gest == 3) {
-                        /* 四角手柄拖动 = 缩放框（帧坐标取整、夹在图内、最小 8×8 含端点） */
-                        int fx = (int)floorf((mp.x - ix) / sc), fy = (int)floorf((mp.y - iy) / sc);
+                        /* 四角手柄拖动 = 缩放框（**起点角 + 位移增量，零跳变**；帧坐标取整、夹在图内、最小 8×8 含端点） */
                         int x0b = g_vis_gest_box[0], y0b = g_vis_gest_box[1];
                         int x1b = g_vis_gest_box[2], y1b = g_vis_gest_box[3];
+                        int fx, fy;
+                        if (g_vis_gest_corner == 0 || g_vis_gest_corner == 2)
+                            fx = (int)lroundf(x0b + (mp.x - g_vis_dx0) / sc);
+                        else
+                            fx = (int)lroundf(x1b + (mp.x - g_vis_dx0) / sc);
+                        if (g_vis_gest_corner == 0 || g_vis_gest_corner == 1)
+                            fy = (int)lroundf(y0b + (mp.y - g_vis_dy0) / sc);
+                        else
+                            fy = (int)lroundf(y1b + (mp.y - g_vis_dy0) / sc);
                         if (fx < 0) fx = 0;
                         if (fx > g_vis_img_w - 1) fx = g_vis_img_w - 1;
                         if (fy < 0) fy = 0;
