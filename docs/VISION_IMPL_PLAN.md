@@ -105,11 +105,13 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
    - 初始化（systemMain 后，懒初始化+失败重试）：`ServiceManager.getService("SurfaceFlingerAIDL")` → 事务 6（skip 4B → `long[]` ids）→ 事务 7（skip 4B → token）。**逐字照 spec §2.1**（参考实现 `build/probe/VProbe7.java`）。
    - `captureToShm()`：`DisplayCaptureArgs$Builder(token).build()` → `captureDisplay` → `nativeVisCopyFrame(hb, rotation, w, h, stride)` → 更新帧头（seq 奇偶 + `buf_idx` 翻转 + ts + 尺寸 + rotation + req_seq + flags）。
    - 帧循环接线：每帧读 `nativeVisPollRequest()`（JNI 读帧头）≠ 已完成 → `captureToShm()`；异常/失败写 `flags` 错误码；**面板不阻塞渲染**（capture 4–7ms 同步做可接受）。
-2. `src-ui/ui_glue.c`（JNI 段，静态命名照 `vtouch_ui.cpp:6041+` 风格）：
-   - `Java_VTouchUI_nativeVisCopyFrame(env, cls, jobject hb, jint rotation, jint w, jint h, jint stride)`：`AHardwareBuffer_fromHardwareBuffer` → `AHardwareBuffer_lock(CPU_READ_OFTEN)` → memcpy 进帧区**后备缓冲** → unlock → 返回耗时 ms。
-   - `Java_VTouchUI_nativeVisPollRequest(env, cls)`：读帧头（req_pending vs req_seq）返回待抓标志。
+2. `src-ui/ui_glue.c`（JNI 段；**实现口径回填**）：
+   - `Java_VTouchUI_nativeVisPollRequest()` → jint：acquire 读 req_pending 与 req_seq 比对，返回待抓请求序号（0=无）。
+   - `Java_VTouchUI_nativeVisSubmitFrame(jobject hb, jint reqSeq, jint rotation)` → jlong：`AHardwareBuffer_describe`（校验 format=RGBA8888、dims/容量限界）→ `lock(CPU_READ_OFTEN)` → 按行 memcpy 进后备缓冲（目标紧排、源 stride 感知）→ unlock → 写 dims/rotation/flags/ts_ns → buf_idx 翻转 → **req_seq release 最后写**；失败返回负值且不写 req_seq。
+   - `Java_VTouchUI_nativeVisFailFrame(jint reqSeq, jint err)`：写 flags/err → req_seq release 存（核心立即解阻）。
    - shm 帧区指针：复用面板现有 shm 映射（`-DVT_UI_PANEL` 半边）。
-   - **帧区内存序契约（承 T2.1 评审 I-3）**：读 `req_pending` 用 acquire；写像素完成后 `req_seq` 用 release 存（或等价 store-store 屏障）——以 `vt_shm.h` 帧区注释为准（核心侧已按 release/acquire 配对实现）。
+   - 构建：`ui_glue.c` 用 API 26 编译器（`AHardwareBuffer_*` 头），链接保持 API 24（符号运行时解析）。
+   - **轮询节拍（承 T3.1 评审 I-1 裁决）**：空闲拍 40→**10ms**（`VTouchUI.java` `sleep(tight ? 5 : 10)`；满足 spec §2.2 ≤16ms / §9 ≤25ms）；转屏期 5ms 档不变。
 3. 构建：`<android/hardware_buffer.h>`（NDK）+ 链接 `-landroid`（查 `scripts/build_ui.sh` 现有链接清单补）。
 - **验收**：`VTOUCH_UI_CORE=real sh scripts/build_ui.sh` rc=0（0 告警）；`build.sh ui` rc=0；**真机冒烟统一在 5.1**（本任务静态对账 + 编译）。
 
