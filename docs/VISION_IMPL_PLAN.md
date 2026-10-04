@@ -87,8 +87,8 @@ void vt_vis_logic_rect_to_frame(int rotation, int fw, int fh,
 2. `src/vt_shm.c`：memfd total 计算 + 帧区（头 + 2 缓冲）；面板半边可见帧区访问；初始清零；尺寸断言（同现有区纪律）。
 3. `src/vt_internal.h`：`#define OP_STEP_FINDIMAGE 10` / `#define OP_STEP_FINDCOLOR 11`（注释：字段映射照 spec §6.1 定稿；**区域限定复用 expr 列**，不新增字段——保 4096 页限）；视觉常量（抓帧超时默认 1000ms）。
 4. `src/vt_ops.c`：
-   - `op_valid`：+ `case OP_STEP_FINDIMAGE`（ref=模板名合法非空；expr 空或合法区域名；a1=0..255；a2/a3/a4/ms=0；j1/j2 四档校验同条件步——含跳转目标域）；+ `case OP_STEP_FINDCOLOR`（a1=0/1 模式；ref 多点必填/单点必空；expr 同；单点 a2=0..255、a3=0..0xFFFFFF；多点 a2/a3=0）；**其余所有 case** 防御：expr 非空 → 拒收（calc 与视觉两类除外——防御口径随类型表更新）。
-   - 执行器：视觉步骤 = static `op_vis_run()`：写 `req_pending = ++请求序号` → 轮询等待（`usleep(1000)`，总超时 1000ms）→ 校验（req_seq 匹配 + flags 无错 + 尺寸合法）→ `vt_vis_frame_prepare` → 区域换算（expr 区域名 → 区域几何 → 逻辑矩形 → `vt_vis_logic_rect_to_frame`；空 = 全屏）→ 匹配（找图先读 `.tmpl`、找色多点先读 `.pts`——读失败 → 中止 `模板不存在`）→ 命中：`r1/r2 = vt_vis_frame_to_logic(命中帧坐标)`（**逻辑坐标**）+ 四档「成立」侧；未命中：四档「不成立」侧；抓帧失败 → 中止 `无画面`；内部错 → 中止 `视觉错`。一帧多步复用：`now-ts<50ms` 且帧有效/方向一致 → 复用不重抓（spec §9 行）。
+   - `op_valid`：+ `case OP_STEP_FINDIMAGE`（ref=模板名合法非空；expr 空或合法区域名；a1=0..255；a2/ms=0；a3/a4 档位 0..3；j1/j2 跳转目标域同条件步）；+ `case OP_STEP_FINDCOLOR`（a1=0/1 模式；ref 多点必填/单点必空；expr 同；单点 a2=(颜色<<8)|容差 两段校验、多点 a2=0；a3/a4 档位；ms=0；j1/j2 同）；**其余所有 case** 防御：expr 非空 → 拒收（calc 与视觉两类除外）。
+   - 执行器：视觉步骤 = static `op_vis_run()`：写 `req_pending = ++请求序号` → 轮询等待（`usleep(1000)`，总超时 1000ms；「面板不在」= ui_hb 冻结 ≥3s 判据，同看门狗口径）→ 校验（req_seq 匹配 + flags 无错 + 尺寸合法）→ `vt_vis_frame_prepare` → 区域换算（expr 区域名 → 区域几何 → 逻辑矩形 → `vt_vis_logic_rect_to_frame`；空 = 全屏；区域名不存在 → 中止 `区域不存在`）→ 匹配（找图先读 `.tmpl`、找色多点先读 `.pts`——读失败 → 中止 `模板不存在`）→ 命中：`r1/r2 = vt_vis_frame_to_logic(命中帧坐标)`（**逻辑坐标**）+ 四档「成立」侧；未命中：四档「不成立」侧；抓帧失败 → 中止 `无画面`；内部错 → 中止 `视觉错`。一帧多步复用：`now-ts<50ms` 且帧有效/方向一致 → 复用不重抓（spec §9 行）。
    - 模板方向：`.tmpl` 记录 rot；匹配前若与当前帧 rot 不同 → 旋转模板灰度（90° 数组变换）再匹配（spec §11-#7）。
    - 分支复用：把条件步的分支助手（vt_ops.c:645 附近 static）抽成可复用（或按同款参数调用）；**不改条件步行为**；日志照 spec §8（`vis 找图 <模板> 命中 x,y (耗时 <ms>)` 等 + TRACE `vis 抓帧 请求 → 完成 <ms>`）。
    - 按住期允许集 += 视觉步骤（spec §6.2）。
