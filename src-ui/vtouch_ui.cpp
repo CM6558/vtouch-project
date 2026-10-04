@@ -2628,7 +2628,7 @@ static void build_sidebar(void)
         if (nav_btn("区域列表", g_nav == 0 && g_sheet, bw)) { g_nav = 0; g_sheet = 1; g_need = 1; }
         if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
         if (nav_btn("方案",     g_nav == 5 && g_sheet, bw)) { g_nav = 5; g_sheet = 1; g_need = 1; }
-        if (nav_btn("模板",     g_nav == 6 && g_sheet, bw)) { g_nav = 6; g_sheet = 1; g_need = 1; }
+        if (nav_btn("模板",     g_nav == 6 && g_sheet, bw)) { g_nav = 6; g_sheet = 1; g_vis_test_on = 0; g_vis_test_seq = 0; g_vis_test_msg[0] = 0; g_need = 1; }
         if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
         if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
         if (nav_btn("说明",     g_nav == 4 && g_sheet, bw)) { g_nav = 4; g_sheet = 1; g_need = 1; }
@@ -4110,6 +4110,7 @@ static void ope_vis_open(int se)
     g_vis_ed = 1;
     g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
     g_vis_edmsg[0] = 0;
+    g_vis_test_on = 0; g_vis_test_seq = 0; g_vis_test_msg[0] = 0;   /* 试查固定槽清空（M3：换步不串台） */
     g_need = 1; g_force_frames = 2;
     ALOGI("op edit 视觉参数开 第 %d 步 %s", se + 1, ope_tname(t));
 }
@@ -6787,18 +6788,24 @@ static void draw_vis_edit(void)
             }
         }
     }
-    /* 提示槽（固定占位：出现/消失不动下面） */
+    /* 底部锚（M1 修复）：试一下 / 结果行 / 提示槽都锚到 [取消]/[完成] 行上方，矮屏不越界。 */
+    by = b.y - 24.0f - 92.0f;
+    float ry_btn = by - 12.0f - 20.0f - 12.0f - 92.0f;   /* 试一下按钮顶（92px） */
+    float ry_res = by - 12.0f - 20.0f;                    /* 结果行顶（文本 ~20px） */
+    /* 提示槽（固定占位：出现/消失不动下面；矮屏夹到按钮上方） */
     if (g_vis_edmsg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 384));
+        float y_edmsg = ry + 384.0f;
+        if (y_edmsg > ry_btn - 32.0f) y_edmsg = ry_btn - 32.0f;
+        ImGui::SetCursorScreenPos(ImVec2(x0, y_edmsg));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_edmsg);
     }
-    /* 试一下（Task 7.1）：当场执行一次查找 → 结果行 + 屏幕标记。 */
+    /* 试一下（Task 7.1）：当场执行一次查找 → 结果行 + 屏幕标记（位置见上方底部锚，M1）。 */
     ImGui::PushID(9300);
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry + 480));
+    ImGui::SetCursorScreenPos(ImVec2(x0, ry_btn));
     if (btn_blue("试一下", ImVec2(cw, 92))) vis_test_start_se(se);
     ImGui::PopID();
     /* 试查结果行（固定槽：出现/消失不动下面） */
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry + 584));
+    ImGui::SetCursorScreenPos(ImVec2(x0, ry_res));
     if (g_vis_test_msg[0]) {
         ImGui::TextColored(vis_test_msg_col(), "%s", g_vis_test_msg);
     } else {
