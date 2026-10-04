@@ -348,6 +348,8 @@ void *region_thread_main(void *arg);
 int  vt_ops_init(void);
 /* 主循环每轮调：消费触发槽 → 推进运行中的操作 → 刷新到点 deadline。 (vtouch-doc: vt_ops_tick) */
 void vt_ops_tick(void);
+/* 主循环每轮调：面板「试一下」请求 → 执行一次查找 → 写结果（x/y/err，release test_res_seq）。 (vtouch-doc: vt_ops_test_poll) */
+void vt_ops_test_poll(void);
 /* 下一步到点的剩余毫秒数（下限 0）；-1 = 空闲。 (vtouch-doc: vt_ops_next_deadline_ms) */
 int  vt_ops_next_deadline_ms(void);
 /* 起跑一条操作（忙时丢弃 + 日志）。 (vtouch-doc: vt_ops_run) */

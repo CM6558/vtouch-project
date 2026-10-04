@@ -85,6 +85,10 @@ int  vtouch_region_kind(const char *id, int kind);                     /* 开关
 void vtouch_vis_panel_capture_req(void);
 int  vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf);
 int  vtouch_vis_panel_err_take(int *err);
+/* 试查（Task 7.1）：「试一下」→ 核心执行一次查找（投递/取结果；定义见 src-ui/ui_glue.c，
+ * 单跑模式见 src-ui/ui_stubs.c）。 */
+unsigned vtouch_vis_test_post(int kind, const char *ref, const char *region, int a1, int a2);
+int      vtouch_vis_test_take(unsigned *seq, int *x, int *y, int *err);
 }
 
 #define LOGT "VTouchUI"
@@ -212,6 +216,24 @@ static int g_pick_sf = -1;
 static int g_pickmk_x = 0, g_pickmk_y = 0;
 static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无标记 */
 #define PICK_MARK_MS 2000                /* 标记存活时长（~2 秒） */
+/* 试查（Task 7.1「试一下」）：找图/找色步骤参数层 + 模板页发起 → 核心执行一次查找 → 结果行 +
+ * 屏幕标记。整条链都在渲染线程（点击、轮询、绘制同线程；等待期间每拍轮询 test_res_seq，≤10ms）。 */
+static int g_vis_test_on = 0;            /* 请求在途（等待结果） */
+static unsigned g_vis_test_seq = 0;      /* 本次请求序号（与核心结果序号比对认领） */
+static long g_vis_test_t0 = 0;           /* 发起时刻（now_ms()；1.5s 超时判据） */
+static int g_vis_test_err = 0;           /* 结果码：0 命中 / -1 未命中 / 1..4 错误码（核心）/ 面板内部态见下 */
+static char g_vis_test_msg[96] = {0};    /* 结果行文本（固定槽显示） */
+#define VIS_TEST_TMO_MS 1500             /* 等待超时（1.5s 无响应 →「超时（无响应）」） */
+#define VIS_TEST_WAIT   (-2)             /* 面板内部显示态：等待结果 */
+#define VIS_TEST_TMO    (-3)             /* 面板内部显示态：超时（无响应） */
+#define VIS_TEST_NOCORE (-4)             /* 面板内部显示态：没接核心 */
+/* 试查命中标记（Task 7.1）：命中后在命中点画 ~2 秒方框 + 坐标文字（找图 = 模板 w×h 按方向映射、
+ * 找色 = 固定 80×80 居中）；纯绘制 —— 不参与命中、不吞触摸、不写共享内存（同取点标记口径）。 */
+static int g_vis_testmk_x = 0, g_vis_testmk_y = 0;
+static long g_vis_testmk_t = 0;          /* 命中时刻（now_ms()）；0 = 无标记 */
+static int g_vis_testmk_kind = 0;        /* 0 = 找图 / 1|2 = 找色（方框口径不同） */
+static int g_vis_testmk_tw = 80, g_vis_testmk_th = 80, g_vis_testmk_trot = 0;   /* 模板 w/h + 抓取方向（找色 = 80/80） */
+#define VIS_TEST_MARK_MS 2000            /* 标记存活时长（~2 秒，同取点标记） */
 /* 编辑层（T2.6/T2.4）里「渲染与吞触摸都要读」的三个标量定义在这里（g_ope_ 一族其余在 T2.6 区块）：
  * 文件前段的快照/吞触摸判据（ui_rect_now / snapshot_touches）要用它们 —— C++ 变量不能像函数那样
  * 先声明后定义（后置带初值的定义会判重定义），所以把定义搬前。
@@ -2181,6 +2203,30 @@ static void build_overlay(int sw, int sh)
             char mkb[32];
             snprintf(mkb, sizeof mkb, "%d,%d", g_pickmk_x, g_pickmk_y);
             dl->AddText(ImVec2((float)mx + arm + 10.0f, (float)my - 30.0f), mc, mkb);
+        }
+        /* 试查命中标记（Task 7.1）：~2 秒方框 + 坐标文字（x,y = 竖屏逻辑坐标）。
+         * 找图 = 模板 w×h 按（模板抓取方向 → 当前方向）的旋转映射（奇步宽高互换，同核心模板旋转口径）；
+         * 找色 = 固定 80×80 居中。纯绘制（同取点标记口径）：不参与命中、不吞触摸、不写共享内存。 */
+        if (g_vis_testmk_t && t - g_vis_testmk_t < VIS_TEST_MARK_MS) {
+            int tmx, tmy, tbx, tby, tbw, tbh;
+            ImU32 tc = IM_COL32(0, 200, 0, 255);            /* 绿：与取点橙 / 触点蓝区分 */
+            p2c(g_vis_testmk_x, g_vis_testmk_y, &tmx, &tmy);
+            if (g_vis_testmk_kind == 0) {
+                int steps = (g_vis_testmk_trot - g_rot) & 3;
+                tbw = (steps & 1) ? g_vis_testmk_th : g_vis_testmk_tw;
+                tbh = (steps & 1) ? g_vis_testmk_tw : g_vis_testmk_th;
+                tbx = tmx; tby = tmy;                       /* 命中点 = 匹配框左上（帧锚点；p2c 后与帧坐标同点） */
+            } else {
+                tbw = 80; tbh = 80;
+                tbx = tmx - 40; tby = tmy - 40;             /* 找色：命中像素居中 */
+            }
+            dl->AddRect(ImVec2((float)tbx, (float)tby),
+                        ImVec2((float)(tbx + tbw - 1), (float)(tby + tbh - 1)), tc, 0, 0, 6.0f);
+            {
+                char tkb[32];
+                snprintf(tkb, sizeof tkb, "%d,%d", g_vis_testmk_x, g_vis_testmk_y);
+                dl->AddText(ImVec2((float)tbx, (float)(tby - 34)), tc, tkb);
+            }
         }
         /* 框选橡皮筋 + 提示（手势坐标是竖屏的，画之前换算） */
         if (g_cap_mode && g_cap_slot >= 0) {
@@ -5901,6 +5947,147 @@ static void vis_cap_tick(void)
         g_need = 1;                                             /* 等帧/提示期间保持重画 */
     }
 }
+
+/* ---- 试查（Task 7.1「试一下」；整条链在渲染线程）---- */
+
+/* 结果码 → 原因词（词表 = 核心 op 中止词；码值 = 核心 src/vt_shm.h 的 VT_TEST_ERR_* ——
+ * 面板不 include 核心头，独立定义）。 */
+#define VIS_TEST_ERR_NOPIC  1            /* 无画面 */
+#define VIS_TEST_ERR_VIS    2            /* 视觉错 */
+#define VIS_TEST_ERR_REGION 3            /* 区域不存在 */
+#define VIS_TEST_ERR_TMPL   4            /* 模板不存在 */
+static const char *vis_test_err_word(int err)
+{
+    switch (err) {
+    case VIS_TEST_ERR_NOPIC:  return "无画面";
+    case VIS_TEST_ERR_VIS:    return "视觉错";
+    case VIS_TEST_ERR_REGION: return "区域不存在";
+    case VIS_TEST_ERR_TMPL:   return "模板不存在";
+    default:                  return "未知错误";
+    }
+}
+
+/* 结果行颜色：命中绿 / 未命中灰 / 等待灰 / 错误与超时红。 */
+static ImVec4 vis_test_msg_col(void)
+{
+    if (g_vis_test_on || g_vis_test_err == -1) return ImVec4(0.45f, 0.45f, 0.48f, 1.0f);
+    if (g_vis_test_err == 0) return ImVec4(0.09f, 0.64f, 0.29f, 1.0f);
+    return ImVec4(0.863f, 0.149f, 0.149f, 1.00f);   /* 同 g_vis_edmsg 红 */
+}
+
+/* 读 .tmpl 头（w/h/rot；找图标记方框尺寸用）。0 = 成功；非 0 = 读不到（方框按 80×80 兜底）。 */
+static int vis_test_read_tmpl(const char *name, int *tw, int *th, int *trot)
+{
+    char p[160];
+    unsigned char hd[14];
+    FILE *f;
+    int w, h, rot;
+
+    snprintf(p, sizeof p, "%s/%s.tmpl", VIS_TMPL_DIR, name);
+    f = fopen(p, "rb");
+    if (!f) return -1;
+    if (fread(hd, 1, sizeof hd, f) != sizeof hd) { fclose(f); return -1; }
+    fclose(f);
+    if (hd[0] != 'V' || hd[1] != 'T' || hd[2] != 'M' || hd[3] != '1') return -1;
+    w = (int)hd[8] | ((int)hd[9] << 8);
+    h = (int)hd[10] | ((int)hd[11] << 8);
+    rot = hd[12];
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || rot > 3) return -1;
+    *tw = w; *th = h; *trot = rot;
+    return 0;
+}
+
+/* 发起一次试查（面板→核心）：填参数 → release 写 test_req_seq → 写唤醒 pipe → 置等待态 + 请求日志。
+ * 单请求在途（g_vis_test_on）；在途时点按只提示、不重发。kind 0 的模板 w×h 先在本地读好（标记用）。 */
+static void vis_test_fire(int kind, const char *ref, const char *region, int a1, int a2)
+{
+    unsigned seq;
+    if (g_vis_test_on) {
+        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "上一发还在等结果…");
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    seq = vtouch_vis_test_post(kind, ref, region, a1, a2);
+    if (!seq) {                                        /* 没接核心（单跑模式 / 附着失败） */
+        g_vis_test_err = VIS_TEST_NOCORE;
+        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "没接核心（无法试查）");
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    g_vis_test_on = 1;
+    g_vis_test_seq = seq;
+    g_vis_test_t0 = now_ms();
+    g_vis_test_err = VIS_TEST_WAIT;
+    snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "等待结果…");
+    g_vis_testmk_kind = kind;
+    g_vis_testmk_tw = 80; g_vis_testmk_th = 80; g_vis_testmk_trot = g_rot;   /* 找色固定 80×80 */
+    if (kind == 0)                                     /* 找图：模板 w×h（读不到按 80×80 兜底） */
+        vis_test_read_tmpl(ref, &g_vis_testmk_tw, &g_vis_testmk_th, &g_vis_testmk_trot);
+    if (kind == 0) ALOGI("vis 试查 请求 找图 %s", ref);
+    else if (kind == 2) ALOGI("vis 试查 请求 找色 多点 %s", ref);
+    else ALOGI("vis 试查 请求 找色 单点 #%06X 容差=%d",
+               (unsigned)(((uint32_t)a2 >> 8) & 0xFFFFFFu), (int)((uint32_t)a2 & 0xFFu));
+    g_need = 1; g_force_frames = 2;
+}
+
+/* 「试一下」发起（步骤参数层）：校验当前步（同源 ope_step_check，不过 → 就地提示、不投）→ 按类型填参数。
+ * 参数 = 当前编辑缓冲（未落表的改动也照测）。 */
+static void vis_test_start_se(int se)
+{
+    char why[96];
+    int type = g_ope_steps[se][0], kind, a1, a2;
+    if (!ope_step_check(se, g_ope_steps[se], why, (int)sizeof why)) {
+        snprintf(g_vis_edmsg, sizeof g_vis_edmsg, "%s", why);
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    if (type == OP_STEP_FINDIMAGE) {
+        kind = 0; a1 = g_ope_steps[se][1]; a2 = 0;     /* 找图：a1 = 阈值 */
+    } else if (g_ope_steps[se][1] == 1) {
+        kind = 2; a1 = 1; a2 = 0;                      /* 找色多点：点集在 ref */
+    } else {
+        kind = 1; a1 = 0; a2 = g_ope_steps[se][2];     /* 找色单点：a2 = (颜色<<8)|容差 */
+    }
+    vis_test_fire(kind, g_ope_refs[se], g_ope_exprs[se], a1, a2);
+}
+
+/* 「试一下」发起（模板页）：按行内名字直接投（全屏；找图阈值 8 = 新步默认口径）。 */
+static void vis_test_start_tmpl(const char *name, int is_pts)
+{
+    if (is_pts) vis_test_fire(2, name, "", 1, 0);
+    else        vis_test_fire(0, name, "", 8, 0);
+}
+
+/* 渲染循环每拍调（试查在途才做事）：收结果（acquire 轮询 test_res_seq，≤10ms）→ 结果行 + 标记；
+ * 1.5s 无响应 →「超时（无响应）」。晚到的陈旧结果（seq 不是本次）不认领、不打断在途。 */
+static void vis_test_tick(void)
+{
+    unsigned seq;
+    int x, y, err;
+    if (!g_vis_test_on) return;
+    if (vtouch_vis_test_take(&seq, &x, &y, &err) && seq == g_vis_test_seq) {
+        g_vis_test_on = 0;
+        g_vis_test_err = err;
+        if (err == 0) {
+            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "命中 (%d, %d)", x, y);
+            g_vis_testmk_x = x; g_vis_testmk_y = y; g_vis_testmk_t = now_ms();
+        } else if (err == -1) {
+            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "未命中");
+        } else {
+            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "%s", vis_test_err_word(err));
+        }
+        g_need = 1; g_force_frames = 2;
+        return;
+    }
+    if (now_ms() - g_vis_test_t0 > VIS_TEST_TMO_MS) {
+        g_vis_test_on = 0;
+        g_vis_test_err = VIS_TEST_TMO;
+        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "超时（无响应）");
+        ALOGI("vis 试查 超时");
+        g_need = 1; g_force_frames = 2;
+    }
+}
+
 /* 采集图像 GL 纹理上传（渲染线程；调用时 GL 上下文已 current）。尺寸变 = 重建，否则子更新。 */
 static void vis_tex_update(const unsigned char *rgba, int w, int h)
 {
@@ -6605,6 +6792,18 @@ static void draw_vis_edit(void)
         ImGui::SetCursorScreenPos(ImVec2(x0, ry + 384));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_edmsg);
     }
+    /* 试一下（Task 7.1）：当场执行一次查找 → 结果行 + 屏幕标记。 */
+    ImGui::PushID(9300);
+    ImGui::SetCursorScreenPos(ImVec2(x0, ry + 480));
+    if (btn_blue("试一下", ImVec2(cw, 92))) vis_test_start_se(se);
+    ImGui::PopID();
+    /* 试查结果行（固定槽：出现/消失不动下面） */
+    ImGui::SetCursorScreenPos(ImVec2(x0, ry + 584));
+    if (g_vis_test_msg[0]) {
+        ImGui::TextColored(vis_test_msg_col(), "%s", g_vis_test_msg);
+    } else {
+        text_meta_s("试一下：当场查找一次，命中位置画到屏幕上");
+    }
     /* 底：[取消] 丢弃 / [完成] 同源预检 → 关层（外层 [完成] 才落表） */
     bw2 = (cw - 12.0f) * 0.5f;
     by = b.y - 24.0f - 92.0f;
@@ -6672,6 +6871,13 @@ static void page_template(void)
         }
     }
     ImGui::Dummy(ImVec2(0, 6));
+    /* 试查（Task 7.1）结果行：固定槽（出现/消失不动下面列表） */
+    if (g_vis_test_msg[0]) {
+        ImGui::TextColored(vis_test_msg_col(), "%s", g_vis_test_msg);
+    } else {
+        text_meta_s("「试一下」：当场执行一次查找，结果在此显示、命中位置画到屏幕上");
+    }
+    ImGui::Dummy(ImVec2(0, 6));
     /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
@@ -6684,10 +6890,12 @@ static void page_template(void)
     for (i = 0; i < nt; i++) {
         ImGui::PushID(9400 + i);
         {
-            float dw = 150.0f;
-            float nw = ImGui::GetContentRegionAvail().x - dw - 12.0f;
+            float dw = 150.0f, qw = 150.0f;          /* [试一下] / [删除] 宽 */
+            float nw = ImGui::GetContentRegionAvail().x - dw - qw - 24.0f;
             if (nw < 120.0f) nw = 120.0f;
             btn_light(tms[i], ImVec2(nw, 76));       /* 只显示（不可点） */
+            ImGui::SameLine();
+            if (btn_blue("试一下", ImVec2(qw, 76))) vis_test_start_tmpl(tms[i], 0);
             ImGui::SameLine();
             if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(tms[i], 0);
         }
@@ -6699,10 +6907,12 @@ static void page_template(void)
     for (i = 0; i < np; i++) {
         ImGui::PushID(9500 + i);
         {
-            float dw = 150.0f;
-            float nw = ImGui::GetContentRegionAvail().x - dw - 12.0f;
+            float dw = 150.0f, qw = 150.0f;          /* [试一下] / [删除] 宽 */
+            float nw = ImGui::GetContentRegionAvail().x - dw - qw - 24.0f;
             if (nw < 120.0f) nw = 120.0f;
             btn_light(pss[i], ImVec2(nw, 76));       /* 只显示（不可点） */
+            ImGui::SameLine();
+            if (btn_blue("试一下", ImVec2(qw, 76))) vis_test_start_tmpl(pss[i], 1);
             ImGui::SameLine();
             if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(pss[i], 1);
         }
@@ -7028,6 +7238,7 @@ static void *render_thread_fn(void *)
         region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
         ops_run_watch();          /* 操作运行状态变了 → 请求重画（「运行中 · 第 k/n 步」实时读核心） */
         vis_cap_tick();           /* 视觉采集（T3.2）：收帧/失败/超时（等帧期间保持重画） */
+        vis_test_tick();          /* 试查（Task 7.1）：收结果/超时（≤10ms 轮询 test_res_seq） */
         int need_draw = g_need;   /* 显式请求的重画：不被下面的静止门吞掉 */
         go = g_need || g_ov_need;
         if (g_force_frames > 0) go = 1;
@@ -7059,6 +7270,8 @@ static void *render_thread_fn(void *)
                 for (i = 0; i < 64 && !ov_active; i++) if (g_dots[i].on) ov_active = 1;
                 /* 取点标记（T3.2）同属「由有到无」：过期后补一帧擦掉（否则十字留在屏上） */
                 if (!ov_active && g_pickmk_t && now_ms() - g_pickmk_t < PICK_MARK_MS) ov_active = 1;
+                /* 试查标记（Task 7.1）同款：过期后补一帧擦掉（否则方框留在屏上） */
+                if (!ov_active && g_vis_testmk_t && now_ms() - g_vis_testmk_t < VIS_TEST_MARK_MS) ov_active = 1;
             } else ov_active = 0;
             static int ov_was = 0;
             if (ov_was && !ov_active) { go = 1; g_force_frames = 1; }

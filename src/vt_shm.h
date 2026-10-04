@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  8u            /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  9u            /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -37,7 +37,8 @@
                                        * 5 = v2 操作扩展：step.ref / 触发数据槽。
                                        * 6 = v3 操作扩展：step.j1/j2（条件双分支 + 跳转步）。
                                        * 7 = v5 操作扩展：step.expr（计算步骤表达式）。
-                                       * 8 = 视觉扩展：帧区（区 D：帧头 + 双缓冲；spec VISION §3.1）。 */
+                                       * 8 = 视觉扩展：帧区（区 D：帧头 + 双缓冲；spec VISION §3.1）。
+                                       * 9 = 编辑器 v2 试查：帧区头新增测试块（test_*；spec EDITOR_V2 §Task 7.1）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -153,9 +154,31 @@ struct vt_shm_frame_hdr {
                                         * （成功 = 只置 bit0；失败 = 置 bit1 并清 bit0）—— 核心按「VALID 且非 ERR」判成败 */
     int32_t  err;                      /* 失败码 */
     uint64_t ts_ns;                    /* 抓帧完成时刻（CLOCK_MONOTONIC） */
+    /* 测试块（契约 v9）：面板写请求 / 核心写结果，单请求在途（spec EDITOR_V2 §Task 7.1「试一下」）。
+     * 请求：面板先写 kind/ref/region/a1/a2，**最后 release 存 test_req_seq**（自增序号；0 = 从未请求）；
+     * 结果：核心执行完先写 x/y/err，**最后 release 存 test_res_seq = 对应请求序号**；面板 acquire 读
+     * res_seq 与本地请求序号比对认领（晚到的陈旧结果自行丢弃）。 */
+    volatile uint32_t test_req_seq;    /* 面板写：请求序号（release 存 / 最后写） */
+    uint8_t  test_kind;                /* 0 = 找图 / 1 = 找色单点 / 2 = 找色多点 */
+    char     test_ref[16];             /* 模板名 / 点集名（找色单点不读，写空） */
+    char     test_region[16];          /* 区域名；空 = 全屏 */
+    int32_t  test_a1;                  /* 找图 = 阈值 0..255 / 找色 = 模式 0/1 */
+    int32_t  test_a2;                  /* 找色单点 = (颜色<<8)|容差；其余 0 */
+    volatile uint32_t test_res_seq;    /* 核心写：结果序号（release 存 / 最后写；= 已应答的请求序号） */
+    int32_t  test_x, test_y;           /* 命中点（竖屏逻辑坐标；仅命中有效） */
+    int32_t  test_err;                 /* 0 = 命中 / -1 = 未命中 / 其余 = 错误码（VT_TEST_ERR_*） */
 };
 /* 帧头必须装进一页（帧缓冲起点按页对齐，页对齐只留一页余量 —— 同区 B 的断言纪律）。 */
 _Static_assert(sizeof(struct vt_shm_frame_hdr) <= 4096, "帧头必须装进一页");
+
+/* 试查结果码（test_err；spec EDITOR_V2 §Task 7.1）：0 = 命中 / -1 = 未命中 / 其余 = 错误码 ——
+ * 词表同 op 中止词（面板按码显示：无画面 / 视觉错 / 区域不存在 / 模板不存在）。 */
+#define VT_TEST_HIT        0
+#define VT_TEST_MISS       (-1)
+#define VT_TEST_ERR_NOPIC  1           /* 无画面（抓帧失败 / 面板不在 / 超时） */
+#define VT_TEST_ERR_VIS    2           /* 视觉错（内部错） */
+#define VT_TEST_ERR_REGION 3           /* 区域不存在 */
+#define VT_TEST_ERR_TMPL   4           /* 模板不存在（模板 / 点集读不到） */
 
 /* ---- 帧区访问（核心 / 面板两侧共用；区 D 布局见 vt_shm.c） ---- */
 /* 帧区头指针（核心读 / 面板写；未建 / 未附着时 NULL）。 (vtouch-doc: vt_shm_frame) */
@@ -201,6 +224,10 @@ int  vt_shm_ui_tick(void);
 void vt_shm_post_edit(const struct vt_shm_edit *e);
 /* 面板发布矩形（seqlock 写侧）。 (vtouch-doc: vt_shm_publish_rect) */
 void vt_shm_publish_rect(int visible, int rot, int x1, int y1, int x2, int y2);
+/* 面板发起一次试查（填参数 → release 写 test_req_seq；返回本次请求序号，0 = 没接共享内存）。 (vtouch-doc: vt_shm_ui_test_post) */
+unsigned vt_shm_ui_test_post(int kind, const char *ref, const char *region, int a1, int a2);
+/* 面板取一次试查结果（acquire 读 test_res_seq vs 本地 seen；1 = 有新结果）。 (vtouch-doc: vt_shm_ui_test_take) */
+int vt_shm_ui_test_take(unsigned *seq, int *x, int *y, int *err);
 
 #endif /* VT_UI */
 #endif /* VT_SHM_H */

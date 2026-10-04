@@ -1012,3 +1012,41 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeVisPanelFail(JNIEnv *env, jclass cls,
     __atomic_store_n(&s_pv_err, (int)err, __ATOMIC_RELEASE);
 }
 
+/* ===================== 试查（Task 7.1「试一下」）：面板 → 核心执行一次查找 =====================
+ * 链路：面板 UI 填参数 → vt_shm_ui_test_post（区 D 头 test_* 块；参数先写、seq 最后 release）→
+ * 写唤醒管道 → 核心主循环 vt_ops_test_poll 执行 → 写结果（release test_res_seq）→ 面板 UI 每拍
+ * vtouch_vis_test_take 取结果（≤10ms）。单请求在途由面板 UI 保证（等待期间不重发）。 */
+
+/**
+ * (vtouch-doc: vtouch_vis_test_post)
+ * @brief 发起一次试查（填参数 → release 写 test_req_seq → 写唤醒管道）。
+ * @param   kind     0 = 找图 / 1 = 找色单点 / 2 = 找色多点
+ * @param   ref      模板名 / 点集名（找色单点不读）
+ * @param   region   区域名（空 = 全屏）
+ * @param   a1       找图 = 阈值 0..255 / 找色 = 模式
+ * @param   a2       找色单点 = (颜色<<8)|容差；其余 0
+ * @return  本次请求序号（≥1；与 take 的 seq 比对认领结果）；0 = 没接共享内存。
+ * @note    写唤醒管道 = 与编辑邮箱同款（glue_wake）：核心立刻醒，不等 poll 超时；没有唤醒 fd 时
+ *          核心最坏 1s 兜底轮询也会吃到。单请求在途：调用方（面板 UI）等待期间不重发。
+ */
+unsigned vtouch_vis_test_post(int kind, const char *ref, const char *region, int a1, int a2)
+{
+    unsigned seq = vt_shm_ui_test_post(kind, ref, region, a1, a2);
+    if (seq) glue_wake();
+    return seq;
+}
+
+/**
+ * (vtouch-doc: vtouch_vis_test_take)
+ * @brief 取一次试查结果（有新结果返回 1；结果序号给调用方认领）。
+ * @param   seq      输出：结果序号（= 核心已应答的请求序号；可 NULL）
+ * @param   x,y      输出：命中点竖屏逻辑坐标（仅命中有效；可 NULL）
+ * @param   err      输出：0 = 命中 / -1 = 未命中 / 其余 = 错误码（VT_TEST_ERR_*；可 NULL）
+ * @return  1 有新结果（本次取走）；0 没有。
+ * @note    同一结果只回报一次；晚到的陈旧结果由调用方按 seq 比对丢弃。
+ */
+int vtouch_vis_test_take(unsigned *seq, int *x, int *y, int *err)
+{
+    return vt_shm_ui_test_take(seq, x, y, err);
+}
+

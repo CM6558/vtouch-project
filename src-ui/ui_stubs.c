@@ -327,3 +327,16 @@ int vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **
 }
 
 int vtouch_vis_panel_err_take(int *err) { (void)err; return 0; }
+
+/* 试查（Task 7.1）：单跑模式没有核心 —— 投递永远失败（面板显示「没接核心」）、无结果可取。 */
+unsigned vtouch_vis_test_post(int kind, const char *ref, const char *region, int a1, int a2)
+{
+    (void)kind; (void)ref; (void)region; (void)a1; (void)a2;
+    return 0;
+}
+
+int vtouch_vis_test_take(unsigned *seq, int *x, int *y, int *err)
+{
+    (void)seq; (void)x; (void)y; (void)err;
+    return 0;
+}

@@ -443,5 +443,71 @@ void vt_shm_publish_rect(int visible, int rot, int x1, int y1, int x2, int y2)
     S_b->rect_seq++;                 /* 偶 = 稳定 */
 }
 
+/* ---- 试查（契约 v9；Task 7.1「试一下」）：面板写请求 / 读结果（核心侧执行见 vt_ops.c 的 vt_ops_test_poll） ---- */
+
+/**
+ * (vtouch-doc: vt_shm_ui_test_post)
+ * @brief 面板发起一次试查：填参数 → **最后** release 写 test_req_seq（序号 = 当前值 + 1）。
+ * @param   kind     0 = 找图 / 1 = 找色单点 / 2 = 找色多点
+ * @param   ref      模板名 / 点集名（找色单点不读；按 test_ref 上限截断）
+ * @param   region   区域名（空 = 全屏；按 test_region 上限截断）
+ * @param   a1       找图 = 阈值 0..255 / 找色 = 模式 0/1
+ * @param   a2       找色单点 = (颜色<<8)|容差；其余 0
+ * @return  本次请求序号（≥1）；0 = 帧区没附着（没接核心）。
+ * @note    内存序照区 D 口径（写端）：参数先写、seq 最后 release 存 —— 核心侧 acquire 读 test_req_seq 后
+ *          一定能看到全部参数。单请求在途由调用方（面板 UI）保证（等待期间不重发）。
+ */
+unsigned vt_shm_ui_test_post(int kind, const char *ref, const char *region, int a1, int a2)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    uint32_t seq;
+    size_t n;
+
+    if (!h) return 0;
+    h->test_kind = (uint8_t)kind;
+    n = ref ? strnlen(ref, sizeof h->test_ref) : 0;      /* 未终止（strnlen 顶到数组尾）→ 截到 15 + NUL */
+    if (n >= sizeof h->test_ref) n = sizeof h->test_ref - 1;
+    if (n) memcpy(h->test_ref, ref, n);
+    h->test_ref[n] = 0;
+    n = region ? strnlen(region, sizeof h->test_region) : 0;
+    if (n >= sizeof h->test_region) n = sizeof h->test_region - 1;
+    if (n) memcpy(h->test_region, region, n);
+    h->test_region[n] = 0;
+    h->test_a1 = a1;
+    h->test_a2 = a2;
+    seq = __atomic_load_n(&h->test_req_seq, __ATOMIC_RELAXED) + 1u;
+    if (seq == 0) seq = 1u;                              /* 防御：uint32 回绕（到不了）不留 0 哨兵 */
+    __atomic_store_n(&h->test_req_seq, seq, __ATOMIC_RELEASE);   /* 参数先写、seq 最后 release（契约） */
+    return seq;
+}
+
+/**
+ * (vtouch-doc: vt_shm_ui_test_take)
+ * @brief 面板取一次试查结果（acquire 读 test_res_seq vs 本地 seen；有新结果返回 1）。
+ * @param   seq      输出：结果序号（= 核心已应答的请求序号；调用方与自己的在途序号比对认领；可 NULL）
+ * @param   x,y      输出：命中点**竖屏逻辑坐标**（仅命中有效；可 NULL）
+ * @param   err      输出：0 = 命中 / -1 = 未命中 / 其余 = 错误码（VT_TEST_ERR_*；可 NULL）
+ * @return  1 有新结果（本次取走）；0 没有。
+ * @note    同一次结果只回报一次（内部 seen）；面板重启后 seen 归零，会把当前结果当「新」报一次 ——
+ *          调用方（在途序号比对）自行丢弃陈旧结果。读侧以 acquire 读 res_seq（配核心侧 release 写：
+ *          读到新 res_seq 必能读到配对 x/y/err）。
+ */
+int vt_shm_ui_test_take(unsigned *seq, int *x, int *y, int *err)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    static uint32_t seen;
+    uint32_t s;
+
+    if (!h) return 0;
+    s = __atomic_load_n(&h->test_res_seq, __ATOMIC_ACQUIRE);
+    if (s == 0 || s == seen) return 0;                   /* 0 = 还没应答过任何请求 */
+    seen = s;
+    if (seq) *seq = s;
+    if (x) *x = (int)h->test_x;
+    if (y) *y = (int)h->test_y;
+    if (err) *err = (int)h->test_err;
+    return 1;
+}
+
 #endif /* VT_UI_PANEL */
 #endif /* VT_UI */

@@ -204,6 +204,7 @@ int vtouch_poll_step(void)
     vt_shm_tick();                       /* 核心心跳 */
     vt_shm_edit_apply();                 /* 面板投的区域编辑：这一轮就吃掉 */
     vt_ops_tick();                       /* 操作执行器：触发 / 撞槽自检 / 到点动作（一拍一步） */
+    vt_ops_test_poll();                  /* 试查（Task 7.1）：面板「试一下」请求 → 执行一次查找 → 写结果 */
     if (vt_shm_stop_req()) { fprintf(stderr, "vtouchd: 面板请求停引擎 → 退出\n"); return -1; }
 #endif
     /* poll 超时（四档，取最紧的那个）：
