@@ -95,7 +95,8 @@ for f in imgui imgui_draw imgui_tables imgui_widgets; do
 done
 "$CXX" -O2 -Wall -fPIC -DIMGUI_IMPL_OPENGL_ES2 -I$IMG -c $IMG/backends/imgui_impl_opengl3.cpp \
   -o build/ui/obj/imgui_impl_opengl3.o
-"$CXX" -O2 -Wall -fPIC -I$IMG -Isrc-ui -Ibuild/ui -c src-ui/vtouch_ui.cpp -o build/ui/obj/vtouch_ui.o
+# -Isrc：面板写端（T3.2）要用 vt_vision.h 的灰度公式（单一来源，引擎同款）——只 include 这一个零依赖头
+"$CXX" -O2 -Wall -fPIC -I$IMG -Isrc-ui -Ibuild/ui -Isrc -c src-ui/vtouch_ui.cpp -o build/ui/obj/vtouch_ui.o
 echo "[4/6] link..."
 "$CXX" -shared -o build/ui/libtestimgui.so build/ui/obj/*.o \
   -lEGL -lGLESv2 -landroid -llog -lm

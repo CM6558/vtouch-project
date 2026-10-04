@@ -24,6 +24,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "ui_chars.h"   /* 自动生成（scripts/gen_ui_chars.py）：面板文案里实际用到的字形集 */
+#include "vt_vision.h"  /* T3.2：灰度公式单一来源（vt_vis_gray_px；.tmpl 写端与引擎逐字同款）—— build_ui.sh 加 -Isrc */
 
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；面板不 include 核心头，独立定义）——
  * vtouch_op_put 的每步区域引用表与编辑层本地 ref 副本（g_ope_refs）按它定宽。 */
@@ -79,6 +80,11 @@ int  vtouch_region_toggle(int i);
 int  vtouch_region_trig(int i, char *op, int n, int *ev);
 int  vtouch_region_bind(const char *id, const char *opname, int ev);   /* 触发绑定（opname "-"/空 = 解除） */
 int  vtouch_region_kind(const char *id, int kind);                     /* 开关型（0=普通 1=开关型） */
+/* 视觉模板/点集（T3.2）：面板侧抓帧旁路（请求 → 面板侧缓冲取帧/取错；不进共享内存、不动帧区协议）。
+ * 定义见 src-ui/ui_glue.c（单跑模式见 src-ui/ui_stubs.c）。 */
+void vtouch_vis_panel_capture_req(void);
+int  vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf);
+int  vtouch_vis_panel_err_take(int *err);
 }
 
 #define LOGT "VTouchUI"
@@ -208,9 +214,43 @@ static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无
 #define PICK_MARK_MS 2000                /* 标记存活时长（~2 秒） */
 /* 编辑层（T2.6/T2.4）里「渲染与吞触摸都要读」的三个标量定义在这里（g_ope_ 一族其余在 T2.6 区块）：
  * 文件前段的快照/吞触摸判据（ui_rect_now / snapshot_touches）要用它们 —— C++ 变量不能像函数那样
- * 先声明后定义（后置带初值的定义会判重定义），所以把定义搬前。 */
+ * 先声明后定义（后置带初值的定义会判重定义），所以把定义搬前。
+ * 视觉（T3.2）一族同理由：ui_rect_now（采集覆盖层整屏吞）与编辑层开关（op_edit_close/open）都要读。 */
 static int g_ope_i = -1;                 /* 正在编辑的操作下标（-1 = 编辑层关；三态矩形的判据） */
 static int g_ope_coll = 0;               /* 编辑层收起态（取点自动收起 / 手动收起共用；1 = 收成底部条） */
+#define VIS_PTS_MAX 16                   /* 点集参考点上限（= 核心 VT_VIS_PTS_MAX；面板不 include 核心头） */
+static int g_vis_cap = 0;                /* 采集覆盖层（T3.2）：0=关 1=模板框选 2=点集编辑 3=吸色（找色步 [取点]） */
+static int g_vis_cap_wait = 0;           /* 等帧中（请求已发） */
+static int g_vis_cap_err = 0;            /* 抓帧失败码（显示用；-1 = 3s 超时哨兵） */
+static long g_vis_cap_t0 = 0;            /* 请求时刻（超时判据；now_ms()） */
+static const unsigned char *g_vis_img = 0;   /* 面板侧帧缓冲（ui_glue.c 内；只读，紧排 w*4） */
+static int g_vis_img_w = 0, g_vis_img_h = 0, g_vis_img_rot = 0;
+static int g_vis_drag = 0;               /* 采集层拖动中（模板框选 / 点选轻点判据共用） */
+static float g_vis_dx0 = 0, g_vis_dy0 = 0;   /* 拖动起点（屏坐标） */
+static int g_vis_sel[4] = {0, 0, 0, 0};  /* 已定框选（帧坐标 x0,y0,x1,y1 含端点） */
+static int g_vis_sel_on = 0;             /* 框选有效 */
+static int g_vis_base_x = -1, g_vis_base_y = -1;   /* 点集基准点（帧坐标；-1 = 未选） */
+static uint32_t g_vis_base_rgb = 0;      /* 点集基准色 */
+static int g_vis_base_tol = 8;           /* 基准容差（默认 8；写盘时每点 tol = 它，v1 不逐点编辑） */
+static int g_vis_pts_n = 0;              /* 参考点数（≤ VIS_PTS_MAX） */
+static int g_vis_pts_x[VIS_PTS_MAX], g_vis_pts_y[VIS_PTS_MAX];
+static uint32_t g_vis_pts_rgb[VIS_PTS_MAX];
+static char g_vis_cap_msg[72] = {0};     /* 采集层就地提示（上限等） */
+static int g_vis_kb = 0;                 /* 采集层命名键盘子层：0=关 1=模板 2=点集 */
+static char g_vis_kb_buf[16] = {0}, g_vis_kb_msg[72] = {0};
+static int g_vis_kb_up = 0;
+static int g_vis_pick_se = -1;           /* 吸色回填目标步（-1 = 非吸色会话） */
+static int g_vis_ed = 0;                 /* 视觉步参数层（编辑层子层）：0=关 1=找图 2=找色（g_ope_se = 步号） */
+static int g_vis_num = 0;                /* 数字键盘子层（从视觉参数层进；复用 draw_num_edit） */
+static int g_vis_tl = 0;                 /* 模板列表子层 */
+static int g_vis_pl = 0;                 /* 点集列表子层 */
+static int g_vis_hex = 0;                /* 颜色十六进制键盘子层 */
+static char g_vis_hexbuf[8] = {0}, g_vis_hexmsg[72] = {0};
+static int g_vis_hexup = 0;
+static char g_vis_edmsg[96] = {0};       /* 视觉参数层就地提示 */
+static unsigned int g_vis_tex = 0;       /* 采集图像 GL 纹理（0 = 未建；渲染线程独占） */
+static int g_vis_tex_w = 0, g_vis_tex_h = 0;
+static int g_vis_tex_dirty = 0;          /* 新帧到达 → 下一帧上传 */
 static long g_pick_t0 = 0;               /* 取点发起时刻（now_ms()；0 = 无）—— 面板自带 20s 兜底计时 */
 /* 取点弹回抑制（T2.4 修复轮 1，评审 Important 1）：编辑层「收起→展开」跃迁的那一帧 / 条上取消那一下，
  * 还按着的手指一律抑制到抬起（1 = 该 slot 不喂 ImGui）—— 否则矩形回整屏后会被快照锁存成面板鼠标
@@ -472,7 +512,7 @@ static void region_rot_step(void)
     }
     if (g_rr_off || g_w <= 0 || g_h <= 0 || g_scr_w <= 0 || g_scr_h <= 0) return;
     /* ⚠ 只认自洽的屏帧（见 frame_sane）。不自洽就**什么都不做**：既不换算、也不推进基准，
-     * 等 Java 侧 500ms 观察窗给到自洽值（通常 5~40ms 后；这段短暂错位被双图层翻转遮住）。 */
+     * 等 Java 侧 500ms 观察窗给到自洽值（通常 5~10ms 后；这段短暂错位被双图层翻转遮住）。 */
     if (!frame_sane(g_rot, g_scr_w, g_scr_h)) {
         g_rr_insane++;
         if (g_rr_insane == 1 || (g_rr_insane % 120) == 0)
@@ -811,6 +851,10 @@ static void load_regions(void)
 #define OP_STEP_COND_TOGGLE 7          /* 开关判断（ref 区域须开关型且开着） */
 #define OP_STEP_JUMP        8          /* 跳转（a1 = 目标步骤：0 = 结束、1..步数 = 目标） */
 #define OP_STEP_CALC        9          /* 计算（v5；a1 = 结果槽 1..4、expr = 表达式） */
+#define OP_STEP_FINDIMAGE  10          /* 找图（T3.2 v8；ref=模板名、expr=区域名（空=全屏）、a1=阈值 0..255、
+                                        * a2=0、a3/a4=不成立/成立档、j1/j2=该侧目标） */
+#define OP_STEP_FINDCOLOR  11          /* 找色（T3.2 v8；a1=模式 0 单点/1 多点；ref=点集名（多点必填/单点必空）；
+                                        * expr=区域名；单点 a2=(颜色<<8)|容差、多点 a2=0；a3/a4/j1/j2 同上） */
 #define OP_COND_ABORT       0          /* 档位：中止（条件步成立/不成立侧共用；不成立侧默认） */
 #define OP_COND_SKIP        1          /* 档位：跳过下一步 */
 #define OP_COND_CONT        2          /* 档位：继续下一步（成立侧默认） */
@@ -1391,6 +1435,10 @@ static int scheme_precheck(const char *name)
 }
 /* 关闭操作编辑覆盖层（定义在操作编辑区块 T2.6；切换的静默边界要关掉它 —— 含全部子层与取点态）。 */
 static void op_edit_close(void);
+/* 视觉（T3.2）：视觉步参数层（定义在文件后段视觉区块；draw_op_edit 的分发要用）；
+ * 名字校验（ope_step_check 的区域/模板/点集名校验要用）。 */
+static void draw_vis_edit(void);
+static int vis_name_ok(const char *n);
 /* 回滚复制（评审 I2 / Minor 3）：scheme_copy_file 的「源缺失 → 写空表」语义在回滚方向是危险的
  * （源没了还写空表 = 把 live 清掉）—— 源缺失直接 -1（调用方告警、保持现状）；其余照常复制。0 / -1。 */
 static int scheme_restore_file(const char *src, const char *dst, int kind)
@@ -1550,6 +1598,10 @@ static void ope_bar_rect(float *x1, float *y1, float *x2, float *y2)
  *   编辑层关闭 → 面板窗口（现状）。 */
 static void ui_rect_now(float *x1, float *y1, float *x2, float *y2)
 {
+    if (g_vis_cap) {                 /* 采集覆盖层（T3.2）：整屏吞（框选/点选/吸色都在整屏层上做） */
+        *x1 = 0; *y1 = 0; *x2 = (float)g_scr_w - 1; *y2 = (float)g_scr_h - 1;
+        return;
+    }
     if (g_ope_i >= 0) {
         if (g_ope_coll) ope_bar_rect(x1, y1, x2, y2);
         else { *x1 = 0; *y1 = 0; *x2 = (float)g_scr_w - 1; *y2 = (float)g_scr_h - 1; }
@@ -2530,6 +2582,7 @@ static void build_sidebar(void)
         if (nav_btn("区域列表", g_nav == 0 && g_sheet, bw)) { g_nav = 0; g_sheet = 1; g_need = 1; }
         if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
         if (nav_btn("方案",     g_nav == 5 && g_sheet, bw)) { g_nav = 5; g_sheet = 1; g_need = 1; }
+        if (nav_btn("模板",     g_nav == 6 && g_sheet, bw)) { g_nav = 6; g_sheet = 1; g_need = 1; }
         if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
         if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
         if (nav_btn("说明",     g_nav == 4 && g_sheet, bw)) { g_nav = 4; g_sheet = 1; g_need = 1; }
@@ -3168,7 +3221,7 @@ static const char *ope_name_why(int rc)
  * 可变量的字段（spec §2.1）多画一个 [变量]（ope_var_ok 判）。条件步的 a3/a4/j1/j2/ref 不在字段表里 ——
  * 它们是步骤行上的行内控件（档位 + 目标格 + 区域下拉）；跳转步的「目标」= a1，走字段表（1 格）；
  * 计算步无数字字段（表达式走表达式子层，不进数字弹层）。 */
-static const int ope_fidx[9][5] = {
+static const int ope_fidx[11][5] = {
     { 1, 2, 5, -1, -1 },       /* 点按：x, y, 按住 ms */
     { 1, 2, 3, 4, 5 },         /* 滑动：起点 x, 起点 y, 终点 x, 终点 y, 时长 ms */
     { 5, -1, -1, -1, -1 },     /* 等待：ms */
@@ -3178,8 +3231,10 @@ static const int ope_fidx[9][5] = {
     { -1, -1, -1, -1, -1 },    /* 开关判断：无数字字段 */
     { 1, -1, -1, -1, -1 },     /* 跳转：目标步骤（0 = 结束） */
     { -1, -1, -1, -1, -1 },    /* 计算：无数字字段（表达式子层编辑） */
+    { 1, -1, -1, -1, -1 },     /* 找图（T3.2）：阈值 = a1（数字键盘子层编辑） */
+    { 2, -1, -1, -1, -1 },     /* 找色（T3.2）：容差 = a2 低 8 位（ne_field_get/set 拆包） */
 };
-static const char *const ope_flabel[9][5] = {
+static const char *const ope_flabel[11][5] = {
     { "坐标 x", "坐标 y", "按住时长 ms", "", "" },
     { "起点 x", "起点 y", "终点 x", "终点 y", "滑动时长 ms" },
     { "等待时长 ms", "", "", "", "" },
@@ -3189,11 +3244,14 @@ static const char *const ope_flabel[9][5] = {
     { "", "", "", "", "" },
     { "目标", "", "", "", "" },
     { "", "", "", "", "" },    /* 计算：无数字字段 */
+    { "阈值", "", "", "", "" }, /* 找图：阈值 0..255 */
+    { "容差", "", "", "", "" }, /* 找色（单点）：容差 0..255 */
 };
 static int ope_nfields(int type)
 {
     return type == OP_STEP_TAP ? 3 : type == OP_STEP_SWIPE ? 5 : type == OP_STEP_WAIT ? 1 :
-           type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : type == OP_STEP_JUMP ? 1 : 0;
+           type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : type == OP_STEP_JUMP ? 1 :
+           type == OP_STEP_FINDIMAGE ? 1 : type == OP_STEP_FINDCOLOR ? 1 : 0;
 }
 static const char *ope_tname(int type)
 {
@@ -3207,6 +3265,8 @@ static const char *ope_tname(int type)
     case OP_STEP_COND_TOGGLE: return "开关判断";
     case OP_STEP_JUMP:        return "跳转";
     case OP_STEP_CALC:        return "计算";
+    case OP_STEP_FINDIMAGE:   return "找图";
+    case OP_STEP_FINDCOLOR:   return "找色";
     default:                  return "?";
     }
 }
@@ -3242,7 +3302,7 @@ static int ope_var_ok(int type, int idx)
 static int ne_check(const char *label, int type, int fi, int v, char *why, int whycap)
 {
     int idx;
-    if (type < OP_STEP_TAP || type > OP_STEP_CALC || fi < 0 || fi >= ope_nfields(type)) {
+    if (type < OP_STEP_TAP || type > OP_STEP_FINDCOLOR || fi < 0 || fi >= ope_nfields(type)) {
         snprintf(why, (size_t)whycap, "步骤类型非法");
         return 0;
     }
@@ -3250,6 +3310,13 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
     if (type == OP_STEP_JUMP) {                       /* 跳转目标：0..32（0 = 结束） */
         if (v < 0 || v > OPE_MAX_STEPS) {
             snprintf(why, (size_t)whycap, "%s 必须在 0..%d（0 = 结束）", label, OPE_MAX_STEPS);
+            return 0;
+        }
+        return 1;
+    }
+    if (type == OP_STEP_FINDIMAGE || type == OP_STEP_FINDCOLOR) {   /* 视觉步单字段（T3.2）：阈值 / 容差 */
+        if (v < 0 || v > 255) {
+            snprintf(why, (size_t)whycap, "%s 必须在 0..255", label);
             return 0;
         }
         return 1;
@@ -3277,7 +3344,7 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
 static int ope_step_check(int si, const int *s6, char *why, int whycap)
 {
     int t = s6[0], nf, fi;
-    if (t < OP_STEP_TAP || t > OP_STEP_CALC) {
+    if (t < OP_STEP_TAP || t > OP_STEP_FINDCOLOR) {
         snprintf(why, (size_t)whycap, "第 %d 步类型非法", si + 1);
         return 0;
     }
@@ -3334,6 +3401,74 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
         w2[0] = 0;
         if (vtouch_expr_check(g_ope_exprs[si], w2, (int)sizeof w2) != 0) {
             snprintf(why, (size_t)whycap, "第 %d 步：表达式错（%s）", si + 1, w2[0] ? w2 : "非法");
+            return 0;
+        }
+    } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
+        /* 视觉步（T3.2 v8）：镜像核心 op_valid —— 找图 ref=模板名（必填）、expr=区域名（空或合法）、
+         * a1=阈值 0..255、a2/ms=0；找色 a1=模式、单点 ref 空 + a2=(颜色<<8)|容差、多点 ref=点集名（必填）+ a2=0；
+         * 两类型 a3/a4 档位、j1/j2 目标域（同条件步）。 */
+        if (t == OP_STEP_FINDIMAGE) {
+            if (s6[1] < 0 || s6[1] > 255) {
+                snprintf(why, (size_t)whycap, "第 %d 步：阈值必须在 0..255", si + 1);
+                return 0;
+            }
+            if (s6[2] != 0 || s6[5] != 0) {
+                snprintf(why, (size_t)whycap, "第 %d 步：找图其它字段必须为空", si + 1);
+                return 0;
+            }
+            if (!g_ope_refs[si][0]) {
+                snprintf(why, (size_t)whycap, "第 %d 步：请选择模板（点 [参数]）", si + 1);
+                return 0;
+            }
+            if (vis_name_ok(g_ope_refs[si]) != 0) {
+                snprintf(why, (size_t)whycap, "第 %d 步：模板名非法（[A-Za-z0-9_-]、1..15）", si + 1);
+                return 0;
+            }
+        } else {
+            if (s6[1] != 0 && s6[1] != 1) {
+                snprintf(why, (size_t)whycap, "第 %d 步：模式非法（0/1）", si + 1);
+                return 0;
+            }
+            if (s6[5] != 0) {
+                snprintf(why, (size_t)whycap, "第 %d 步：找色其它字段必须为空", si + 1);
+                return 0;
+            }
+            if (s6[1] == 1) {                 /* 多点：点集名必填 + a2 必须 0（基准色/容差/点表在 .pts） */
+                if (!g_ope_refs[si][0]) {
+                    snprintf(why, (size_t)whycap, "第 %d 步：请选择点集（多点必填）", si + 1);
+                    return 0;
+                }
+                if (vis_name_ok(g_ope_refs[si]) != 0) {
+                    snprintf(why, (size_t)whycap, "第 %d 步：点集名非法（[A-Za-z0-9_-]、1..15）", si + 1);
+                    return 0;
+                }
+                if (s6[2] != 0) {
+                    snprintf(why, (size_t)whycap, "第 %d 步：多点模式字段必须为空", si + 1);
+                    return 0;
+                }
+            } else if (g_ope_refs[si][0]) {   /* 单点：点集名必须空 */
+                snprintf(why, (size_t)whycap, "第 %d 步：单点模式不能带点集", si + 1);
+                return 0;
+            }
+        }
+        if (s6[3] < OP_COND_ABORT || s6[3] > OP_COND_JUMP) {
+            snprintf(why, (size_t)whycap, "第 %d 步：不成立行为非法", si + 1);
+            return 0;
+        }
+        if (s6[4] < OP_COND_ABORT || s6[4] > OP_COND_JUMP) {
+            snprintf(why, (size_t)whycap, "第 %d 步：成立行为非法", si + 1);
+            return 0;
+        }
+        if (s6[4] == OP_COND_JUMP && (s6[6] < 0 || s6[6] > g_ope_nsteps)) {
+            snprintf(why, (size_t)whycap, "第 %d 步成立侧跳转目标超出步数", si + 1);
+            return 0;
+        }
+        if (s6[3] == OP_COND_JUMP && (s6[7] < 0 || s6[7] > g_ope_nsteps)) {
+            snprintf(why, (size_t)whycap, "第 %d 步不成立侧跳转目标超出步数", si + 1);
+            return 0;
+        }
+        if (g_ope_exprs[si][0] && vis_name_ok(g_ope_exprs[si]) != 0) {
+            snprintf(why, (size_t)whycap, "第 %d 步：区域名非法（[A-Za-z0-9_-]、1..15）", si + 1);
             return 0;
         }
     }
@@ -3425,6 +3560,24 @@ static void ope_step_text(int si, char *out, int outcap)
         snprintf(out, (size_t)outcap, "计算 → r%d = %s", s6[1],
                  g_ope_exprs[si][0] ? g_ope_exprs[si] : "(空)");
         break;
+    case OP_STEP_FINDIMAGE:
+        /* 摘要（T3.2）：模板 / 区域 / 阈值 + 成立/不成立两档（跳转档带目标；同条件步口径） */
+        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
+        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
+        snprintf(out, (size_t)outcap, "模板 %s · %s · 阈值 %d · 成立 → %s / 不成立 → %s",
+                 ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", s6[1], t1, t2);
+        break;
+    case OP_STEP_FINDCOLOR:
+        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
+        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
+        if (s6[1] == 1)
+            snprintf(out, (size_t)outcap, "多点 · 点集 %s · %s · 成立 → %s / 不成立 → %s",
+                     ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", t1, t2);
+        else
+            snprintf(out, (size_t)outcap, "单点 #%06X 容差 %d · %s · 成立 → %s / 不成立 → %s",
+                     (unsigned)(((uint32_t)s6[2] >> 8) & 0xFFFFFFu), (int)((uint32_t)s6[2] & 0xFFu),
+                     g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", t1, t2);
+        break;
     default:
         snprintf(out, (size_t)outcap, "类型非法（%d）", s6[0]);
         break;
@@ -3470,6 +3623,24 @@ static int ne_check_target(const char *label, int v, char *why, int whycap)
     return 1;
 }
 
+/* 视觉步（T3.2）字段语义值读写：默认 = 字段直存 g_ope_steps[idx]；找色的容差字段特殊 ——
+ * a2 是打包值 (颜色<<8)|容差，字段值 = 低 8 位（写回只改低 8 位，颜色段保留）。 */
+static int ne_field_get(int se, int type, int fi)
+{
+    int idx = ope_fidx[type - 1][fi];
+    if (type == OP_STEP_FINDCOLOR && idx == 2) return (int)((uint32_t)g_ope_steps[se][2] & 0xFFu);
+    return g_ope_steps[se][idx];
+}
+static void ne_field_set(int se, int type, int fi, int v)
+{
+    int idx = ope_fidx[type - 1][fi];
+    if (type == OP_STEP_FINDCOLOR && idx == 2) {
+        g_ope_steps[se][2] = (int)(((uint32_t)g_ope_steps[se][2] & ~0xFFu) | ((uint32_t)v & 0xFFu));
+        return;
+    }
+    g_ope_steps[se][idx] = v;
+}
+
 /* 参数弹层 v3：进层快照 —— 把该步全部数值字段（目标模式 = j1/j2 单格）装进本地缓冲。
  * 每格 = {值, 文本}：g_ne_vals[fi] 存语义值（字面值 ≥ 0 / 变量引用 -9..-1）；g_ne_text[fi] 存字面
  * 输入文本（变量态留空 = 显示中文名；目标格值 0 留空 = 显示「结束」）。层内编辑只改缓冲；
@@ -3482,7 +3653,8 @@ static void ope_num_load(void)
     if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; g_ne_tgt = 0; return; }
     type = g_ope_steps[g_ope_se][0];
     if (g_ne_tgt) {                                  /* 目标模式：单格 j1/j2；类型非法就关层 */
-        if (type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE) { g_ope_se = -1; g_ne_tgt = 0; return; }
+        if (type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE &&
+            type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) { g_ope_se = -1; g_ne_tgt = 0; return; }
         v = g_ope_steps[g_ope_se][5 + g_ne_tgt];
         g_ne_vals[0] = v;
         if (v > 0) snprintf(g_ne_text[0], sizeof g_ne_text[0], "%d", v);
@@ -3492,7 +3664,7 @@ static void ope_num_load(void)
     nf = ope_nfields(type);
     if (nf == 0 || g_ope_sf < 0 || g_ope_sf >= nf) { g_ope_se = -1; return; }
     for (fi = 0; fi < nf; fi++) {
-        v = g_ope_steps[g_ope_se][ope_fidx[type - 1][fi]];
+        v = ne_field_get(g_ope_se, type, fi);        /* 视觉步容差走拆包读（ne_field_get） */
         g_ne_vals[fi] = v;
         if (v < 0) continue;                         /* 变量引用：文本留空（显示中文名） */
         if (ne_is_target(type, fi) && v == 0) continue;   /* 目标格 0 = 结束：文本留空（显示「结束」） */
@@ -3506,7 +3678,8 @@ static void ope_num_load(void)
 static void ne_open_target(int se, int slot)
 {
     if (se < 0 || se >= g_ope_nsteps || (slot != NE_TGT_J1 && slot != NE_TGT_J2)) return;
-    if (g_ope_steps[se][0] != OP_STEP_COND_REGION && g_ope_steps[se][0] != OP_STEP_COND_TOGGLE) return;
+    if (g_ope_steps[se][0] != OP_STEP_COND_REGION && g_ope_steps[se][0] != OP_STEP_COND_TOGGLE &&
+        g_ope_steps[se][0] != OP_STEP_FINDIMAGE && g_ope_steps[se][0] != OP_STEP_FINDCOLOR) return;
     g_ope_se = se; g_ope_sf = 0; g_ne_tgt = slot;
     ope_num_load();
     g_ne_msg[0] = 0;
@@ -3558,7 +3731,8 @@ static void pick_ev_apply(int px, int py)
 /* 加一步：默认值必须核心必过 —— 点按 = 逻辑屏中心按住 50ms；滑动 = 中心 → 中心下方 200px、300ms；
  * 等待 = 100ms；按下 / 区域判断 = 中心点（区域判断还须选区域，默认空、[完成] 预检拦）；弹起 / 开关判断 = 无字段；
  * 跳转 = 目标 1（spec §2.1 缺省）；条件步默认 成立继续 / 不成立中止（spec §1.1）；
- * 计算（v5）= 槽 r1、表达式空（加完调用方立即开表达式子层，spec §6）。
+ * 计算（v5）= 槽 r1、表达式空（加完调用方立即开表达式子层，spec §6）；
+ * 找图（T3.2）= 阈值 8、模板待选；找色 = 单点、颜色 #000000 容差 8、点集待选（加完调用方立即开参数层）。
  * 坐标默认取屏中心是唯一「任何逻辑尺寸都必合法」的取法（精确落点交给 [参数]/[取点]）。 */
 static void ope_add_step(int type)
 {
@@ -3586,9 +3760,15 @@ static void ope_add_step(int type)
         s6[1] = 1;                                   /* 跳转目标默认 1（spec §2.1 缺省） */
     } else if (type == OP_STEP_CALC) {
         s6[1] = 1;                                   /* 计算：槽默认 r1（spec §6：a1=1、其余 0、expr 空） */
+    } else if (type == OP_STEP_FINDIMAGE) {
+        s6[1] = 8;                                   /* 找图：阈值默认 8（spec VISION §11-#5） */
+    } else if (type == OP_STEP_FINDCOLOR) {
+        s6[1] = 0;                                   /* 找色：模式默认单点 */
+        s6[2] = 8;                                   /* 颜色 #000000、容差 8（打包 (0<<8)|8） */
     }
-    /* 弹起 / 开关判断：无字段（s6 已清零）。条件步默认：不成立中止（a3=0）/ 成立继续（a4=CONT，spec §1.1）。 */
-    if (type == OP_STEP_COND_REGION || type == OP_STEP_COND_TOGGLE) s6[4] = OP_COND_CONT;
+    /* 弹起 / 开关判断：无字段（s6 已清零）。条件步与视觉步默认：不成立中止（a3=0）/ 成立继续（a4=CONT）。 */
+    if (type == OP_STEP_COND_REGION || type == OP_STEP_COND_TOGGLE ||
+        type == OP_STEP_FINDIMAGE || type == OP_STEP_FINDCOLOR) s6[4] = OP_COND_CONT;
     g_ope_nsteps++;
     g_ope_msg[0] = 0;
     g_need = 1; g_force_frames = 2;
@@ -3677,6 +3857,11 @@ static void op_edit_close(void)
     g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并关（变量 / 区域选择弹层） */
     g_ope_ex = 0; g_ope_ex_msg[0] = 0;              /* 表达式子层（v5 计算步）一并关 */
+    g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;   /* 视觉步子层（T3.2） */
+    if (g_vis_cap) {                                /* 采集覆盖层（T3.2）一并关（防御：正常只能经 [取消] 退出） */
+        g_vis_cap = 0; g_vis_cap_wait = 0; g_vis_cap_err = 0;
+        g_vis_kb = 0; g_vis_pick_se = -1;
+    }
     g_ope_msg[0] = 0;
     g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态只活在开层期间（[取消] 也丢账：旧条目可去列表里删） */
     g_need = 1; g_force_frames = 3;
@@ -3722,6 +3907,8 @@ static void op_edit_open(int i, const char *name)
     g_ope_se = -1; g_ope_sf = 0; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并清（变量 / 区域选择弹层） */
     g_ope_ex = 0; g_ope_ex_msg[0] = 0;              /* 表达式子层（v5 计算步）一并清 */
+    g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;   /* 视觉步子层一并清 */
+    g_vis_cap = 0; g_vis_cap_wait = 0; g_vis_cap_err = 0; g_vis_kb = 0; g_vis_pick_se = -1;      /* 采集覆盖层（防御） */
     g_ope_coll = 0; g_pick_t0 = 0;                  /* 收起态 / 取点计时清零（防御：正常流程关层已清） */
     g_ope_pv = 0;                                   /* 预览页状态清零（防御；会话态只活在开层期间） */
     g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态开层清零（只服务本次编辑） */
@@ -3864,9 +4051,26 @@ static void ope_expr_open(int se)
     ALOGI("op edit 表达式开 第 %d 步（槽 r%d）", se + 1, g_ope_expr_slot);
 }
 
-/* 步骤行：`i. 点按` + 参数小字一行（摘要），下面按键 [参数（无字段的类型不画；计算步 = 表达式子层入口）]
- * [↑][↓][删]（行高 72 保手指可点）。条件步（区域判断 / 开关判断）再加三行：区域下拉 + 成立 / 不成立
- * 各一枚四档循环钮（继续下一步 → 跳过下一步 → 跳到… → 中止；档位 = 跳到… 时该侧出现目标格）。 */
+/* 视觉步参数层入口（T3.2）：找图/找色的 [参数] 与「＋找图/＋找色」都走它 ——
+ * g_ope_se = 该步、g_vis_ed = 1（子层分发在 draw_op_edit 顶部、draw_num_edit 之前）。 */
+static void ope_vis_open(int se)
+{
+    int t;
+    if (se < 0 || se >= g_ope_nsteps) return;
+    t = g_ope_steps[se][0];
+    if (t != OP_STEP_FINDIMAGE && t != OP_STEP_FINDCOLOR) return;   /* 防御：只有视觉步有参数层 */
+    g_ope_se = se;
+    g_vis_ed = 1;
+    g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
+    g_vis_edmsg[0] = 0;
+    g_need = 1; g_force_frames = 2;
+    ALOGI("op edit 视觉参数开 第 %d 步 %s", se + 1, ope_tname(t));
+}
+
+/* 步骤行：`i. 点按` + 参数小字一行（摘要），下面按键 [参数（无字段的类型不画；计算步 = 表达式子层入口、
+ * 视觉步 = 视觉参数层入口）] [↑][↓][删]（行高 72 保手指可点）。条件步（区域判断 / 开关判断）再加三行：
+ * 区域下拉 + 成立 / 不成立各一枚四档循环钮（继续下一步 → 跳过下一步 → 跳到… → 中止；档位 = 跳到… 时
+ * 该侧出现目标格）。视觉步（找图/找色，T3.2）复用同一对四档循环钮（无区域下拉行 —— 区域在参数层选）。 */
 static void ope_step_row(int i)
 {
     const int *s6 = g_ope_steps[i];
@@ -3887,6 +4091,8 @@ static void ope_step_row(int i)
             if (btn_blue("参数", ImVec2(bw, 72))) {
                 if (t == OP_STEP_CALC) {
                     ope_expr_open(i);                /* 计算步：开表达式子层（不开数字键盘） */
+                } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
+                    ope_vis_open(i);                 /* 视觉步：开参数层（模板/区域/阈值 或 模式/颜色/容差/点集） */
                 } else {                             /* 其余：进参数弹层，全字段一屏（v3；点格切换激活） */
                     g_ope_se = i; g_ope_sf = 0; g_ne_tgt = 0;
                     ope_num_load();
@@ -3916,6 +4122,11 @@ static void ope_step_row(int i)
         }
         ope_cond_side(i, NE_TGT_J1);                 /* 成立侧：档 = a4、目标 = j1 */
         ope_cond_side(i, NE_TGT_J2);                 /* 不成立侧：档 = a3、目标 = j2 */
+    } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
+        /* 视觉步（T3.2）：成立 / 不成立四档照搬条件步控件（参数化同一实现，防两处漂移 ——
+         * 字段映射相同：a4/j1 = 成立侧、a3/j2 = 不成立侧）；模板/区域/阈值等在 [参数] 子层编辑。 */
+        ope_cond_side(i, NE_TGT_J1);
+        ope_cond_side(i, NE_TGT_J2);
     }
     ImGui::Dummy(ImVec2(0, 4));                      /* 行间缝 */
     ImGui::PopID();
@@ -3960,11 +4171,12 @@ static void draw_num_edit(void)
     ImDrawList *dl;
     ImVec2 wp, a, b, avail;
     float ww, wh, x0, y0, cw, ry, cellw, cellh, cellgap, cy0, vy, vbh, boxw, btnw, bx, by, ky, kw, kh;
-    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; g_ne_tgt = 0; return; }
+    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
     type = g_ope_steps[g_ope_se][0];
-    if (g_ne_tgt && type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE) { g_ope_se = -1; g_ne_tgt = 0; return; }
+    if (g_ne_tgt && type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE &&
+        type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
     nf = g_ne_tgt ? 1 : ope_nfields(type);
-    if (nf == 0) { g_ope_se = -1; g_ne_tgt = 0; return; }
+    if (nf == 0) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
     if (g_ope_sf < 0 || g_ope_sf >= nf) g_ope_sf = 0;
 
     dl = ImGui::GetWindowDrawList();
@@ -4037,9 +4249,10 @@ static void draw_num_edit(void)
     }
     /* 激活格：值框 + [取点] / [变量]（仅该格允许时显示） */
     idx = g_ne_tgt ? (5 + g_ne_tgt) : ope_fidx[type - 1][g_ope_sf];
-    if (idx < 0) { g_ope_se = -1; g_ne_tgt = 0; return; }     /* 防御：字段表里没有这一格 */
+    if (idx < 0) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }     /* 防御：字段表里没有这一格 */
     label = ne_label(type, g_ope_sf);
-    is_coord = !g_ne_tgt && idx >= 1 && idx <= 4 && type != OP_STEP_JUMP;   /* 跳转的 a1=目标编号：不给 [取点] */
+    is_coord = !g_ne_tgt && idx >= 1 && idx <= 4 && type != OP_STEP_JUMP &&
+               type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR;   /* 跳转 a1=目标编号、视觉 a1/a2=阈值/容差：不给 [取点] */
     var_ok = !g_ne_tgt && ope_var_ok(type, idx);
     vy = cy0 + (float)nrow * cellh + (float)(nrow - 1) * cellgap + 12;
     vbh = vbh_a;
@@ -4162,7 +4375,9 @@ static void draw_num_edit(void)
         if (btn_light("取消", ImVec2(bw2, bth_a))) {
             ALOGI("op edit 参数取消 第 %d 步", g_ope_se + 1);
             if (g_pick) { g_pick = 0; g_pick_t0 = 0; g_ope_coll = 0; vtouch_pick_cancel(); }   /* 防御：未回的取点请求也一并撤（全丢） */
-            g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
+            if (g_vis_num) { g_vis_num = 0; }        /* 视觉参数层开的数字键盘：回视觉层（g_ope_se 保持） */
+            else g_ope_se = -1;
+            g_ne_tgt = 0; g_ne_msg[0] = 0;
             g_need = 1; g_force_frames = 3;
         }
         ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + gap, by));
@@ -4194,10 +4409,13 @@ static void draw_num_edit(void)
                     g_ope_steps[g_ope_se][5 + g_ne_tgt] = g_ne_vals[0];
                     ALOGI("op edit 参数完成 第 %d 步 %s = %d", g_ope_se + 1, label, g_ne_vals[0]);
                 } else {
-                    for (fi = 0; fi < nf; fi++) g_ope_steps[g_ope_se][ope_fidx[type - 1][fi]] = g_ne_vals[fi];
+                    for (fi = 0; fi < nf; fi++) ne_field_set(g_ope_se, type, fi, g_ne_vals[fi]);   /* 视觉容差走拆包写 */
                     ALOGI("op edit 参数完成 第 %d 步（%d 格）", g_ope_se + 1, nf);
+                    if (g_vis_num) ALOGI("vis edit 第 %d 步 %s = %d", g_ope_se + 1, label, g_ne_vals[0]);
                 }
-                g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
+                if (g_vis_num) { g_vis_num = 0; }            /* 视觉参数层开的数字键盘：回视觉层 */
+                else g_ope_se = -1;
+                g_ne_tgt = 0; g_ne_msg[0] = 0;
                 g_need = 1; g_force_frames = 3;
             }
         }
@@ -4537,16 +4755,18 @@ static void draw_ope_expr(void)
     ImGui::PopClipRect();                  /* 键区裁剪到此（含 [取消][确定]，同 draw_char_kb） */
 }
 
-/* 区域选择弹层（条件步的 [区域] 按钮）：列表读区域表实时、可滚动；开关判断只列开关型
- * （spec §7：运行时核心仍校验，双保险）。点一条 → 写进该步 ref、关层。 */
+/* 区域选择弹层（条件步的 [区域] 按钮；T3.2 起视觉步 [区域] 也走它）：列表读区域表实时、可滚动；
+ * 开关判断只列开关型（spec §7：运行时核心仍校验，双保险）。点一条 → 写进该步 ref、关层。
+ * 视觉步（找图/找色）：ref 承载**区域名**（区域限定查找范围），另给「全屏」= 清空引用。 */
 static void draw_ope_rlist(void)
 {
     ImDrawList *dl;
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    int i, n, rli = g_ope_rl, only_tg, avail = 0;
+    int i, n, rli = g_ope_rl, only_tg, vis, avail = 0;
     if (rli < 0 || rli >= g_ope_nsteps) { g_ope_rl = -1; return; }
     only_tg = (g_ope_steps[rli][0] == OP_STEP_COND_TOGGLE);
+    vis = (g_ope_steps[rli][0] == OP_STEP_FINDIMAGE || g_ope_steps[rli][0] == OP_STEP_FINDCOLOR);   /* 视觉步：区域 = 查找范围 */
 
     dl = ImGui::GetWindowDrawList();
     wp = ImGui::GetWindowPos();
@@ -4564,7 +4784,8 @@ static void draw_ope_rlist(void)
         text_meta_s(t);
     }
     ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s(only_tg ? "只列开关型区域（在区域页设）" : "点一个区域作为判定目标（悬空引用运行时报「区域不存在」）");
+    text_meta_s(vis ? "点一个区域作为查找范围（不限定 = 「全屏」）"
+              : only_tg ? "只列开关型区域（在区域页设）" : "点一个区域作为判定目标（悬空引用运行时报「区域不存在」）");
     list_top = y0 + 76;
     list_bot = b.y - 24 - 92 - 12;                   /* 底部给 [取消] 留位 */
     list_h = list_bot - list_top;
@@ -4576,6 +4797,17 @@ static void draw_ope_rlist(void)
                       ImGuiWindowFlags_AlwaysVerticalScrollbar);
     pub_zone(g_zone_list);                           /* 列表实区：拖它滚动（同区域/操作列表的口径） */
     drag_scroll_for(SCR_LIST);
+    if (vis) {                                       /* 视觉步：可清空区域引用 = 全屏（T3.2） */
+        ImGui::PushID(3050);
+        if ((g_ope_refs[rli][0] == 0) ? btn_blue("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))
+                                      : btn_light("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
+            g_ope_refs[rli][0] = 0;
+            g_ope_rl = -1;
+            g_need = 1; g_force_frames = 3;
+            ALOGI("vis edit 第 %d 步 区域=全屏", rli + 1);
+        }
+        ImGui::PopID();
+    }
     n = vtouch_region_count();
     for (i = 0; i < n; i++) {
         char id[16]; int t2, a1, a2, a3, a4, en;
@@ -4588,12 +4820,14 @@ static void draw_ope_rlist(void)
             snprintf(g_ope_refs[rli], sizeof g_ope_refs[rli], "%s", id);
             g_ope_rl = -1;
             g_need = 1; g_force_frames = 3;
-            ALOGI("op edit 区域选中 第 %d 步 = %s", rli + 1, id);
+            if (vis) ALOGI("vis edit 第 %d 步 区域=%s", rli + 1, id);
+            else ALOGI("op edit 区域选中 第 %d 步 = %s", rli + 1, id);
         }
         ImGui::PopID();
     }
     if (avail == 0)
-        text_meta_w(only_tg ? "没有开关型区域：先到区域页把某个区域设成开关型" : "还没有区域：先到区域页框一个");
+        text_meta_w(vis ? "还没有区域：可用上面的「全屏」不限定范围"
+                  : only_tg ? "没有开关型区域：先到区域页把某个区域设成开关型" : "还没有区域：先到区域页框一个");
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
@@ -4647,7 +4881,8 @@ static void ope_preview_row(int i)
         ImGui::TextWrapped("%s", p);
         meta_pop();
     }
-    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
+    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE ||
+        t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {   /* 视觉步（T3.2）：同条件步两行分支 */
         ope_pv_target(s6[4], s6[6], tg, (int)sizeof tg);      /* 成立侧：档 a4 / 目标 j1 */
         snprintf(b1, sizeof b1, "├ 成立 → %s", tg);
         ope_pv_target(s6[3], s6[7], tg, (int)sizeof tg);      /* 不成立侧：档 a3 / 目标 j2 */
@@ -4885,6 +5120,7 @@ static void draw_op_edit(void)
     if (g_ope_vl) { draw_ope_vlist(); return; }      /* 变量选择弹层（数字弹层之上） */
     if (g_ope_rl >= 0) { draw_ope_rlist(); return; } /* 区域选择弹层（条件步） */
     if (g_ope_ex) { draw_ope_expr(); return; }       /* 表达式子层（v5 计算步）—— 在 g_ope_se 之前 */
+    if (g_vis_ed) { draw_vis_edit(); return; }       /* 视觉步参数层（T3.2）—— 数字键盘在它内部（g_vis_num） */
     if (g_ope_se >= 0) { draw_num_edit(); return; }
 
     dl = ImGui::GetWindowDrawList();
@@ -4966,31 +5202,46 @@ static void draw_op_edit(void)
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
-    /* 加步（v5 九类型，三行 3×3）/ 门控 / 自动关 / 收尾 */
+    /* 加步（v8 十一类型，三行 4×3：点按/滑动/等待/找图 · 按下/弹起/跳转/找色 · 区域判断/开关判断/计算；
+     * 第 12 格空。行数不变 ⇒ 上面的 5 行自适应阈值口径不动）/ 门控 / 自动关 / 收尾 */
     {
-        float bw3 = (cw - 2 * 12) / 3.0f;
+        float bw4 = (cw - 3 * 12) / 4.0f;
+        float cx2 = x0 + bw4 + 12, cx3 = x0 + 2 * (bw4 + 12), cx4 = x0 + 3 * (bw4 + 12);
         ImGui::SetCursorScreenPos(ImVec2(x0, add_y1));
-        if (btn_light("＋点按", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_TAP);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, add_y1));
-        if (btn_light("＋滑动", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_SWIPE);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), add_y1));
-        if (btn_light("＋等待", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_WAIT);
+        if (btn_light("＋点按", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_TAP);
+        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y1));
+        if (btn_light("＋滑动", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_SWIPE);
+        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y1));
+        if (btn_light("＋等待", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_WAIT);
+        ImGui::SetCursorScreenPos(ImVec2(cx4, add_y1));
+        if (btn_light("＋找图", ImVec2(bw4, bh_row))) {   /* 加完立即开视觉参数层（选模板，同计算步口径） */
+            int n0 = g_ope_nsteps;
+            ope_add_step(OP_STEP_FINDIMAGE);
+            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
+        }
         ImGui::SetCursorScreenPos(ImVec2(x0, add_y2));
-        if (btn_light("＋按下", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_DOWN);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, add_y2));
-        if (btn_light("＋弹起", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_UP);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), add_y2));
-        if (btn_light("＋跳转", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_JUMP);
+        if (btn_light("＋按下", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_DOWN);
+        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y2));
+        if (btn_light("＋弹起", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_UP);
+        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y2));
+        if (btn_light("＋跳转", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_JUMP);
+        ImGui::SetCursorScreenPos(ImVec2(cx4, add_y2));
+        if (btn_light("＋找色", ImVec2(bw4, bh_row))) {
+            int n0 = g_ope_nsteps;
+            ope_add_step(OP_STEP_FINDCOLOR);
+            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
+        }
         ImGui::SetCursorScreenPos(ImVec2(x0, add_y3));
-        if (btn_light(cw < 850.0f ? "区域判断" : "＋区域判断", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_COND_REGION);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, add_y3));
-        if (btn_light(cw < 850.0f ? "开关判断" : "＋开关判断", ImVec2(bw3, bh_row))) ope_add_step(OP_STEP_COND_TOGGLE);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), add_y3));
-        if (btn_light("＋计算", ImVec2(bw3, bh_row))) {   /* 加完立即开表达式子层（spec §6；步满加不进则不弹） */
+        if (btn_light(cw < 1050.0f ? "区域判断" : "＋区域判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_REGION);
+        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y3));
+        if (btn_light(cw < 1050.0f ? "开关判断" : "＋开关判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_TOGGLE);
+        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y3));
+        if (btn_light("＋计算", ImVec2(bw4, bh_row))) {   /* 加完立即开表达式子层（spec §6；步满加不进则不弹） */
             int n0 = g_ope_nsteps;
             ope_add_step(OP_STEP_CALC);
             if (g_ope_nsteps > n0) ope_expr_open(g_ope_nsteps - 1);
         }
+        /* 第 4 列第 3 行：空（11 键 = 4+4+3） */
     }
     {
         char g[72];
@@ -5048,9 +5299,9 @@ static void page_settings(void)
     ImGui::TextWrapped("改完自动存 regions.conf，重启还在");
 }
 
-/* 说明页（v5）：16 条术语（docs/OPS_PLAN_V5.md §9 逐字 = 面板文案唯一来源；1–15 承 v4 §12，其中第 12 条
- * 更新、16 为 v5 新增）。数组内容从 spec 机器提取（条目为单行、无加粗标记，按行原样），
- * 提取结果逐字节复核 —— 改文案先改 spec、再按同一规则重提，别手改这里。 */
+/* 说明页（v8 视觉）：18 条术语 —— 1–15 承 v4 §12、16 为 v5 新增；第 12 条更新 + 17/18 新增逐字照
+ * docs/VISION_PLAN.md §12（面板文案唯一来源）。数组内容从 spec 机器提取（条目为单行、无加粗标记，
+ * 按行原样），提取结果逐字节复核 —— 改文案先改 spec、再按同一规则重提，别手改这里。 */
 static const char *const g_help_lines[] = {
     "1. 触发：给区域绑一条操作；手指碰到这个区域就会跑那条操作。",
     "2. 时机·按下：手指碰到区域的那一刻就跑。",
@@ -5063,11 +5314,13 @@ static const char *const g_help_lines[] = {
     "9. 按下 / 弹起：两条分开的步骤——按下 = 按住不放；弹起 = 松开。中间可以夹「等待」「判断」。",
     "10. 区域判断：检查一个点在不在某个区域内；成立 / 不成立两侧各选接下来做什么：继续下一步、跳过下一步、跳到第 N 步、中止（可以只配一侧，另一侧走默认）。",
     "11. 开关判断：检查某个开关型区域现在是不是「开」；成立 / 不成立两侧的选项同「区域判断」。",
-    "12. 中止原因速查：变量无值 / 结果无值 / 表达式错 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立 / 条件中止 / 跳转超限。",
+    "12. 中止原因速查：变量无值 / 结果无值 / 表达式错 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立 / 条件中止 / 未命中 / 无画面 / 模板不存在 / 视觉错 / 跳转超限。",
     "13. 跳转：直接跳到指定步骤继续——往前跳 = 跳过中间步骤；往后跳 = 循环（比如跳回第 1 步重来）。目标也可以选「结束」直接完成操作；单次运行跳转超过 200 次会自动中止（防死循环）。",
     "14. 方案：把当前的区域和操作整体存成一个命名方案；切换方案 = 换成那一套（编辑会自动存回当前方案）。",
     "15. 方案管理：「方案」页可以新建（空白）、从当前另存为、重命名、删除；当前方案不能删（先切到别的方案再删）。",
     "16. 计算：算一个数存进结果槽（r1–r4）——用触发数据（tdx/tdy=按下坐标、tux/tuy=弹起坐标、tms=按压时长毫秒）、数字和结果槽做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。算好的槽可以当坐标、时长用在后面的步骤里。",
+    "17. 找图：先存好模板（「模板」页截屏框选），步骤里选模板名——在当前画面里找这块图案（可以限定区域）；找到就把坐标填进结果槽 r1（x）、r2（y），走「成立」档；没找到走「不成立」档。",
+    "18. 找色：按颜色找像素——填颜色（十六进制）和容差（0–255）；「多点找色」还要选一个点集（基准色 + 参考点，在「模板」页吸色点选生成）。找到同样写 r1/r2 走「成立」档，没找到走「不成立」档。",
 };
 static void page_help(void)
 {
@@ -5502,6 +5755,962 @@ static void draw_scm_del(void)
     }
 }
 
+/* ==== T3.2：视觉（找图/找色）—— 模板/点集管理 + 视觉步参数层 + 采集覆盖层 ====================
+ * 三块：
+ *   1) 模板页（nav 6）：截帧 → 框选/点选 → 命名 → 存 .tmpl / .pts；列表 / 删除。
+ *   2) 采集覆盖层（整屏）：面板侧抓帧（ui_glue.c 旁路；不动核心帧区请求协议）→ ImGui 纹理显示
+ *      （等比缩放）→ 模板 = 拖框；点集 = 吸基准色 + 点参考点（显示偏移/色）；吸色 = 点一下回填找色步。
+ *   3) 视觉步参数层（编辑层子层，g_vis_ed）：找图 = 模板 / 区域 / 阈值；找色 = 模式 / 颜色 / 取点吸色 /
+ *      容差 / 点集；成立/不成立四档在步骤行上复用条件步控件（ope_cond_side）；数字/字符键盘复用现有子层。
+ * 文件格式（写端；逐字照实施计划「模板/点集文件格式」，与核心读端 op_vis_read_tmpl / op_vis_read_pts 对账）：
+ *   .tmpl = "VTM1" + ver u32=1 + w u16 + h u16 + rot u8 + res u8=0 + gray[w*h]（灰度 = vt_vis_gray_px 单一来源）；
+ *   .pts  = "VTP1" + ver u32=1 + n u16 + res u16=0 + base_rgb u32 + base_tol u16 + n×{dx i16, dy i16, rgb u32, tol u16}；
+ *   目录 = /data/local/vtouch-runtime/templates/；名字同 vt_id_ok 尺子；重名拒绝（.tmpl / .pts 共用一个名字空间）。
+ * 线程：本区块全部跑渲染线程（唯一 UI 线程）；帧数据跨线程只经 ui_glue.c 的 take/err（acquire 读）。
+ */
+
+#define VIS_TMPL_DIR REGION_CONF_DIR "/templates"
+#define VIS_CAP_TMO_MS 3000              /* 面板侧抓帧等待上限（超时提示；真机抓帧 ≤25ms） */
+
+/* 模板 / 点集名合法性（与区域 id / 操作名同一把尺子 vt_id_ok）：[A-Za-z0-9_-]、1..15、裸 `-` 除外。
+ * 0 ok / 1 空 / 2 超长 / 3 非法字符。 */
+static int vis_name_ok(const char *n)
+{
+    int i, len = (int)strlen(n);
+    if (len < 1) return 1;
+    if (len > 15) return 2;
+    if (len == 1 && n[0] == '-') return 3;
+    for (i = 0; i < len; i++) {
+        char ch = n[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
+    }
+    return 0;
+}
+static const char *vis_name_why(int rc)
+{
+    return rc == 1 ? "名字不能为空" : rc == 2 ? "最多 15 个字符" :
+           rc == 3 ? "只能用 a-z A-Z 0-9 _ -" : "这个名字已被占用（模板/点集同名也不行）";
+}
+/* 名字是否已被占用（.tmpl / .pts 共用一个名字空间 —— 下拉里两个列表并存，同名会歧义）。 */
+static int vis_name_taken(const char *name)
+{
+    char p[160];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/%s.tmpl", VIS_TMPL_DIR, name);
+    if (stat(p, &st) == 0) return 1;
+    snprintf(p, sizeof p, "%s/%s.pts", VIS_TMPL_DIR, name);
+    return stat(p, &st) == 0;
+}
+/* qsort 比较器：名字按字节序（names 每格 16 字节）。 */
+static int vis_name_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+/* 枚举 VIS_TMPL_DIR 下 *.ext（名字过 vis_name_ok），字母序装进 names（每格 16 字节），返回条数（≤ max）。 */
+static int vis_list(const char *ext, char (*names)[16], int max)
+{
+    DIR *d = opendir(VIS_TMPL_DIR);
+    struct dirent *e;
+    size_t el;
+    int n = 0;
+    if (!d) return 0;
+    el = strlen(ext);
+    while (n < max && (e = readdir(d)) != NULL) {
+        char nm[16];
+        size_t l = strlen(e->d_name);
+        if (l <= el || l > el + 15) continue;
+        if (strcmp(e->d_name + l - el, ext) != 0) continue;
+        memcpy(nm, e->d_name, l - el);
+        nm[l - el] = 0;
+        if (vis_name_ok(nm) != 0) continue;
+        snprintf(names[n], 16, "%s", nm);
+        n++;
+    }
+    closedir(d);
+    qsort(names, (size_t)n, 16, vis_name_cmp);
+    return n;
+}
+/* 小端写入（格式契约；设备 aarch64 本身小端，仍显式写字节防解释歧义）。 */
+static void vis_put_u16le(FILE *f, unsigned v)
+{
+    fputc((int)(v & 0xFFu), f);
+    fputc((int)((v >> 8) & 0xFFu), f);
+}
+static void vis_put_u32le(FILE *f, unsigned v)
+{
+    vis_put_u16le(f, v & 0xFFFFu);
+    vis_put_u16le(f, (v >> 16) & 0xFFFFu);
+}
+
+/* ---- 面板侧抓帧（采集覆盖层用） ---- */
+
+/* 关采集覆盖层：全部会话态复位（含命名子层 / 框选 / 点集 / 吸色目标）。 */
+static void vis_cap_close(void)
+{
+    g_vis_cap = 0;
+    g_vis_cap_wait = 0; g_vis_cap_err = 0;
+    g_vis_kb = 0; g_vis_kb_msg[0] = 0;
+    g_vis_drag = 0; g_vis_sel_on = 0;
+    g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
+    g_vis_pts_n = 0;
+    g_vis_cap_msg[0] = 0;
+    g_vis_pick_se = -1;
+    g_need = 1; g_force_frames = 3;
+}
+/* 开采集覆盖层：mode 1=模板框选 2=点集编辑 3=吸色（找色步 [取点]，回填目标 = g_vis_pick_se）。
+ * 请求一帧（ui_glue.c 旁路）→ 渲染循环 vis_cap_tick 收帧/超时。 */
+static void vis_cap_start(int mode)
+{
+    g_vis_cap = mode;
+    g_vis_cap_wait = 1; g_vis_cap_err = 0; g_vis_cap_t0 = now_ms();
+    g_vis_kb = 0; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
+    g_vis_drag = 0; g_vis_sel_on = 0;
+    g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
+    g_vis_pts_n = 0;
+    g_vis_cap_msg[0] = 0;
+    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0; g_vis_img_rot = 0;
+    vtouch_vis_panel_capture_req();
+    g_need = 1; g_force_frames = 3;
+    ALOGI("vis 采集开 模式=%s（请求面板侧抓帧）", mode == 1 ? "模板" : mode == 2 ? "点集" : "吸色");
+}
+/* 渲染循环每拍调（采集层开着才做事）：收新帧 / 收失败 / 3s 超时；等帧期间保持重画。
+ * 非等待期也收帧：迟到的帧（重截竞态）照样刷新图像。 */
+static void vis_cap_tick(void)
+{
+    int w = 0, h = 0, rot = 0, err = 0;
+    const unsigned char *buf = 0;
+    if (!g_vis_cap) return;
+    if (vtouch_vis_panel_frame_take(&w, &h, &rot, &buf)) {
+        g_vis_img = buf; g_vis_img_w = w; g_vis_img_h = h; g_vis_img_rot = rot;
+        g_vis_cap_wait = 0; g_vis_cap_err = 0;
+        g_vis_tex_dirty = 1;
+        ALOGI("vis 采集 帧就绪 %dx%d rot=%d", w, h, rot);
+        g_need = 1; g_force_frames = 3;
+        return;
+    }
+    if (g_vis_cap_wait) {
+        if (vtouch_vis_panel_err_take(&err)) {
+            g_vis_cap_wait = 0; g_vis_cap_err = err ? err : -1;
+            ALOGW("vis 采集 抓帧失败 err=%d", g_vis_cap_err);
+        } else if (now_ms() - g_vis_cap_t0 > VIS_CAP_TMO_MS) {
+            g_vis_cap_wait = 0; g_vis_cap_err = -1;             /* -1 = 超时哨兵 */
+            ALOGW("vis 采集 抓帧超时（%dms）", VIS_CAP_TMO_MS);
+        }
+        g_need = 1;                                             /* 等帧/提示期间保持重画 */
+    }
+}
+/* 采集图像 GL 纹理上传（渲染线程；调用时 GL 上下文已 current）。尺寸变 = 重建，否则子更新。 */
+static void vis_tex_update(const unsigned char *rgba, int w, int h)
+{
+    if (!g_vis_tex) glGenTextures(1, &g_vis_tex);
+    if (!g_vis_tex) return;
+    glBindTexture(GL_TEXTURE_2D, g_vis_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    if (w != g_vis_tex_w || h != g_vis_tex_h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        g_vis_tex_w = w; g_vis_tex_h = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    }
+}
+/* 面板侧帧缓冲取像素（紧排 w*4，RGBA8888）；越界 → -1。 */
+static int vis_frame_px(const unsigned char *buf, int w, int h, int x, int y, uint32_t *rgb)
+{
+    const unsigned char *p;
+    if (!buf || x < 0 || y < 0 || x >= w || y >= h) return -1;
+    p = buf + ((size_t)y * (size_t)w + (size_t)x) * 4u;
+    if (rgb) *rgb = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+    return 0;
+}
+/* 点集编辑：一次轻点 —— 首点 = 基准色；其后 = 参考点（≤ VIS_PTS_MAX）。 */
+static void vis_pts_tap(int fx, int fy, uint32_t rgb)
+{
+    if (g_vis_base_x < 0) {
+        g_vis_base_x = fx; g_vis_base_y = fy; g_vis_base_rgb = rgb & 0xFFFFFFu;
+        g_vis_cap_msg[0] = 0;
+        ALOGI("vis 采集 基准色 #%06X @%d,%d（容差 %d）", (unsigned)g_vis_base_rgb, fx, fy, g_vis_base_tol);
+        return;
+    }
+    if (g_vis_pts_n >= VIS_PTS_MAX) {
+        snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "最多 %d 个参考点", VIS_PTS_MAX);
+        return;
+    }
+    g_vis_pts_x[g_vis_pts_n] = fx; g_vis_pts_y[g_vis_pts_n] = fy;
+    g_vis_pts_rgb[g_vis_pts_n] = rgb & 0xFFFFFFu;
+    g_vis_pts_n++;
+    g_vis_cap_msg[0] = 0;
+    ALOGI("vis 采集 参考点 %d +%d,%d #%06X", g_vis_pts_n, fx - g_vis_base_x, fy - g_vis_base_y,
+          (unsigned)(rgb & 0xFFFFFFu));
+}
+/* 吸色（找色步 [取点]）：把颜色回填该步 a2 的颜色段（容差段保留），关采集层回视觉参数层。 */
+static void vis_pick_apply(int fx, int fy, uint32_t rgb)
+{
+    int se = g_vis_pick_se;
+    if (se >= 0 && se < g_ope_nsteps && g_ope_steps[se][0] == OP_STEP_FINDCOLOR) {
+        uint32_t packed = (uint32_t)g_ope_steps[se][2];
+        g_ope_steps[se][2] = (int)(((rgb & 0xFFFFFFu) << 8) | (packed & 0xFFu));
+        ALOGI("vis edit 找色 第 %d 步 颜色=#%06X（吸色 @%d,%d）", se + 1, (unsigned)(rgb & 0xFFFFFFu), fx, fy);
+    }
+    vis_cap_close();
+}
+
+/* ---- 存盘 / 删除 ---- */
+
+/* 存模板（.tmpl 写端；格式逐字照实施计划：VTM1 + ver u32=1 + w u16 + h u16 + rot u8 + res u8=0 + gray[w*h]）。
+ * 灰度用引擎同源公式 vt_vis_gray_px（vt_vision.h 单一来源，防两处漂移）；.tmp + rename（掉电不留半截）。
+ * 返回 0 成功；1 名字非法 / 2 重名 / 3 无可用画面或框选 / 4 建目录失败 / 5 写失败。 */
+static int vis_save_tmpl(const char *name)
+{
+    char path[160], tmppath[168];
+    const unsigned char *buf = g_vis_img;
+    int x0 = g_vis_sel[0], y0 = g_vis_sel[1], x1 = g_vis_sel[2], y1 = g_vis_sel[3];
+    int w, h, x, y;
+    unsigned char *gray;
+    FILE *f;
+    if (vis_name_ok(name) != 0) return 1;
+    if (vis_name_taken(name)) return 2;
+    if (!g_vis_sel_on || !buf || g_vis_img_w <= 0 || g_vis_img_h <= 0) return 3;
+    w = x1 - x0 + 1; h = y1 - y0 + 1;
+    if (w < 1 || h < 1 || x0 < 0 || y0 < 0 || x1 >= g_vis_img_w || y1 >= g_vis_img_h) return 3;
+    gray = (unsigned char *)malloc((size_t)w * (size_t)h);
+    if (!gray) return 5;
+    for (y = 0; y < h; y++) {
+        const unsigned char *p = buf + ((size_t)(y0 + y) * (size_t)g_vis_img_w + (size_t)x0) * 4u;
+        for (x = 0; x < w; x++, p += 4)
+            gray[(size_t)y * (size_t)w + (size_t)x] = vt_vis_gray_px(p[0], p[1], p[2]);
+    }
+    if (mkdir(VIS_TMPL_DIR, 0775) < 0 && errno != EEXIST) { free(gray); return 4; }
+    snprintf(tmppath, sizeof tmppath, "%s/%s.tmpl.tmp", VIS_TMPL_DIR, name);
+    f = fopen(tmppath, "wb");
+    if (!f) { free(gray); return 5; }
+    fputs("VTM1", f);
+    vis_put_u32le(f, 1);
+    vis_put_u16le(f, (unsigned)w);
+    vis_put_u16le(f, (unsigned)h);
+    fputc(g_vis_img_rot & 3, f);
+    fputc(0, f);                                            /* res = 0（保留位） */
+    if (fwrite(gray, 1, (size_t)w * (size_t)h, f) != (size_t)w * (size_t)h) {
+        fclose(f); remove(tmppath); free(gray); return 5;
+    }
+    if (fclose(f) != 0) { remove(tmppath); free(gray); return 5; }
+    free(gray);
+    snprintf(path, sizeof path, "%s/%s.tmpl", VIS_TMPL_DIR, name);
+    if (rename(tmppath, path) != 0) { remove(tmppath); return 5; }
+    ALOGI("vis 模板存 %s %dx%d rot=%d（灰度 %uB）", name, w, h, g_vis_img_rot, (unsigned)(w * h));
+    return 0;
+}
+/* 存点集（.pts 写端；格式逐字照实施计划：VTP1 + ver u32=1 + n u16 + res u16=0 + base_rgb u32 +
+ * base_tol u16 + n×{dx i16, dy i16, rgb u32, tol u16}；每点 tol = 基准容差（v1 不逐点编辑））。
+ * 返回 0 成功；1 名字非法 / 2 重名 / 3 基准或点数不合法 / 4 建目录失败 / 5 写失败。 */
+static int vis_save_pts(const char *name)
+{
+    char path[160], tmppath[168];
+    FILE *f;
+    int i;
+    if (vis_name_ok(name) != 0) return 1;
+    if (vis_name_taken(name)) return 2;
+    if (g_vis_base_x < 0 || g_vis_pts_n < 1 || g_vis_pts_n > VIS_PTS_MAX) return 3;
+    if (mkdir(VIS_TMPL_DIR, 0775) < 0 && errno != EEXIST) return 4;
+    snprintf(tmppath, sizeof tmppath, "%s/%s.pts.tmp", VIS_TMPL_DIR, name);
+    f = fopen(tmppath, "wb");
+    if (!f) return 5;
+    fputs("VTP1", f);
+    vis_put_u32le(f, 1);
+    vis_put_u16le(f, (unsigned)g_vis_pts_n);
+    vis_put_u16le(f, 0);                                    /* res = 0（保留位） */
+    vis_put_u32le(f, g_vis_base_rgb & 0xFFFFFFu);
+    vis_put_u16le(f, (unsigned)g_vis_base_tol);
+    for (i = 0; i < g_vis_pts_n; i++) {
+        int dx = g_vis_pts_x[i] - g_vis_base_x;
+        int dy = g_vis_pts_y[i] - g_vis_base_y;
+        vis_put_u16le(f, (unsigned)(dx & 0xFFFF));          /* i16 小端（负数补码） */
+        vis_put_u16le(f, (unsigned)(dy & 0xFFFF));
+        vis_put_u32le(f, g_vis_pts_rgb[i] & 0xFFFFFFu);
+        vis_put_u16le(f, (unsigned)g_vis_base_tol);         /* v1：每点 tol = 基准容差 */
+    }
+    if (fclose(f) != 0) { remove(tmppath); return 5; }
+    snprintf(path, sizeof path, "%s/%s.pts", VIS_TMPL_DIR, name);
+    if (rename(tmppath, path) != 0) { remove(tmppath); return 5; }
+    ALOGI("vis 点集存 %s n=%d 基准 #%06X 容差 %d", name, g_vis_pts_n,
+          (unsigned)(g_vis_base_rgb & 0xFFFFFFu), g_vis_base_tol);
+    return 0;
+}
+/* 删一个模板 / 点集文件（列表 [删除]）；失败进事件日志。 */
+static void vis_del_file(const char *name, int is_pts)
+{
+    char p[160];
+    snprintf(p, sizeof p, "%s/%s.%s", VIS_TMPL_DIR, name, is_pts ? "pts" : "tmpl");
+    if (remove(p) != 0) {
+        ALOGW("vis %s删 失败 %s: %s", is_pts ? "点集" : "模板", name, strerror(errno));
+        ev_note("%s删除失败：%s", is_pts ? "点集" : "模板", name);
+        return;
+    }
+    ALOGI("vis %s删 %s", is_pts ? "点集" : "模板", name);
+    g_need = 1; g_force_frames = 3;
+}
+/* save 返回码 3..5 → 人话（1/2 = 名字域，走 vis_name_why）。 */
+static const char *vis_save_why(int rc)
+{
+    return rc == 3 ? "没有可用的画面/点集内容" : rc == 4 ? "模板目录创建失败" : "写入失败（磁盘/权限）";
+}
+
+/* ---- 采集覆盖层（整屏）：模板框选 / 点集编辑 / 吸色 ---- */
+
+/* 采集层命名键盘（子层）：[确定] 校验名字（同一把尺子 + 重名拒绝）→ 存盘 → 关层；
+ * 保存失败留在层里提示（同编辑层口径）。 */
+static void draw_vis_cap_kb(void)
+{
+    const char *title = g_vis_cap == 2 ? "给点集起个名字：多点找色步骤按名字引用（重名会被拒）"
+                                       : "给模板起个名字：找图步骤按名字引用（重名会被拒）";
+    int act = draw_char_kb(title, NULL, g_vis_kb_buf, (int)sizeof g_vis_kb_buf, &g_vis_kb_up,
+                           g_vis_kb_msg, (int)sizeof g_vis_kb_msg, 12.0f);
+    if (act == 1) {
+        g_vis_kb = 0; g_vis_kb_msg[0] = 0;                  /* 回采集视图（框选/点选保留） */
+        g_need = 1; g_force_frames = 3;
+        ALOGI("vis 采集 命名取消");
+    } else if (act == 2) {
+        int rc = vis_name_ok(g_vis_kb_buf);
+        if (rc == 0 && vis_name_taken(g_vis_kb_buf)) rc = 4;
+        if (rc == 0) {
+            int sr = (g_vis_cap == 2) ? vis_save_pts(g_vis_kb_buf) : vis_save_tmpl(g_vis_kb_buf);
+            if (sr != 0) {
+                snprintf(g_vis_kb_msg, sizeof g_vis_kb_msg, "%s", sr <= 2 ? vis_name_why(sr) : vis_save_why(sr));
+                ALOGW("vis 采集 保存失败 %s rc=%d", g_vis_kb_buf, sr);
+                g_need = 1; g_force_frames = 2;
+                return;
+            }
+            ev_log_push(g_vis_cap == 2 ? "点集已保存" : "模板已保存");
+            vis_cap_close();
+            return;
+        }
+        snprintf(g_vis_kb_msg, sizeof g_vis_kb_msg, "%s", vis_name_why(rc));
+        g_need = 1; g_force_frames = 2;
+    }
+}
+/* 采集覆盖层（整屏；T3.2）：三态 —— 等帧（wait）/ 失败（err）/ 图像就绪。
+ * 图像等比缩放居中；模板 = 拖动框选（松手 ≥8×8 → 命名）；点集 = 首点吸基准色、其后加点（显示偏移/色）；
+ * 吸色 = 点一下回填找色步颜色。整屏吞触摸（ui_rect_now）；子层 = 命名键盘。 */
+static void build_vis_cap(void)
+{
+    ImDrawList *dl;
+    ImVec2 wp, a, b;
+    float ww, wh, x0, y0, cw, img_top, img_bot, sc = 0, iw = 0, ih = 0, ix = 0, iy = 0;
+    int mode = g_vis_cap;
+    float sw = (float)g_scr_w, sh = (float)g_scr_h;
+    if (sw <= 0 || sh <= 0) return;
+    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(sw, sh), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::Begin("##viscap", 0,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    g_zone_title[0] = g_zone_title[1] = g_zone_title[2] = g_zone_title[3] = 0;
+    g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
+    g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
+    g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
+    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
+    if (g_vis_kb) {
+        draw_vis_cap_kb();
+    } else {
+        dl = ImGui::GetWindowDrawList();
+        wp = ImGui::GetWindowPos();
+        ww = ImGui::GetWindowWidth();
+        wh = ImGui::GetWindowHeight();
+        a = ImVec2(wp.x + 12, wp.y + 12);
+        b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
+        dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
+        dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+        x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+        text_meta_s(mode == 1 ? "模板采集 · 在画面上拖动框选一块图案，松手后命名保存"
+                   : mode == 2 ? "点集编辑 · 先点一下吸基准色，再点参考点（最多 16 个）"
+                               : "吸色 · 点画面里要取的颜色（回填找色步骤）");
+        if (g_vis_cap_msg[0]) {
+            ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 48));
+            ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_cap_msg);
+        }
+        img_top = y0 + 96.0f;
+        img_bot = b.y - 24.0f - 104.0f - (mode == 2 ? 88.0f : 0.0f);   /* 底：按钮 92+缝 12；点集再让容差行 76+12 */
+        if (img_bot < img_top + 120.0f) img_bot = img_top + 120.0f;    /* 极矮兜底 */
+        if (g_vis_cap_wait) {
+            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
+            text_meta_w("抓帧中…（面板向系统要一帧；通常 5~25ms）");
+        } else if (g_vis_cap_err) {
+            char m[128];
+            snprintf(m, sizeof m, "抓帧失败（%s，错误码 %d）：检查系统抓屏是否可用",
+                     g_vis_cap_err == -1 ? "超时" : "错误", g_vis_cap_err);
+            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
+            text_meta_w(m);
+        } else if (g_vis_img && g_vis_img_w > 0 && g_vis_img_h > 0) {
+            sc = cw / (float)g_vis_img_w;
+            {
+                float sy = (img_bot - img_top) / (float)g_vis_img_h;
+                if (sy < sc) sc = sy;
+            }
+            iw = (float)g_vis_img_w * sc;
+            ih = (float)g_vis_img_h * sc;
+            ix = x0 + (cw - iw) * 0.5f;
+            iy = img_top + (img_bot - img_top - ih) * 0.5f;
+            if (g_vis_tex_dirty) { vis_tex_update(g_vis_img, g_vis_img_w, g_vis_img_h); g_vis_tex_dirty = 0; }
+            dl->AddRectFilled(ImVec2(ix - 2, iy - 2), ImVec2(ix + iw + 2, iy + ih + 2), IM_COL32(228, 228, 231, 255), 4);
+            if (g_vis_tex)
+                dl->AddImage((ImTextureID)(intptr_t)g_vis_tex, ImVec2(ix, iy), ImVec2(ix + iw, iy + ih));
+            ImGui::PushID(9100);
+            ImGui::SetCursorScreenPos(ImVec2(ix, iy));
+            ImGui::InvisibleButton("##img", ImVec2(iw, ih));
+            {
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                int act = ImGui::IsItemActive();
+                int deact = ImGui::IsItemDeactivated();
+                if (act && !g_vis_drag) { g_vis_drag = 1; g_vis_dx0 = mp.x; g_vis_dy0 = mp.y; }
+                if (g_vis_drag && act) {
+                    float rx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
+                    float rx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
+                    float ry0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
+                    float ry1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
+                    dl->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1), IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                }
+                if (deact && g_vis_drag) {
+                    float ddx = mp.x - g_vis_dx0, ddy = mp.y - g_vis_dy0;
+                    g_vis_drag = 0;
+                    if (mode == 1) {
+                        /* 模板：松手提交框选（显示坐标 → 帧坐标 floor + 夹取；≥8×8 才收） */
+                        float mx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
+                        float mx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
+                        float my0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
+                        float my1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
+                        int fx0 = (int)((mx0 - ix) / sc), fx1 = (int)((mx1 - ix) / sc);
+                        int fy0 = (int)((my0 - iy) / sc), fy1 = (int)((my1 - iy) / sc);
+                        if (fx0 < 0) fx0 = 0;
+                        if (fy0 < 0) fy0 = 0;
+                        if (fx1 > g_vis_img_w - 1) fx1 = g_vis_img_w - 1;
+                        if (fy1 > g_vis_img_h - 1) fy1 = g_vis_img_h - 1;
+                        if (fx0 <= fx1 && fy0 <= fy1 && fx1 - fx0 + 1 >= 8 && fy1 - fy0 + 1 >= 8) {
+                            g_vis_sel[0] = fx0; g_vis_sel[1] = fy0;
+                            g_vis_sel[2] = fx1; g_vis_sel[3] = fy1;
+                            g_vis_sel_on = 1;
+                            g_vis_kb = 1; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
+                            ALOGI("vis 采集 框选 %d,%d-%d,%d（%dx%d）", fx0, fy0, fx1, fy1,
+                                  fx1 - fx0 + 1, fy1 - fy0 + 1);
+                        }
+                    } else if (ddx * ddx + ddy * ddy <= 14.0f * 14.0f) {
+                        /* 点选（点集 / 吸色）：轻点才算（拖动不算） */
+                        int fx = (int)((mp.x - ix) / sc), fy = (int)((mp.y - iy) / sc);
+                        uint32_t rgb = 0;
+                        if (fx >= 0 && fy >= 0 && fx < g_vis_img_w && fy < g_vis_img_h &&
+                            vis_frame_px(g_vis_img, g_vis_img_w, g_vis_img_h, fx, fy, &rgb) == 0) {
+                            if (mode == 3) vis_pick_apply(fx, fy, rgb);
+                            else vis_pts_tap(fx, fy, rgb);
+                        }
+                    }
+                    g_need = 1; g_force_frames = 3;
+                }
+                if (mode == 1 && g_vis_sel_on) {          /* 已定框选高亮 */
+                    dl->AddRect(ImVec2(ix + g_vis_sel[0] * sc, iy + g_vis_sel[1] * sc),
+                                ImVec2(ix + (g_vis_sel[2] + 1) * sc, iy + (g_vis_sel[3] + 1) * sc),
+                                IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
+                }
+                if (mode == 2) {
+                    /* 基准 + 参考点标记（显示层；帧坐标 → 屏坐标 = ix + fx*sc） */
+                    char lb[44];
+                    int k;
+                    if (g_vis_base_x >= 0) {
+                        float bx = ix + g_vis_base_x * sc, by2 = iy + g_vis_base_y * sc;
+                        dl->AddCircle(ImVec2(bx, by2), 16.0f, IM_COL32(255, 140, 0, 255), 32, 4.0f);
+                        dl->AddLine(ImVec2(bx - 22, by2), ImVec2(bx + 22, by2), IM_COL32(255, 140, 0, 255), 4.0f);
+                        dl->AddLine(ImVec2(bx, by2 - 22), ImVec2(bx, by2 + 22), IM_COL32(255, 140, 0, 255), 4.0f);
+                        snprintf(lb, sizeof lb, "基准 #%06X", (unsigned)g_vis_base_rgb);
+                        dl->AddText(ImVec2(bx + 20, by2 + 12), IM_COL32(180, 83, 9, 255), lb);
+                    }
+                    for (k = 0; k < g_vis_pts_n; k++) {
+                        float px = ix + g_vis_pts_x[k] * sc, py = iy + g_vis_pts_y[k] * sc;
+                        ImU32 cc = IM_COL32((g_vis_pts_rgb[k] >> 16) & 0xFF, (g_vis_pts_rgb[k] >> 8) & 0xFF,
+                                            g_vis_pts_rgb[k] & 0xFF, 255);
+                        if (g_vis_base_x >= 0)
+                            dl->AddLine(ImVec2(ix + g_vis_base_x * sc, iy + g_vis_base_y * sc), ImVec2(px, py),
+                                        IM_COL32(59, 130, 246, 140), 2.0f);
+                        dl->AddCircleFilled(ImVec2(px, py), 11.0f, cc);
+                        dl->AddCircle(ImVec2(px, py), 11.0f, IM_COL32(24, 24, 27, 255), 24, 2.0f);
+                        snprintf(lb, sizeof lb, "%d +%d,%d #%06X", k + 1,
+                                 g_vis_pts_x[k] - g_vis_base_x, g_vis_pts_y[k] - g_vis_base_y,
+                                 (unsigned)g_vis_pts_rgb[k]);
+                        dl->AddText(ImVec2(px + 14, py + 10), IM_COL32(24, 24, 27, 255), lb);
+                    }
+                }
+            }
+            ImGui::PopID();
+        } else {
+            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
+            text_meta_w("没有画面");
+        }
+        /* 底部按钮（状态相关） */
+        {
+            float by = b.y - 24.0f - 92.0f;
+            float bw2 = (cw - 12.0f) * 0.5f;
+            if (g_vis_cap_wait) {
+                ImGui::SetCursorScreenPos(ImVec2(x0, by));
+                if (btn_light("取消", ImVec2(cw, 92))) { ALOGI("vis 采集 取消（等帧中）"); vis_cap_close(); }
+            } else if (g_vis_cap_err) {
+                ImGui::SetCursorScreenPos(ImVec2(x0, by));
+                if (btn_light("重试", ImVec2(bw2, 92))) {
+                    g_vis_cap_err = 0; g_vis_cap_wait = 1; g_vis_cap_t0 = now_ms();
+                    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;
+                    vtouch_vis_panel_capture_req();
+                    g_need = 1; g_force_frames = 3;
+                    ALOGI("vis 采集 重试");
+                }
+                ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
+                if (btn_light("返回", ImVec2(bw2, 92))) vis_cap_close();
+            } else if (mode == 2) {
+                float ty = by - 12.0f - 76.0f;
+                float tw = 130.0f;
+                char tv[24];
+                ImGui::SetCursorScreenPos(ImVec2(x0, ty));
+                if (btn_light("-", ImVec2(tw, 76))) { if (g_vis_base_tol > 0) g_vis_base_tol--; g_need = 1; g_force_frames = 2; }
+                snprintf(tv, sizeof tv, "基准容差 %d", g_vis_base_tol);
+                ImGui::SetCursorScreenPos(ImVec2(x0 + tw + 12, ty));
+                btn_light(tv, ImVec2(cw - 2 * (tw + 12), 76));   /* 只显示（不可点） */
+                ImGui::SetCursorScreenPos(ImVec2(x0 + cw - tw, ty));
+                if (btn_light("+", ImVec2(tw, 76))) { if (g_vis_base_tol < 255) g_vis_base_tol++; g_need = 1; g_force_frames = 2; }
+                {
+                    float bw3 = (cw - 2 * 12) / 3.0f;
+                    ImGui::SetCursorScreenPos(ImVec2(x0, by));
+                    if (btn_light("取消", ImVec2(bw3, 92))) { ALOGI("vis 采集 取消（点集）"); vis_cap_close(); }
+                    ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, by));
+                    if (btn_light("重来", ImVec2(bw3, 92))) {
+                        g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_pts_n = 0;
+                        g_vis_cap_msg[0] = 0;
+                        g_need = 1; g_force_frames = 3;
+                        ALOGI("vis 采集 点集重来");
+                    }
+                    ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), by));
+                    if (g_vis_base_x >= 0 && g_vis_pts_n >= 1) {
+                        if (btn_blue("存点集", ImVec2(bw3, 92))) {
+                            g_vis_kb = 2; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
+                            ALOGI("vis 采集 点集命名开（n=%d）", g_vis_pts_n);
+                        }
+                    } else {
+                        ImGui::BeginDisabled();
+                        btn_light("存点集", ImVec2(bw3, 92));
+                        ImGui::EndDisabled();
+                    }
+                }
+            } else if (mode == 1) {
+                ImGui::SetCursorScreenPos(ImVec2(x0, by));
+                if (btn_light("取消", ImVec2(bw2, 92))) { ALOGI("vis 采集 取消（模板）"); vis_cap_close(); }
+                ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
+                if (btn_light("重新截帧", ImVec2(bw2, 92))) {
+                    g_vis_cap_err = 0; g_vis_cap_wait = 1; g_vis_cap_t0 = now_ms();
+                    g_vis_sel_on = 0; g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;
+                    vtouch_vis_panel_capture_req();
+                    g_need = 1; g_force_frames = 3;
+                    ALOGI("vis 采集 重新截帧");
+                }
+            } else {
+                ImGui::SetCursorScreenPos(ImVec2(x0, by));
+                if (btn_light("取消", ImVec2(cw, 92))) { ALOGI("vis 采集 取消（吸色）"); vis_cap_close(); }
+            }
+        }
+    }
+    ImGui::PopStyleVar(2);
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    if (g_scr_target == SCR_NONE) g_scroll_acc = 0;   /* 与 build_panel 同款：非滚动容器按下丢弃累积量 */
+}
+
+/* ---- 视觉步参数层（编辑层子层；g_vis_ed） ---- */
+
+/* 视觉步单字段数字编辑入口（找图 = 阈值 a1 / 找色 = 容差 a2 低 8 位）：复用数字键盘子层
+ * （draw_num_edit；字段模型见 ope_fidx 的 10/11 行；[完成] 写回经 ne_field_set 拆包）。 */
+static void ne_open_vis_field(int se)
+{
+    if (se < 0 || se >= g_ope_nsteps) return;
+    if (g_ope_steps[se][0] != OP_STEP_FINDIMAGE && g_ope_steps[se][0] != OP_STEP_FINDCOLOR) return;
+    g_ope_se = se; g_ope_sf = 0; g_ne_tgt = 0;
+    g_vis_num = 1;
+    ope_num_load();
+    g_ne_msg[0] = 0;
+    g_need = 1; g_force_frames = 2;
+    ALOGI("op edit 参数开（视觉） 第 %d 步 %s", se + 1, ope_tname(g_ope_steps[se][0]));
+}
+/* 模板列表子层（找图步 [模板]）：枚举 templates 下的 .tmpl，点一条写回该步 ref（模板名）。 */
+static void draw_vis_tlist(void)
+{
+    ImDrawList *dl;
+    ImVec2 wp, a, b;
+    float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
+    char names[64][16];
+    int i, n, se = g_ope_se;
+    if (se < 0 || se >= g_ope_nsteps) { g_vis_tl = 0; return; }
+    dl = ImGui::GetWindowDrawList();
+    wp = ImGui::GetWindowPos();
+    ww = ImGui::GetWindowWidth();
+    wh = ImGui::GetWindowHeight();
+    a = ImVec2(wp.x + 12, wp.y + 12);
+    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
+    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
+    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+    {
+        char t[80];
+        snprintf(t, sizeof t, "第 %d 步 · 找图 · 选择模板", se + 1);
+        text_meta_s(t);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
+    text_meta_s("templates/ 下的 .tmpl（到「模板」页截帧框选生成）");
+    list_top = y0 + 76;
+    list_bot = b.y - 24 - 92 - 12;
+    list_h = list_bot - list_top;
+    if (list_h < 0) list_h = 0;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
+    ImGui::BeginChild("##vistl", ImVec2(cw, list_h), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    n = vis_list(".tmpl", names, 64);
+    for (i = 0; i < n; i++) {
+        ImGui::PushID(3300 + i);
+        if ((strcmp(g_ope_refs[se], names[i]) == 0) ? btn_blue(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))
+                                                   : btn_light(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
+            snprintf(g_ope_refs[se], sizeof g_ope_refs[se], "%s", names[i]);
+            g_vis_tl = 0;
+            g_need = 1; g_force_frames = 3;
+            ALOGI("vis edit 找图 第 %d 步 模板=%s", se + 1, names[i]);
+        }
+        ImGui::PopID();
+    }
+    if (n == 0) text_meta_w("还没有模板：先到「模板」页截帧框选生成");
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PushID(3400);
+    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
+    if (btn_light("取消", ImVec2(cw, 92))) {
+        g_vis_tl = 0;
+        g_need = 1; g_force_frames = 2;
+    }
+    ImGui::PopID();
+}
+/* 点集列表子层（找色多点 [点集]）：枚举 templates 下的 .pts，点一条写回该步 ref（点集名）。 */
+static void draw_vis_plist(void)
+{
+    ImDrawList *dl;
+    ImVec2 wp, a, b;
+    float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
+    char names[64][16];
+    int i, n, se = g_ope_se;
+    if (se < 0 || se >= g_ope_nsteps) { g_vis_pl = 0; return; }
+    dl = ImGui::GetWindowDrawList();
+    wp = ImGui::GetWindowPos();
+    ww = ImGui::GetWindowWidth();
+    wh = ImGui::GetWindowHeight();
+    a = ImVec2(wp.x + 12, wp.y + 12);
+    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
+    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
+    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+    {
+        char t[80];
+        snprintf(t, sizeof t, "第 %d 步 · 找色 · 选择点集", se + 1);
+        text_meta_s(t);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
+    text_meta_s("templates/ 下的 .pts（到「模板」页吸色点选生成）");
+    list_top = y0 + 76;
+    list_bot = b.y - 24 - 92 - 12;
+    list_h = list_bot - list_top;
+    if (list_h < 0) list_h = 0;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
+    ImGui::BeginChild("##vispl", ImVec2(cw, list_h), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    n = vis_list(".pts", names, 64);
+    for (i = 0; i < n; i++) {
+        ImGui::PushID(3600 + i);
+        if ((strcmp(g_ope_refs[se], names[i]) == 0) ? btn_blue(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))
+                                                   : btn_light(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
+            snprintf(g_ope_refs[se], sizeof g_ope_refs[se], "%s", names[i]);
+            g_vis_pl = 0;
+            g_need = 1; g_force_frames = 3;
+            ALOGI("vis edit 找色 第 %d 步 点集=%s", se + 1, names[i]);
+        }
+        ImGui::PopID();
+    }
+    if (n == 0) text_meta_w("还没有点集：先到「模板」页「截帧 · 做点集」生成");
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PushID(3700);
+    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
+    if (btn_light("取消", ImVec2(cw, 92))) {
+        g_vis_pl = 0;
+        g_need = 1; g_force_frames = 2;
+    }
+    ImGui::PopID();
+}
+/* 颜色十六进制键盘子层（找色单点 [颜色]）：复用字符键盘；[确定] 校验 1..6 位十六进制 →
+ * 写回 a2 的颜色段（容差段保留）→ 关层。 */
+static void draw_vis_hex(void)
+{
+    int act = draw_char_kb("颜色（十六进制 RRGGBB，例 ff8800；0-9 a-f）", NULL, g_vis_hexbuf,
+                           (int)sizeof g_vis_hexbuf, &g_vis_hexup, g_vis_hexmsg,
+                           (int)sizeof g_vis_hexmsg, 12.0f);
+    if (act == 1) {
+        g_vis_hex = 0; g_vis_hexmsg[0] = 0;
+        g_need = 1; g_force_frames = 2;
+    } else if (act == 2) {
+        int se = g_ope_se, n = (int)strlen(g_vis_hexbuf), i, ok = (n >= 1 && n <= 6);
+        unsigned c = 0;
+        for (i = 0; ok && i < n; i++) {
+            char ch = g_vis_hexbuf[i];
+            if (ch >= '0' && ch <= '9') c = c * 16u + (unsigned)(ch - '0');
+            else if (ch >= 'a' && ch <= 'f') c = c * 16u + (unsigned)(ch - 'a' + 10);
+            else if (ch >= 'A' && ch <= 'F') c = c * 16u + (unsigned)(ch - 'A' + 10);
+            else ok = 0;
+        }
+        if (!ok || se < 0 || se >= g_ope_nsteps || g_ope_steps[se][0] != OP_STEP_FINDCOLOR) {
+            snprintf(g_vis_hexmsg, sizeof g_vis_hexmsg, "颜色要是 1–6 位十六进制（0-9 a-f）");
+            g_need = 1; g_force_frames = 2;
+            return;
+        }
+        g_ope_steps[se][2] = (int)(((c & 0xFFFFFFu) << 8) | ((uint32_t)g_ope_steps[se][2] & 0xFFu));
+        ALOGI("vis edit 找色 第 %d 步 颜色=#%06X", se + 1, c & 0xFFFFFFu);
+        g_vis_hex = 0; g_vis_hexmsg[0] = 0;
+        g_need = 1; g_force_frames = 3;
+    }
+}
+/* 视觉步参数层（整屏卡片；T3.2）：找图 = 模板 / 区域 / 阈值；找色 = 模式 / 颜色 / 取点吸色 / 容差 / 点集。
+ * 编辑直接落在编辑层快照（g_ope_steps / g_ope_refs / g_ope_exprs；外层 [取消] 全丢、[完成] 才落表）。
+ * [完成] 走同源 ope_step_check（不过 → 就地提示、层不关）；日志 `vis edit …`（spec §8）。 */
+static void draw_vis_edit(void)
+{
+    ImDrawList *dl;
+    ImVec2 wp, a, b;
+    float ww, wh, x0, y0, cw, ry, bw2, by;
+    int se, type;
+    char lab[96], t[80];
+    if (g_vis_num) { draw_num_edit(); return; }      /* 数字键盘子层（复用；[完成] 写回经 ne_field_set） */
+    if (g_vis_tl) { draw_vis_tlist(); return; }
+    if (g_vis_pl) { draw_vis_plist(); return; }
+    if (g_vis_hex) { draw_vis_hex(); return; }
+    se = g_ope_se;
+    if (se < 0 || se >= g_ope_nsteps) {
+        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
+        g_ope_se = -1;
+        return;
+    }
+    type = g_ope_steps[se][0];
+    if (type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) {
+        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
+        g_ope_se = -1;
+        return;
+    }
+    dl = ImGui::GetWindowDrawList();
+    wp = ImGui::GetWindowPos();
+    ww = ImGui::GetWindowWidth();
+    wh = ImGui::GetWindowHeight();
+    a = ImVec2(wp.x + 12, wp.y + 12);
+    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
+    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
+    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
+    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+    snprintf(t, sizeof t, "第 %d 步 · %s · 参数", se + 1, ope_tname(type));
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+    text_meta_s(t);
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
+    text_meta_s(type == OP_STEP_FINDIMAGE ? "选模板 / 区域 / 阈值；成立/不成立在步骤行上编辑"
+                                          : "选模式与颜色（或点集）；成立/不成立在步骤行上编辑");
+    ry = y0 + 84;
+    if (type == OP_STEP_FINDIMAGE) {
+        snprintf(lab, sizeof lab, "模板：%s", g_ope_refs[se][0] ? g_ope_refs[se] : "未选");
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry));
+        if (btn_light(lab, ImVec2(cw, 84))) {
+            g_vis_tl = 1;
+            g_need = 1; g_force_frames = 2;
+            ALOGI("vis edit 模板列表开 第 %d 步", se + 1);
+        }
+        snprintf(lab, sizeof lab, "区域：%s", g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
+        if (btn_light(lab, ImVec2(cw, 84))) {
+            g_ope_rl = se;                           /* 复用区域选择弹层（含「全屏」选项） */
+            g_need = 1; g_force_frames = 2;
+            ALOGI("vis edit 区域列表开 第 %d 步", se + 1);
+        }
+        snprintf(lab, sizeof lab, "阈值：%d（0..255）", g_ope_steps[se][1]);
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 192));
+        if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se);
+    } else {
+        snprintf(lab, sizeof lab, "模式：%s", g_ope_steps[se][1] == 1 ? "多点" : "单点");
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry));
+        if (btn_light(lab, ImVec2(cw, 84))) {        /* 模式循环：单点 ↔ 多点（切换时清/补 a2 的语义字段） */
+            if (g_ope_steps[se][1] == 1) {
+                g_ope_steps[se][1] = 0;
+                if (g_ope_steps[se][2] == 0) g_ope_steps[se][2] = 8;   /* 颜色 #000000、容差 8 */
+            } else {
+                g_ope_steps[se][1] = 1;
+                g_ope_steps[se][2] = 0;                /* 多点：a2 必须 0（基准色/容差/点表在 .pts） */
+            }
+            g_need = 1; g_force_frames = 2;
+            ALOGI("vis edit 找色 第 %d 步 模式=%s", se + 1, g_ope_steps[se][1] ? "多点" : "单点");
+        }
+        if (g_ope_steps[se][1] == 0) {
+            snprintf(lab, sizeof lab, "颜色：#%06X", (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu));
+            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
+            if (btn_light(lab, ImVec2(cw, 84))) {
+                g_vis_hex = 1;
+                snprintf(g_vis_hexbuf, sizeof g_vis_hexbuf, "%06x",
+                         (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu));
+                g_vis_hexmsg[0] = 0; g_vis_hexup = 0;
+                g_need = 1; g_force_frames = 2;
+            }
+            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 192));
+            if (btn_light("取点吸色（去屏幕点一下）", ImVec2(cw, 84))) {
+                g_vis_pick_se = se;
+                vis_cap_start(3);
+            }
+            snprintf(lab, sizeof lab, "容差：%d（0..255）", (int)((uint32_t)g_ope_steps[se][2] & 0xFFu));
+            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 288));
+            if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se);
+        } else {
+            snprintf(lab, sizeof lab, "点集：%s", g_ope_refs[se][0] ? g_ope_refs[se] : "未选");
+            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
+            if (btn_light(lab, ImVec2(cw, 84))) {
+                g_vis_pl = 1;
+                g_need = 1; g_force_frames = 2;
+                ALOGI("vis edit 点集列表开 第 %d 步", se + 1);
+            }
+        }
+    }
+    /* 提示槽（固定占位：出现/消失不动下面） */
+    if (g_vis_edmsg[0]) {
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 384));
+        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_edmsg);
+    }
+    /* 底：[取消] 丢弃 / [完成] 同源预检 → 关层（外层 [完成] 才落表） */
+    bw2 = (cw - 12.0f) * 0.5f;
+    by = b.y - 24.0f - 92.0f;
+    ImGui::PushID(9200);
+    ImGui::SetCursorScreenPos(ImVec2(x0, by));
+    if (btn_light("取消", ImVec2(bw2, 92))) {
+        ALOGI("vis edit 取消 第 %d 步", se + 1);
+        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;
+        g_ope_se = -1;
+        g_need = 1; g_force_frames = 3;
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
+    if (btn_blue("完成", ImVec2(bw2, 92))) {
+        char why[96];
+        if (!ope_step_check(se, g_ope_steps[se], why, (int)sizeof why)) {
+            snprintf(g_vis_edmsg, sizeof g_vis_edmsg, "%s", why);
+            g_need = 1; g_force_frames = 2;
+        } else {
+            if (type == OP_STEP_FINDIMAGE)
+                ALOGI("vis edit 找图 第 %d 步 模板=%s 区域=%s 阈值=%d", se + 1, g_ope_refs[se],
+                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏", g_ope_steps[se][1]);
+            else if (g_ope_steps[se][1] == 1)
+                ALOGI("vis edit 找色 第 %d 步 模式=多点 点集=%s 区域=%s", se + 1, g_ope_refs[se],
+                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
+            else
+                ALOGI("vis edit 找色 第 %d 步 模式=单点 颜色=#%06X 容差=%d 区域=%s", se + 1,
+                      (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu),
+                      (int)((uint32_t)g_ope_steps[se][2] & 0xFFu),
+                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
+            g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;
+            g_ope_se = -1;
+            g_need = 1; g_force_frames = 3;
+        }
+    }
+    ImGui::PopID();
+}
+
+/* ---- 模板页（nav 6）：截帧 / 列表 / 删除 ---- */
+
+/* 模板页（T3.2）：[截帧 · 存模板] / [截帧 · 做点集] + 两个列表（模板 / 点集，各带 [删除]）。
+ * 列表读目录实时（同区域/操作列表「每帧重读」口径）；删除立即生效（引用它的步骤运行时报「模板不存在」）。 */
+static void page_template(void)
+{
+    char tms[64][16], pss[64][16];
+    char meta[40];
+    int nt, np, i;
+    nt = vis_list(".tmpl", tms, 64);
+    np = vis_list(".pts", pss, 64);
+    snprintf(meta, sizeof meta, "%d 模板 / %d 点集", nt, np);
+    page_header("模板", meta);
+    text_meta_w("模板 = 截帧框选一块图案（找图用）；点集 = 基准色 + 参考点（多点找色用）。存到 "
+                "/data/local/vtouch-runtime/templates/，重启保留、方案内共享。");
+    ImGui::Dummy(ImVec2(0, 6));
+    {
+        float gap = 12.0f;
+        float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        if (btn_blue("截帧 · 存模板", ImVec2(bw, 84))) {
+            g_vis_pick_se = -1;
+            vis_cap_start(1);
+        }
+        ImGui::SameLine();
+        if (btn_light("截帧 · 做点集", ImVec2(bw, 84))) {
+            g_vis_pick_se = -1;
+            vis_cap_start(2);
+        }
+    }
+    ImGui::Dummy(ImVec2(0, 6));
+    /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::BeginChild("##tmpls", ImVec2(0, 0), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);
+    drag_scroll_for(SCR_LIST);
+    text_meta_s("模板（.tmpl）");
+    if (nt == 0) text_meta_w("还没有模板：点「截帧 · 存模板」开始");
+    for (i = 0; i < nt; i++) {
+        ImGui::PushID(9400 + i);
+        {
+            float dw = 150.0f;
+            float nw = ImGui::GetContentRegionAvail().x - dw - 12.0f;
+            if (nw < 120.0f) nw = 120.0f;
+            btn_light(tms[i], ImVec2(nw, 76));       /* 只显示（不可点） */
+            ImGui::SameLine();
+            if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(tms[i], 0);
+        }
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, 8));
+    text_meta_s("点集（.pts）");
+    if (np == 0) text_meta_w("还没有点集：点「截帧 · 做点集」开始");
+    for (i = 0; i < np; i++) {
+        ImGui::PushID(9500 + i);
+        {
+            float dw = 150.0f;
+            float nw = ImGui::GetContentRegionAvail().x - dw - 12.0f;
+            if (nw < 120.0f) nw = 120.0f;
+            btn_light(pss[i], ImVec2(nw, 76));       /* 只显示（不可点） */
+            ImGui::SameLine();
+            if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(pss[i], 1);
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+}
+
 /* ---- 面板：标题栏（唯一拖动区）/ 固定侧栏 / 可滚内容页；收起态只剩标题栏 ---- */
 static void build_panel(void)
 {
@@ -5566,6 +6775,7 @@ static void build_panel(void)
         else if (g_nav == 2) page_log();
         else if (g_nav == 4) page_help();
         else if (g_nav == 5) page_scheme();
+        else if (g_nav == 6) page_template();        /* 模板/点集页（T3.2） */
         else page_settings();
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -5666,7 +6876,8 @@ static void draw_frame(int sw, int sh)
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     if (g_ov_show) build_overlay(sw, sh);
-    if (g_ope_i >= 0) build_edit_layer();   /* 编辑层整屏（T2.4）：面板主窗口本帧不画 */
+    if (g_vis_cap) build_vis_cap();         /* 采集覆盖层整屏（T3.2）：模板/点集/吸色 —— 最高优先 */
+    else if (g_ope_i >= 0) build_edit_layer();   /* 编辑层整屏（T2.4）：面板主窗口本帧不画 */
     else build_panel();
     ImGui::Render();
     if (g_mdown && g_mup_pend) { g_mdown = 0; g_mup_pend = 0; g_mslot = -1; }
@@ -5814,6 +7025,7 @@ static void *render_thread_fn(void *)
         snapshot_touches();
         region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
         ops_run_watch();          /* 操作运行状态变了 → 请求重画（「运行中 · 第 k/n 步」实时读核心） */
+        vis_cap_tick();           /* 视觉采集（T3.2）：收帧/失败/超时（等帧期间保持重画） */
         int need_draw = g_need;   /* 显式请求的重画：不被下面的静止门吞掉 */
         go = g_need || g_ov_need;
         if (g_force_frames > 0) go = 1;

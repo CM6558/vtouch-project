@@ -2,7 +2,8 @@
  *
  * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现；
  * T2.4 起本文件另提供操作 / 取点 / 绑定（读 + 写）的 17 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）；
- * T3.1 起文件末尾另有视觉抓帧 JNI 三函数（面板主循环每帧轮询请求、抓帧读回 shm 帧区；契约 v8 区 D）。
+ * T3.1 起文件末尾另有视觉抓帧 JNI 三函数（面板主循环每帧轮询请求、抓帧读回 shm 帧区；契约 v8 区 D）；
+ * T3.2 起另有一段面板侧抓帧旁路（模板/点集/吸色；请求位与缓冲全在面板进程内存，不进共享内存、不动帧区协议）。
  * 数据来源与去向（契约见 src/vt_shm.h、docs/UI_INTEGRATION.md §4）：
  *   物理触点 / 区域表 / 操作表 / 运行状态 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
  *   区域 / 操作编辑             → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
@@ -825,6 +826,7 @@ JNIEXPORT jlong JNICALL Java_VTouchUI_nativeVisSubmitFrame(JNIEnv *env, jclass c
     AHardwareBuffer_describe(buf, &d);
     if (d.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) return -4;   /* 只认 RGBA8888（契约 format=0 口径） */
     w = d.width; hh = d.height;
+    if (d.stride != 0 && d.stride < w) return -5;   /* T3.2 顺手项（T3.1 M-1）：源 stride < 宽 ⇒ 按行拷贝会越读，显式拒 */
     need = (uint64_t)w * hh * 4u;
     if (w == 0 || hh == 0 || w > 4096 || hh > 4096 || need > (uint64_t)H->frame_buf_bytes) return -5;
     t0 = now_ns();
@@ -872,3 +874,141 @@ JNIEXPORT void JNICALL Java_VTouchUI_nativeVisFailFrame(JNIEnv *env, jclass cls,
     h->seq++;
     __atomic_store_n(&h->req_seq, (uint32_t)reqSeq, __ATOMIC_RELEASE);
 }
+
+/* ===================== 面板侧抓帧（T3.2：模板 / 点集 / 找色吸色用） =====================
+ * 与核心抓帧（区 D 请求协议）**完全独立的旁路**：请求位、面板侧缓冲、错误码全在本文件静态区
+ * （面板进程内存），不进共享内存、不动帧区协议、不干扰核心请求。协议：
+ *   面板 UI（渲染线程）vtouch_vis_panel_capture_req() 置请求 → Java 主循环 nativeVisPanelPoll 读到（清）→
+ *   VTouchUI.captureToPanel() 复用同一套 captureDisplay → nativeVisPanelFrame(hb, rot) 拷进后备块
+ *   （双缓冲翻转 + gen release 存）→ 面板 UI vtouch_vis_panel_frame_take() 取到新帧指针；
+ *   失败（Java 侧 token/反射/capture 异常或拷贝错误）→ nativeVisPanelFail → err_take 取走。
+ * 内存序（同帧区写端纪律的简化版）：写 w/h/rot → 屏障 → idx 翻转 → 屏障 → gen release 存；
+ * 读侧 acquire 读 gen 后再读 idx/尺寸。双缓冲：新帧写对侧块 ⇒ 旧读者手里的指针不被下一次拷贝覆写
+ * （连续两次请求之间的最坏窗口 = 仍持有更早一帧的调用方；UI 侧在请求新帧时丢弃旧指针）。
+ * 缓冲按需 realloc（上限 4096×4096×4）；malloc 失败 → 错误码返回（-206）。
+ * JNI 函数与 T3.1 同风格：静态命名（Java_VTouchUI_nativeVisPanel*），字段写入全在 C。 */
+
+#define VT_VIS_PANEL_MAX 4096
+static uint8_t *s_pv_buf[2];              /* 面板侧帧缓冲（双缓冲；按需 realloc） */
+static size_t   s_pv_cap[2];              /* 各块容量（字节） */
+static volatile int      s_pv_req;        /* 面板 → Java：要一帧（读到即清） */
+static volatile int      s_pv_idx;        /* 最近完成帧所在块（0/1） */
+static volatile int      s_pv_w, s_pv_h;  /* 最近完成帧尺寸 */
+static volatile int      s_pv_rot;        /* 抓帧时屏幕方向（0..3） */
+static volatile uint32_t s_pv_gen;        /* 成功拷贝计数（每帧 +1；release 存） */
+static volatile int      s_pv_err;        /* 最近一次失败码（0 = 无；读到即清） */
+
+/**
+ * (vtouch-doc: vtouch_vis_panel_capture_req)
+ * @brief 面板请求抓一帧（模板页 / 点集编辑 / 找色吸色用；旁路，不动核心帧区协议）。
+ * @note    只置请求位；Java 主循环 nativeVisPanelPoll 每轮读一次（≤10ms 延迟）。
+ */
+void vtouch_vis_panel_capture_req(void)
+{
+    __atomic_store_n(&s_pv_req, 1, __ATOMIC_RELEASE);
+}
+
+/**
+ * (vtouch-doc: vtouch_vis_panel_frame_take)
+ * @brief 取面板侧最近一帧（有新帧才返回 1；buf 指向面板侧缓冲，只读）。
+ * @param   w,h,rot  输出：帧尺寸与抓帧方向（可 NULL）
+ * @param   buf      输出：RGBA8888 紧排缓冲指针（w*4 字节/行；可 NULL）
+ * @return  1 有新帧；0 没有。
+ * @note    acquire 读 gen（配写侧 release）；同一帧只回报一次（内部记 seen）。单消费者（渲染线程）。
+ */
+int vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf)
+{
+    static uint32_t seen;
+    uint32_t gen = __atomic_load_n(&s_pv_gen, __ATOMIC_ACQUIRE);
+    int idx;
+
+    if (gen == 0 || gen == seen) return 0;
+    seen = gen;
+    idx = s_pv_idx;
+    if (idx < 0 || idx > 1 || !s_pv_buf[idx]) return 0;
+    if (w) *w = s_pv_w;
+    if (h) *h = s_pv_h;
+    if (rot) *rot = s_pv_rot;
+    if (buf) *buf = s_pv_buf[idx];
+    return 1;
+}
+
+/**
+ * (vtouch-doc: vtouch_vis_panel_err_take)
+ * @brief 取一次面板抓帧失败事件（读到即清）。
+ * @param   err      输出：失败码（负值；Java 侧 -101..-104 / JNI 侧 -201..-208）
+ * @return  1 有失败事件；0 无。
+ */
+int vtouch_vis_panel_err_take(int *err)
+{
+    int e = __atomic_load_n(&s_pv_err, __ATOMIC_ACQUIRE);
+
+    if (e == 0) return 0;
+    __atomic_store_n(&s_pv_err, 0, __ATOMIC_RELEASE);
+    if (err) *err = e;
+    return 1;
+}
+
+/* Java 主循环轮询：面板要帧没有（1 = 有，读到即清）。 */
+JNIEXPORT jint JNICALL Java_VTouchUI_nativeVisPanelPoll(JNIEnv *env, jclass cls)
+{
+    (void)env; (void)cls;
+    if (__atomic_load_n(&s_pv_req, __ATOMIC_ACQUIRE) == 0) return 0;
+    __atomic_store_n(&s_pv_req, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+
+/* 拷贝一帧到面板侧缓冲（同步；返回 0 成功，负 = 错误码）。写端顺序：字段 → idx 翻转 → gen release。 */
+JNIEXPORT jint JNICALL Java_VTouchUI_nativeVisPanelFrame(JNIEnv *env, jclass cls, jobject hb, jint rotation)
+{
+    AHardwareBuffer *buf;
+    AHardwareBuffer_Desc d;
+    void *src = NULL;
+    uint8_t *dst, *nb;
+    uint32_t w, hh, src_stride, dst_stride, back, y;
+    uint64_t need;
+    int r;
+
+    (void)cls;
+    if (!hb) return -201;
+    if (rotation < 0 || rotation > 3) return -202;
+    buf = AHardwareBuffer_fromHardwareBuffer(env, hb);
+    if (!buf) return -203;
+    AHardwareBuffer_describe(buf, &d);
+    if (d.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) return -204;
+    w = d.width; hh = d.height;
+    if (w == 0 || hh == 0 || w > VT_VIS_PANEL_MAX || hh > VT_VIS_PANEL_MAX) return -205;
+    if (d.stride != 0 && d.stride < w) return -205;
+    need = (uint64_t)w * hh * 4u;
+    back = (s_pv_idx == 0) ? 1u : 0u;                  /* 后备块 = 当前发布块的对侧（旧读者不被覆写） */
+    if (s_pv_cap[back] < need) {
+        nb = realloc(s_pv_buf[back], (size_t)need);
+        if (!nb) return -206;
+        s_pv_buf[back] = nb;
+        s_pv_cap[back] = (size_t)need;
+    }
+    r = AHardwareBuffer_lock(buf, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &src);
+    if (r != 0) return -207;
+    if (!src) { AHardwareBuffer_unlock(buf, NULL); return -208; }
+    src_stride = (d.stride ? d.stride : w) * 4u;
+    dst_stride = w * 4u;
+    dst = s_pv_buf[back];
+    for (y = 0; y < hh; y++)
+        memcpy(dst + (size_t)y * dst_stride, (const uint8_t *)src + (size_t)y * src_stride, dst_stride);
+    AHardwareBuffer_unlock(buf, NULL);
+    s_pv_w = (int)w; s_pv_h = (int)hh; s_pv_rot = (int)rotation;
+    __sync_synchronize();
+    s_pv_idx = (int)back;
+    __sync_synchronize();
+    __atomic_add_fetch(&s_pv_gen, 1u, __ATOMIC_RELEASE);   /* gen 最后写：新帧对面板可见 */
+    s_pv_err = 0;
+    return 0;
+}
+
+/* 报告一次面板抓帧失败（Java 侧 token/反射/capture 异常或拷贝错误码）。 */
+JNIEXPORT void JNICALL Java_VTouchUI_nativeVisPanelFail(JNIEnv *env, jclass cls, jint err)
+{
+    (void)env; (void)cls;
+    __atomic_store_n(&s_pv_err, (int)err, __ATOMIC_RELEASE);
+}
+

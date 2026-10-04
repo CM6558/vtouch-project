@@ -476,6 +476,12 @@ DOCS = {
          "引用 mask 缺位的触发数据 / 未写的槽返回 NO_VAR / NO_SLOT（按求值顺序，先遇到先报）。"),
 
 # ---------------- 视觉引擎（vt_vision.c；spec VISION_PLAN §3.3/§4） ----------------
+# 灰度公式单一来源（vt_vision.h 的 static inline；引擎与面板写端共用；T3.2 提取）：
+"vt_vis_gray_px": dict(brief="灰度公式（唯一来源）：(77r+150g+29b+128)>>8。",
+    params=[("r,g,b", "像素通道值（0..255）")],
+    ret="8bit 灰度（0..255）。",
+    note="引擎（vt_vision.c 标量/NEON 路径）与面板写端（.tmpl 存灰度）共用这一处定义；"
+         "NEON 路径复用同组权重常量（逐 lane 同算式）；改公式只改这里（实施计划「灰度公式单一来源」）。"),
 "vt_vis_frame_prepare": dict(brief="准备帧视图（静态单例）：RGBA→灰度 + 1/2、1/4 金字塔。",
     params=[("rgba", "帧 RGBA8888（stride 字节/行；调用方保证在 release 前有效）"), ("w", "帧宽（像素）"),
             ("h", "帧高（像素）"), ("stride", "行跨距（字节；≥ w×4）")],
@@ -518,11 +524,11 @@ DOCS = {
 "vis_gray_scalar": dict(brief="灰度转换（标量版）：逐像素 (77r+150g+29b+128)>>8。",
     params=[("dst", "输出灰度（w×h 紧凑）"), ("rgba", "输入帧（stride 字节/行，RGBA8888）"),
             ("w", "宽（像素）"), ("h", "高（像素）"), ("stride", "行跨距（字节）")],
-    note="权重与 NEON 版共用同一组常量（逐像素同算式）。"),
+    note="算式 = vt_vision.h 的 vt_vis_gray_px（唯一来源）；NEON 版共用同组权重常量（逐像素同算式）。"),
 "vis_gray_neon": dict(brief="灰度转换（NEON 版）：vld4q_u8 解交织 + 16 位加权，16 像素/次。",
     params=[("dst", "输出灰度（w×h 紧凑）"), ("rgba", "输入帧（stride 字节/行，RGBA8888）"),
             ("w", "宽（像素）"), ("h", "高（像素）"), ("stride", "行跨距（字节）")],
-    note="16 位通道和上限 65408 不溢出；尾部标量；逐 lane 与标量版同一算式。"),
+    note="16 位通道和上限 65408 不溢出；尾部标量；逐 lane 与标量版同一算式（权重同 vt_vis_gray_px）。"),
 "vis_down2": dict(brief="1/2 盒式下采样（四舍五入）：dst[Y][X] = (a+b+c+d+2)>>2。",
     params=[("dst", "输出（dw×dh）"), ("dw", "输出宽"), ("dh", "输出高"),
             ("src", "输入（行跨距 sw）"), ("sw", "输入行跨距（元素数）")],

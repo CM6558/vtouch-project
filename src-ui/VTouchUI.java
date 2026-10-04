@@ -23,6 +23,11 @@ public class VTouchUI {
     static native int nativeVisPollRequest();    /* 0 = 无请求；≠0 = 待抓请求序号 */
     static native long nativeVisSubmitFrame(Object hb, int reqSeq, int rotation);  /* 读回 shm 帧区；返回耗时 ms，负 = 失败 */
     static native void nativeVisFailFrame(int reqSeq, int err);                    /* 写帧头失败标志，立即解阻核心 */
+    /* 面板侧抓帧（T3.2）：模板 / 点集 / 找色吸色用；与核心帧区请求协议**完全独立的旁路**
+     * （请求位与缓冲全在 JNI C 的静态区，不进共享内存、不干扰核心请求）。 */
+    static native int nativeVisPanelPoll();                     /* 1 = 面板要一帧（读到即清） */
+    static native int nativeVisPanelFrame(Object hb, int rotation);  /* 拷进面板侧缓冲；0 = 成功，负 = 错误码 */
+    static native void nativeVisPanelFail(int err);             /* Java 侧失败（token/反射/capture） */
 
     /* 显示变化：事件驱动（公开 API DisplayManager.registerDisplayListener）。
      * 事件只告诉我们"去查"——实测回调常早于状态更新（getRotation() 仍返回旧值），所以配一个
@@ -194,6 +199,23 @@ public class VTouchUI {
     static java.lang.reflect.Method visCapM;
     static volatile IBinder visToken;
     static boolean visLoggedOnce;
+    /* 视觉失败日志限频（T3.2 顺手项，T3.1 M-2）：首条带栈，之后最多每 3s 一行短句 ——
+     * 反射 / token 失败会在每个请求上重试，不限频会把 logcat 刷满（真问题反而被淹掉）。 */
+    static boolean visWarned;
+    static long visWarnT;
+    static void visWarn(String msg, Throwable t) {
+        long now0 = System.currentTimeMillis();
+        if (!visWarned) {
+            visWarned = true;
+            visWarnT = now0;
+            if (t != null) Log.w(TAG, msg, t); else Log.w(TAG, msg);
+            return;
+        }
+        if (now0 - visWarnT > 3000) {
+            visWarnT = now0;
+            Log.w(TAG, msg + "（持续失败，限频报告）");
+        }
+    }
 
     static boolean visInitReflect() {
         if (visReflectOk) return true;
@@ -206,7 +228,7 @@ public class VTouchUI {
             visReflectOk = true;
             Log.i(TAG, "视觉抓帧反射就绪");
         } catch (Throwable t) {
-            Log.w(TAG, "视觉抓帧反射不可用（下次请求重试）", t);
+            visWarn("视觉抓帧反射不可用（下次请求重试）", t);
         }
         return visReflectOk;
     }
@@ -220,7 +242,7 @@ public class VTouchUI {
             try {
                 Object sf = Class.forName("android.os.ServiceManager")
                                  .getMethod("getService", String.class).invoke(null, "SurfaceFlingerAIDL");
-                if (!(sf instanceof IBinder)) { Log.w(TAG, "视觉 token：SurfaceFlingerAIDL 拿不到"); return null; }
+                if (!(sf instanceof IBinder)) { visWarn("视觉 token：SurfaceFlingerAIDL 拿不到", null); return null; }
                 final String DESC = "android.gui.ISurfaceComposer";
                 long pid = 0;
                 Parcel d = Parcel.obtain(), r = Parcel.obtain();
@@ -237,7 +259,7 @@ public class VTouchUI {
                     }
                     if (ids != null && ids.length > 0) pid = ids[0];
                 } finally { d.recycle(); r.recycle(); }
-                if (pid == 0) { Log.w(TAG, "视觉 token：物理屏 id 拿不到"); return null; }
+                if (pid == 0) { visWarn("视觉 token：物理屏 id 拿不到", null); return null; }
                 d = Parcel.obtain(); r = Parcel.obtain();
                 try {
                     d.writeInterfaceToken(DESC);
@@ -257,9 +279,9 @@ public class VTouchUI {
                         return tok;
                     }
                 } finally { d.recycle(); r.recycle(); }
-                Log.w(TAG, "视觉 token：display token 拿不到");
+                visWarn("视觉 token：display token 拿不到", null);
             } catch (Throwable t2) {
-                Log.w(TAG, "视觉 token 获取失败（下次请求重试）", t2);
+                visWarn("视觉 token 获取失败（下次请求重试）", t2);
             }
             return null;
         }
@@ -282,7 +304,7 @@ public class VTouchUI {
             long ms = nativeVisSubmitFrame(hb, reqSeq, dispNow[2]);
             if (ms < 0) {
                 nativeVisFailFrame(reqSeq, (int) ms);          /* submit 失败没写 req_seq：补失败帧 */
-                Log.w(TAG, "vis 抓帧提交失败 ms=" + ms + " req=" + reqSeq);
+                visWarn("vis 抓帧提交失败 ms=" + ms + " req=" + reqSeq, null);
             } else if (!visLoggedOnce) {
                 visLoggedOnce = true;
                 Log.i(TAG, "vis 抓帧就绪 首帧 " + ms + "ms");
@@ -290,7 +312,35 @@ public class VTouchUI {
         } catch (Throwable t) {
             visToken = null;                                   /* token 可能失效：置空，下次请求重新拿 */
             nativeVisFailFrame(reqSeq, -103);
-            Log.w(TAG, "vis 抓帧失败（已报核心）", t);
+            visWarn("vis 抓帧失败（已报核心）", t);
+        } finally {
+            if (hb != null) try { hb.getClass().getMethod("close").invoke(hb); } catch (Throwable t2) { }
+        }
+    }
+
+    /* 面板侧抓帧（T3.2）：模板页截帧 / 点集编辑 / 找色吸色用 —— 复用同一套反射与 token，
+     * 但帧走 nativeVisPanelFrame 拷进**面板侧缓冲**（不进共享内存、不动核心帧区请求协议）。
+     * 面板要帧时 nativeVisPanelPoll 读到（≤10ms）；失败路径统一 nativeVisPanelFail（面板显示错误）。 */
+    static void captureToPanel() {
+        if (!visInitReflect()) { nativeVisPanelFail(-102); return; }
+        IBinder token = visGetToken();
+        if (token == null) { nativeVisPanelFail(-101); return; }
+        Object hb = null;
+        try {
+            Object bld = visBldCtor.newInstance(token);
+            Object args = visBldCls.getMethod("build").invoke(bld);
+            Object shb = visCapM.invoke(null, args);
+            if (shb != null) hb = shb.getClass().getMethod("getHardwareBuffer").invoke(shb);
+            if (hb == null) { nativeVisPanelFail(-104); return; }
+            int rc = nativeVisPanelFrame(hb, dispNow[2]);
+            if (rc != 0) {
+                nativeVisPanelFail(rc);                        /* 拷贝失败：错误码交面板显示 */
+                visWarn("vis 面板抓帧失败 rc=" + rc, null);
+            }
+        } catch (Throwable t) {
+            visToken = null;                                   /* token 可能失效：置空，下次请求重新拿 */
+            nativeVisPanelFail(-103);
+            visWarn("vis 面板抓帧失败（已报面板）", t);
         } finally {
             if (hb != null) try { hb.getClass().getMethod("close").invoke(hb); } catch (Throwable t2) { }
         }
@@ -516,11 +566,13 @@ public class VTouchUI {
                     }
                 }
             }
-            /* ④ 视觉抓帧（T3.1）：核心有请求才抓 —— 轮询是廉价 JNI 读（帧区 req_pending vs req_seq），
-             * 抓帧同步做（capture 4–7ms + 读回，可承受；挂死由核心 1000ms 超时兜底）。 */
+            /* ④ 视觉抓帧（T3.1/T3.2）：核心有请求才抓 —— 轮询是廉价 JNI 读（帧区 req_pending vs req_seq）；
+             * 面板侧抓帧（模板/点集/吸色）同轮询、同同步做（capture 4–7ms + 读回，可承受；
+             * 挂死由核心 1000ms 超时兜底 / 面板侧 3s 超时提示）。 */
             {
                 int vreq = nativeVisPollRequest();
                 if (vreq != 0) captureToShm(vreq);
+                if (nativeVisPanelPoll() != 0) captureToPanel();
             }
         }
     }

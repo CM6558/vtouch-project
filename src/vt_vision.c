@@ -6,8 +6,8 @@
  *      金字塔 1/4 粗筛 → 1/2 定位 → 全分辨率精修；命中即停）。
  *   3) 坐标映射：帧坐标（当前方向）↔ 竖屏逻辑坐标（纯函数；与面板 p2c/c2p 同一约定）。
  *
- * 灰度公式（整数近似；NEON 与标量共用同一组权重，对 Rec.601 加权真值最大误差 ≤1）：
- *     gray = (77*r + 150*g + 29*b + 128) >> 8        （权重和 = 256，四舍五入）
+ * 灰度公式（**唯一来源 = vt_vision.h 的 vt_vis_gray_px**；NEON 与标量共用同一组权重，对 Rec.601
+ * 加权真值最大误差 ≤1）：gray = (77*r + 150*g + 29*b + 128) >> 8（权重和 = 256，四舍五入）。
  * 金字塔（帧与模板同一套）：1/2 = 2×2 盒式平均、四舍五入 (a+b+c+d+2)>>2；1/4 由 1/2 再降一次。
  *
  * 找图判定与金字塔口径（完整说明；报告 task-1.1 同步披露）：
@@ -51,10 +51,7 @@
 /* 粗筛阈值余量（1/4、1/2 两级共用；为什么这么写见文件头）。 */
 #define VT_VIS_COARSE_MARGIN 8
 
-/* 灰度权重（NEON 与标量共用同一组；和 = 256，+128 四舍五入）。 */
-#define VT_VIS_GRAY_WR 77
-#define VT_VIS_GRAY_WG 150
-#define VT_VIS_GRAY_WB 29
+/* 灰度权重常量与算式 = vt_vision.h 的 vt_vis_gray_px（唯一来源；本文件不重写算式）。 */
 
 /* ---- 帧视图（静态单例；主循环单线程，不可并发） ---- */
 
@@ -84,7 +81,7 @@ static int s_row_any;                            /* 当前胞行是否有过筛�
  * @param   w        宽（像素）
  * @param   h        高（像素）
  * @param   stride   行跨距（字节）
- * @note    16 位通道和上限 65408 不溢出；尾部标量；逐 lane 与标量版同一算式。
+ * @note    16 位通道和上限 65408 不溢出；尾部标量；逐 lane 与标量版同一算式（权重同 vt_vis_gray_px）。
  */
 static void vis_gray_neon(uint8_t *dst, const uint8_t *rgba, int w, int h, int stride)
 {
@@ -117,8 +114,7 @@ static void vis_gray_neon(uint8_t *dst, const uint8_t *rgba, int w, int h, int s
         for (; x < w; x++) {
             const uint8_t *q = p + (size_t)x * 4;
 
-            d[x] = (uint8_t)((VT_VIS_GRAY_WR * q[0] + VT_VIS_GRAY_WG * q[1] +
-                              VT_VIS_GRAY_WB * q[2] + 128) >> 8);
+            d[x] = vt_vis_gray_px(q[0], q[1], q[2]);
         }
     }
 }
@@ -133,7 +129,7 @@ static void vis_gray_neon(uint8_t *dst, const uint8_t *rgba, int w, int h, int s
  * @param   w        宽（像素）
  * @param   h        高（像素）
  * @param   stride   行跨距（字节）
- * @note    权重与 NEON 版共用同一组常量（逐像素同算式）。
+ * @note    算式 = vt_vision.h 的 vt_vis_gray_px（唯一来源）；NEON 版共用同组权重常量（逐像素同算式）。
  */
 static void vis_gray_scalar(uint8_t *dst, const uint8_t *rgba, int w, int h, int stride)
 {
@@ -144,8 +140,7 @@ static void vis_gray_scalar(uint8_t *dst, const uint8_t *rgba, int w, int h, int
         uint8_t *d = dst + (size_t)y * w;
 
         for (x = 0; x < w; x++, p += 4)
-            d[x] = (uint8_t)((VT_VIS_GRAY_WR * p[0] + VT_VIS_GRAY_WG * p[1] +
-                              VT_VIS_GRAY_WB * p[2] + 128) >> 8);
+            d[x] = vt_vis_gray_px(p[0], p[1], p[2]);
     }
 }
 

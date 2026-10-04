@@ -315,3 +315,15 @@ int vtouch_region_trig(int i, char *op, int n, int *ev)
     if (ev) *ev = R[i].trig_ev;
     return 0;
 }
+
+/* 视觉面板抓帧（T3.2）：单跑模式没有 Java/抓帧 —— 请求置空、无帧、无错误
+ * （采集覆盖层会走「抓帧超时」路径，面板照常可交互；真抓帧只在接核心（real）构建里走）。 */
+void vtouch_vis_panel_capture_req(void) { }
+
+int vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf)
+{
+    (void)w; (void)h; (void)rot; (void)buf;
+    return 0;
+}
+
+int vtouch_vis_panel_err_take(int *err) { (void)err; return 0; }

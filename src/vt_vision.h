@@ -25,11 +25,31 @@
  *   - 区域（rx,ry,rw,rh）：先与帧求交（越界部分不算；交集空 = 未命中）；rw/rh ≤ 0 = 参数非法。
  *   - 帧视图：vt_vis_frame_prepare 用**静态单例**（主循环单线程，不可并发调用）；rgba 缓冲在
  *     release 前须保持有效（引擎只读、不拷贝）。
+ *   - 灰度公式 = 本头的 vt_vis_gray_px（唯一来源；引擎与面板写端共用，见下）。
  */
 #ifndef VT_VISION_H
 #define VT_VISION_H
 
 #include <stdint.h>
+
+/* 灰度公式（唯一来源；spec §4.1 / 实施计划「灰度公式单一来源」）：RGBA → 8bit 灰度，整数近似。
+ * gray = (77*r + 150*g + 29*b + 128) >> 8 —— 权重和 = 256、+128 四舍五入（对 Rec.601 加权真值误差 ≤1）。
+ * 引擎（vt_vision.c 的标量路径与 NEON 路径共用这组权重常量）与面板写端（T3.2：.tmpl 存灰度）
+ * **同用这一处定义**；改公式只改这里，禁止在别处重写算式。 */
+#define VT_VIS_GRAY_WR 77
+#define VT_VIS_GRAY_WG 150
+#define VT_VIS_GRAY_WB 29
+/**
+ * (vtouch-doc: vt_vis_gray_px)
+ * @brief 灰度公式（唯一来源）：(77r+150g+29b+128)>>8。
+ * @param   r,g,b  像素通道值（0..255）
+ * @return  8bit 灰度（0..255）。
+ * @note    引擎（vt_vision.c）与面板写端（.tmpl 存灰度）共用；NEON 路径复用同组权重常量（逐 lane 同算式）。
+ */
+static inline uint8_t vt_vis_gray_px(int r, int g, int b)
+{
+    return (uint8_t)((VT_VIS_GRAY_WR * r + VT_VIS_GRAY_WG * g + VT_VIS_GRAY_WB * b + 128) >> 8);
+}
 
 /* 返回码（全接口统一）。 */
 #define VT_VIS_OK        0    /* 命中（匹配类接口）/ 成功（prepare） */
