@@ -5161,9 +5161,152 @@ static void draw_op_preview(void)
     ImGui::PopID();
 }
 
+/* 横屏编辑器（T7.3，⑤）：左右分栏 —— 左 ~60% 步骤列表（主区，整高滚动）；右 ~40% 控制栏，
+ * 自上而下：名字行 / 门控·自动关行 / 加步区（3 列 × 4 行竖排，按列分组：基础 / 控制 / 条件）/
+ * [预览][收起] / [取消][完成]。名字与提示槽顶锚、两排钮底锚，余量留中间。
+ * 窄档（44px 长文案放不下）门控/自动关/加步整组降 30px 小字（同标题栏「降一档字号」口径）；
+ * 极窄只留「门控 / 自动关」；加步「＋」前缀与判断短文案按实算宽度定档（同竖屏 cw 阈值口径）。 */
+static void draw_op_edit_land(float x0, float y0, float cw, float wh)
+{
+    float by = wh - 36.0f;                   /* 内容底（= b.y - 24） */
+    float lw = (cw - 12.0f) * 0.6f;          /* 左：步骤列表（主区） */
+    float rw = cw - 12.0f - lw;              /* 右：控制栏（~40%） */
+    float rx = x0 + lw + 12.0f;
+    float hn, hr, hd, bw3, gy;               /* 名字 / 通用行 / [取消][完成] 行高；加步钮宽；门控行 y */
+    int sm, mini, plus, plus4, j4, sm2;
+    char t[80];
+
+    /* 右栏三档自适应（同竖屏「按可用高定档」口径；内容 = 名字 + 提示槽 + 6 行 + [取消][完成] + 8 缝） */
+    hn = 84.0f; hr = 76.0f; hd = 92.0f;
+    if (by - y0 < 84.0f + 46.0f + 6.0f * 76.0f + 92.0f + 8.0f * 12.0f) { hn = 64.0f; hr = 58.0f; hd = 70.0f; }
+    if (by - y0 < 64.0f + 46.0f + 6.0f * 58.0f + 70.0f + 8.0f * 12.0f) { hn = 56.0f; hr = 48.0f; hd = 60.0f; }
+    /* 窄档判定（按实算宽度反推：「放得下才用长文案」；44px 字形宽 = 字号、按钮内缝 32） */
+    sm    = ((rw - 12.0f) * 0.545f < 252.0f);   /* 「自动关：开」（44px）放不下 → 降 30px 小字档 */
+    mini  = ((rw - 12.0f) * 0.455f < 152.0f);   /* 「门控：无」（30px）也放不下 → 只留「门控 / 自动关」 */
+    bw3   = (rw - 24.0f) / 3.0f;
+    plus  = (bw3 >= 164.0f);                    /* 加步「＋X」（三字 44px）放得下 */
+    plus4 = (bw3 >= 252.0f);                    /* 「＋区域判断」（五字）放得下 */
+    j4    = (bw3 >= 208.0f);                    /* 「区域判断」（四字）放得下 */
+    sm2   = ((rw - 12.0f) * 0.5f < 120.0f);     /* 两字钮（44px）放不下 → 降 30px */
+
+    /* 左栏：标题 + 列表（整高滚动） */
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
+    snprintf(t, sizeof t, "步骤 · %d 步（最多 %d；列表可上下拖动滚）", g_ope_nsteps, OPE_MAX_STEPS);
+    text_meta_s(t);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 36.0f));
+    ImGui::BeginChild("##opsteps", ImVec2(lw, by - y0 - 36.0f), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    pub_zone(g_zone_list);                   /* 列表实区：拖它滚动（同竖屏口径） */
+    drag_scroll_for(SCR_LIST);
+    for (int i = 0; i < g_ope_nsteps; i++) ope_step_row(i);
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    /* 右栏 · 名字行（顶锚；点它开改名子层） */
+    ImGui::SetCursorScreenPos(ImVec2(rx, y0));
+    if (btn_light(g_ope_name, ImVec2(rw, hn))) {
+        g_ope_kb = 1; g_ope_kbmsg[0] = 0; g_ope_up = 0;
+        g_need = 1; g_force_frames = 2;
+        ALOGI("op edit 改名子层开 %s", g_ope_name);
+    }
+    /* 右栏 · 提示槽（固定占位：出现提示时下面整块不动，防误点；同竖屏口径） */
+    if (g_ope_msg[0]) {
+        ImGui::SetCursorScreenPos(ImVec2(rx, y0 + hn + 12.0f));
+        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
+    }
+    /* 右栏 · 门控 · 自动关 · 加步（窄档整组 30px 小字） */
+    gy = y0 + hn + 12.0f + 46.0f + 12.0f;
+    if (sm) meta_push();
+    if (mini) snprintf(t, sizeof t, "门控");
+    else snprintf(t, sizeof t, "门控：%s", g_ope_gate[0] ? g_ope_gate : "无");
+    ImGui::SetCursorScreenPos(ImVec2(rx, gy));
+    if (btn_light(t, ImVec2((rw - 12.0f) * 0.455f, hr))) ope_gate_cycle();
+    if (mini) snprintf(t, sizeof t, "自动关");
+    else snprintf(t, sizeof t, "自动关：%s", g_ope_autoff ? "开" : "关");
+    ImGui::SetCursorScreenPos(ImVec2(rx + (rw - 12.0f) * 0.455f + 12.0f, gy));
+    if (btn_light(t, ImVec2((rw - 12.0f) * 0.545f, hr))) {
+        g_ope_autoff = !g_ope_autoff;
+        g_need = 1; g_force_frames = 2;
+        ALOGI("op edit 自动关 %s", g_ope_autoff ? "开" : "关");
+    }
+    {
+        /* 加步（3 列 × 4 行竖排：按列分组 —— 基础 / 控制 / 条件；第 12 格空。加完开子层同竖屏口径） */
+        float c2 = rx + bw3 + 12.0f, c3 = rx + 2.0f * (bw3 + 12.0f);
+        float a1 = gy + hr + 12.0f;
+        float a2 = a1 + hr + 12.0f, a3 = a2 + hr + 12.0f, a4 = a3 + hr + 12.0f;
+        ImGui::SetCursorScreenPos(ImVec2(rx, a1));
+        if (btn_light(plus ? "＋点按" : "点按", ImVec2(bw3, hr))) ope_add_step(OP_STEP_TAP);
+        ImGui::SetCursorScreenPos(ImVec2(rx, a2));
+        if (btn_light(plus ? "＋滑动" : "滑动", ImVec2(bw3, hr))) ope_add_step(OP_STEP_SWIPE);
+        ImGui::SetCursorScreenPos(ImVec2(rx, a3));
+        if (btn_light(plus ? "＋等待" : "等待", ImVec2(bw3, hr))) ope_add_step(OP_STEP_WAIT);
+        ImGui::SetCursorScreenPos(ImVec2(rx, a4));
+        if (btn_light(plus ? "＋找图" : "找图", ImVec2(bw3, hr))) {
+            int n0 = g_ope_nsteps;
+            ope_add_step(OP_STEP_FINDIMAGE);
+            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(c2, a1));
+        if (btn_light(plus ? "＋按下" : "按下", ImVec2(bw3, hr))) ope_add_step(OP_STEP_DOWN);
+        ImGui::SetCursorScreenPos(ImVec2(c2, a2));
+        if (btn_light(plus ? "＋弹起" : "弹起", ImVec2(bw3, hr))) ope_add_step(OP_STEP_UP);
+        ImGui::SetCursorScreenPos(ImVec2(c2, a3));
+        if (btn_light(plus ? "＋跳转" : "跳转", ImVec2(bw3, hr))) ope_add_step(OP_STEP_JUMP);
+        ImGui::SetCursorScreenPos(ImVec2(c2, a4));
+        if (btn_light(plus ? "＋找色" : "找色", ImVec2(bw3, hr))) {
+            int n0 = g_ope_nsteps;
+            ope_add_step(OP_STEP_FINDCOLOR);
+            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(c3, a1));
+        if (btn_light(plus4 ? "＋区域判断" : (j4 ? "区域判断" : "区域"), ImVec2(bw3, hr))) ope_add_step(OP_STEP_COND_REGION);
+        ImGui::SetCursorScreenPos(ImVec2(c3, a2));
+        if (btn_light(plus4 ? "＋开关判断" : (j4 ? "开关判断" : "开关"), ImVec2(bw3, hr))) ope_add_step(OP_STEP_COND_TOGGLE);
+        ImGui::SetCursorScreenPos(ImVec2(c3, a3));
+        if (btn_light(plus ? "＋计算" : "计算", ImVec2(bw3, hr))) {
+            int n0 = g_ope_nsteps;
+            ope_add_step(OP_STEP_CALC);
+            if (g_ope_nsteps > n0) ope_expr_open(g_ope_nsteps - 1);
+        }
+        /* 第 3 列第 4 行：空（11 键 = 4+4+3） */
+    }
+    if (sm) meta_pop();
+    /* 右栏 · [预览][收起] / [取消][完成]（底锚两排；窄档两字钮 30px） */
+    {
+        float bw = (rw - 12.0f) * 0.5f;
+        float py = by - hd - 12.0f - hr;
+        if (sm2) meta_push();
+        ImGui::SetCursorScreenPos(ImVec2(rx, py));
+        if (btn_light("预览", ImVec2(bw, hr))) {
+            g_ope_pv = 1;                    /* 全屏只读页（T2.5）；吞触摸矩形照旧整屏 */
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 预览开（%d 步）", g_ope_nsteps);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(rx + bw + 12.0f, py));
+        if (btn_light("收起", ImVec2(bw, hr))) {
+            g_ope_coll = 1;
+            g_need = 1; g_force_frames = 2;
+            ALOGI("op edit 收起（编辑状态保留；点条展开）");
+        }
+        ImGui::SetCursorScreenPos(ImVec2(rx, by - hd));
+        if (btn_light("取消", ImVec2(bw, hd))) {    /* 取消 = 丢本轮编辑回操作页（改名弹层同款语义） */
+            ALOGI("op edit 取消（丢编辑）");
+            op_edit_close();
+        }
+        ImGui::SetCursorScreenPos(ImVec2(rx + bw + 12.0f, by - hd));
+        if (btn_blue("完成", ImVec2(bw, hd))) op_edit_save();
+        if (sm2) meta_pop();
+    }
+}
+
 /* 编辑层主屏（T2.4 起按**当前屏整屏**绘制，见 build_edit_layer）：头部（名字行 + [预览][收起]）/
  * 步骤列表（可滚）/ 加步（v5 三行九类型 3×3）/ 门控循环 / 跑完自动关 / [取消][完成]。
- * 子层（名字键盘、数字弹层、变量选择、区域选择、表达式、预览页）开着时本屏不画（子层整面盖住）。 */
+ * 子层（名字键盘、数字弹层、变量选择、区域选择、表达式、预览页）开着时本屏不画（子层整面盖住）。
+ * T7.3（⑤）：横屏（g_scr_w > g_scr_h）整屏改左右分栏（draw_op_edit_land）；竖屏本函数为现状布局
+ * 收紧行高（加步 4×3 紧凑置底）；竖屏列表保底 120px 给不出时也退分栏（硬约束兜底）。 */
 static void draw_op_edit(void)
 {
     ImDrawList *dl;
@@ -5187,6 +5330,33 @@ static void draw_op_edit(void)
     dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
     dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
     x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
+    /* T7.3 布局重排（⑤）：横屏（g_scr_w > g_scr_h）左右分栏 —— 左步骤列表（主区）/ 右控制栏。 */
+    if (g_scr_w > g_scr_h) { draw_op_edit_land(x0, y0, cw, wh); return; }
+    /* ---- 竖屏几何（T7.3：先算后画 —— 兜底判定要在落笔之前）----
+     * 步骤区标题 + 底部按钮锚点（从底往上排，列表拿中间剩下的高度） */
+    msg_h = 46.0f;                           /* 提示槽固定占位：出现提示时下面整块不动，防误点 */
+    ly = y0 + 68 + 84 + 12 + msg_h;
+    /* 底部按钮行高自适应（矮屏/横屏）：先压矮按钮、再让列表，保证 [取消]/[完成]/加步/门控/自动关
+     * 永远在屏内可点（列表内部本就可滚）。两档紧凑，阈值按「底锚区可用高」算；v5 加步三行 → 5 行 bh_row。
+     * T7.3：默认行高收紧（76→64 / 92→80）—— 加步区 4×3 紧凑置底，列表（主区）多拿高度。 */
+    float bh_row = 64.0f, bh_done = 80.0f;
+    {
+        float avail_b = (b.y - 24.0f) - (ly + 36.0f);
+        if (avail_b < 140.0f + 80.0f + 5.0f * (64.0f + 12.0f)) { bh_row = 56.0f; bh_done = 68.0f; }
+        if (avail_b < 80.0f + 68.0f + 5.0f * (56.0f + 12.0f)) { bh_row = 48.0f; bh_done = 60.0f; }
+    }
+    by_bottom = b.y - 24;
+    done_y = by_bottom - bh_done;
+    autooff_y = done_y - 12 - bh_row;
+    gate_y = autooff_y - 12 - bh_row;
+    add_y3 = gate_y - 12 - bh_row;           /* 加步第三行（最下）：区域判断 / 开关判断 / 计算 */
+    add_y2 = add_y3 - 12 - bh_row;           /* 加步第二行：按下 / 弹起 / 跳转 */
+    add_y1 = add_y2 - 12 - bh_row;           /* 加步第一行（最上）：点按 / 滑动 / 等待 */
+    list_top = ly + 36;
+    list_bot = add_y1 - 12;
+    list_h = list_bot - list_top;
+    /* T7.3 硬约束兜底：竖屏连列表 120px 保底都给不出（极矮 / 方形屏）→ 退横屏分栏，保全元素可达 */
+    if (list_h < 120.0f) { draw_op_edit_land(x0, y0, cw, wh); return; }
     /* 头部：名字小字 + 右 [收起] 钮（T2.4：收成底部条，编辑状态全保留；点条再展开 ——
      * 「一边看游戏一边改」用。收起态与子层叠加规则：收起只画条，子层状态原样保留，展开即回原层）。 */
     ImGui::SetCursorScreenPos(ImVec2(x0, y0));
@@ -5213,33 +5383,11 @@ static void draw_op_edit(void)
         g_need = 1; g_force_frames = 2;
         ALOGI("op edit 改名子层开 %s", g_ope_name);
     }
-    /* 就地提示（[完成] 拒收 / 步数门 / 门控提示）；提示槽固定占位：出现提示时下面整块不动，防误点 */
-    msg_h = 46.0f;
+    /* 就地提示（[完成] 拒收 / 步数门 / 门控提示） */
     if (g_ope_msg[0]) {
         ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 68 + 84 + 12));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
     }
-    /* 步骤区标题 + 底部按钮锚点（从底往上排，列表拿中间剩下的高度） */
-    ly = y0 + 68 + 84 + 12 + msg_h;
-    /* 底部按钮行高自适应（矮屏/横屏）：先压矮按钮、再让列表，保证 [取消]/[完成]/加步/门控/自动关
-     * 永远在屏内可点（列表内部本就可滚）。两档紧凑，阈值按「底锚区可用高」算；v5 加步三行 → 5 行 bh_row。 */
-    float bh_row = 76.0f, bh_done = 92.0f;
-    {
-        float avail_b = (b.y - 24.0f) - (ly + 36.0f);
-        if (avail_b < 140.0f + 92.0f + 5.0f * (76.0f + 12.0f)) { bh_row = 58.0f; bh_done = 70.0f; }
-        if (avail_b < 80.0f + 70.0f + 5.0f * (58.0f + 12.0f)) { bh_row = 48.0f; bh_done = 60.0f; }
-    }
-    by_bottom = b.y - 24;
-    done_y = by_bottom - bh_done;
-    autooff_y = done_y - 12 - bh_row;
-    gate_y = autooff_y - 12 - bh_row;
-    add_y3 = gate_y - 12 - bh_row;           /* 加步第三行（最下）：区域判断 / 开关判断 / 计算 */
-    add_y2 = add_y3 - 12 - bh_row;           /* 加步第二行：按下 / 弹起 / 跳转 */
-    add_y1 = add_y2 - 12 - bh_row;           /* 加步第一行（最上）：点按 / 滑动 / 等待 */
-    list_top = ly + 36;
-    list_bot = add_y1 - 12;
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;              /* 极矮：列表让位（按钮优先可达；正常屏不受影响） */
     ImGui::SetCursorScreenPos(ImVec2(x0, ly));
     {
         char t[80];
