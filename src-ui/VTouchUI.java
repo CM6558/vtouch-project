@@ -1,3 +1,5 @@
+import android.os.IBinder;
+import android.os.Parcel;
 import android.util.Log;
 import android.view.Surface;
 
@@ -17,6 +19,10 @@ public class VTouchUI {
     static native void nativeDestroy();
     static native int nativeWantLayerVisible();
     static native int nativeTakeSwapDone();      /* 转屏后"新 surface 首帧已提交"（读到即清零） */
+    /* 视觉抓帧（T3.1）：轮询请求 / 读回帧区 / 报告失败 —— 帧头字段写入与内存序全在 JNI C 里做。 */
+    static native int nativeVisPollRequest();    /* 0 = 无请求；≠0 = 待抓请求序号 */
+    static native long nativeVisSubmitFrame(Object hb, int reqSeq, int rotation);  /* 读回 shm 帧区；返回耗时 ms，负 = 失败 */
+    static native void nativeVisFailFrame(int reqSeq, int err);                    /* 写帧头失败标志，立即解阻核心 */
 
     /* 显示变化：事件驱动（公开 API DisplayManager.registerDisplayListener）。
      * 事件只告诉我们"去查"——实测回调常早于状态更新（getRotation() 仍返回旧值），所以配一个
@@ -175,6 +181,119 @@ public class VTouchUI {
             if (r != null) return r;
         }
         return new int[]{dw, dh, drot};
+    }
+
+    /* ---- 视觉抓帧（T3.1）：binder 拿 display token → captureDisplay → JNI 读回 shm 帧区 ----
+     * 主循环每帧调 nativeVisPollRequest（廉价 JNI 读帧头）；有请求才走下面这条链。
+     * 反射句柄懒初始化、失败可重试（旧 android.jar 编译 ⇒ ScreenCapture / HardwareBuffer 全反射，
+     * recipe 逐字照 spec §2.1 / build/probe/VProbe7.java：事务 6 = getPhysicalDisplayIds（回复 skip 4B）→
+     * 事务 7 = getPhysicalDisplayToken（skip 4B）；接口类不可反射加载，只能 binder 事务）。 */
+    static boolean visReflectOk;
+    static java.lang.reflect.Constructor<?> visBldCtor;
+    static Class<?> visBldCls, visDcaCls;
+    static java.lang.reflect.Method visCapM;
+    static volatile IBinder visToken;
+    static boolean visLoggedOnce;
+
+    static boolean visInitReflect() {
+        if (visReflectOk) return true;
+        try {
+            visBldCls = Class.forName("android.window.ScreenCapture$DisplayCaptureArgs$Builder");
+            visBldCtor = visBldCls.getDeclaredConstructor(IBinder.class);
+            visBldCtor.setAccessible(true);
+            visDcaCls = Class.forName("android.window.ScreenCapture$DisplayCaptureArgs");
+            visCapM = Class.forName("android.window.ScreenCapture").getMethod("captureDisplay", visDcaCls);
+            visReflectOk = true;
+            Log.i(TAG, "视觉抓帧反射就绪");
+        } catch (Throwable t) {
+            Log.w(TAG, "视觉抓帧反射不可用（下次请求重试）", t);
+        }
+        return visReflectOk;
+    }
+
+    /* display token：懒初始化；失败不缓存（下次请求重试）。 */
+    static IBinder visGetToken() {
+        IBinder t = visToken;
+        if (t != null) return t;
+        synchronized (VTouchUI.class) {
+            if (visToken != null) return visToken;
+            try {
+                Object sf = Class.forName("android.os.ServiceManager")
+                                 .getMethod("getService", String.class).invoke(null, "SurfaceFlingerAIDL");
+                if (!(sf instanceof IBinder)) { Log.w(TAG, "视觉 token：SurfaceFlingerAIDL 拿不到"); return null; }
+                final String DESC = "android.gui.ISurfaceComposer";
+                long pid = 0;
+                Parcel d = Parcel.obtain(), r = Parcel.obtain();
+                try {
+                    d.writeInterfaceToken(DESC);
+                    ((IBinder) sf).transact(6, d, r, 0);          /* 6 = getPhysicalDisplayIds */
+                    int sz = r.dataSize();
+                    r.setDataPosition(0);
+                    if (sz >= 4) r.readInt();                     /* 回复头 4B 状态前缀（spec §2.1） */
+                    long[] ids = r.createLongArray();
+                    if ((ids == null || ids.length == 0) && sz >= 4) {
+                        r.setDataPosition(0);                     /* 防御：无前缀实现 → 原样再试（探针同款） */
+                        ids = r.createLongArray();
+                    }
+                    if (ids != null && ids.length > 0) pid = ids[0];
+                } finally { d.recycle(); r.recycle(); }
+                if (pid == 0) { Log.w(TAG, "视觉 token：物理屏 id 拿不到"); return null; }
+                d = Parcel.obtain(); r = Parcel.obtain();
+                try {
+                    d.writeInterfaceToken(DESC);
+                    d.writeLong(pid);
+                    ((IBinder) sf).transact(7, d, r, 0);          /* 7 = getPhysicalDisplayToken(pid) */
+                    int sz = r.dataSize();
+                    r.setDataPosition(0);
+                    if (sz >= 4) r.readInt();
+                    IBinder tok = r.readStrongBinder();
+                    if (tok == null && sz >= 4) {
+                        r.setDataPosition(0);                     /* 防御：同 ids */
+                        tok = r.readStrongBinder();
+                    }
+                    if (tok != null) {
+                        visToken = tok;
+                        Log.i(TAG, "视觉 token 就绪 pid=" + pid);
+                        return tok;
+                    }
+                } finally { d.recycle(); r.recycle(); }
+                Log.w(TAG, "视觉 token：display token 拿不到");
+            } catch (Throwable t2) {
+                Log.w(TAG, "视觉 token 获取失败（下次请求重试）", t2);
+            }
+            return null;
+        }
+    }
+
+    /* 响应一次抓帧请求：captureDisplay → nativeVisSubmitFrame。失败路径统一 nativeVisFailFrame
+     * （写帧头失败标志 + req_seq，让核心立即解阻，不等 1000ms 超时）；同步做（capture 4–7ms +
+     * 读回可承受；挂死由核心超时兜底）。err 码表见 ui_glue.c 的 JNI 段注释。 */
+    static void captureToShm(int reqSeq) {
+        if (!visInitReflect()) { nativeVisFailFrame(reqSeq, -102); return; }
+        IBinder token = visGetToken();
+        if (token == null) { nativeVisFailFrame(reqSeq, -101); return; }
+        Object hb = null;
+        try {
+            Object bld = visBldCtor.newInstance(token);
+            Object args = visBldCls.getMethod("build").invoke(bld);
+            Object shb = visCapM.invoke(null, args);
+            if (shb != null) hb = shb.getClass().getMethod("getHardwareBuffer").invoke(shb);
+            if (hb == null) { nativeVisFailFrame(reqSeq, -104); return; }
+            long ms = nativeVisSubmitFrame(hb, reqSeq, dispNow[2]);
+            if (ms < 0) {
+                nativeVisFailFrame(reqSeq, (int) ms);          /* submit 失败没写 req_seq：补失败帧 */
+                Log.w(TAG, "vis 抓帧提交失败 ms=" + ms + " req=" + reqSeq);
+            } else if (!visLoggedOnce) {
+                visLoggedOnce = true;
+                Log.i(TAG, "vis 抓帧就绪 首帧 " + ms + "ms");
+            }
+        } catch (Throwable t) {
+            visToken = null;                                   /* token 可能失效：置空，下次请求重新拿 */
+            nativeVisFailFrame(reqSeq, -103);
+            Log.w(TAG, "vis 抓帧失败（已报核心）", t);
+        } finally {
+            if (hb != null) try { hb.getClass().getMethod("close").invoke(hb); } catch (Throwable t2) { }
+        }
     }
 
     static Surface newSurface(Object layer) throws Throwable {
@@ -395,6 +514,12 @@ public class VTouchUI {
                         Log.w(TAG, "显示变化处理失败（保留旧状态，下轮重试）", t);
                     }
                 }
+            }
+            /* ④ 视觉抓帧（T3.1）：核心有请求才抓 —— 轮询是廉价 JNI 读（帧区 req_pending vs req_seq），
+             * 抓帧同步做（capture 4–7ms + 读回，可承受；挂死由核心 1000ms 超时兜底）。 */
+            {
+                int vreq = nativeVisPollRequest();
+                if (vreq != 0) captureToShm(vreq);
             }
         }
     }

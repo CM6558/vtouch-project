@@ -31,6 +31,10 @@ esac
 NDKBIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin"
 CC="$NDKBIN/aarch64-linux-android${API}-clang$EXT"
 CXX="$NDKBIN/aarch64-linux-android${API}-clang++$EXT"
+# 视觉抓帧（T3.1）专用：ui_glue.c 用 AHardwareBuffer_*（API 26+；API 24 的 NDK 头把它们标成
+# unavailable ⇒ 直接编译报错）。该文件用 API 26 编译器编；链接仍走 $CXX（API 24），符号留在 .so
+# 里由设备 libandroid.so 在运行时解析（Android 8+ 都有导出）。
+CC26="$NDKBIN/aarch64-linux-android26-clang$EXT"
 STRIP="$NDKBIN/llvm-strip$STRIP_EXT"
 AJAR="$SDK/platforms/android-$API/android.jar"
 D8="$SDK/build-tools/$BT/d8$D8_EXT"
@@ -42,6 +46,7 @@ D8="$SDK/build-tools/$BT/d8$D8_EXT"
 command -v javac >/dev/null 2>&1 || { echo "缺 javac — 装 JDK（CI 用 actions/setup-java）"; exit 1; }
 # 存在性检查而不是 -x：Windows 上编译器是 clang.cmd（MSYS 不认它为可执行），-x 会误报
 [ -f "$CC" ] || { echo "缺编译器 $CC — 检查 NDK_ROOT / API_LEVEL / HOST_TAG"; exit 1; }
+[ -f "$CC26" ] || { echo "缺编译器 $CC26 — NDK 安装不完整（视觉抓帧要 API 26 工具链）"; exit 1; }
 
 mkdir -p build/ui/classes build/ui/dex build/ui/obj
 # 默认清干净再编：陈旧的 .class/.o（改过源码没重编、或删掉的类还留着）会被打进 dex/so ——
@@ -80,7 +85,8 @@ if [ "${VTOUCH_UI_CORE:-stub}" = "real" ]; then
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_shm.c  -o build/ui/obj/vt_shm.o
   # v5：表达式引擎（计算步；面板 real 与核心同源 —— vtouch_expr_check 转发它，spec §4）
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -c src/vt_expr.c -o build/ui/obj/vt_expr.o
-  "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -Isrc-ui -c src-ui/ui_glue.c -o build/ui/obj/ui_glue.o
+  # 视觉抓帧（T3.1）：AHardwareBuffer_* 是 API 26+ 符号 ⇒ 这一个文件用 CC26（见上方说明）
+  "$CC26" -O2 -Wall -fPIC -D_GNU_SOURCE -DVT_UI -DVT_UI_PANEL -Isrc -Isrc-ui -c src-ui/ui_glue.c -o build/ui/obj/ui_glue.o
 else
   "$CC" -O2 -Wall -fPIC -D_GNU_SOURCE -Isrc-ui -c src-ui/ui_stubs.c -o build/ui/obj/ui_stubs.o
 fi

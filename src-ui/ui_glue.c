@@ -1,7 +1,8 @@
 /* ui_glue.c —— 面板侧胶水：把「老面板的进程内 12 个 C 接口」接到核心的共享内存上。
  *
  * 面板代码（src-ui/vtouch_ui.cpp）**一行不改**：它照旧调这 12 个函数，这里换掉实现；
- * T2.4 起本文件另提供操作 / 取点 / 绑定（读 + 写）的 17 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）。
+ * T2.4 起本文件另提供操作 / 取点 / 绑定（读 + 写）的 17 个入口（面板 T2.5+ 逐字调用，都定义在文件末尾）；
+ * T3.1 起文件末尾另有视觉抓帧 JNI 三函数（面板主循环每帧轮询请求、抓帧读回 shm 帧区；契约 v8 区 D）。
  * 数据来源与去向（契约见 src/vt_shm.h、docs/UI_INTEGRATION.md §4）：
  *   物理触点 / 区域表 / 操作表 / 运行状态 ← 区 A（**只读**映射；对它写 = SIGSEGV，只死面板）
  *   区域 / 操作编辑             → 区 B 的编辑邮箱（**再写一字节到唤醒管道** ⇒ 核心立刻吃掉，不等它的
@@ -26,6 +27,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* 视觉抓帧 JNI（T3.1）：JNI + HardwareBuffer 头。AHardwareBuffer_* 是 API 26+ 符号 —— 本文件用
+ * API 26 编译器编（scripts/build_ui.sh 的 CC26；API 24 的 NDK 头把它们标成 unavailable），
+ * 链接仍按 API 24（符号留在 .so 里由设备 libandroid.so 在运行时解析）。 */
+#include <jni.h>
+#include <android/hardware_buffer.h>
+#include <android/hardware_buffer_jni.h>
 
 /* vt_internal.h 里带着核心自己的 vtouch_poll_step(void) 原型；面板这边要提供的却是老面板的接口
  * vtouch_poll_step(int timeout_ms)（名字必须一致才能不改面板代码）→ 包含期把核心那个原型改名掉。 */
@@ -767,4 +775,100 @@ int vtouch_region_kind(const char *id, int kind)
     i = glue_find(id);
     if (i < 0) return -1;
     return (S->regions[i].kind == (kind ? 1 : 0)) ? 0 : -1;
+}
+
+/* ===================== 视觉抓帧 JNI（T3.1；静态命名照 vtouch_ui.cpp:6041+ 先例） =====================
+ * 面板主循环每帧调 nativeVisPollRequest（廉价 JNI 读帧头）；有请求才抓帧（VTouchUI.captureToShm：
+ * binder token → captureDisplay）并调 nativeVisSubmitFrame 把 HardwareBuffer 读回 shm 帧区。
+ * 帧头字段写入与内存序**全在这里**（Java 不直写帧头）；契约 = src/vt_shm.h 区 D 注释（承 T2.1 评审
+ * I-3：req_pending 读 acquire；req_seq 写 release 存、最后写）—— 核心侧配对见 src/vt_ops.c 的
+ * op_vis_capture。错误路径：submit 返回负值（不写 req_seq）或 Java 侧失败 → 调 nativeVisFailFrame
+ * 写 flags/err + req_seq（让核心立即解阻，不等 1000ms 超时）。
+ *
+ * submit 返回 / 写进 err 的码（负值）：-1 没帧区 / -2 rotation 越界 / -3 fromHardwareBuffer 失败 /
+ * -4 格式不是 RGBA8888 / -5 尺寸非法或装不进缓冲 / -6 lock 失败 / -7 lock 空指针 / -8 缓冲取不到；
+ * Java 侧自用 err（帧头诊断字段）：-101 token / -102 反射 / -103 capture 异常 / -104 无 hb。 */
+
+/* 轮询抓帧请求：acquire 读 req_pending，与 req_seq（acquire）比对；不等即有待抓请求。
+ * 返回待抓请求序号（≠0）；0 = 无请求（req_pending 为 0，或该序号已完成）。 */
+JNIEXPORT jint JNICALL Java_VTouchUI_nativeVisPollRequest(JNIEnv *env, jclass cls)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    uint32_t pend, done;
+    (void)env; (void)cls;
+    if (!h) return 0;
+    pend = __atomic_load_n(&h->req_pending, __ATOMIC_ACQUIRE);   /* acquire：配核心写侧 release 存 */
+    if (pend == 0) return 0;                                     /* 0 = 无请求（契约） */
+    done = __atomic_load_n(&h->req_seq, __ATOMIC_ACQUIRE);
+    return (pend == done) ? 0 : (jint)pend;                      /* 已完成的不重复抓（序号按位往返安全） */
+}
+
+/* 提交一帧：HardwareBuffer → 帧区后备缓冲 + 帧头发布（双缓冲翻转）。同步拷贝，返回耗时毫秒；
+ * 失败返回负值（码表见上）且不写 req_seq —— 调用方接 nativeVisFailFrame 补失败帧。 */
+JNIEXPORT jlong JNICALL Java_VTouchUI_nativeVisSubmitFrame(JNIEnv *env, jclass cls, jobject hb, jint reqSeq, jint rotation)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    struct vt_shm_header *H = vt_shm_hdr();
+    AHardwareBuffer *buf;
+    AHardwareBuffer_Desc d;
+    void *src = NULL;
+    uint8_t *dst;
+    uint32_t w, hh, src_stride, dst_stride, back, y;
+    uint64_t t0, t1, need;
+    int r;
+
+    (void)cls;
+    if (!h || !H || !hb) return -1;
+    if (rotation < 0 || rotation > 3) return -2;
+    buf = AHardwareBuffer_fromHardwareBuffer(env, hb);   /* 不多拿引用：Java 侧在本调用返回后才 close */
+    if (!buf) return -3;
+    AHardwareBuffer_describe(buf, &d);
+    if (d.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM) return -4;   /* 只认 RGBA8888（契约 format=0 口径） */
+    w = d.width; hh = d.height;
+    need = (uint64_t)w * hh * 4u;
+    if (w == 0 || hh == 0 || w > 4096 || hh > 4096 || need > (uint64_t)H->frame_buf_bytes) return -5;
+    t0 = now_ns();
+    r = AHardwareBuffer_lock(buf, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &src);
+    if (r != 0) return -6;
+    if (!src) { AHardwareBuffer_unlock(buf, NULL); return -7; }
+    src_stride = (d.stride ? d.stride : w) * 4u;         /* desc.stride 单位 = 像素（NDK 口径） */
+    dst_stride = w * 4u;                                 /* 目标紧排（核心校验 stride ≥ w×4 且装得进缓冲） */
+    back = (h->buf_idx == 0u) ? 1u : 0u;                 /* 后备缓冲 = 当前发布块的对侧（不碰核心在读的那块） */
+    dst = vt_shm_frame_buf((int)back);
+    if (!dst) { AHardwareBuffer_unlock(buf, NULL); return -8; }
+    for (y = 0; y < hh; y++)                             /* 按行拷贝：源 stride 感知、目标紧排 */
+        memcpy(dst + (size_t)y * dst_stride, (const uint8_t *)src + (size_t)y * src_stride, dst_stride);
+    AHardwareBuffer_unlock(buf, NULL);
+    /* 帧头发布（顺序 = 契约：字段 → buf_idx 翻转 → req_seq release 最后写）。seqlock 写侧照 Linux
+     * seqlock 纪律（奇数 → 屏障 → 字段 → 屏障 → 偶数），配核心侧 vt_ops.c 的 seqlock 读。 */
+    h->seq++;
+    __sync_synchronize();
+    h->width = w; h->height = hh; h->stride = dst_stride;
+    h->format = 0;                                       /* 0 = RGBA8888（契约口径） */
+    h->rotation = (uint32_t)rotation;
+    h->err = 0;
+    h->flags = VT_FRAME_F_VALID;                         /* 两位一起重写：成功 = 只置 bit0（契约） */
+    h->ts_ns = now_ns();                                 /* CLOCK_MONOTONIC（契约；核心复用窗口判据） */
+    h->buf_idx = back;                                   /* 翻转：后备块成为最新完成帧 */
+    __sync_synchronize();
+    h->seq++;
+    __atomic_store_n(&h->req_seq, (uint32_t)reqSeq, __ATOMIC_RELEASE);   /* 最后写：完成标志（release 存） */
+    t1 = now_ns();
+    return (jlong)((t1 - t0) / 1000000ull);
+}
+
+/* 报告一次抓帧失败：写 flags(ERR)/err → req_seq release 存（让核心立即解阻，不等 1000ms 超时）。
+ * 所有错误路径都调它（Java 侧 token/反射/capture 异常、submit 负返回值）；没帧区时静默。 */
+JNIEXPORT void JNICALL Java_VTouchUI_nativeVisFailFrame(JNIEnv *env, jclass cls, jint reqSeq, jint err)
+{
+    struct vt_shm_frame_hdr *h = vt_shm_frame();
+    (void)env; (void)cls;
+    if (!h) return;
+    h->seq++;
+    __sync_synchronize();
+    h->flags = VT_FRAME_F_ERR;                           /* 两位一起重写：置 bit1 并清 bit0（契约） */
+    h->err = err;
+    __sync_synchronize();
+    h->seq++;
+    __atomic_store_n(&h->req_seq, (uint32_t)reqSeq, __ATOMIC_RELEASE);
 }
