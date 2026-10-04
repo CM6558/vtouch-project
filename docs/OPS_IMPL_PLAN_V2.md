@@ -1,5 +1,7 @@
 # 操作编辑器 v2 实施计划（变量 / 按下弹起 / 条件步 / 取点提示 / 说明页）
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给 v1 操作编辑器加：触发数据变量（`tdx/tdy/tux/tuy/tms`）、按下/弹起步骤、区域判断/开关判断条件步、取点捕获标记、面板「说明」页；契约 v4→v5。

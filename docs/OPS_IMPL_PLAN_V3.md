@@ -1,5 +1,7 @@
 # 操作编辑器 v3 实施计划（坐标同编 / 条件分支 / 跳转步 / 预览与整屏编辑）
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给 v2 操作编辑器加：坐标对同屏编辑 + 取点一次填一对、条件步两侧对称四档（继续/跳过/跳转/中止，跳转目标 0=结束）、新步骤类型「跳转」+ 防死循环守卫、编辑层整屏（取点自动收起）+ [预览] 页（清单 + 小地图）；契约 v5→v6、ops.conf v3。

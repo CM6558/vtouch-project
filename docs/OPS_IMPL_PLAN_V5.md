@@ -1,5 +1,7 @@
 # OPS_IMPL_PLAN_V5 — 计算步骤（v5）实施计划
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > **Spec（约束权威）**：`docs/OPS_PLAN_V5.md`（行为/文案唯一来源；与本计划冲突时以 spec 为准）。
 > 执行方式：Subagent-Driven（每任务：精确简报 → 实现子代理 → 任务评审 → 修复环；控制方裁决并记账）。
 > 任务号是精确号（1.1 / 2.1 / 3.1 / 3.2 / 4.1 / 5.1）；台账 = `.superpowers/sdd/OPS_IMPL_PLAN_V5/progress.md`。

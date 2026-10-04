@@ -1,5 +1,7 @@
 # 方案（Profiles）实施计划 v4（区域+操作打包：切换 / 新建 / 另存 / 改名 / 删除）
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给面板加「方案」体系：`schemes/<名>/{regions.conf,ops.conf}` + `current` 指针 + live 镜像；切换 = 现有编辑邮箱 **clear + 重放**；CRUD（新建/另存/改名/删）+「方案」页；说明页/README/AGENTS 收尾。

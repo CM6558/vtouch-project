@@ -2,7 +2,7 @@
 
 Android 上把**物理触摸**与**注入的虚拟触摸**合成一条触摸流的用户态方案（只需 root）：
 `EVIOCGRAB` 抓走真触摸屏 + `uinput` 建合并触摸屏，应用侧只看到一块普通触摸屏。
-虚拟手指由 WebSocket 客户端（AutoJs6 / 任意语言）驱动；核心自带原生 ImGui 面板
+虚拟手指由核心自带的操作体系驱动（面板编辑操作 + 区域触发执行；su 脚本自包含启动）；核心自带原生 ImGui 面板
 （只读核心状态 + 输入面板）。**一个可执行、零依赖**：设备上只需要 `vtouchd_ui` 一个文件。
 
 ## 项目结构
@@ -22,8 +22,6 @@ src/vt_util.c        小工具（参数解析 / 坐标换算 / 时钟 / 逻辑�
 src/vt_shm.{h,c}     共享内存契约（单 memfd 三区：状态只读 · 双向编辑 · 事件环）
 src/vt_panel.c       拉起/看护面板子进程（fork+exec app_process）+ 内嵌面板自解包
 src-ui/              ImGui 面板（C++）+ JNI 胶水 + 图层/转屏 Java 壳 + 构建入口（操作页 + 触发侧卡片行）
-clients/vtouch.js    AutoJs6 客户端 SDK（Finger API：down/move/up/tap/swipe/frame）
-clients/*_demo.js    示例：画圆 / 区域五事件 / 命中区域回触
 scripts/             构建（build.sh / build_ui.sh）、部署起停（ui-deploy.sh / ui_ondev.sh / deploy.sh）、
                      文档工具（apply_funcdoc.py / funcdoc_data.py）、字库生成（gen_ui_chars.py）
 docs/                VTOUCH_ARCH_PLAN.md（方案原文）/ CODE_WALKTHROUGH.md / UI_INTEGRATION.md（UI 接入定稿）
@@ -57,8 +55,7 @@ sh scripts/ui-deploy.sh status   # 核心/面板 pid、面板 fd 卫生、日志
 su -c 'cd /data/local/tmp && nohup ./vtouchd_ui >/data/local/tmp/vt_ui_core.log 2>&1 </dev/null &'
 ```
 
-AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 AutoJs6 里 `require("/sdcard/vtouch.js")`。
-只认 `/sdcard` 下的文件为准（导入产生的分叉副本曾多次导致跑到旧副本）。
+设备侧自包含入口：`build/vtouch.sh` 推到 `/sdcard/vtouch.sh`，`su -c 'sh /sdcard/vtouch.sh start|stop|status'`（模板在 `scripts/vtouch.sh.in`；详见 README「su 脚本入口」）。
 
 ## 设备侧运行时（现状口径）
 
@@ -67,7 +64,7 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 - 区域表落盘：`/data/local/vtouch-runtime/regions.conf`（重启保留；含触发绑定 `bind` / 开关型 `kind` 增量行）。
 - 操作表落盘：`/data/local/vtouch-runtime/ops.conf`（`#vtouch-ops v4`：step 行固定 10 字段（末位 `expr`）、ref/expr 空写 `-`；读端兼容 v1/v2/v3 并按类型感知翻译；面板编辑后存，启动只补缺）。
 - 方案落盘：`/data/local/vtouch-runtime/schemes/<名>/{regions.conf,ops.conf}` + `current`（一行方案名）；live 两文件与 `schemes/<current>/` 内容恒等（`live == schemes/<current>` 不变量 —— 启动强制同步 + 编辑保存镜像 + 切换直写共同保证）；首启把既有 live 收进「默认」（名字冲突自增 `默认2 / 默认3 …`）。
-- WebSocket：`ws://127.0.0.1:27183`（loopback，单客户端，新连接踢旧连接）。
+- WebSocket：`ws://127.0.0.1:27183`（loopback，单客户端，新连接踢旧连接；通用接口，仓库无内置客户端）。
 - **没有开机自启**（按用户口径不做）；手机重启后需要重新起核心。
 
 ## 操作编辑器 / 执行器 / 触发侧（现状口径）
@@ -143,7 +140,6 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
 
 - C：`-O2 -Wall -Wextra -Werror`，POSIX + NDK API，`-D_GNU_SOURCE`。
 - Shell：`#!/system/bin/sh`（Android shell），不用 bashism。
-- JS：AutoJs6 API（`WebSocket.EVENT_*`、`threads.start()`、`events.on("exit")`）。
 - **函数文档**：每个函数定义正上方一个 Doxygen 块（含 `(vtouch-doc: 名字)` 机器标记），
   原型上方一句话；文案唯一来源 `scripts/funcdoc_data.py`，改完跑 `python scripts/apply_funcdoc.py`，
   再来一遍必须是"共调整 0 处"（幂等）。**`--check` 有退出码**（0 = 0 处调整且不变式全满足）⇒ 可以当门跑，CI 里就是一道。
@@ -184,15 +180,6 @@ AutoJs6：把 `clients/vtouch.js`（+ 需要的 demo）推到 `/sdcard/`，在 A
   一个事务里旧层 alpha→0 / 新层 alpha→1）。单图层遮挡模式保留为 `VTOUCH_UI_ROT_MODE=hide`。
   区域**跟随视口**（默认）：转屏/启动时按当前方向重算区域坐标并写回（保持「当前方向左上角 xy」不变、
   显示=命中；基准帧记进 `regions.conf` 的 `#frame`，重启不偏移）；`VTOUCH_REGION_ROT=off` 回到「粘玻璃」。
-- **AutoJs6**：`sleep()` 在主线程会堵住 WebSocket 回调（用 `setInterval` 或 `threads.start()`）；
-  `new Shell(true)` 初始化慢（~2s），一次性 root 命令用 `shell(cmd, true)`；
-  `events.on("exit")` 里要 `stopService()`，强杀不会走退出回调。
-- **AutoJs6 脚本不会「跑到结尾」就结束**：只要**还有子线程**或**建过 `setInterval`**，引擎就继续跑
-  （实测：30s 定时器被子线程 `clearInterval` 后 40s 仍不结束；子线程全结束才结束）⇒ 收尾要真正结束脚本
-  必须显式 `exit()`（它会**照常触发** `events.on("exit")` 钩子，钩子里的写盘/收尾不会丢）。
-- **客户端收包不能用 `available()` 判「没数据」**：对端 `close()` 时 Java 的 `available()` 返回 0 而不抛异常
-  ⇒ 永远察觉不到掉线（脚本照旧「活着」但事件永不来）。必须**阻塞读 + 读超时**：超时 = 本轮无数据、
-  `read()` 返回 -1 = 对端已关（EOF 判据）。
 - **单文件新鲜度**：设备上只推 `vtouchd_ui`，面板三件套由核心自解包 —— 版本一致性由
   "同一个二进制"保证，`ui-deploy.sh` 会回读 md5 对账，别手工替换设备上的面板文件。
 
@@ -206,6 +193,4 @@ su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：有 memfd:vtouch-shm�
 
 **协议回包别用裸 nc 验**：核心只认 WebSocket 握手，`printf 'res\n' | nc …` 会被判握手失败并关连接
 （症状 = 收 EOF、核心日志多一条 `ws 握手失败`）—— 这条自检以前写在文档里，是错的。
-要验 `res` 回包就**用客户端连**：推 `build/vtouch_onefile.js` 到 `/sdcard/vtouch.js`，
-AutoJs6 里 `require` 后看它日志里的 `res` 行；核心自己的日志也能看出主循环是活的（`engine=on`、
-`ws client connected`、手指按压时的 `phys down/up`）。
+核心自己的日志就能看出主循环是活的（`engine=on`、手指按压时的 `phys down/up`）。

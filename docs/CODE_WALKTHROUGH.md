@@ -1,5 +1,7 @@
 # vtouch 代码走读（现役）
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > 行号以本文档写作时的现读为准（`grep -n` 取），源码一改就会漂。
 >
 > 本文只讲**盘上现役**代码。面板接入的定稿（共享区字段表 / 启动时序 / 旋转判定）见 `docs/UI_INTEGRATION.md`；

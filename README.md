@@ -1,8 +1,8 @@
 # vtouch-project —— 物理触摸 × 虚拟触摸合成（用户态，只需 root）
 
 `EVIOCGRAB` 抓走真触摸屏，再用 `uinput` 建一个**合并触摸屏**：物理手指与注入的虚拟手指
-合成**同一条**触摸流交给系统，应用侧只看到一块普通触摸屏。虚拟手指由 WebSocket 客户端
-（AutoJs6 / 任意语言）驱动；核心自带一块原生 ImGui 面板（只读状态 + 输入面板）。
+合成**同一条**触摸流交给系统，应用侧只看到一块普通触摸屏。虚拟手指由核心自带的操作体系驱动
+（面板编辑操作 + 区域触发执行；su 脚本自包含启动）；核心自带一块原生 ImGui 面板（只读状态 + 输入面板）。
 
 一个可执行、零依赖（除 Android 系统库）：**设备上只需要 `vtouchd_ui` 一个文件**。
 
@@ -13,8 +13,6 @@ src/                    核心：进程 / 物理输入 / 组帧 / WS / 区域 / 
 src/vt_shm.{h,c}        共享内存契约（单 memfd 三区：状态只读 · 双向编辑 · 事件环）
 src/vt_panel.c          拉起/看护面板子进程（fork+exec app_process），内嵌面板三件套的自解包
 src-ui/                 ImGui 面板（C++）+ JNI 胶水 + 图层/转屏 Java 壳 + 构建入口
-clients/vtouch.js       AutoJs6 客户端（Finger API：down/move/up/tap/swipe/frame）
-clients/example.js      调用示例（注入 / 多指同帧 / 区域订阅 / 生命周期开关）
 scripts/build.sh        交叉编译核心（`ui` 目标出带面板的 vtouchd_ui）
 scripts/build_ui.sh     编译面板（classes.dex + libtestimgui.so + libc++_shared.so）
 scripts/ui-deploy.sh    主机侧一键：build / deploy / start / stop / status（含 md5 对账）
@@ -43,39 +41,10 @@ su -c 'cd /data/local/tmp && nohup ./vtouchd_ui >/data/local/tmp/vt_ui_core.log 
 
 停：`sh scripts/ui-deploy.sh stop`（先停面板、再放 `EVIOCGRAB`，物理触摸立刻回系统）。
 
-AutoJs6 侧（`clients/vtouch.js`：**引用即用** —— require 时自动确保 daemon 在跑，
-脚本退出（`events.on("exit")`）自动停掉并释放 EVIOCGRAB；daemon 本来就在跑则复用、退出不动它）：
-
-```js
-var vt = require("/sdcard/vtouch.js");
-var c = vt.connect();                              // 连上就能用
-vt.finger().tap(540, 1200);                        // 自动挑空闲 slot
-vt.finger(1).down(100, 200).move(140, 240).up();   // 显式 slot（finger()/finger(3)/finger(conn,3) 都吃）
-vt.frame([{slot:0,state:"down",x:100,y:200},       // 多指合并进同一帧
-          {slot:1,state:"down",x:300,y:200}]);
-// 走到结尾 / 按停止 → 自动收尾，不需要你调 vt.stop()
-// 需要保留时：vt.keepRunning(true)；不想自动起：require 前 global.VTOUCH_NO_AUTOSTART = true
-
-vt.onRegion("c1", "down", function (h) {           // 区域事件（只由物理手指产生；回调跑在子线程）
-    toastLog(h.id + " 被 slot" + h.slot + " 按下 @" + h.x + "," + h.y);
-});                                                // 省略事件 = down/up/enter/exit；"*" = 含 move
-
-// 追一根手指：在区域内按下 → 跟到抬起（区域流出了区域就断，所以用物理触摸流 onTouch）
-vt.onRegion("c1", "down", function (h) {
-    var t = vt.follow(h.slot, function (e) {       // 只跟这根手指；e = {ev,slot,x,y,t}
-        if (e.ev === "up") { log("历时 " + (e.t - h.t) + " ms"); t.stop(); }
-    });
-});
-```
-
-**单文件自包含版**（设备上什么都不用先放）：`python scripts/pack_client.py` 把核心二进制
-base64 内嵌进 `build/vtouch_onefile.js`（~3.6MB），推到 `/sdcard/vtouch.js` 后 require 即可 ——
-设备上没有该二进制或版本不对时，它会自己写进去并用 md5 校验（当前手机里放的就是这一版）。
-
-## su 脚本入口（不装 AutoJs 也能起）
+## su 脚本入口（自包含单文件）
 
 主机侧 `python scripts/pack_su.py` 把 `build/vtouchd_ui` base64 内嵌进模板 `clients/vtouch.sh`
-（三个占位符 `<<PAYLOAD_MD5>>` / `<<PAYLOAD_SIZE>>` / `<<PAYLOAD>>` 在 `clients/vtouch.sh:17-18`，
+（三个占位符 `<<PAYLOAD_MD5>>` / `<<PAYLOAD_SIZE>>` / `<<PAYLOAD>>` 在 `scripts/vtouch.sh.in:17-18`，
 载荷写在标记行 `__VTOUCH_PAYLOAD_BELOW__` 之下，`:111-112`），生成**设备侧自包含入口**
 `build/vtouch.sh`（产物只写 LF，`scripts/pack_su.py:43`；打包器自带「载荷解回来逐字节等于源二进制」
 自检，`:37-40`）。设备上只要放这一个文件：
@@ -90,7 +59,7 @@ su -c 'sh /sdcard/vtouch.sh install'    # 只装不启
 
 | 子命令 | 行为 |
 |---|---|
-| `install` | 解载荷 → 长度/md5 对账 → `chmod 755` → 原子 `mv` → **回读 md5**（`clients/vtouch.sh:41-52`）；设备上已是同一 md5 就直接跳过（`:36-40`） |
+| `install` | 解载荷 → 长度/md5 对账 → `chmod 755` → 原子 `mv` → **回读 md5**（`scripts/vtouch.sh.in:41-52`）；设备上已是同一 md5 就直接跳过（`:36-40`） |
 | `start` | 先 `install`，再起核心并等日志出现 `engine=on`（最多 8s；`:55-75`） |
 | `stop` | 没在跑就直说；跑着就 `SIGTERM`（核心自己先停面板、再放 grab），10s 没退 `SIGKILL`（`:77-90`） |
 | `status` | 内嵌版本与设备已装两份 md5 对摆，核心/面板 pid + 端口 27183（`/proc/net/tcp` 找 `6a2f`）+ 日志尾 15 行（`:92-98`） |
@@ -99,16 +68,15 @@ su -c 'sh /sdcard/vtouch.sh install'    # 只装不启
 `status` 又用 pidof / 端口 / md5 三样把「跑没跑、听没听、装的是不是这份」一次摆出来 ——
 md5 不一致就是没装上或被换过。无参数 = 用法 + 退出 2（`:105`）；非 root = 提示 + 退出 1（`:24`）。
 
-`clients/vtouch.sh` 是**模板**（保留占位符，别直接推它）；`build/vtouch.sh` 是产物（不入库，换核心就
-重跑打包器；同一输入两次打包逐字节一致）。老 AutoJs6 通道（`clients/vtouch.js` / 单文件版）原样保留，
-两条路互不影响。
+`scripts/vtouch.sh.in` 是**模板**（保留占位符，别直接推它）；`build/vtouch.sh` 是产物（不入库，换核心就
+重跑打包器；同一输入两次打包逐字节一致）。旧 JS 客户端通道已全退役（2026-10-05，见 git 历史）。
 
 ## 操作编辑器（面板「操作」页）
 
 面板侧栏「页面」组六页：区域列表 / **操作** / **方案** / 事件日志 / 设置 / 说明（`src-ui/vtouch_ui.cpp:2528-2534`）。
 「操作」页把「点按 / 滑动 / 等待 / 按下 / 弹起 / 区域判断 / 开关判断 / 跳转 / 计算」九种步骤编成一条操作
 （上限 16 条、每条最多 32 步），点一下就能在屏幕上跑出来 ——
-编辑与运行都在面板里完成，不依赖 AutoJs / WS。
+编辑与运行都在面板里完成，不依赖外部客户端。
 
 **页面**：页头（左标题 + 右侧条数）+ 运行读数（`运行中：<名> · 第 k/n 步` / `空闲`）+ `＋新建`（新条默认
 1 步「等待 100ms」）；每条一张卡片：`名字` + `N 步 · 门控 <r1|无> · 跑完自动关 <开|关>`，
@@ -329,14 +297,14 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 | `move <slot> <x> <y>` | `ok` / `err point` | 移动（各自成一帧） |
 | `up <slot>` | `ok` / `err point` | 抬起（各自成一帧） |
 | `begin_frame` / `point <slot> <down\|move\|up> <x> <y>` / `end_frame` | `ok` / `err frame` `err point` | 一帧多指 |
-| `points <n> <slot> <down\|move\|up> <x> <y> …` | `ok` / `err point` `err frame` | 一帧多指的**单命令**版（n 组；语义同上面三条，但先全校验再一次性提交）。SDK 的 `vt.frame()` 用它 |
+| `points <n> <slot> <down\|move\|up> <x> <y> …` | `ok` / `err point` `err frame` | 一帧多指的**单命令**版（n 组；语义同上面三条，但先全校验再一次性提交） |
 | `region add <id> <0矩形\|1圆形> <a1..a4> <0\|1>` | `ok <总数>` / `err region` | rect: `x1 y1 x2 y2`；circle: `cx cy r 0` |
 | `region list` | 每行 `region <id> <type> <a1..a4> <en>` + 末行 `end <n>` | **一条区域一帧**，末行单独一帧（见下方口径） |
 | `region clear` | `ok 0` | 清空 |
 | `sub [phys\|region\|all]` / `unsub` | `ok` / `err sub` | 订阅通道：裸 `sub` = 区域通道（与改动前一致）；`sub phys` = 物理触摸流；`sub all` = 两条 |
 | `phys_ev <ev> <slot> <x> <y> <ms>`（推送） | — | 物理触摸流：按 slot 的 `down/move/up`，不按区域过滤；追手指用它 |
 
-上表里 **`ping` / `reset` / `region clear` / `sub all` 现役 SDK 不发**（`clients/` 里零命中）—— 它们保留作**调试口**（手工排障），改这几条没有"客户端兼容"压力。
+上表里 **`ping` / `reset` / `region clear` / `sub all` 保留作调试口**（手工排障用）—— 仓库已无内置客户端，改这几条没有"客户端兼容"压力。
 
 `region list` 的**分帧口径**（现役）：
 
@@ -347,9 +315,9 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 - **队列满时的口径**：这一族走「**满了就丢这一帧**」（`outq_push_text_keep`）、**不挤掉已排队的数据**
   （事件流的策略相反：满时丢最旧、保新鲜）。所以出站队列真满时回包**可能少行、也可能连 `end <n>` 一起丢**
   （核心同时打一条 `region list 有 N 行因出站队列满被丢弃`）——客户端拿 `end`/行数或超时对账即可发现
-  （本仓 SDK 会 `warn("region list 回包不完整 …")`，不会静默给半张表）。
+  （客户端拿 `end`/行数或超时对账即可发现）。
 - **没有 WS `region del` / `region rename`**：单条区域的删/改名在**面板**上做（面板把编辑投进共享内存
-  邮箱，核心主循环这一轮就吃掉）；脚本侧要改就 `region clear` 清空重加，或 `region add` 同 id 覆盖。
+  邮箱，核心主循环这一轮就吃掉）；外部客户端要改就 `region clear` 清空重加，或 `region add` 同 id 覆盖。
 
 推送（单向，混在同一条 WS 里），两条通道：
 
@@ -361,9 +329,9 @@ SurfaceFlinger 原子提交 → 屏幕无空白。备用方案 `VTOUCH_UI_ROT_MO
 
 `region_ev` 说明：
 
-- 末尾 `<ms>` 是**事件发生的墙钟毫秒**（与脚本的 `Date.now()` 同基准，可直接做差）；
+- 末尾 `<ms>` 是**事件发生的墙钟毫秒**（墙钟基准，可直接做差）；
   它由事件自己的时间戳换算而来，是「手指那一刻」而不是「脚本收到那一刻」，
-  所以 `up - down` 就是真实按压时长，`Date.now() - t` 是送达延迟。SDK 里对应 `h.t`。
+  所以 `up - down` 就是真实按压时长，`Date.now() - t` 是送达延迟。
 
 - `down` 只在**按下那一刻就命中**时发；`enter`/`exit` 是跨边界；`move` 是区内移动且位置变了；
 - `up` 在**抬起时此刻在区域内**就发 —— 包括"从区域外滑进来再抬起"（这种 `up` 没有配对的 `down`，
@@ -416,8 +384,7 @@ su -c 'ls -l /proc/$(pidof vtouch-ui)/fd'      # 面板：memfd:vtouch-shm 有�
 ```
 
 **别用裸 `nc` 验协议**：核心只认 WebSocket 握手，`printf 'res\n' | nc -q1 127.0.0.1 27183` 会被判
-握手失败并关连接（收到 EOF、核心日志多一条 `ws 握手失败`）。要验 `res 1440 3168 raw … phys 10`
-这种回包，用客户端连：`build/vtouch_onefile.js` → `/sdcard/vtouch.js`，AutoJs6 `require` 后看脚本日志。
+握手失败并关连接（收到 EOF、核心日志多一条 `ws 握手失败`）—— 核心自己的日志（`engine=on` 等）就能看出主循环是活的。
 
 ## CI（GitHub Actions）
 
@@ -427,35 +394,15 @@ JDK 17 + build-tools 34.0.0 + platforms;android-24 + NDK r27d + 自拉 imgui v1.
 
 | 产物 | 说明 |
 |---|---|
-| `build/vtouch_onefile.js` | **SDK**：单文件 AutoJs6 客户端（核心二进制内嵌其中），推 `/sdcard/vtouch.js` 即用 |
-| `clients/example.js` | 调用示例（用到的 API 必须都在 SDK 里导出，由 CI 断言） |
+| `build/vtouch.sh` | **su 脚本**：自包含单文件（核心二进制内嵌其中），推 `/sdcard/vtouch.sh` 即用 |
 | `build/vtouchd` / `build/vtouchd_ui` | 默认核心 / 带面板核心 |
 
-`scripts/ci_check.py` 是硬门（本地也能跑）：它把 SDK 用「当前源码 + 本次构建的核心」**重新生成一遍
-逐字节比对**，并断言面板是 **real 模式**（不是 `ui_stubs.c` 的桩版）、示例的 require 与每个 API 都在 SDK 里。
+`scripts/ci_check.py` 是硬门（本地也能跑）：断言四个产物齐全、面板是 **real 模式**（不是 `ui_stubs.c` 的桩版）、
+**su 脚本内嵌负载与带面板核心逐字节对账**（换核心没重打包 → 判红）。
 所以 artifact 里不可能混进旧副本或桩版面板 —— 这也确实抓住过一次：workflow 漏 `VTOUCH_UI_CORE=real`
 时发出去的就是"面板不接核心"的桩版，现在有门挡着了。
 
 （CI 与本机构建只在 `.comment` 段（编译器版本串）不同，代码各节逐字节一致。）
-
-## 本机产物与 CI 门的口径
-
-`build/vtouch_onefile.js` 里内嵌的是**打包那一刻用的那份核心** —— 即 `python scripts/pack_client.py`
-的默认输入 `build/vtouchd_ui`（换核心就重跑它，或 `python scripts/pack_client.py <核心> <输出路径>`）。
-
-`scripts/ci_check.py` 的 ② 门会拿「当前源码 + `--core` 指定的核心」**逐字节重生成**一遍 SDK 与磁盘上
-的 SDK 比对，所以**只要内嵌的不是 `--core` 那份就会判红** —— 这时 ①c 会先把「内嵌负载 md5」与
-「`--core` 的 md5」摆在一起给你看：
-
-```sh
-python scripts/ci_check.py --core build/vtouchd_ui     # 内嵌的就是 build/vtouchd_ui → 全绿
-python scripts/ci_check.py --core build/vtouchd_ui \
-    --allow-core build/device-core/vtouchd_ui          # 内嵌的是「设备上那一份」时：显式放行
-```
-
-**判红 ≠ 代码坏了，而是产物与声明的核心不是同一份**：要么重跑 `scripts/pack_client.py` 让产物跟上声明的
-核心，要么用 `--allow-core <路径>`（可重复）说明「内嵌的就是这一份」。不传 `--allow-core` 时行为与以前
-完全一致（只看 `--core`）。
 
 ## 已知边界
 

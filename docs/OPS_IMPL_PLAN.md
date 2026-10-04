@@ -1,5 +1,7 @@
 # 操作编辑器 + 核心执行器 · 实施计划
 
+> 注（2026-10-05）：旧 JS 客户端通道已全退役；文中 `clients/*`、`pack_client.py`、`vtouch_onefile.js` 等引用均为历史记录（su 模板现位于 `scripts/vtouch.sh.in`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给 vtouch 加「面板内操作编辑器 + 核心主线程执行器 + 区域/开关触发侧 + su 脚本入口」——启动与操作用作不再依赖 AutoJs6（老通道保留）。
