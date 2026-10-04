@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把核心二进制 base64 内嵌进 clients/vtouch.sh，生成设备侧自包含入口 build/vtouch.sh。
+"""把核心二进制 base64 内嵌进 scripts/vtouch.sh.in（模板），生成设备侧自包含入口 build/vtouch.sh。
 
 用法：
     python scripts/pack_su.py                        # build/vtouchd_ui → build/vtouch.sh
@@ -8,7 +8,7 @@
 import base64, hashlib, pathlib, re, sys, textwrap
 
 root = pathlib.Path(__file__).resolve().parent.parent
-src = root / "clients" / "vtouch.sh"
+src = root / "scripts" / "vtouch.sh.in"
 bin_path = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else root / "build" / "vtouchd_ui"
 out = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else root / "build" / "vtouch.sh"
 

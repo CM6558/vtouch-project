@@ -3,10 +3,10 @@ name: build
 # 一条流水线产出三样东西，且都**来自本次提交**：
 #   ① build/vtouchd        —— 默认核心（不带面板）
 #   ② build/vtouchd_ui     —— 带面板的核心（面板三件套内嵌在 .rodata 里）
-#   ③ build/vtouch_onefile.js —— **SDK**：单文件 AutoJs6 客户端（内嵌 ②），配 clients/example.js 示例
-# scripts/ci_check.py 是硬门：它把 SDK 用"当前源码 + 本次构建的核心"重新生成一遍比对，
-# 对不上就让构建失败 —— 所以 artifact 里不可能混进旧副本。
-# 另两道小门：apply_funcdoc.py --check（函数文档幂等，靠退出码判）与字形表两次生成一致。
+#   ③ build/vtouch.sh      —— su 脚本（自包含单文件：内嵌 ②；设备侧 装/起/停/状态）
+# scripts/ci_check.py 是硬门：产物齐全 + 面板必须 real 模式 + su 内嵌负载对账，
+# 对不上就让构建失败。另两道小门：apply_funcdoc.py --check（函数文档幂等，靠退出码判）
+# 与字形表两次生成一致。
 
 on:
   push:
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   build:
-    name: 核心 + 面板 + 单文件 SDK
+    name: 核心 + 面板 + su 脚本
     runs-on: ubuntu-latest
     steps:
       - name: 取源码
@@ -52,7 +52,7 @@ jobs:
       - name: 编面板（javac + d8 + NDK clang；**必须 real 模式：接核心**）
         env:
           NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          VTOUCH_UI_CORE: real          # 默认是 stub（面板单跑用的桩）——漏了这个就会发出「面板不接核心」的 SDK
+          VTOUCH_UI_CORE: real          # 默认是 stub（面板单跑用的桩）——漏了这个就会发出「面板不接核心」的产物
         run: bash scripts/build_ui.sh
 
       - name: 编带面板的核心（面板三件套内嵌）
@@ -65,8 +65,8 @@ jobs:
           NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
         run: bash scripts/build.sh
 
-      - name: 打成 SDK（单文件 AutoJs6 客户端，内嵌核心）
-        run: python3 scripts/pack_client.py
+      - name: 打 su 脚本（自包含单文件，内嵌带面板核心）
+        run: python3 scripts/pack_su.py
 
       - name: 函数文档幂等门（--check 有退出码：0 处调整 + 不变式全满足才算过）
         run: python3 scripts/apply_funcdoc.py --check
@@ -94,18 +94,17 @@ jobs:
             [ -f build/ci_check.txt ] && cat build/ci_check.txt || echo "(门没跑到，看上面的步骤日志)"
             echo '```'
             echo
-            echo "**SDK**：\`vtouch_onefile.js\` —— 推到手机 \`/sdcard/vtouch.js\`，AutoJs6 里 require 即用"
-            echo "（会自检设备上核心的 md5，不一致就用内嵌这份覆盖并复验）。示例见 \`clients/example.js\`。"
+            echo "**交付**：\`vtouch.sh\` —— 推到手机 \`/sdcard/vtouch.sh\`，\`su -c 'sh /sdcard/vtouch.sh start'\` 即用"
+            echo "（装完回读 md5 对账；面板三件套由核心启动时自解包）。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: vtouch-sdk
+          name: vtouch
           if-no-files-found: error
           path: |
-            build/vtouch_onefile.js
-            clients/example.js
+            build/vtouch.sh
             build/vtouchd
             build/vtouchd_ui
             build/ci_check.txt
