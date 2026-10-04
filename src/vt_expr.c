@@ -1,9 +1,10 @@
-/* vt_expr.c —— v5「计算」步骤的表达式引擎（vt_expr_check / vt_expr_eval）。
+/* vt_expr.c —— v5「计算」步骤的表达式引擎（vt_expr_check / vt_expr_eval；v10 起操作数 = 变量）。
  *
  * 语法与语义逐字照 docs/OPS_PLAN_V5.md §2（递归下降解析 + 现解析现求值）：
  *   expr := term { ("+"|"-") term }；term := unary { ("*"|"/") unary }；unary := ["-"] unary | primary；
- *   primary := number | var | slot | func "(" args ")" | "(" expr ")"；
- *   var = tdx/tdy/tux/tuy/tms；slot = r1..r4；func = atan2/sin/cos/abs/min/max/sqrt；
+ *   primary := number | var | func "(" args ")" | "(" expr ")"；
+ *   var = tdx/tdy/tux/tuy/tms（触发数据）、fx/fy（最近命中坐标）、自定义命名变量（名字表按调用传入）；
+ *   func = atan2/sin/cos/abs/min/max/sqrt；
  *   number = 十进制整数 [ "." 十进制小数 ]（必须数字开头：`.5`、`1.` 都非法）；空白忽略；全小写精确匹配。
  * 语义：+ - * / 为 double 运算（除零 → 错）；atan2(y,x) 返回**度**、范围 (-180,180]、`(0,0)` = 0；
  *   sin/cos 参数为度；abs 绝对值；min/max 两参数；sqrt(x<0) → 错；参数个数不符 → 错；
@@ -11,9 +12,12 @@
  * 边界：长度 ≤ 63 字符；括号嵌套 ≤ 8 层；token 数 ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各算 1 个）。
  *   token 上限**先于长度检查**执行 —— 63 字符内 token 最多 63 个、到不了 128，所以该上限实际只对
  *   >63 字符的输入生效（防御式兜底）；这样三条边界都「可触发、各有 why」。
- * 错误口径：vt_expr_check 只解析 + **静态常量折叠**（变量/槽视为未知值并传播）——
+ * 错误口径：vt_expr_check 只解析 + **静态常量折叠**（变量视为未知值并传播）——
  *   「除零 / 负数开方 / 结果非有限」只在**完全由常量决定**时被编辑期拦下（不会误拒 `1/tdx` 这类）；
  *   vt_expr_eval 用真实值求值，运行时同一套判定兜底（spec §5「编辑期已拦，这里是防御」）。
+ * v10（spec EDITOR_V2 §Task 7.5）：变量空间 = 预置 7（触发 5 + fx/fy）+ 自定义命名变量（≤16，名字表
+ *   随调用传入）；引用未写的触发数据 → NO_VAR（变量无值）；引用未写的 fx/fy / 自定义变量 → NO_SLOT
+ *   （结果无值）；名字不在表里 → BAD（未知名字）。
  *
  * 守卫：整文件在 #ifdef VT_UI 内 —— 默认（无面板）构建里本文件是空 TU（build.sh 用通配把 src 下的 .c 一起链）。
  * 零核心依赖：只 include 标准头 + 自家头，宿主 gcc 可直接编译（宿主单测见 build/test_vt_expr.c，不入库）。
@@ -42,8 +46,8 @@ enum {
     TOK_END = 0, TOK_NUM, TOK_NAME, TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_LP, TOK_RP, TOK_COMMA
 };
 
-/* 名字类别（白名单；全小写精确匹配 —— `TDX` 也走「未知名字」）。 */
-enum { NAME_UNKNOWN = 0, NAME_VAR, NAME_SLOT, NAME_FUNC };
+/* 名字类别（全小写精确匹配 —— `TDX` 也走「未知名字」）。 */
+enum { NAME_UNKNOWN = 0, NAME_VAR, NAME_RES, NAME_CUSTOM, NAME_FUNC };
 
 /* 函数下标（识别为 NAME_FUNC 后的 idx）。 */
 enum { XF_ATAN2 = 0, XF_SIN, XF_COS, XF_ABS, XF_MIN, XF_MAX, XF_SQRT };
@@ -65,8 +69,12 @@ struct ex_ctx {
     size_t whycap;
     const int *trig_vals; /* eval：触发数据（可 NULL = 全无值） */
     unsigned trig_mask;
-    const double *slots;  /* eval：结果槽（可 NULL = 全未写） */
-    unsigned slot_mask;
+    double fx, fy;        /* eval：fx/fy 命中坐标（res_mask 位 0/1 指示已写） */
+    unsigned res_mask;
+    const char (*names)[16]; /* eval/check：自定义变量名表（可 NULL = 无自定义） */
+    const double *vals;   /* eval：自定义变量值（与 names 同下标；可 NULL） */
+    unsigned var_mask;    /* eval：位 0..15 = 已写 */
+    int nnames;           /* names 条数（0..16） */
 };
 
 /* ---- 词法与上下文 ---- */
@@ -133,18 +141,19 @@ static void ex_tok(struct ex_ctx *c)
     if (++c->tcount > VT_EXPR_TOK_MAX) { ex_fail(c, XE_BAD, "表达式过长"); c->tok = TOK_END; }
 }
 
-/* 标识符白名单：精确匹配（长度 + 逐字节）。命中出类别与下标；否则 NAME_UNKNOWN。 */
-static int ex_name_kind(const char *s, int n, int *idx)
+/* 标识符分类：精确匹配（长度 + 逐字节）。预置名 / 函数命中出类别与下标；否则查自定义变量名表
+ * （表由调用方给；空名 = 空槽）；全不中 → NAME_UNKNOWN（调用方报 `未知名字`）。 */
+static int ex_name_kind(const struct ex_ctx *c, const char *s, int n, int *idx)
 {
+    int i;
+
     if (n == 3 && !memcmp(s, "tdx", 3)) { *idx = 0; return NAME_VAR; }
     if (n == 3 && !memcmp(s, "tdy", 3)) { *idx = 1; return NAME_VAR; }
     if (n == 3 && !memcmp(s, "tux", 3)) { *idx = 2; return NAME_VAR; }
     if (n == 3 && !memcmp(s, "tuy", 3)) { *idx = 3; return NAME_VAR; }
     if (n == 3 && !memcmp(s, "tms", 3)) { *idx = 4; return NAME_VAR; }
-    if (n == 2 && !memcmp(s, "r1", 2)) { *idx = 0; return NAME_SLOT; }
-    if (n == 2 && !memcmp(s, "r2", 2)) { *idx = 1; return NAME_SLOT; }
-    if (n == 2 && !memcmp(s, "r3", 2)) { *idx = 2; return NAME_SLOT; }
-    if (n == 2 && !memcmp(s, "r4", 2)) { *idx = 3; return NAME_SLOT; }
+    if (n == 2 && !memcmp(s, "fx", 2)) { *idx = 0; return NAME_RES; }
+    if (n == 2 && !memcmp(s, "fy", 2)) { *idx = 1; return NAME_RES; }
     if (n == 5 && !memcmp(s, "atan2", 5)) { *idx = XF_ATAN2; return NAME_FUNC; }
     if (n == 3 && !memcmp(s, "sin", 3)) { *idx = XF_SIN; return NAME_FUNC; }
     if (n == 3 && !memcmp(s, "cos", 3)) { *idx = XF_COS; return NAME_FUNC; }
@@ -152,6 +161,13 @@ static int ex_name_kind(const char *s, int n, int *idx)
     if (n == 3 && !memcmp(s, "min", 3)) { *idx = XF_MIN; return NAME_FUNC; }
     if (n == 3 && !memcmp(s, "max", 3)) { *idx = XF_MAX; return NAME_FUNC; }
     if (n == 4 && !memcmp(s, "sqrt", 4)) { *idx = XF_SQRT; return NAME_FUNC; }
+    if (c->names) {
+        int lim = c->nnames < 16 ? c->nnames : 16;
+        for (i = 0; i < lim; i++) {
+            size_t l = strnlen(c->names[i], 16);
+            if (l > 0 && l < 16 && (int)l == n && !memcmp(c->names[i], s, l)) { *idx = i; return NAME_CUSTOM; }
+        }
+    }
     return NAME_UNKNOWN;
 }
 
@@ -254,8 +270,8 @@ static void ex_call(struct ex_ctx *c, int f)
     if (c->known && !isfinite(c->v)) ex_fail(c, XE_BAD, "结果非有限");
 }
 
-/* primary：数字 / 变量 / 槽 / 函数调用 / 括号表达式；其余（含 EOF、运算符、逗号、`)`）→ `缺少操作数`。
- * 变量与槽在静态模式（check）一律记「未知」—— 运行值不可知，不能拿试算值误拒合法表达式。 */
+/* primary：数字 / 变量（预置 / fx/fy / 自定义）/ 函数调用 / 括号表达式；其余（含 EOF、运算符、
+ * 逗号、`)`）→ `缺少操作数`。变量在静态模式（check）一律记「未知」—— 运行值不可知，不能拿试算值误拒合法表达式。 */
 static void ex_primary(struct ex_ctx *c)
 {
     int kind, idx;
@@ -268,7 +284,7 @@ static void ex_primary(struct ex_ctx *c)
         ex_tok(c);
         return;
     case TOK_NAME:
-        kind = ex_name_kind(c->name, c->namelen, &idx);
+        kind = ex_name_kind(c, c->name, c->namelen, &idx);
         if (kind == NAME_VAR) {
             if (c->mode_eval) {
                 if (!c->trig_vals || !(c->trig_mask & (1u << idx))) { ex_fail(c, XE_NOVAR, "变量无值"); return; }
@@ -278,10 +294,20 @@ static void ex_primary(struct ex_ctx *c)
             ex_tok(c);
             return;
         }
-        if (kind == NAME_SLOT) {
+        if (kind == NAME_RES) {                  /* fx/fy（预置）：未写 → 结果无值（同自定义变量口径） */
             if (c->mode_eval) {
-                if (!c->slots || !(c->slot_mask & (1u << idx))) { ex_fail(c, XE_NOSLOT, "结果无值"); return; }
-                c->v = c->slots[idx];
+                if (!(c->res_mask & (1u << idx))) { ex_fail(c, XE_NOSLOT, "结果无值"); return; }
+                c->v = (idx == 0) ? c->fx : c->fy;
+                if (!isfinite(c->v)) { ex_fail(c, XE_BAD, "结果非有限"); return; }
+            }
+            c->known = c->mode_eval;
+            ex_tok(c);
+            return;
+        }
+        if (kind == NAME_CUSTOM) {               /* 自定义命名变量：未写 → 结果无值（spec EDITOR_V2 §Task 7.5） */
+            if (c->mode_eval) {
+                if (!c->vals || !(c->var_mask & (1u << idx))) { ex_fail(c, XE_NOSLOT, "结果无值"); return; }
+                c->v = c->vals[idx];
                 if (!isfinite(c->v)) { ex_fail(c, XE_BAD, "结果非有限"); return; }
             }
             c->known = c->mode_eval;
@@ -375,10 +401,10 @@ static void ex_expr(struct ex_ctx *c)
 }
 
 /* 主流程（check / eval 共用）：空 → 词法预扫（token 上限/非法字符/非法数字）→ 长度 → 递归下降解析。
- * 静态模式（mode_eval=0）做常量折叠 + 未知传播；真实模式取触发数据/槽值求值。
- * 返回 0 或 XE_*；成功时（仅真实模式）*out 收结果。 */
-static int ex_run(const char *s, int mode_eval, const int *trig_vals, unsigned trig_mask,
-                  const double *slots, unsigned slot_mask, double *out, char *why, size_t whycap)
+ * 静态模式（mode_eval=0）做常量折叠 + 未知传播（env 只需 names/nnames）；真实模式按 env 里的
+ * 变量快照求值。返回 0 或 XE_*；成功时（仅真实模式）*out 收结果。 */
+static int ex_run(const char *s, int mode_eval, const struct vt_expr_env *env,
+                  double *out, char *why, size_t whycap)
 {
     struct ex_ctx c;
 
@@ -387,10 +413,17 @@ static int ex_run(const char *s, int mode_eval, const int *trig_vals, unsigned t
     c.mode_eval = mode_eval;
     c.why = why;
     c.whycap = whycap;
-    c.trig_vals = trig_vals;
-    c.trig_mask = trig_mask;
-    c.slots = slots;
-    c.slot_mask = slot_mask;
+    if (env) {                                   /* 快照整组拷进上下文（check 传只有 names 的壳） */
+        c.trig_vals = env->trig_vals;
+        c.trig_mask = env->trig_mask;
+        c.fx = env->fx;
+        c.fy = env->fy;
+        c.res_mask = env->res_mask;
+        c.names = env->names;
+        c.vals = env->vals;
+        c.var_mask = env->var_mask;
+        c.nnames = env->nnames;
+    }
 
     if (!s || s[0] == '\0') { ex_fail(&c, XE_BAD, "表达式为空"); return c.err; }
 
@@ -418,33 +451,36 @@ static int ex_run(const char *s, int mode_eval, const int *trig_vals, unsigned t
  * (vtouch-doc: vt_expr_check)
  * @brief 校验表达式是否合法（面板编辑期与核心拒收共用的唯一实现）。
  * @param   s        表达式文本（可 NULL / 空）
+ * @param   names    自定义变量名表（16 字节定长数组；可 NULL = 无）
+ * @param   nnames   名表条数
  * @param   why      非法时写入短中文原因（可 NULL / 0 容）
  * @param   whycap   why 缓冲长度
  * @return  0 合法；-1 非法（why 已填原因；成功时 why 为空串）。
- * @note    语法与语义逐字照 spec §2（递归下降；+ - * /；atan2/sin/cos/abs/min/max/sqrt（三角函数按度、atan2(0,0)=0）；小数；空白忽略；全小写精确匹配）。边界：长度 ≤ 63、括号嵌套 ≤ 8、token ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各 1 个；token 上限先于长度检查，三条边界都可触发、各有 why）。静态常量折叠：变量/槽视为未知值并传播 —— 「除零 / 负数开方 / 结果非有限」只在完全由常量决定时拦下（不会误拒 `1/tdx` 这类），运行期由 vt_expr_eval 同一套判定兜底。
+ * @note    语法与语义逐字照 spec §2（递归下降；+ - * /；atan2/sin/cos/abs/min/max/sqrt（三角函数按度、atan2(0,0)=0）；小数；空白忽略；全小写精确匹配）。变量空间（v10，EDITOR_V2 §Task 7.5）：预置 tdx..tms / fx / fy + names 表里的自定义名；都不中 → `未知名字`。边界：长度 ≤ 63、括号嵌套 ≤ 8、token ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各 1 个；token 上限先于长度检查，三条边界都可触发、各有 why）。静态常量折叠：变量视为未知值并传播 —— 「除零 / 负数开方 / 结果非有限」只在完全由常量决定时拦下（不会误拒 `1/tdx` 这类），运行期由 vt_expr_eval 同一套判定兜底。
  */
-int vt_expr_check(const char *s, char *why, size_t whycap)
+int vt_expr_check(const char *s, const char (*names)[16], int nnames, char *why, size_t whycap)
 {
+    struct vt_expr_env env;
+
     if (why && whycap) why[0] = '\0';
-    return ex_run(s, 0, NULL, 0, NULL, 0, NULL, why, whycap) ? -1 : 0;
+    memset(&env, 0, sizeof env);                 /* 静态模式只需名字表（值 / 掩码不参与） */
+    env.names = names;
+    env.nnames = nnames;
+    return ex_run(s, 0, &env, NULL, why, whycap) ? -1 : 0;
 }
 
 /**
  * (vtouch-doc: vt_expr_eval)
- * @brief 求值表达式：触发数据 / 结果槽 / 字面量参与运算，返回 double。
+ * @brief 求值表达式：触发数据 / fx/fy / 自定义变量 / 字面量参与运算，返回 double。
  * @param   s        表达式文本
- * @param   trig_vals 触发数据 [tdx,tdy,tux,tuy,tms]（可 NULL = 全无值）
- * @param   trig_mask 位 0..4 同序，1=有值
- * @param   slots    结果槽 [r1..r4]（可 NULL = 全未写）
- * @param   slot_mask 位 0..3，1=已写
+ * @param   env      求值环境：trig_vals/trig_mask（触发数据）、fx/fy（命中坐标，res_mask 位 0/1）、names/vals/var_mask（自定义变量表，位 0..15）、nnames（表条数）
  * @param   out      输出（仅返回 OK 时有意义；出错不写）
  * @return  VT_EXPR_OK；VT_EXPR_NO_VAR（变量无值）/ VT_EXPR_NO_SLOT（结果无值）/ VT_EXPR_BAD（表达式错）。
- * @note    与 check 同一套解析与判定：语法错、除零、负数开方、结果非有限（inf/NaN）、超限都返回 BAD；引用 mask 缺位的触发数据 / 未写的槽返回 NO_VAR / NO_SLOT（按求值顺序，先遇到先报）。
+ * @note    与 check 同一套解析与判定：语法错、除零、负数开方、结果非有限（inf/NaN）、超限都返回 BAD；引用 mask 缺位的触发数据 / 未写的 fx/fy / 未写的自定义变量返回 NO_VAR / NO_SLOT（按求值顺序，先遇到先报）。
  */
-int vt_expr_eval(const char *s, const int trig_vals[5], unsigned trig_mask,
-                 const double slots[4], unsigned slot_mask, double *out)
+int vt_expr_eval(const char *s, const struct vt_expr_env *env, double *out)
 {
-    int rc = ex_run(s, 1, trig_vals, trig_mask, slots, slot_mask, out, NULL, 0);
+    int rc = ex_run(s, 1, env, out, NULL, 0);
 
     if (rc == 0) return VT_EXPR_OK;
     if (rc == XE_NOVAR) return VT_EXPR_NO_VAR;

@@ -38,7 +38,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "vt_expr.h"     /* v5「计算」步骤的表达式引擎（vt_expr_check / vt_expr_eval；默认构建里 vt_expr.c 是空 TU） */
+#include "vt_expr.h"     /* v5「计算」步骤的表达式引擎（vt_expr_check / vt_expr_eval；默认构建里 vt_expr.c 是空 TU；
+                          * v10 起操作数 = 触发数据 / fx/fy / 自定义命名变量，spec EDITOR_V2 §Task 7.5） */
 
 #define MAX_PHYS 64
 #define MAX_VIRT 32
@@ -81,7 +82,8 @@
 #define OP_STEP_COND_REGION 6    /* 步骤类型：区域判断（a1,a2 的点 ∈ ref 区域） */
 #define OP_STEP_COND_TOGGLE 7    /* 步骤类型：开关判断（ref 区域须开关型且开着） */
 #define OP_STEP_JUMP        8    /* 步骤类型：跳转（a1 = 目标步骤：0 = 结束、1..步数 = 目标） */
-#define OP_STEP_CALC        9    /* 步骤类型：计算（a1 = 槽号 1..4、expr = 表达式；结果写槽 rN，spec OPS_PLAN_V5 §5） */
+#define OP_STEP_CALC        9    /* 步骤类型：计算（v10：a1 = 变量索引 0..15、ref = 变量名、expr = 表达式；
+                                  * 结果写该变量，spec EDITOR_V2 §Task 7.5） */
 #define OP_STEP_FINDIMAGE   10   /* 步骤类型：找图（spec VISION §6.1 定稿：ref=模板名、expr=区域名（空=全屏）、
                                   * a1=阈值 0..255、a2=0、a3=不成立档、a4=成立档、ms=0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、
                                   * j1/j2=该侧跳转目标） */
@@ -102,19 +104,26 @@
 #define OP_COND_JUMP        3
 /* 单次运行跳转计数上限（条件跳转 + 跳转步共用一枚，起跑清零）：超限中止 `跳转超限`，防死循环。 */
 #define VT_OPS_JUMP_MAX 200
-/* 变量编码（v2 契约，spec OPS_PLAN_V2 §1.4；v5 扩展 -6..-9，spec OPS_PLAN_V5 §4）：字段取负数 = 引用
- * 触发数据（-1..-5）或结果槽（-6..-9）；字面值恒 ≥0。
- * op_valid 只对「允许变量的字段」放行 [-9, max]，其余字段照旧拒负值。 */
+/* 变量编码（v10 契约，spec EDITOR_V2 §Task 7.5；v2 起 -1..-5 不变）：字段取负数 = 引用变量；字面值恒 ≥0。
+ *   -1..-5 = 触发数据 tdx/tdy/tux/tuy/tms（不变）；
+ *   -6/-7 = fx/fy：最近一次找图/找色命中坐标（视觉步改写；起跑清零）；
+ *   -8/-9 = 退役槽编码（v5 的 r3/r4）：无变量承接，引用 → 中止 `结果无值`；
+ *   -10..-25 = 自定义命名变量（名字表 op->vars[16]，编码 = -10 - 表索引 0..15）。
+ * op_valid 只对「允许变量的字段」放行 [-25, -1]，其余字段照旧拒负值。 */
 #define OP_VAR_TDX (-1)          /* tdx：触发按下 x */
 #define OP_VAR_TDY (-2)          /* tdy：触发按下 y */
 #define OP_VAR_TUX (-3)          /* tux：触发弹起 x */
 #define OP_VAR_TUY (-4)          /* tuy：触发弹起 y */
 #define OP_VAR_TMS (-5)          /* tms：触发时长（按下→抬起的毫秒数） */
-#define OP_VAR_R1  (-6)          /* r1：结果槽 1（v5 计算步写入；槽引用 -6..-9，spec V5 §5.3） */
-#define OP_VAR_R2  (-7)          /* r2：结果槽 2 */
-#define OP_VAR_R3  (-8)          /* r3：结果槽 3 */
-#define OP_VAR_R4  (-9)          /* r4：结果槽 4 */
-#define OP_VAR_N    5            /* 触发变量个数（不变；结果槽不在此列） */
+#define OP_VAR_FX  (-6)          /* fx：最近一次找图/找色命中 x（视觉步改写 fx/fy，替代 v5 的 r1/r2） */
+#define OP_VAR_FY  (-7)          /* fy：最近一次找图/找色命中 y */
+#define OP_VAR_RET1 (-8)         /* 退役：v5 的 r3 编码（悬空 → 结果无值；v4 文件重映射失败时原样保留） */
+#define OP_VAR_RET2 (-9)         /* 退役：v5 的 r4 编码 */
+#define OP_VAR_V0  (-10)         /* 自定义变量表索引 0（编码 = -10 - 索引） */
+#define OP_VAR_V15 (-25)         /* 自定义变量表索引 15 */
+#define OP_VAR_IDX_N 16          /* 自定义变量表条数（op->vars[16]；编码 -10..-25 与索引 0..15 一一对应） */
+#define OP_VAR_NAME_MAX 15       /* 自定义变量名长度上限（[A-Za-z_][A-Za-z0-9_]*、1..15；char[16] 存储含 NUL） */
+#define OP_VAR_N    5            /* 触发变量个数（不变；fx/fy 与自定义变量不在此列） */
 /* 触发数据可用位（struct vt_trig_data.mask / g.op_trig_mask）：哪些变量这次有值。
  * 完整按压全置；按下触发只置 TDX|TDY；面板手动运行全清（无数据）。 */
 #define OP_TRIGB_TDX 1u
@@ -171,7 +180,7 @@ struct vt_step {
     int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用；按下: x,y；
                                     * 区域判断: 判定点 x,y + a3=不成立档位、a4=成立档位；开关判断: a3/a4=两侧档位；
                                     * 跳转: a1 = 目标步骤（0 = 结束、1..步数 = 目标）；
-                                    * 计算: a1 = 槽号 1..4（其余字段不用，spec OPS_PLAN_V5 §3）；
+                                    * 计算: a1 = 变量索引 0..15（其余字段不用，spec EDITOR_V2 §Task 7.5）；
                                     * 找图: a1 = 阈值 0..255、a2 = 0、a3/a4 = 不成立/成立档位；
                                     * 找色: a1 = 模式 0/1、a2 = 单点 (颜色<<8)|容差（多点 = 0）、a3/a4 = 档位
                                     * （spec VISION §6.1） */
@@ -179,7 +188,8 @@ struct vt_step {
                                     * （弹起/条件步/跳转/计算不用） */
     int j1, j2;                    /* 条件步跳转目标（仅该侧档位=OP_COND_JUMP 时有意义）：j1=成立侧、j2=不成立侧；
                                     * 0 = 结束、1..步数 = 目标步骤（spec OPS_PLAN_V3 §6.1）；视觉步同款 */
-    char ref[REGION_ID_MAX + 1];   /* 条件步的区域 id；视觉步 = 模板名（找图）/ 点集名（找色多点）；"" = 不用 */
+    char ref[REGION_ID_MAX + 1];   /* 条件步的区域 id；视觉步 = 模板名（找图）/ 点集名（找色多点）；
+                                    * 计算步 = 变量名（v10，[A-Za-z_][A-Za-z0-9_]*、1..15）；"" = 不用 */
     char expr[VT_EXPR_MAX + 1];    /* 计算步的表达式（type=9）；视觉步 = 区域名（type=10/11，空 = 全屏）；
                                     * 其余类型恒空（spec OPS_PLAN_V5 §3 / VISION §6.1） */
 };
@@ -195,6 +205,13 @@ struct vt_op {
     char gate[REGION_ID_MAX + 1];  /* 门控开关的区域 id；""=无 */
     int  auto_off;                 /* 跑完自动关掉门控开关 */
     struct vt_step steps[MAX_STEPS];
+#ifdef VT_UI
+    /* 自定义变量名表（契约 v10，spec EDITOR_V2 §Task 7.5）：下标 = 计算步 a1（变量索引 0..15），
+     * 名字 [A-Za-z_][A-Za-z0-9_]*、1..15、含 NUL 存 16 字节；空名 = 空槽。执行器起跑时整表快照进
+     * R.vnames（字段负数编码 -10..-25 按它查名/查值）。**VT_UI 守卫**：默认（无面板）构建不含
+     * 这一项 —— 结构体是共享路径，加了会改默认核心 md5（守卫纪律，见 AGENTS.md）。 */
+    char vars[OP_VAR_IDX_N][16];
+#endif
 };
 
 struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used; };

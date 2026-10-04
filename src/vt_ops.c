@@ -26,17 +26,52 @@
 #ifdef VT_UI
 
 #include <sys/eventfd.h>     /* 执行器的触发唤醒 fd（eventfd：写一下就叫醒主循环） */
-#include <math.h>            /* llround：槽引用取整（v5；spec §5.3） */
+#include <math.h>            /* llround：变量引用取整（v5 起；spec §5.3） */
 #include "vt_vision.h"       /* 视觉匹配引擎（找图/找色 + 坐标映射；spec VISION §4/§6.1） */
 
-/* 允许变量的数值字段判据（op_valid v2；v5 扩 -9..-1）：字段 = 字面值 v ∈ [lo, hi]，或负数编码引用
- * -9..-1（-1..-5 = 触发变量 OP_VAR_TDX..TMS、-6..-9 = 结果槽 OP_VAR_R1..R4）。
- * 坐标与时长共用（lo/hi 每档不同：坐标 = 0..逻辑尺寸-1；时长 = 各类型区间，见下）。 */
+/**
+ * (vtouch-doc: op_num_ok)
+ * @brief 允许变量的数值字段判据：字面值 v ∈ [lo,hi]，或负数编码引用 -25..-1。
+ * @param   v        字段原值
+ * @param   lo       字面值下界（含；按字段档）
+ * @param   hi       字面值上界（含；按字段档）
+ * @return  1 合法；0 非法。
+ * @note    坐标与时长共用（lo/hi 每档不同：坐标 = 0..逻辑尺寸-1；时长 = 各类型区间）。编码域 -25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy、-8/-9 = 退役槽（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   允许变量的数值字段判据（op_valid v2；v10 扩 -25..-1）：字段 = 字面值 v ∈ [lo, hi]，或负数编码引用
+ *   -25..-1（-1..-5 = 触发变量、-6/-7 = fx/fy、-8/-9 = 退役槽（悬空）、-10..-25 = 自定义变量索引 0..15）。
+ *   坐标与时长共用（lo/hi 每档不同：坐标 = 0..逻辑尺寸-1；时长 = 各类型区间，见下）。
+ */
 static int op_num_ok(int v, int lo, int hi)
 {
     if (v >= lo && v <= hi) return 1;
-    if (v >= OP_VAR_R4 && v <= OP_VAR_TDX) return 1;
+    if (v >= OP_VAR_V15 && v <= OP_VAR_TDX) return 1;
     return 0;
+}
+
+/**
+ * (vtouch-doc: op_var_name_ok)
+ * @brief 自定义变量名合法性：[A-Za-z_][A-Za-z0-9_]*、长度 1..OP_VAR_NAME_MAX。
+ * @param   s        名字文本
+ * @param   n        已量出的长度
+ * @return  1 合法；0 非法。
+ * @note    名字存 char[16]（含 NUL），OP_VAR_NAME_MAX = 15（spec EDITOR_V2 §Task 7.5）。
+ *
+ * 为什么这么写（原有注释，逐字保留）：
+ *   自定义变量名合法性（v10，spec EDITOR_V2 §Task 7.5）：[A-Za-z_][A-Za-z0-9_]*、长度 1..OP_VAR_NAME_MAX
+ *   （名字存 char[16]，含 NUL；n = 已量出的长度）。
+ */
+static int op_var_name_ok(const char *s, size_t n)
+{
+    size_t i;
+
+    if (n < 1 || n > OP_VAR_NAME_MAX) return 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
+    for (i = 1; i < n; i++)
+        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') ||
+              (s[i] >= '0' && s[i] <= '9') || s[i] == '_')) return 0;
+    return 1;
 }
 
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
@@ -47,15 +82,18 @@ static int op_num_ok(int v, int lo, int hi)
  * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色）。
  * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
  * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
- * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -9..-1（-1..-5 = 触发变量、
- * -6..-9 = 结果槽；spec V2 §1.4 / V5 §4）——操作的手指是**注入**的，屏外的点没有意义：收下来也只是
+ * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -25..-1（-1..-5 = 触发变量、
+ * -6/-7 = fx/fy、-8/-9 = 退役槽（悬空）、-10..-25 = 自定义变量索引 0..15；spec EDITOR_V2 §Task 7.5）
+ * ——操作的手指是**注入**的，屏外的点没有意义：收下来也只是
  * 静默不命中，不如当场拒掉让面板报错。
  * 条件步（6/7）：两档位 a3/a4 ∈ 0..3（不成立侧/成立侧）；档位 = 跳转时该侧目标 ∈ 0..step_count
  * （0 = 结束、1..step_count = 目标步骤；j1 = 成立侧、j2 = 不成立侧），其余档位目标**忽略**（不校验、不拒收）；
  * ref 长度 1..REGION_ID_MAX 且过 vt_id_ok —— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
  * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
- * 计算步（9，v5）：a1 ∈ 1..4（槽号）；expr 非空、≤63、且过 vt_expr_check（不过 → 拒收 `表达式错: <why>`）；
- * 防御：a2..a4/ms/j1/j2 必须 0、ref 必须空。
+ * 计算步（9，v10）：a1 ∈ 0..15（变量索引）；ref = 变量名（[A-Za-z_][A-Za-z0-9_]*、1..15，且必须等于
+ * op->vars[a1] —— 名字表单源）；expr 非空、≤63、且过 vt_expr_check（名字表 = op->vars；不过 → 拒收
+ * `表达式错: <why>`）；防御：a2..a4/ms/j1/j2 必须 0。
+ * 变量名表（v10，op->vars[16]）：每项空（空槽）或合法名字；非空名字两两不同（同名 = 同一变量，表里只许一份）。
  * 视觉步（10/11，v8；T7.4 扩 ms）：字段映射照 spec VISION §6.1 定稿 —— 找图 ref=模板名（必填）、找色 ref=点集名
  * （多点必填、单点必空）、expr=区域名（空或 vt_id_ok 尺子；存在性不校验，运行时按 `区域不存在` 收场）、
  * 找图 a1=阈值 0..255、找色 a1=模式 0/1 且单点 a2=(颜色<<8)|容差（按无符号解读：打包域 = 全部 32 位，
@@ -67,7 +105,7 @@ static int op_num_ok(int v, int lo, int hi)
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
 {
-    int i;
+    int i, k;
     size_t n;
 
     /* 名字来自邮箱载荷，先按数组长度找终止符：未终止（strnlen 顶到 name[] 尾）按非法拒 ——
@@ -87,6 +125,21 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     if (op->step_count < 1 || op->step_count > MAX_STEPS) {
         snprintf(why, whycap, "步数 %d 不在 1..%d", op->step_count, MAX_STEPS);
         return 0;
+    }
+    /* 自定义变量名表（v10）：每项空（空槽）或合法名字；非空名字两两不同（同名 = 同一变量，表里只许一份）。
+     * 先整表过门再逐步 —— 名字表坏掉的载荷（邮箱裸字节）绝不喂给表达式解析器。 */
+    for (i = 0; i < OP_VAR_IDX_N; i++) {
+        size_t vn = strnlen(op->vars[i], sizeof op->vars[i]);
+        if (vn == 0) continue;
+        if (vn >= sizeof op->vars[i] || !op_var_name_ok(op->vars[i], vn)) {
+            snprintf(why, whycap, "变量表第 %d 项名字非法（[A-Za-z_][A-Za-z0-9_]*、1..%d）", i + 1, OP_VAR_NAME_MAX);
+            return 0;
+        }
+        for (k = 0; k < i; k++)
+            if (op->vars[k][0] && strncmp(op->vars[k], op->vars[i], sizeof op->vars[0]) == 0) {
+                snprintf(why, whycap, "变量表重名（第 %d / %d 项）", k + 1, i + 1);
+                return 0;
+            }
     }
     for (i = 0; i < op->step_count; i++) {
         const struct vt_step *st = &op->steps[i];
@@ -187,18 +240,23 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             break;
-        case OP_STEP_CALC: {                     /* 计算（v5）：a1 = 槽号 1..4；expr 非空且可解析；其余字段/ref 必须空（spec V5 §4） */
+        case OP_STEP_CALC: {                     /* 计算（v10）：a1 = 变量索引 0..15；ref = 变量名；expr 非空且可解析 */
             char w[40];
-            if (st->a1 < 1 || st->a1 > 4) {
-                snprintf(why, whycap, "第 %d 步槽号非法（1..4）", i + 1);
+            size_t rl = strnlen(st->ref, sizeof st->ref);
+            if (st->a1 < 0 || st->a1 >= OP_VAR_IDX_N) {
+                snprintf(why, whycap, "第 %d 步变量索引非法（0..%d）", i + 1, OP_VAR_IDX_N - 1);
                 return 0;
             }
             if (st->a2 || st->a3 || st->a4 || st->ms || st->j1 || st->j2) {
                 snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
                 return 0;
             }
-            if (st->ref[0]) {
-                snprintf(why, whycap, "第 %d 步区域引用必须为空", i + 1);
+            if (rl < 1 || rl > OP_VAR_NAME_MAX || !op_var_name_ok(st->ref, rl)) {
+                snprintf(why, whycap, "第 %d 步变量名非法（[A-Za-z_][A-Za-z0-9_]*、1..%d）", i + 1, OP_VAR_NAME_MAX);
+                return 0;
+            }
+            if (strncmp(op->vars[st->a1], st->ref, sizeof op->vars[0]) != 0) {   /* 名字表单源：a1 位就是这个名字 */
+                snprintf(why, whycap, "第 %d 步变量名与名字表不符", i + 1);
                 return 0;
             }
             n = strnlen(st->expr, sizeof st->expr);
@@ -206,7 +264,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 snprintf(why, whycap, "表达式错: 未终止");
                 return 0;
             }
-            if (vt_expr_check(st->expr, w, sizeof w) != 0) {   /* 空 / 超长 / 语法 / 未知名字都由它拦（spec V5 §4） */
+            /* 表达式校验用整张名字表（v10）：引用别步定义的自定义变量也合法（运行期未写才 `结果无值`） */
+            if (vt_expr_check(st->expr, (const char (*)[16])op->vars, OP_VAR_IDX_N, w, sizeof w) != 0) {
                 snprintf(why, whycap, "表达式错: %s", w);
                 return 0;
             }
@@ -338,7 +397,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-9..-1：-1..-5 = 触发变量、-6..-9 = 结果槽）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、计算步 a1 ∈ 1..4 且 expr 非空、过 vt_expr_check（其余字段/ref 必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -440,7 +499,9 @@ void vt_ops_clear(void)
  *   jumps   本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用一枚；超限中止 `跳转超限`，spec §2.3）
  *   trig_seen  已消费到的触发序号（触发槽 SPSC 的消费者一侧）
  *   trig    触发数据快照（起跑时整组拷入，运行中不回填；td=NULL 的手动运行 = 全零 ⇒ 全部变量无值）
- *   slots/slot_mask  结果槽 r1..r4 与已写位（v5）：起跑清零；计算步写、槽引用（-6..-9）读（spec V5 §5）
+ *   fx/fy/res_mask  fx/fy（最近一次找图/找色命中坐标）与已写位（v10）：起跑清零；视觉步写、字段引用（-6/-7）读
+ *   vnames/vvals/vmask  自定义变量名快照（起跑从 op->vars 整表抄）与值 / 已写位（v10）：起跑清零；
+ *               计算步写、字段引用（-10..-25）读（spec EDITOR_V2 §Task 7.5）
  *   t_start   起跑时刻（完成日志的「用时」）
  *   frozen / frozen_since  帧冻结标记与冻结起点（帧窗内暂停推进；帧关后把 t0/deadline/t_start
  *              一起平移暂停时长 —— 见 vt_ops_tick）；起跑 / 完成 / 中止都清零，不泄漏到下一次运行
@@ -477,9 +538,12 @@ static struct {
     int      jumps;                                          /* 本次运行的跳转计数（起跑清零；条件跳转 + 跳转步共用；spec §2.3）：超限中止 `跳转超限` */
     uint32_t trig_seen;
     struct vt_trig_data trig;                                /* 触发数据快照（起跑时整组拷入；spec §1.5） */
-    double   slots[4];                                       /* 结果槽 r1..r4（v5 计算步写、槽引用读；起跑清零，spec V5 §5.1）——
-                                                              * 名字用复数避与上面的虚拟槽号 R.slot 撞名 */
-    unsigned slot_mask;                                      /* 槽已写位（位 0..3 = r1..r4；1=已写；起跑清零） */
+    double   fx, fy;                                         /* fx/fy：最近一次找图/找色命中坐标（视觉步写、字段引用读；
+                                                              * 起跑清零，spec EDITOR_V2 §Task 7.5 —— 替代 v5 的结果槽 r1/r2） */
+    unsigned res_mask;                                       /* fx/fy 已写位（位 0 = fx、位 1 = fy；起跑清零） */
+    char     vnames[OP_VAR_IDX_N][16];                       /* 自定义变量名快照（起跑从 op->vars 整表抄；空名 = 空槽） */
+    double   vvals[OP_VAR_IDX_N];                            /* 自定义变量值（起跑清零；计算步写、字段引用读） */
+    unsigned vmask;                                          /* 自定义变量已写位（位 0..15 = 索引；起跑清零） */
     uint64_t t_start;
     int      frozen;                                         /* 帧冻结中（R1 封口）：帧窗内暂停推进 */
     uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
@@ -596,44 +660,54 @@ static void op_release_held(void)
 
 /**
  * (vtouch-doc: op_resolve)
- * @brief 解析一个可变量字段：字面值原样出；负数编码查触发快照或结果槽。
- * @param   v        字段原值：字面值（≥0）或负数编码引用 -9..-1（-1..-5 = 触发变量、-6..-9 = 结果槽）
- * @param   lo       结果槽取整后的夹取下界（坐标 0 / 时长按类型档；spec V5 §5.3）
+ * @brief 解析一个可变量字段：字面值原样出；负数编码查触发快照 / fx/fy / 自定义变量。
+ * @param   v        字段原值：字面值（≥0）或负数编码引用 -25..-1（-1..-5 = 触发变量、-6/-7 = fx/fy、-10..-25 = 自定义变量索引 0..15；-8/-9 退役恒无值）
+ * @param   lo       取整后的夹取下界（坐标 0 / 时长按类型档；spec V5 §5.3）
  * @param   hi       夹取上界（坐标 逻辑尺寸-1 / 时长按类型档）
  * @param   out      成功时写入解析结果
  * @return  0 成功；-1 失败（已按码中止：`变量无值` / `结果无值`）。
- * @note    **静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），未设即中止 `变量无值` —— **不静默当 0**（spec §1.3/D6）；-6..-9 查 R.slot_mask（未写即中止 `结果无值`），已写则 llround 取整后夹取 [lo,hi]（静默语义，spec V5 §5.3）；越界负值不会到达（op_valid 已拒，防御按无值中止）。
+ * @note    **静态**，只在执行器内用：v>=0 直接出；-1..-5 查 R.trig.mask 的对应位（OP_TRIGB_TDX << idx），未设即中止 `变量无值` —— **不静默当 0**（spec §1.3/D6）；-6/-7 查 R.res_mask 的 fx/fy（视觉步命中写、起跑清零；未写即中止 `结果无值`）；-10..-25 查 R.vmask 的自定义变量值表（同上）；-8/-9 恒 `结果无值`（v5 槽编码退役）。命中则 llround 取整后夹取 [lo,hi]（静默语义，spec V5 §5.3）；越界负值不会到达（op_valid 已拒，防御按无值中止）。
  */
 static int op_resolve(int v, int lo, int hi, int *out)
 {
     const int val[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
+    double d;
     int idx;
 
     if (v >= 0) { *out = v; return 0; }                      /* 字面值：原样出 */
-    if (v >= OP_VAR_R4 && v <= OP_VAR_R1) {                  /* -6..-9 = r1..r4（v5 结果槽引用；spec §5.3） */
-        idx = OP_VAR_R1 - v;                                 /* -6→0(r1) … -9→3(r4) */
-        if (!(R.slot_mask & (1u << idx))) {                  /* 槽未写 ⇒ 结果无值（绝不静默当 0；spec V5 §5.2） */
+    if (v == OP_VAR_FX || v == OP_VAR_FY) {                  /* -6/-7：fx/fy（最近命中坐标；未写 → 结果无值） */
+        idx = (v == OP_VAR_FX) ? 0 : 1;
+        if (!(R.res_mask & (1u << idx))) {                   /* 未写 ⇒ 结果无值（绝不静默当 0） */
             vt_ops_abort("结果无值");
             return -1;
         }
-        {
-            double d = R.slots[idx];                         /* 先夹 double 域再取整：llround 超范围行为未指定（spec §5.3） */
-            if (d < (double)lo) d = lo;                      /* 夹取 [lo,hi]：静默语义，不因越界中止（spec §5.3） */
-            else if (d > (double)hi) d = hi;
-            *out = (int)llround(d);
+        d = (idx == 0) ? R.fx : R.fy;
+    } else if (v >= OP_VAR_V15 && v <= OP_VAR_V0) {          /* -10..-25：自定义变量（索引 0..15；未写 → 结果无值） */
+        idx = OP_VAR_V0 - v;                                 /* -10→0 … -25→15 */
+        if (!(R.vmask & (1u << idx))) {
+            vt_ops_abort("结果无值");
+            return -1;
         }
+        d = R.vvals[idx];
+    } else if (v == OP_VAR_RET1 || v == OP_VAR_RET2) {       /* -8/-9：退役槽编码（v5 r3/r4）悬空 → 结果无值 */
+        vt_ops_abort("结果无值");
+        return -1;
+    } else if (v >= OP_VAR_TMS && v <= OP_VAR_TDX) {         /* -1..-5：触发数据（mask 缺位 → 变量无值） */
+        idx = OP_VAR_TDX - v;                                /* -1→0(tdx) … -5→4(tms)，与 OP_TRIGB_* 位序一致 */
+        if (!(R.trig.mask & (OP_TRIGB_TDX << idx))) {        /* 本次触发没带这个变量 ⇒ 无值（绝不静默当 0） */
+            vt_ops_abort("变量无值");
+            return -1;
+        }
+        *out = val[idx];
         return 0;
-    }
-    if (v < OP_VAR_TMS || v > OP_VAR_TDX) {                  /* 不会到达：op_valid 只放行 -9..-1；防御按无值 */
+    } else {                                                 /* 不会到达：op_valid 只放行 -25..-1；防御按无值 */
         vt_ops_abort("变量无值");
         return -1;
     }
-    idx = OP_VAR_TDX - v;                                    /* -1→0(tdx) … -5→4(tms)，与 OP_TRIGB_* 位序一致 */
-    if (!(R.trig.mask & (OP_TRIGB_TDX << idx))) {            /* 本次触发没带这个变量 ⇒ 无值（绝不静默当 0） */
-        vt_ops_abort("变量无值");
-        return -1;
-    }
-    *out = val[idx];
+    /* fx/fy 与自定义变量：先夹 double 域再取整 —— llround 超范围行为未指定（spec §5.3） */
+    if (d < (double)lo) d = lo;                              /* 夹取 [lo,hi]：静默语义，不因越界中止（spec §5.3） */
+    else if (d > (double)hi) d = hi;
+    *out = (int)llround(d);
     return 0;
 }
 
@@ -1092,7 +1166,7 @@ static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, i
  * @param   attempts 输出：尝试次数（抓帧 + 匹配的轮数；单次 = 1；可 NULL）
  * @param   err      输出：失败原因词（`无画面` / `视觉错` / `区域不存在` / `模板不存在`；命中 / 未命中置 NULL）
  * @return  0 = 命中 / -1 = 未命中 / -2 = 失败（err 已置原因词，调用方中止或按码报错）。
- * @note    **静态**，op 执行器与面板「试一下」共用（op 路径单次行为逐字不变：中止词 / 日志 / 结果槽口径照旧）。持续模式（T7.4）：循环 { 抓新帧（force=1，不复用缓存）→ 匹配 → 命中 break } 到 deadline；硬失败（无画面 / 视觉错 / 区域不存在 / 模板不存在）立即按 -2 收场，不等超时；超时按未命中（-1）返回。持续循环占着主循环：每轮手动 vt_shm_tick 喂核心心跳（面板心跳停滞 ≥3s 会自杀退出；单次 ≤1s 不越线）。链路（spec VISION §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`。命中点从帧坐标换算成竖屏逻辑坐标（vt_vis_frame_to_logic）；找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。
+ * @note    **静态**，op 执行器与面板「试一下」共用（op 路径单次行为逐字不变：中止词 / 日志 / 命中坐标口径照旧；v10 起把命中点写进 fx/fy 的是调用方 op_vis_run）。持续模式（T7.4）：循环 { 抓新帧（force=1，不复用缓存）→ 匹配 → 命中 break } 到 deadline；硬失败（无画面 / 视觉错 / 区域不存在 / 模板不存在）立即按 -2 收场，不等超时；超时按未命中（-1）返回。持续循环占着主循环：每轮手动 vt_shm_tick 喂核心心跳（面板心跳停滞 ≥3s 会自杀退出；单次 ≤1s 不越线）。链路（spec VISION §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`。命中点从帧坐标换算成竖屏逻辑坐标（vt_vis_frame_to_logic）；找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。
  */
 static int vis_exec_find(int kind, const char *ref, const char *region, int a1, int a2, int timeout_ms,
                          int *x, int *y, uint64_t *ms, int *attempts, const char **err)
@@ -1184,9 +1258,9 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
 
 /**
  * (vtouch-doc: op_vis_run)
- * @brief 视觉步骤执行（找图 / 找色）：转调 vis_exec_find → 结果槽 + 四档分支。
+ * @brief 视觉步骤执行（找图 / 找色）：转调 vis_exec_find → fx/fy + 四档分支。
  * @param   st       当前视觉步（type = OP_STEP_FINDIMAGE / OP_STEP_FINDCOLOR）
- * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：失败 → 按 vis_exec_find 的原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → r1/r2 = 命中点**竖屏逻辑坐标** + 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。ms > 0 = 持续查找（T7.4）：vis_exec_find 循环抓帧查到命中或超时（超时 = 未命中）；日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`；持续增量：`vis 找图 <模板> 持续 <ms> 命中 x,y（尝试 N 次 / 耗时 M ms）` / `… 未命中（超时 <ms>，尝试 N 次）`（找色同款去模板名）。按住期允许（纯读屏不碰手指，spec §6.2）。
+ * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：失败 → 按 vis_exec_find 的原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → fx/fy = 命中点**竖屏逻辑坐标**（res_mask 置位；v10 起替代 v5 的 r1/r2）+ 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。ms > 0 = 持续查找（T7.4）：vis_exec_find 循环抓帧查到命中或超时（超时 = 未命中）；日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`；持续增量：`vis 找图 <模板> 持续 <ms> 命中 x,y（尝试 N 次 / 耗时 M ms）` / `… 未命中（超时 <ms>，尝试 N 次）`（找色同款去模板名）。按住期允许（纯读屏不碰手指，spec §6.2）。
  */
 static void op_vis_run(const struct vt_step *st)
 {
@@ -1201,7 +1275,7 @@ static void op_vis_run(const struct vt_step *st)
     if (rc == -2) { vt_ops_abort(err); return; }             /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
     hit = (rc == 0);
     if (hit) {
-        R.slots[0] = ox; R.slots[1] = oy; R.slot_mask |= 1u | 2u;      /* r1/r2 = 命中点竖屏逻辑坐标（spec §6.2） */
+        R.fx = ox; R.fy = oy; R.res_mask |= 3u;              /* fx/fy = 命中点竖屏逻辑坐标（v10 替代 v5 的 r1/r2；spec §6.2） */
         if (st->type == OP_STEP_FINDIMAGE) {
             if (st->ms > 0)                                  /* 持续（T7.4）：尝试计数 + 全程耗时 */
                 fprintf(stderr, "vtouchd: vis 找图 %s 持续 %d 命中 %d,%d（尝试 %d 次 / 耗时 %llu ms）\n",
@@ -1318,7 +1392,7 @@ void vt_ops_test_poll(void)
 
 /* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算 / 视觉步）；点按 / 滑动 / 按下 →
  * 中止 `槽占用`）+ 解析本步数值字段（字面值 / 负数编码引用；变量无值 → 中止 `变量无值`、
- * 槽未写 → 中止 `结果无值`）+ 打步日志 + 发这一步的起始动作（点按 / 滑动 / 按下先 down；
+ * 变量未写 → 中止 `结果无值`）+ 打步日志 + 发这一步的起始动作（点按 / 滑动 / 按下先 down；
  * 弹起 up；等待 / 条件步 / 跳转 / 计算 / 视觉步不动手）。 */
 static void op_begin_step(void)
 {
@@ -1446,24 +1520,34 @@ static void op_begin_step(void)
         op_jump_apply(target);                               /* 0 = 结束（op_finish）/ 否则守卫 + 落位（spec §2.3） */
         break;
     }
-    case OP_STEP_CALC: {                                     /* 计算（v5）：结果槽 rN = 表达式（spec §5.2） */
+    case OP_STEP_CALC: {                                     /* 计算（v10）：<名> = 表达式（a1 = 变量索引、ref = 名；spec §7.5） */
         const int vals[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
+        struct vt_expr_env env;
         double out;
-        int v, rc = vt_expr_eval(st->expr, vals, R.trig.mask, R.slots, R.slot_mask, &out);
+        int v, rc;
+        memset(&env, 0, sizeof env);
+        env.trig_vals = vals;
+        env.trig_mask = R.trig.mask;
+        env.fx = R.fx; env.fy = R.fy; env.res_mask = R.res_mask;
+        env.names = (const char (*)[16])R.vnames;            /* 名字快照（起跑从 op->vars 整表抄；v10） */
+        env.vals = R.vvals;
+        env.var_mask = R.vmask;
+        env.nnames = OP_VAR_IDX_N;
+        rc = vt_expr_eval(st->expr, &env, &out);
         if (rc == VT_EXPR_NO_VAR)  { vt_ops_abort("变量无值"); return; }   /* 触发数据无值（沿用 v2 词；spec §5.2） */
-        if (rc == VT_EXPR_NO_SLOT) { vt_ops_abort("结果无值"); return; }   /* 槽未写（v5 新词；spec §5.2） */
+        if (rc == VT_EXPR_NO_SLOT) { vt_ops_abort("结果无值"); return; }   /* 变量未写（v5 词沿用；spec §5.2 / §7.5） */
         if (rc != VT_EXPR_OK)      { vt_ops_abort("表达式错"); return; }   /* 防御：除零/域错/非有限——编辑期已拦（spec §5.2） */
-        R.slots[st->a1 - 1] = out;                           /* 写槽（覆盖；spec §5.2） */
-        R.slot_mask |= 1u << (st->a1 - 1);
+        R.vvals[st->a1] = out;                               /* 写变量（同名重复赋值 = 后者覆盖；spec §7.5） */
+        R.vmask |= 1u << st->a1;
         {
             double dv = out;                                 /* 日志值 = 取整显示（spec §7） */
             if (dv < (double)INT_MIN) dv = INT_MIN;          /* 先夹 int 域再取整：llround 超范围行为未指定（spec §5.3） */
             else if (dv > (double)INT_MAX) dv = INT_MAX;
             v = (int)llround(dv);
         }
-        fprintf(stderr, "vtouchd: op 步 %d/%d 计算 r%d = %d\n", R.step + 1, R.nsteps, st->a1, v);
+        fprintf(stderr, "vtouchd: op 步 %d/%d 计算 %s = %d\n", R.step + 1, R.nsteps, st->ref, v);
         if (op_trace_on())                                   /* TRACE：回显表达式原文（spec §7；L9 默认零输出） */
-            fprintf(stderr, "vtouchd: op 计算 r%d = %s = %d\n", st->a1, st->expr, v);
+            fprintf(stderr, "vtouchd: op 计算 %s = %s = %d\n", st->ref, st->expr, v);
         R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
         R.deadline = R.t0;
         break;
@@ -1674,7 +1758,7 @@ int vt_ops_next_deadline_ms(void)
  * @brief 起跑一条操作（忙时丢弃 + 日志）。
  * @param   name     操作名；表里查不到 / 没空闲槽 / 已有操作在跑 = 丢弃 + 对应日志
  * @param   td       触发数据快照（mask/dx/dy/ux/uy/ms；spec §1.5）；NULL = 手动运行（全零 ⇒ 全部变量无值）
- * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 触发数据拷进 R.trig（起跑瞬间快照、运行中不回填，spec §1.2）+ 结果槽清零（值 + 未写标记，spec V5 §5.1）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`；VTOUCH_OPS_TRACE=1 时再一行 `op 变量 tdx=… tdy=… tux=… tuy=… tms=…`（未设字段打 `-`，值取快照）。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
+ * @note    起跑 = 整条快照进执行器私有内存（运行中改表 / 删表不影响本次，spec §7）+ 触发数据拷进 R.trig（起跑瞬间快照、运行中不回填，spec §1.2）+ 变量表快照（vnames = op->vars）+ 自定义变量值清零（vvals/vmask，spec EDITOR_V2 §Task 7.5）+ fx/fy 清零（视觉命中坐标同口径）+ 挑第一个空闲虚拟槽（virt[]/staged[] 都空）全程占用，并写 g.op_run / op_run_step / op_run_state 供面板回显；日志 `op 启动 <名> 步数=N 槽=K 门控=<r1|无>`；VTOUCH_OPS_TRACE=1 时再一行 `op 变量 tdx=… tdy=… tux=… tuy=… tms=… fx=… fy=…`（未设字段打 `-`，值取快照）。门控 / 自动关（spec §4.3）：gate 非空先过门控检查 —— 区域须存在、是开关型且开着，否则 `op 丢弃 门控拦截`；auto_off=1 在正常完成时把门控开关翻回关（中止不翻）。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   起跑的三件事（顺序有讲究）：
@@ -1744,8 +1828,11 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
-    memset(R.slots, 0, sizeof R.slots);                      /* 结果槽起跑清零（值 + 未写标记；spec V5 §5.1） */
-    R.slot_mask = 0;
+    memcpy(R.vnames, g.ops[i].vars, sizeof R.vnames);        /* 自定义变量名快照（v10）：整表从操作抄（名字表 = 单源） */
+    memset(R.vvals, 0, sizeof R.vvals);                      /* 自定义变量起跑清零（值 + 未写标记；spec §7.5 沿用 v5 口径） */
+    R.vmask = 0;
+    R.fx = R.fy = 0.0;                                       /* fx/fy 起跑清零（同 v5 结果槽口径；spec §7.5） */
+    R.res_mask = 0;
     R.hold = R.dur = R.nsamp = R.sample = 0;
     R.sx1 = R.sy1 = R.sx2 = R.sy2 = 0;
     R.t_start = op_now_ms();
@@ -1759,14 +1846,18 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
             R.name, R.nsteps, R.slot, R.gate[0] ? R.gate : "无");
     if (op_trace_on()) {                                     /* TRACE：起跑一行变量快照（未设打 `-`；L9 默认零输出） */
         const int val[OP_VAR_N] = { R.trig.dx, R.trig.dy, R.trig.ux, R.trig.uy, R.trig.ms };
-        char b[OP_VAR_N][16];
+        char b[OP_VAR_N + 2][16];                            /* v10：扩 fx/fy 两格（起跑清零 ⇒ 恒 `-`，照 mask 写） */
         int k;
         for (k = 0; k < OP_VAR_N; k++) {
             if (R.trig.mask & (OP_TRIGB_TDX << k)) snprintf(b[k], sizeof b[k], "%d", val[k]);
             else snprintf(b[k], sizeof b[k], "-");
         }
-        fprintf(stderr, "vtouchd: op 变量 tdx=%s tdy=%s tux=%s tuy=%s tms=%s\n",
-                b[0], b[1], b[2], b[3], b[4]);
+        if (R.res_mask & 1u) snprintf(b[OP_VAR_N], sizeof b[OP_VAR_N], "%d", (int)llround(R.fx));
+        else snprintf(b[OP_VAR_N], sizeof b[OP_VAR_N], "-");
+        if (R.res_mask & 2u) snprintf(b[OP_VAR_N + 1], sizeof b[OP_VAR_N + 1], "%d", (int)llround(R.fy));
+        else snprintf(b[OP_VAR_N + 1], sizeof b[OP_VAR_N + 1], "-");
+        fprintf(stderr, "vtouchd: op 变量 tdx=%s tdy=%s tux=%s tuy=%s tms=%s fx=%s fy=%s\n",
+                b[0], b[1], b[2], b[3], b[4], b[OP_VAR_N], b[OP_VAR_N + 1]);
     }
     op_ev_push("run", 1, R.nsteps);
 }

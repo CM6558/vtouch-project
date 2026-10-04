@@ -439,8 +439,8 @@ int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int 
  *          区域判断：a1,a2 = 判定点、a3 = 不成立档位、a4 = 成立档位（0=中止 1=跳过下一步 2=继续下一步 3=跳转）、
  *          j1 = 成立侧 / j2 = 不成立侧跳转目标（仅该侧档位=跳转时有意义；0 = 结束）、ref = 区域 id；
  *          开关判断：a3 = 不成立档位、a4 = 成立档位、j1/j2 同款、ref = 区域 id（须开关型）；
- *          跳转步：a1 = 目标步骤（0 = 结束）、其余字段忽略；计算步：a1 = 槽号 1..4、expr = 表达式。
- *          坐标 / 时长字段可为字面值或负数编码引用（-9..-1：-1..-5 = tdx/tdy/tux/tuy/tms、-6..-9 = r1..r4）。
+ *          跳转步：a1 = 目标步骤（0 = 结束）、其余字段忽略；计算步（v10）：a1 = 变量索引 0..15、ref = 变量名、expr = 表达式。
+ *          坐标 / 时长字段可为字面值或负数编码引用（-25..-1：-1..-5 = tdx/tdy/tux/tuy/tms、-6/-7 = fx/fy、-8/-9 = 退役槽（悬空）、-10..-25 = 自定义变量）。
  *          ref / expr 出参：写空串 = 无；空 / 未终止（防御）也写空串；n<=0 或指针 NULL 可省略；j1/j2 可 NULL。
  */
 int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
@@ -486,7 +486,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  * @return  0 核心已吃掉且回读通过（同名 + 步数一致）；-1 失败（原因见 out_err）。
  * @note    邮箱是单槽：投完等 edit_applied 到位才返回（正常 ~1ms），否则下一条编辑会把它盖掉；
  *          refs / exprs 逐步拷进 op.steps[i].ref / .expr（strnlen 防御照款：未终止按空串处理，同 vtouch_get_op_step 口径）；
- *          核心的校验是单点（名字 / 步数 / 类型 1..9 / 坐标 / 时长 / 变量编码 -9..-1 / 计算步 expr 过 vt_expr_check / 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
+ *          vars 表（v10）由计算步派生：vars[a1] = ref（名字表单源）；核心的校验是单点（名字 / 步数 / 类型 1..11 / 坐标 / 时长 / 变量编码 -25..-1 / 变量名表（合法 + 不重名 + vars[a1]==ref）/ 计算步 expr 过 vt_expr_check（名字表 = vars）/ 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
  */
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
                   const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
@@ -526,6 +526,16 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
             if (rn <= VT_EXPR_MAX)                   /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
                 snprintf(op.steps[i].expr, sizeof op.steps[i].expr, "%s", exprs[i]);
         }
+    }
+    /* 自定义变量名表（契约 v10，spec EDITOR_V2 §Task 7.5）：由计算步派生 —— vars[a1] = ref（名字表单源；
+     * 同名步共享同一索引 = 「同名重复赋值后者覆盖」的单变量口径）。a1 越界 / 名字非法的载荷不写，
+     * 核心 op_valid 的变量表校验会把整条拒掉（防御照款）。 */
+    for (i = 0; i < nsteps; i++) {
+        if (op.steps[i].type != OP_STEP_CALC) continue;
+        if (op.steps[i].a1 < 0 || op.steps[i].a1 >= OP_VAR_IDX_N) continue;
+        rn = strnlen(op.steps[i].ref, sizeof op.steps[i].ref);
+        if (rn < 1 || rn > OP_VAR_NAME_MAX) continue;
+        snprintf(op.vars[op.steps[i].a1], sizeof op.vars[0], "%s", op.steps[i].ref);
     }
     if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) { if (out_err) *out_err = 2; return -1; }
     /* 回读校验（spec §2.6）：核心不给逐条回执 —— 找到同名且步数一致才算真落地。 */
@@ -608,14 +618,17 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
  * (vtouch-doc: vtouch_expr_check)
  * @brief 校验计算步表达式（转发核心 vt_expr_check；面板 real 构建链核心源码，同一实现）。
  * @param   s        表达式文本（可 NULL / 空）
+ * @param   names    自定义变量名表（≤16 条，NUL 结尾；空名 = 空槽；可 NULL = 无自定义）
+ * @param   nnames   names 条数（0..16）
  * @param   why      非法时写入短中文原因（可 NULL / 0 容）
  * @param   whycap   why 缓冲长度
  * @return  0 合法；-1 非法（why 已填原因）。
- * @note    面板表达式子层的 [确定] 走它（spec V5 §4：不过 → 就地拒收、层不关）。
+ * @note    面板表达式子层的 [确定] 走它（spec V5 §4：不过 → 就地拒收、层不关）；v10 起带名字表 ——
+ *          自定义命名变量只有出现在表里才算合法（名字全不中 → `未知名字`）。
  */
-int vtouch_expr_check(const char *s, char *why, int whycap)
+int vtouch_expr_check(const char *s, const char (*names)[16], int nnames, char *why, int whycap)
 {
-    return vt_expr_check(s, why, whycap > 0 ? (size_t)whycap : 0);
+    return vt_expr_check(s, names, nnames, why, whycap > 0 ? (size_t)whycap : 0);
 }
 
 /**

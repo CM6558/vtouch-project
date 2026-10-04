@@ -266,10 +266,10 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
     return 0;
 }
 
-/* 表达式校验（v5）：单跑模式没有核心解析器 —— 恒放行（桩行为：面板画得出来、点得动就行）。 */
-int vtouch_expr_check(const char *s, char *why, int whycap)
+/* 表达式校验（v5；v10 起带名字表）：单跑模式没有核心解析器 —— 恒放行（桩行为：面板画得出来、点得动就行）。 */
+int vtouch_expr_check(const char *s, const char (*names)[16], int nnames, char *why, int whycap)
 {
-    (void)s;
+    (void)s; (void)names; (void)nnames;
     if (why && whycap > 0) why[0] = 0;
     return 0;
 }
