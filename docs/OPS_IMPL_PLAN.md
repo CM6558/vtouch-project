@@ -4,7 +4,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给 vtouch 加「面板内操作编辑器 + 核心主线程执行器 + 区域/开关触发侧 + su 脚本入口」——启动与操作用作不再依赖 AutoJs6（老通道保留）。
+**Goal:** 给 vtouch 加「面板内操作编辑器 + 核心主线程执行器 + 区域/开关触发侧 + su 脚本入口」——启动与操作用作不再依赖旧 JS 客户端（该通道后于 2026-10-05 全退役）。
 
 **Architecture:** 操作表进共享内存区 A（`g.ops[]`，面板只读直读）；编辑走区 B 编辑邮箱（新码 5–11 + 操作载荷）；执行器在主循环（`vt_ops_tick()` + poll 第四档 deadline + 触发 eventfd）；面板加「操作」页 + 取点；su 脚本自包含单文件。
 
@@ -269,9 +269,9 @@ git commit -F build/_msg_t12.txt
 ### Task 1.3: README 段落 + 批收尾
 
 **Files:**
-- Modify: `README.md`（新增一节「su 脚本入口（不装 AutoJs 也能起）」；文内引用 `clients/vtouch.sh` / `scripts/pack_su.py` / `build/vtouch.sh`）
+- Modify: `README.md`（新增一节「su 脚本入口（自包含单文件）」；文内引用 `scripts/vtouch.sh.in` / `scripts/pack_su.py` / `build/vtouch.sh`）
 
-- [ ] **Step 1: 写 README 段落**（要点：设备上放 `build/vtouch.sh` → `/sdcard/vtouch.sh`；四个子命令与示例；"必定回读"的口径——pidof/端口/md5；老 AutoJs 通道仍在，不改）。规范同仓内其它节（`文件:行号` 引用、中文）。
+- [ ] **Step 1: 写 README 段落**（要点：设备上放 `build/vtouch.sh` → `/sdcard/vtouch.sh`；四个子命令与示例；"必定回读"的口径——pidof/端口/md5；旧 JS 客户端通道彼时仍在、不改）。规范同仓内其它节（`文件:行号` 引用、中文）。
 - [ ] **Step 2: 批收尾门**：`git status --short` 只剩 README；`sh -n build/vtouch.sh` 再跑一次。
 - [ ] **Step 3: 提交**
 

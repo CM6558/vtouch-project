@@ -43,7 +43,7 @@ su -c 'cd /data/local/tmp && nohup ./vtouchd_ui >/data/local/tmp/vt_ui_core.log 
 
 ## su 脚本入口（自包含单文件）
 
-主机侧 `python scripts/pack_su.py` 把 `build/vtouchd_ui` base64 内嵌进模板 `clients/vtouch.sh`
+主机侧 `python scripts/pack_su.py` 把 `build/vtouchd_ui` base64 内嵌进模板 `scripts/vtouch.sh.in`
 （三个占位符 `<<PAYLOAD_MD5>>` / `<<PAYLOAD_SIZE>>` / `<<PAYLOAD>>` 在 `scripts/vtouch.sh.in:17-18`，
 载荷写在标记行 `__VTOUCH_PAYLOAD_BELOW__` 之下，`:111-112`），生成**设备侧自包含入口**
 `build/vtouch.sh`（产物只写 LF，`scripts/pack_su.py:43`；打包器自带「载荷解回来逐字节等于源二进制」
