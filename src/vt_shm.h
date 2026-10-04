@@ -122,12 +122,17 @@ struct vt_shm_c {
 };
 
 /* 区 D：帧区（契约 v8 新增；spec VISION §3.1）。布局 = 帧头 + 双缓冲（各「逻辑宽 × 逻辑高 × 4」字节，
- * 两方向同字节数）。面板写帧 / 核心读帧；请求协议（spec §2.2）：
- *   核心：写 req_pending = ++请求序号（单调）→ 面板抓帧完成后写 req_seq = 该序号（**最后写**）
- *         + buf_idx 翻转 + flags/ts/尺寸/rotation；
- *   核心：完成判定 = req_seq == 请求序号；读帧头前后各读一次 seq（seqlock：奇 = 写入中、偶 = 稳定；
+ * 两方向同字节数）。面板写帧 / 核心读帧；请求协议（spec §2.2）+ **内存序**（写端 T3.1 照此实现；核心侧
+ * 已按 release/acquire 配对，见 vt_ops.c 的 op_vis_capture）：
+ *   核心：写 req_pending = ++请求序号（单调；**release 存**，或等价 store-store 屏障）；
+ *   面板：**acquire 读** req_pending（或等价 load-load 屏障）→ 抓帧 → 写 buf_idx 翻转 + flags/ts/
+ *         尺寸/rotation → **最后**写 req_seq = 该序号（**release 存**，或等价 store-store 屏障 ——
+ *         先行的像素与字段对核心可见）；
+ *   核心：完成判定 = req_seq == 请求序号（**acquire 读**）；读帧头前后各读一次 seq（seqlock：奇 = 写入中、
+ *         偶 = 稳定；字段读与第二次 seq 读之间需 load-load 屏障 —— ARMv8 的 acquire 读不约束其前访问；
  *         奇/变 → 重试至超时）。数据缓冲直接原地匹配（双缓冲：完成之后到下一次请求前，面板不碰当前
- *         缓冲 —— spec §3.2「或直接原地匹配，匹配只读不改帧」）。 */
+ *         缓冲 —— spec §3.2「或直接原地匹配，匹配只读不改帧」）。
+ *   ts_ns：面板写、核心读；**CLOCK_MONOTONIC**（单调钟口径）。 */
 #define VT_FRAME_MAGIC   0x4D524656u   /* 'V' 'F' 'R' 'M'（小端内存序 = "VFRM"） */
 #define VT_FRAME_VER     1u
 #define VT_FRAME_F_VALID 1u            /* flags bit0：帧有效 */
@@ -141,13 +146,13 @@ struct vt_shm_frame_hdr {
     uint32_t stride;                   /* 行跨距（字节） */
     uint32_t format;                   /* 0 = RGBA8888 */
     uint32_t rotation;                 /* 抓帧时屏幕方向（0..3） */
-    volatile uint32_t req_seq;         /* 面板写：已完成的抓帧请求序号 */
-    volatile uint32_t req_pending;     /* 核心写：请求序号（0 = 无请求） */
+    volatile uint32_t req_seq;         /* 面板写：已完成的抓帧请求序号（release 存 / 最后写；见区 D 契约） */
+    volatile uint32_t req_pending;     /* 核心写：请求序号（0 = 无请求；release 存；面板 acquire 读） */
     uint32_t buf_idx;                  /* 面板写：最近完成帧所在缓冲（0/1） */
     volatile uint32_t flags;           /* 面板写：bit0 = 帧有效、bit1 = 抓帧失败。**每次完成时两位一起重写**
                                         * （成功 = 只置 bit0；失败 = 置 bit1 并清 bit0）—— 核心按「VALID 且非 ERR」判成败 */
     int32_t  err;                      /* 失败码 */
-    uint64_t ts_ns;                    /* 抓帧完成时刻（单调钟） */
+    uint64_t ts_ns;                    /* 抓帧完成时刻（CLOCK_MONOTONIC） */
 };
 /* 帧头必须装进一页（帧缓冲起点按页对齐，页对齐只留一页余量 —— 同区 B 的断言纪律）。 */
 _Static_assert(sizeof(struct vt_shm_frame_hdr) <= 4096, "帧头必须装进一页");

@@ -868,7 +868,9 @@ static int op_vis_capture(struct op_vis_frame *fr)
         vt_ops_abort("无画面");
         return -1;
     }
-    /* 按 seqlock 读一次稳定帧头（读 seq → 读字段 → 再读 seq；奇/变 → 重试至超时，spec §3.2）。
+    /* 按 seqlock 读一次稳定帧头（读 seq → 读字段 → load-load 屏障 → 再读 seq；奇/变 → 重试至超时，
+     * spec §3.2）。屏障必须有：第二次 seq 读的 acquire 不约束其前访问（ARMv8 LDAR 只挡其后的访问），
+     * 字段读与 s2 之间缺 load-load 序 ⇒ 撕裂场景 s1 == s2 仍可能成立（同 vt_shm.c 的 panel_rect）。
      * 数据缓冲不拷贝：完成观察之后到下一次请求之前面板不会碰它（双缓冲 + 单请求在途），
      * 直接原地匹配（spec §3.2「或直接原地匹配，匹配只读不改帧」）。 */
     for (;;) {
@@ -877,6 +879,7 @@ static int op_vis_capture(struct op_vis_frame *fr)
             buf = h->buf_idx;
             w = h->width; hh = h->height; stride = h->stride; rot = h->rotation;
             ts = h->ts_ns;
+            __sync_synchronize();                            /* load-load 屏障：字段读先于 s2 读（同 panel_rect） */
             s2 = __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE);
             if (s1 == s2) break;                             /* 读期间没变过：这份帧头可信 */
         }
@@ -1018,10 +1021,10 @@ static int op_vis_read_pts(const char *name, uint32_t *base, int *base_tol,
     bt = (int)hdr[16] | ((int)hdr[17] << 8);
     if (cnt < 1 || cnt > VT_VIS_PTS_MAX || bt > 255) { fclose(f); return -1; }
     for (i = 0; i < cnt; i++) {
-        unsigned char p[12];
+        unsigned char p[10];                                 /* 点记录 = {dx i16, dy i16, rgb u32, tol u16}（10B，定稿） */
         int dx, dy, tol;
         uint32_t rgb;
-        if (fread(p, 1, sizeof p, f) != sizeof p) { fclose(f); return -1; }
+        if (fread(p, 1, 10, f) != 10) { fclose(f); return -1; }
         dx = (int)((uint16_t)p[0] | ((uint16_t)p[1] << 8));      /* dx i16（小端） */
         if (dx >= 32768) dx -= 65536;
         dy = (int)((uint16_t)p[2] | ((uint16_t)p[3] << 8));
