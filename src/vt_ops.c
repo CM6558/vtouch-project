@@ -271,15 +271,15 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             break;
         }
-        case OP_STEP_FINDIMAGE: {                /* 找图（v8；T7.4 扩 ms）：ref = 模板名（必填）；expr = 区域名（空 = 全屏）；
-                                                  * a1 = 阈值 0..255；a2 = 0；ms = 0..60000（0 = 单次、>0 = 持续超时）；
+        case OP_STEP_FINDIMAGE: {                /* 找图（v8；T7.4 扩 ms；v2.1 颜色校验）：ref = 模板名（必填）；expr = 区域名（空 = 全屏）；
+                                                  * a1 = 阈值 0..255；a2 = 颜色校验 0/1；ms = 0..60000（0 = 单次、>0 = 持续超时）；
                                                   * a3/a4 = 不成立/成立档位；j1/j2 = 该侧跳转目标（域同条件步）。spec VISION §6.1 */
             if (st->a1 < 0 || st->a1 > 255) {
                 snprintf(why, whycap, "第 %d 步阈值越界（0..255）", i + 1);
                 return 0;
             }
-            if (st->a2 != 0) {
-                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+            if (st->a2 != 0 && st->a2 != 1) {                /* v2.1（2026-10-05e）：a2 = 颜色校验开关 */
+                snprintf(why, whycap, "第 %d 步字段必须为 0/1", i + 1);
                 return 0;
             }
             if (st->ms < 0 || st->ms > 60000) {
@@ -397,7 +397,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -1039,12 +1039,13 @@ static int op_vis_region(const char *name, const struct op_vis_frame *fr,
  * @return  0 成功；-1 文件问题（调用方中止 `模板不存在`）；-2 内存失败（调用方中止 `视觉错`）。
  * @note    **静态**，只在执行器内用。目录 /data/local/vtouch-runtime/templates/（spec §5.1）；格式逐字照实施计划「模板/点集文件格式」（T2.1 读端）。
  */
-static int op_vis_read_tmpl(const char *name, uint8_t **gray, int *tw, int *th, int *trot)
+static int op_vis_read_tmpl(const char *name, uint8_t **gray, int *tw, int *th, int *trot,
+                            uint32_t *avg_rgb, int *has_color)
 {
     char path[128];
-    unsigned char hdr[14];
+    unsigned char hdr[14], tail[8];
     uint8_t *buf;
-    size_t n;
+    size_t n, got;
     uint32_t ver;
     int w, h, rot;
     FILE *f;
@@ -1065,6 +1066,13 @@ static int op_vis_read_tmpl(const char *name, uint8_t **gray, int *tw, int *th, 
     buf = malloc(n);
     if (!buf) { fclose(f); return -2; }                      /* 内存失败与文件问题分开（中止词不同） */
     if (fread(buf, 1, n, f) != n) { free(buf); fclose(f); return -1; }
+    got = fread(tail, 1, sizeof tail, f);                    /* 尾扩展（可选；面板写：x/y u16×2 + 平均色 r/g/b u8×3 + res） */
+    if (avg_rgb) *avg_rgb = 0;
+    if (has_color) *has_color = 0;
+    if (got >= 8) {                                          /* 平均色 = 颜色校验存色（2026-10-05e） */
+        if (avg_rgb) *avg_rgb = ((uint32_t)tail[4]) | ((uint32_t)tail[5] << 8) | ((uint32_t)tail[6] << 16);
+        if (has_color) *has_color = 1;
+    }
     fclose(f);
     *gray = buf; *tw = w; *th = h; *trot = rot;
     return 0;
@@ -1152,6 +1160,10 @@ static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, i
     return dst;
 }
 
+/* 颜色校验每通道容差（平均色；2026-10-05e）：灰度命中后 |Δr|/|Δg|/|Δb| 均 ≤ 此值才算命中。
+ * 48 = 宽松档：拦「明暗接近但色相不同」的误匹配（如纯红↔暗绿），又能容忍亮度/色温波动。 */
+#define VT_OPS_COLOR_TOL 48
+
 /**
  * (vtouch-doc: vis_exec_find)
  * @brief 查找执行（找图 / 找色；op 视觉步与面板试查共用）：抓帧（或复用）→ 帧视图 → 区域换算 → 匹配；持续模式循环到命中或超时。
@@ -1173,6 +1185,8 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
 {
     struct op_vis_frame fr;
     int rx, ry, rw, rh, ox = 0, oy = 0, rc, tries = 0;
+    uint32_t avg_rgb = 0;
+    int has_color = 0, cc_log = 0;                           /* 颜色校验（找图 a2=1；2026-10-05e） */
     uint64_t t0, dt = 0, t_start;
 
     *err = NULL;
@@ -1204,7 +1218,7 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
             uint8_t *gray = NULL;
             int tw = 0, th = 0, trot = 0, steps;
 
-            rc = op_vis_read_tmpl(ref, &gray, &tw, &th, &trot);
+            rc = op_vis_read_tmpl(ref, &gray, &tw, &th, &trot, &avg_rgb, &has_color);
             if (rc != 0) { *err = (rc == -2) ? "视觉错" : "模板不存在"; break; }
             steps = (trot - fr.rot) & 3;                     /* 模板 → 当前帧的顺时针步数（spec §11-#7） */
             if (steps) {
@@ -1218,6 +1232,36 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
             rc = vt_vis_find_image(rx, ry, rw, rh, gray, tw, th, a1, &ox, &oy);
             dt = op_now_ms() - t0;
             free(gray);
+            if (rc == VT_VIS_OK && a2 == 1) {                /* 颜色校验（2026-10-05e）：灰度命中后再验命中区域平均色 */
+                if (!has_color) {
+                    if (!cc_log) { cc_log = 1; fprintf(stderr, "vtouchd: vis 找图 颜色校验：模板无颜色信息（跳过；重存模板可带上）\n"); }
+                } else {
+                    uint64_t sr = 0, sg = 0, sb = 0, nn = (uint64_t)tw * (uint64_t)th;
+                    int py2, px2, ar, ag, ab, dr, dg, db;
+                    for (py2 = 0; py2 < th; py2++) {
+                        const uint8_t *row = fr.rgba + (size_t)(oy + py2) * (size_t)fr.stride;
+                        for (px2 = 0; px2 < tw; px2++) {
+                            const uint8_t *pp = row + (size_t)(ox + px2) * 4u;
+                            sr += pp[0]; sg += pp[1]; sb += pp[2];
+                        }
+                    }
+                    ar = (int)(sr / nn); ag = (int)(sg / nn); ab = (int)(sb / nn);
+                    dr = ar - (int)((avg_rgb >> 16) & 0xFFu);
+                    dg = ag - (int)((avg_rgb >> 8) & 0xFFu);
+                    db = ab - (int)(avg_rgb & 0xFFu);
+                    if (dr < 0) dr = -dr;
+                    if (dg < 0) dg = -dg;
+                    if (db < 0) db = -db;
+                    if (dr > VT_OPS_COLOR_TOL || dg > VT_OPS_COLOR_TOL || db > VT_OPS_COLOR_TOL) {
+                        if (!cc_log) {
+                            cc_log = 1;
+                            fprintf(stderr, "vtouchd: vis 找图 颜色校验不通过 Δ=(%d,%d,%d) @%d,%d（按未命中处理）\n",
+                                    dr, dg, db, ox, oy);
+                        }
+                        rc = VT_VIS_NO_MATCH;
+                    }
+                }
+            }
         } else if (kind == 2) {                              /* 找色多点：ref = 点集名（spec §6.1） */
             uint32_t base = 0;
             int base_tol = 0, n = 0;

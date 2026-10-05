@@ -3678,8 +3678,8 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
                 snprintf(why, (size_t)whycap, "第 %d 步：阈值必须在 0..255", si + 1);
                 return 0;
             }
-            if (s6[2] != 0) {
-                snprintf(why, (size_t)whycap, "第 %d 步：找图其它字段必须为空", si + 1);
+            if (s6[2] != 0 && s6[2] != 1) {          /* v2.1（2026-10-05e）：a2 = 颜色校验 0/1 */
+                snprintf(why, (size_t)whycap, "第 %d 步：找图字段必须为 0/1", si + 1);
                 return 0;
             }
             if (!g_ope_refs[si][0]) {
@@ -3826,8 +3826,9 @@ static void ope_step_text(int si, char *out, int outcap)
         /* 摘要（T3.2）：模板 / 区域 / 阈值 + 成立/不成立两档（跳转档带目标；同条件步口径） */
         ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
         ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
-        snprintf(out, (size_t)outcap, "模板 %s · %s · 阈值 %d · 成立 → %s / 不成立 → %s",
-                 ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", s6[1], t1, t2);
+        snprintf(out, (size_t)outcap, "模板 %s · %s · 阈值 %d%s · 成立 → %s / 不成立 → %s",
+                 ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", s6[1],
+                 s6[2] ? " · 颜色校验" : "", t1, t2);
         break;
     case OP_STEP_FINDCOLOR:
         ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
@@ -6092,7 +6093,7 @@ static const char *const g_help_lines[] = {
     "14. 方案：把当前的区域和操作整体存成一个命名方案；切换方案 = 换成那一套（编辑会自动存回当前方案）。",
     "15. 方案管理：「方案」页可以新建（空白）、从当前另存为、重命名、删除；当前方案不能删（先切到别的方案再删）。",
     "16. 计算：算一个数存进自己命名的变量——用触发数据（tdx/tdy=按下坐标、tux/tuy=弹起坐标、tms=按压时长毫秒）、找图/找色的命中坐标（fx/fy）、数字和已有变量做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。变量名字可以自己改（默认 v1、v2…）；算好的变量可以当坐标、时长用在后面的步骤里。",
-    "17. 找图：先存好模板（「模板」页截屏框选），步骤里选模板名——在当前画面里找这块图案（可以限定区域）；找到就把命中坐标写进 fx（x）/fy（y）（系统预置变量，后面的步骤直接引用），走「成立」档；没找到走「不成立」档。",
+    "17. 找图：先存好模板（「模板」页截屏框选），步骤里选模板名——在当前画面里找这块图案（可以限定区域）；找到就把命中坐标写进 fx（x）/fy（y）（系统预置变量，后面的步骤直接引用），走「成立」档；没找到走「不成立」档。打开「颜色校验」后，明暗像但颜色不同的图案会被跳过（旧模板重存一次即可生效）。",
     "18. 找色：按颜色找像素——填颜色（十六进制）和容差（0–255）；「多点找色」还要选一个点集（基准色 + 参考点，在「模板」页吸色点选生成）。找到同样写 fx/fy 走「成立」档，没找到走「不成立」档。",
     "19. 试一下：找图/找色步骤（和「模板」页）里点「试一下」——当场找一次，马上显示「命中 (x, y)」或「未命中」，并把找到的位置在屏幕上框出来（约 2 秒）。编辑时先用它验证模板/颜色找不找得到；旁边可以直接调阈值/容差（±1、±10），调一下立刻重试。",
     "20. 持续查找：找图/找色打开「持续查找」并设个超时（毫秒）——它会一遍遍重新找，找到就停、返回坐标；一直没找到就到超时为止（走「不成立」档）。",
@@ -6826,7 +6827,7 @@ static void vis_test_start_se(int se)
         return;
     }
     if (type == OP_STEP_FINDIMAGE) {
-        kind = 0; a1 = g_ope_steps[se][1]; a2 = 0;     /* 找图：a1 = 阈值 */
+        kind = 0; a1 = g_ope_steps[se][1]; a2 = g_ope_steps[se][2];   /* 找图：a1 = 阈值、a2 = 颜色校验 0/1（v2.1） */
     } else if (g_ope_steps[se][1] == 1) {
         kind = 2; a1 = 1; a2 = 0;                      /* 找色多点：点集在 ref */
     } else {
@@ -6935,7 +6936,7 @@ static void vis_pick_apply(int fx, int fy, uint32_t rgb)
 /* ---- 存盘 / 删除 ---- */
 
 /* 存模板（.tmpl 写端；格式逐字照实施计划：VTM1 + ver u32=1 + w u16 + h u16 + rot u8 + res u8=0 + gray[w*h]
- * + 尾扩展 x u16 + y u16（原区域左上；2026-10-05 重编辑；旧读端忽略尾部）。
+ * + 尾扩展 x u16 + y u16 + 平均色 r/g/b u8×3 + res u8（原区域 + 颜色校验存色；旧读端忽略尾部）。
  * 灰度用引擎同源公式 vt_vis_gray_px（vt_vision.h 单一来源，防两处漂移）；.tmp + rename（掉电不留半截）。
  * 返回 0 成功；1 名字非法 / 2 重名（g_vis_overwrite = 1 时跳过，重编辑覆盖） / 3 无可用画面或框选 / 4 建目录失败 / 5 写失败。 */
 static int vis_save_tmpl(const char *name)
@@ -6945,6 +6946,7 @@ static int vis_save_tmpl(const char *name)
     int x0 = g_vis_sel[0], y0 = g_vis_sel[1], x1 = g_vis_sel[2], y1 = g_vis_sel[3];
     int w, h, x, y;
     unsigned char *gray;
+    uint64_t sr = 0, sg = 0, sb = 0;                        /* 平均色求和（2026-10-05e） */
     FILE *f;
     if (vis_name_ok(name) != 0) return 1;
     if (vis_name_taken(name) && !g_vis_overwrite) return 2;    /* 重编辑同名 = 覆盖（2026-10-05） */
@@ -6955,8 +6957,10 @@ static int vis_save_tmpl(const char *name)
     if (!gray) return 5;
     for (y = 0; y < h; y++) {
         const unsigned char *p = buf + ((size_t)(y0 + y) * (size_t)g_vis_img_w + (size_t)x0) * 4u;
-        for (x = 0; x < w; x++, p += 4)
+        for (x = 0; x < w; x++, p += 4) {
             gray[(size_t)y * (size_t)w + (size_t)x] = vt_vis_gray_px(p[0], p[1], p[2]);
+            sr += p[0]; sg += p[1]; sb += p[2];             /* 平均色（颜色校验用；2026-10-05e） */
+        }
     }
     if (mkdir(VIS_TMPL_DIR, 0775) < 0 && errno != EEXIST) { free(gray); return 4; }
     snprintf(tmppath, sizeof tmppath, "%s/%s.tmpl.tmp", VIS_TMPL_DIR, name);
@@ -6971,10 +6975,18 @@ static int vis_save_tmpl(const char *name)
     if (fwrite(gray, 1, (size_t)w * (size_t)h, f) != (size_t)w * (size_t)h) {
         fclose(f); remove(tmppath); free(gray); return 5;
     }
-    /* v1 尾扩展（2026-10-05 重编辑）：灰度后追加 原区域左上 x u16 + y u16 —— 旧读端（核心
-     * op_vis_read_tmpl）读满灰度即停、忽略尾部（双向兼容）；面板按文件尺寸识别有无。 */
+    /* v1 尾扩展（2026-10-05 重编辑 / 2026-10-05e 颜色校验）：灰度后追加 原区域左上 x u16 + y u16
+     * + 平均色 r/g/b u8×3 + res u8（共 8B）—— 旧读端读满灰度即停、忽略尾部（双向兼容）；
+     * 面板按尺寸识别 x/y（4B）与平均色（8B）。 */
     vis_put_u16le(f, (unsigned)x0);
     vis_put_u16le(f, (unsigned)y0);
+    {
+        uint64_t nn = (uint64_t)w * (uint64_t)h;
+        fputc((int)((sr / nn) & 0xFFu), f);
+        fputc((int)((sg / nn) & 0xFFu), f);
+        fputc((int)((sb / nn) & 0xFFu), f);
+        fputc(0, f);                                        /* res */
+    }
     if (fclose(f) != 0) { remove(tmppath); free(gray); return 5; }
     free(gray);
     snprintf(path, sizeof path, "%s/%s.tmpl", VIS_TMPL_DIR, name);
@@ -7978,7 +7990,7 @@ static void draw_vis_edit(void)
     ImGui::SetCursorScreenPos(ImVec2(x0, y0));
     text_meta_s(t);
     ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s(type == OP_STEP_FINDIMAGE ? "选模板 / 区域 / 阈值；成立/不成立在步骤行上编辑"
+    text_meta_s(type == OP_STEP_FINDIMAGE ? "选模板 / 区域 / 阈值 / 颜色校验；成立/不成立在步骤行上编辑"
                                           : "选模式与颜色（或点集）；成立/不成立在步骤行上编辑");
     ry = y0 + 84;
     if (type == OP_STEP_FINDIMAGE) {
@@ -7999,7 +8011,14 @@ static void draw_vis_edit(void)
         snprintf(lab, sizeof lab, "阈值：%d（0..255）", g_ope_steps[se][1]);
         ImGui::SetCursorScreenPos(ImVec2(x0, ry + 192));
         if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se, 0);
-        ry2 = ry + 288;                          /* 持续查找行（T7.4）：阈值之后 */
+        snprintf(lab, sizeof lab, "颜色校验：%s", g_ope_steps[se][2] ? "开" : "关");
+        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 288));
+        if (btn_light(lab, ImVec2(cw, 84))) {    /* v2.1（2026-10-05e）：灰度命中后再验平均色（a2 0/1；旧模板无存色则跳过） */
+            g_ope_steps[se][2] = g_ope_steps[se][2] ? 0 : 1;
+            ALOGI("vis edit 找图 第 %d 步 颜色校验=%s", se + 1, g_ope_steps[se][2] ? "开" : "关");
+            g_need = 1; g_force_frames = 2;
+        }
+        ry2 = ry + 384;                          /* 持续查找行（T7.4）：颜色校验之后 */
     } else {
         snprintf(lab, sizeof lab, "模式：%s", g_ope_steps[se][1] == 1 ? "多点" : "单点");
         ImGui::SetCursorScreenPos(ImVec2(x0, ry));
