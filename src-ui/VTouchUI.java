@@ -213,6 +213,8 @@ public class VTouchUI {
     static boolean visKeepLogged;        /* 「复用保持隐藏」首次日志（限频，同 visHideLogged 口径） */
     static boolean skipShotOk;           /* 图层 skip-screenshot 已设（免隐藏抓帧）；makeLayer 探测成功置 true，
                                           * 老 ROM 无此方法 → false（回退隐藏+沉降路径，行为同 2026-10-05） */
+    static Object[] visLayers = new Object[2];   /* main 的 layers 镜像（抓帧 setExcludeLayers 双保险用） */
+    static boolean visExclLogged;                /* setExcludeLayers 接线成功一次性日志 */
     static void visWarn(String msg, Throwable t) {
         long now0 = System.currentTimeMillis();
         if (!visWarned) {
@@ -307,6 +309,7 @@ public class VTouchUI {
         Object hb = null;
         try {
             Object bld = visBldCtor.newInstance(token);
+            visBldExclude(bld);
             Object args = visBldCls.getMethod("build").invoke(bld);
             Object shb = visCapM.invoke(null, args);
             if (shb != null) hb = shb.getClass().getMethod("getHardwareBuffer").invoke(shb);
@@ -338,6 +341,7 @@ public class VTouchUI {
         Object hb = null;
         try {
             Object bld = visBldCtor.newInstance(token);
+            visBldExclude(bld);
             Object args = visBldCls.getMethod("build").invoke(bld);
             Object shb = visCapM.invoke(null, args);
             if (shb != null) hb = shb.getClass().getMethod("getHardwareBuffer").invoke(shb);
@@ -353,6 +357,23 @@ public class VTouchUI {
             visWarn("vis 面板抓帧失败（已报面板）", t);
         } finally {
             if (hb != null) try { hb.getClass().getMethod("close").invoke(hb); } catch (Throwable t2) { }
+        }
+    }
+
+    /* 免隐藏抓帧双保险（2026-10-05b）：DisplayCaptureArgs.Builder.setExcludeLayers —— 抓帧参数直接
+     * 排除面板图层（与图层 skip-screenshot 标志相互独立）。老 ROM 无此方法 → 静默跳过（靠 skipShotOk 兜底）。 */
+    static void visBldExclude(Object bld) {
+        try {
+            int n = 0, i;
+            for (i = 0; i < visLayers.length; i++) if (visLayers[i] != null) n++;
+            if (n == 0) return;
+            Object ex = java.lang.reflect.Array.newInstance(SCC, n);
+            n = 0;
+            for (i = 0; i < visLayers.length; i++) if (visLayers[i] != null) java.lang.reflect.Array.set(ex, n++, visLayers[i]);
+            visBldCls.getMethod("setExcludeLayers", ex.getClass()).invoke(bld, ex);
+            if (!visExclLogged) { visExclLogged = true; Log.i(TAG, "vis 抓帧：抓帧参数排除面板图层已接线（双保险）"); }
+        } catch (Throwable t) {
+            /* 老 ROM 无此方法或调用失败：忽略（skip-screenshot 标志 + 隐藏回退路径仍兜底） */
         }
     }
 
@@ -423,7 +444,7 @@ public class VTouchUI {
 
         Object layer = null;
         int[] disp = queryDisplay(w, h, 0);
-        Object[] layers = new Object[2];   /* 双图层：layers[cur] 可见，另一个待命 */
+        Object[] layers = visLayers;   /* 双图层：layers[cur] 可见，另一个待命（visLayers = 同引用，抓帧排除用） */
         int cur = 0;
         rotFlip = !"hide".equals(System.getenv("VTOUCH_UI_ROT_MODE"));
         try {
