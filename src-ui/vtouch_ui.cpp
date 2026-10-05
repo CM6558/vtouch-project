@@ -6099,7 +6099,7 @@ static const char *const g_help_lines[] = {
     "21. 自定义变量：计算步骤可以存进自己命名的变量（默认 v1、v2…，名字可改，最多 16 个）——不再只有固定的 4 个槽；找图/找色、按下/弹起这些是系统预置名字（fx/fy、触发按下x…）。任何字段编辑时都能在「变量」列表里选它们；表达式编辑里也有「变量」按钮，点开就是全部变量（含预置），点一条直接插进去。",
     "22. 字段直接写算式：坐标、时长这些格子里点「表达式」可以直接写算式（比如 按下x+100）——确定后自动在这步前面生成一条「计算」步骤（名字默认 e1，可改），格子指向它。原来的「计算」步骤照样能用。",
     "23. 截帧选择器：截帧后可以用 [＋]/[－]/[适应] 缩放、拖画面平移；选择框四角拖着改大小、框里拖着整体挪；[确认] 后框会留着，还能继续调整。",
-    "24. 模板/点集重编辑：列表里点「编辑」——模板先看到已存的样子（点「重新截帧」重选区域，会尽量恢复上次框的位置）；点集会摆回画面上改（旧文件先点一下基准色位置）。保存：不改名 = 覆盖，改名 = 另存。",
+    "24. 模板/点集重编辑：列表里点「编辑」——模板先看到已存的样子（点「重新截帧」重选区域，会尽量恢复上次框的位置）；点集一进入就摆到画面上（旧文件先摆在画面中间，用 [重选基准] 挪位；容差可直接调，[存点集] 保存）。保存：不改名 = 覆盖，改名 = 另存。",
     "25. 步骤移动：步骤行点「移动」，再点目标位置那一行的「放这里」，一步到位（长距离不用一点点挪）；移动中再点自己那行可取消。",
 };
 static void page_help(void)
@@ -6691,9 +6691,12 @@ static void vis_cap_tick(void)
                 g_vis_base_x = bx; g_vis_base_y = by;
                 g_vis_base_rgb = g_vis_re_base_rgb;
                 vis_pts_restore();
-            } else {                                         /* 旧格式：等用户点一下基准位置 */
+            } else {                                         /* 旧格式：一进入就摆到画面中间（可见），再用 [重选基准] 挪 */
+                g_vis_base_x = w / 2; g_vis_base_y = h / 2;
+                g_vis_base_rgb = g_vis_re_base_rgb;
+                vis_pts_restore();
                 snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg,
-                         "点一下基准色位置 —— 已存的 %d 个参考点会跟着摆过来", g_vis_re_pts_n);
+                         "旧文件未记基准位置：已摆到画面中间（%d 个点）—— [重选基准] 后点画面可整组挪位", g_vis_re_pts_n);
             }
         }
         if (g_vis_cap == 4) {
@@ -7592,7 +7595,7 @@ static void build_vis_cap(void)
                             if (mode == 3) vis_pick_apply(fx, fy, rgb);
                             else {
                                 vis_pts_tap(fx, fy, rgb);
-                                if (mode == 5) vis_pts_restore();   /* 首点（基准）后恢复已存参考点（2026-10-05b） */
+                                vis_pts_restore();       /* 待恢复组（重编辑 / [重选基准]）首点后回摆（2026-10-05b/c） */
                             }
                         }
                     }
@@ -7677,18 +7680,39 @@ static void build_vis_cap(void)
                 ImGui::SetCursorScreenPos(ImVec2(x0 + cw - tw, ty));
                 if (btn_light("+", ImVec2(tw, 76))) { if (g_vis_base_tol < 255) g_vis_base_tol++; g_need = 1; g_force_frames = 2; }
                 {
-                    float bw3 = (cw - 2 * 12) / 3.0f;
+                    float bw3 = (cw - 3 * 12) / 4.0f;
                     ImGui::SetCursorScreenPos(ImVec2(x0, by));
                     if (btn_light("取消", ImVec2(bw3, 92))) { ALOGI(mode == 5 ? "vis 采集 取消（点集重编辑）" : "vis 采集 取消（点集）"); vis_cap_close(); }
                     ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, by));
                     if (btn_light("重来", ImVec2(bw3, 92))) {
                         g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_pts_n = 0;
                         g_vis_cap_msg[0] = 0;
-                        if (mode == 5) g_vis_re_pts_restored = 1;   /* 重来 = 彻底重来（不再回摆已存点） */
+                        g_vis_re_pts_restored = 1; g_vis_re_pts_n = 0;   /* 重来 = 彻底重来（不再回摆已存/已挪点组） */
                         g_need = 1; g_force_frames = 3;
                         ALOGI("vis 采集 点集重来");
                     }
                     ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), by));
+                    if (btn_light("重选基准", ImVec2(bw3, 92))) {   /* 2026-10-05c：整组（基准+参考点）挪到新位置 */
+                        if (g_vis_base_x >= 0 && g_vis_pts_n >= 1) {
+                            int i;
+                            g_vis_re_pts_n = g_vis_pts_n;
+                            for (i = 0; i < g_vis_pts_n; i++) {
+                                g_vis_re_pts_dx[i] = g_vis_pts_x[i] - g_vis_base_x;
+                                g_vis_re_pts_dy[i] = g_vis_pts_y[i] - g_vis_base_y;
+                                g_vis_re_pts_rgb[i] = g_vis_pts_rgb[i];
+                            }
+                            g_vis_re_pts_restored = 0;
+                            g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0;
+                            g_vis_pts_n = 0;
+                            snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg,
+                                     "点一下画面 = 新基准位置（%d 个参考点跟着挪）", g_vis_re_pts_n);
+                            ALOGI("vis 采集 重选基准开（n=%d）", g_vis_re_pts_n);
+                        } else {
+                            snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "先有基准和参考点才能重选基准");
+                        }
+                        g_need = 1; g_force_frames = 3;
+                    }
+                    ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw3 + 12), by));
                     if (g_vis_base_x >= 0 && g_vis_pts_n >= 1) {
                         if (btn_blue("存点集", ImVec2(bw3, 92))) {
                             g_vis_kb = 2;
@@ -8044,34 +8068,40 @@ static void draw_vis_edit(void)
     /* 阈值/容差快捷调整（2026-10-05 item）：[−10][−1][值][＋1][＋10]，点一下立即重试 ——
      * 找图 = 阈值（a1）、找色单点 = 容差（a2 低 8 位）；找色多点无阈值；矮屏与上方行相撞则不画。 */
     int has_q = (type == OP_STEP_FINDIMAGE || (type == OP_STEP_FINDCOLOR && g_ope_steps[se][1] != 1));
-    float qy = ry_btn - 104.0f;
-    if (has_q && qy < ry2 + 192.0f + 12.0f) has_q = 0;   /* 让位（矮屏） */
+    float qyB = ry_btn - 104.0f;                 /* 第二行：加减按钮（2026-10-05c 两行布局） */
+    float qyA = qyB - 64.0f - 12.0f;             /* 第一行：标签+值 */
+    if (has_q && qyA < ry2 + 192.0f + 12.0f) has_q = 0;   /* 让位（矮屏） */
     /* 提示槽（固定占位：出现/消失不动下面；矮屏夹到按钮上方）—— T7.4：锚到持续查找两行之后 */
     if (g_vis_edmsg[0]) {
         float y_edmsg = ry2 + 192.0f;
-        float ylim = has_q ? qy - 32.0f : ry_btn - 32.0f;
+        float ylim = has_q ? qyA - 32.0f : ry_btn - 32.0f;
         if (y_edmsg > ylim) y_edmsg = ylim;
         ImGui::SetCursorScreenPos(ImVec2(x0, y_edmsg));
         ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_edmsg);
     }
-    if (has_q) {                                     /* 快捷调整行：4 键 + 值显示格（调完立即重试） */
+    if (has_q) {                                     /* 快捷调整两行（2026-10-05c）：上 = 标签+值，下 = [−10][−1][＋1][＋10] */
         static const int dlt[4] = { -10, -1, 1, 10 };
-        float valw, bwq;
         char vv0[40];
         int cur = (type == OP_STEP_FINDIMAGE) ? g_ope_steps[se][1]
                                               : (int)((uint32_t)g_ope_steps[se][2] & 0xFFu);
+        float bwq = (cw - 3.0f * 12.0f) / 4.0f;
         int d;
         snprintf(vv0, sizeof vv0, "%s：%d", type == OP_STEP_FINDIMAGE ? "阈值" : "容差", cur);
-        valw = ImGui::CalcTextSize(vv0).x + 28.0f;       /* 值框按文本自适应（防溢出压邻键，2026-10-05b） */
-        bwq = (cw - valw - 4.0f * 12.0f) / 4.0f;
-        if (bwq < 64.0f) bwq = 64.0f;
+        ImGui::PushID(9315);
+        ImGui::SetCursorScreenPos(ImVec2(x0, qyA));
+        {
+            ImVec2 p0 = ImGui::GetCursorScreenPos(), p1 = ImVec2(p0.x + cw, p0.y + 64.0f);
+            dl->AddRectFilled(p0, p1, IM_COL32(244, 244, 245, 255), 10.0f);
+            dl->AddRect(p0, p1, IM_COL32(228, 228, 231, 255), 10.0f, 0, 1.5f);
+            dl->AddText(ImVec2(p0.x + 18, p0.y + 18.0f), IM_COL32(24, 24, 27, 255), vv0);
+            ImGui::InvisibleButton("##qval", ImVec2(cw, 64.0f));
+        }
+        ImGui::PopID();
         for (d = 0; d < 4; d++) {
             char bl[8];
-            float bx = x0 + (float)d * (bwq + 12.0f);
-            if (d >= 2) bx += valw + 12.0f;              /* 显示格占第 3 位（d=2 起右移） */
             snprintf(bl, sizeof bl, dlt[d] > 0 ? "+%d" : "%d", dlt[d]);
             ImGui::PushID(9311 + d);
-            ImGui::SetCursorScreenPos(ImVec2(bx, qy));
+            ImGui::SetCursorScreenPos(ImVec2(x0 + (float)d * (bwq + 12.0f), qyB));
             if (btn_light(bl, ImVec2(bwq, 92))) {
                 int nv = cur + dlt[d];
                 if (nv < 0) nv = 0;
@@ -8085,16 +8115,6 @@ static void draw_vis_edit(void)
             }
             ImGui::PopID();
         }
-        ImGui::PushID(9315);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + 2.0f * (bwq + 12.0f), qy));
-        {
-            ImVec2 p0 = ImGui::GetCursorScreenPos(), p1 = ImVec2(p0.x + valw, p0.y + 92.0f);
-            dl->AddRectFilled(p0, p1, IM_COL32(244, 244, 245, 255), 10.0f);
-            dl->AddRect(p0, p1, IM_COL32(228, 228, 231, 255), 10.0f, 0, 1.5f);
-            dl->AddText(ImVec2(p0.x + 14, p0.y + 32.0f), IM_COL32(24, 24, 27, 255), vv0);
-            ImGui::InvisibleButton("##qval", ImVec2(valw, 92.0f));
-        }
-        ImGui::PopID();
     }
     /* 试一下（Task 7.1）：当场执行一次查找 → 结果行 + 屏幕标记（位置见上方底部锚，M1）。 */
     ImGui::PushID(9300);
@@ -8175,27 +8195,21 @@ static void page_template(void)
         }
     }
     ImGui::Dummy(ImVec2(0, 6));
-    /* 试一下阈值快捷调整（2026-10-05 item）：模板 [试一下] 用它（0..255；默认 8 = 新步口径）。 */
+    /* 试一下阈值两行（2026-10-05c）：上 = 标签+值（整行），下 = [−10][−1][＋1][＋10]（纯 flow，零重叠风险）。 */
     {
         static const int dlt2[4] = { -10, -1, 1, 10 };
-        float valw, bwq;
         char vv0[40];
-        ImVec2 qp = ImGui::GetCursorScreenPos();
-        float qy2 = qp.y;
-        ImDrawList *dl2 = ImGui::GetWindowDrawList();
+        float avail = ImGui::GetContentRegionAvail().x;
+        float bwq = (avail - 3.0f * 12.0f) / 4.0f;
         int d;
         snprintf(vv0, sizeof vv0, "试一下阈值：%d", g_vis_tmpl_tol);
-        valw = ImGui::CalcTextSize(vv0).x + 28.0f;       /* 值框按文本自适应（防溢出压邻键，2026-10-05b） */
-        bwq = (ImGui::GetContentRegionAvail().x - valw - 4.0f * 12.0f) / 4.0f;
-        if (bwq < 64.0f) bwq = 64.0f;
+        btn_light(vv0, ImVec2(avail, 64));               /* 只显示（不可点） */
         for (d = 0; d < 4; d++) {
             char bl[8];
-            float bx = qp.x + (float)d * (bwq + 12.0f);
-            if (d >= 2) bx += valw + 12.0f;
+            if (d) ImGui::SameLine();
             snprintf(bl, sizeof bl, dlt2[d] > 0 ? "+%d" : "%d", dlt2[d]);
             ImGui::PushID(9360 + d);
-            ImGui::SetCursorScreenPos(ImVec2(bx, qy2));
-            if (btn_light(bl, ImVec2(bwq, 72))) {
+            if (btn_light(bl, ImVec2(bwq, 76))) {
                 g_vis_tmpl_tol += dlt2[d];
                 if (g_vis_tmpl_tol < 0) g_vis_tmpl_tol = 0;
                 if (g_vis_tmpl_tol > 255) g_vis_tmpl_tol = 255;
@@ -8204,16 +8218,6 @@ static void page_template(void)
             }
             ImGui::PopID();
         }
-        ImGui::PushID(9365);
-        ImGui::SetCursorScreenPos(ImVec2(qp.x + 2.0f * (bwq + 12.0f), qy2));
-        {
-            ImVec2 p0 = ImGui::GetCursorScreenPos(), p1 = ImVec2(p0.x + valw, p0.y + 72.0f);
-            dl2->AddRectFilled(p0, p1, IM_COL32(244, 244, 245, 255), 10.0f);
-            dl2->AddRect(p0, p1, IM_COL32(228, 228, 231, 255), 10.0f, 0, 1.5f);
-            dl2->AddText(ImVec2(p0.x + 14, p0.y + 22.0f), IM_COL32(24, 24, 27, 255), vv0);
-            ImGui::InvisibleButton("##qtol", ImVec2(valw, 72.0f));
-        }
-        ImGui::PopID();
         ImGui::Dummy(ImVec2(0, 6));
     }
     /* 试查（Task 7.1）结果行：固定槽（出现/消失不动下面列表） */
