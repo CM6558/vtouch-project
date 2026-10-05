@@ -519,7 +519,7 @@ public class VTouchUI {
         boolean guard = false;       /* 转屏遮挡中：此期间不碰 alpha（由遮挡逻辑管） */
         boolean changedSeen = false; /* 本轮遮挡期间是否真的查到了变化（没有就是伪事件，要尽快恢复） */
         long guardT0 = 0;
-        int tick = 0;
+        long nextDispCheck = 0;      /* 显示方向兜底检查的墙钟截止（评审修复 2026-10-05：原拍数折算在负载下节奏漂移） */
         long visWarn = 0, dispWarn = 0;   /* 各失败路径的限频时刻 */
         for (;;) {
             /* 平时 10ms：视觉抓帧发现延迟 ≤10ms（满足 spec §2.2 ≤16ms / §9 全链 ≤25ms）；
@@ -608,11 +608,11 @@ public class VTouchUI {
                     }
                 }
             } catch (Throwable t) { Log.e(TAG, "visibility poll", t); }
-            /* ③ 显示方向/尺寸：观察窗内每轮查；否则按兜底周期（注册成功 2s / 失败 320ms）。
-             * 10ms 拍折算：200 拍 = 2s、32 拍 = 320ms（原 40ms 拍下为 50 / 8，墙钟节奏不变）。 */
+            /* ③ 显示方向/尺寸：观察窗内每轮查；否则按兜底周期（注册成功 2s / 失败 320ms）——
+             * 墙钟截止判据（2026-10-05 评审修复：原「拍数折算」在回退抓帧/负载下拍长不定、节奏漂移）。 */
             boolean settling = System.currentTimeMillis() < settleUntil;
-            int period = (listenerOk && !settling) ? 200 : 32;
-            if (settling || (tick++ % period) == 0) {
+            if (settling || System.currentTimeMillis() >= nextDispCheck) {
+                nextDispCheck = System.currentTimeMillis() + (listenerOk ? 2000 : 320);
                 try {
                     int[] d2 = queryDisplay(disp[0], disp[1], disp[2]);
                     if (d2[0] != disp[0] || d2[1] != disp[1] || d2[2] != disp[2]) {
@@ -686,14 +686,17 @@ public class VTouchUI {
                     }
                 }
             }
-            if (!skipShotOk) {
+            if (!skipShotOk && !guard) {
                 /* 老 ROM 回退路径（skipShotOk=false）：渲染循环内隐藏 + 沉降 + 抓帧（含保持隐藏窗口，T7.4）。
-                 * skip-screenshot 生效时抓帧已移交 vt-cap 工作线程（2026-10-05f）——本块整段跳过。 */
+                 * skip-screenshot 生效时抓帧已移交 vt-cap 工作线程（2026-10-05f）——本块整段跳过。
+                 * 转屏 guard 期间也整段跳过（2026-10-05 评审修复）：guard 期可见层仍在出图（翻转收尾才换），
+                 * 原来照抓会把面板/区域拍进帧；请求不消费，guard 结束后照常抓。 */
                 int vreq = nativeVisPollRequest();
                 boolean pneed = nativeVisPanelPoll() != 0;
                 if (vreq != 0 || pneed) {
                     boolean hid = false;
-                    if (!guard && !skipShotOk) {   /* skip-screenshot 生效：帧天然无面板/区域，无需隐藏（不闪） */
+                    /* 隐藏或复用隐藏态（外层门已滤掉 guard / skipShotOk；评审修复 2026-10-05 注释对齐） */
+                    {
                         if (capHide) {
                             hid = true;    /* 复用隐藏态：跳过隐藏 + 沉降（保持隐藏窗口内） */
                             if (!visKeepLogged) {

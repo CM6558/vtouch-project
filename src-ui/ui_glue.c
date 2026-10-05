@@ -57,6 +57,9 @@ static struct vt_shm_c      *C;
 static struct vtouch_hooks   HK;          /* 按值保存（见文件头坑 1） */
 static int                   HK_ok;
 static uint32_t              glue_seq;
+static int                   S_force_wait;   /* 1 = 下一次 glue_post 强制走等待路径（转屏重算批用；评审修复
+                                              * 2026-10-05：批的每帧一条必须条条落地 —— 不等待分支在核心被占时
+                                              * 会被单槽邮箱互相覆盖、批失败计数还恒 0）。单线程面板，一次性旗标。 */
 static int                   W = -1;      /* 唤醒核心的管道写端（VTOUCH_WAKE_FD；-1 = 没有） */
 static int                   pick_armed;  /* 取点（T2.8）：面板处于取点态（[取点] 已点、结果未取）。
                                            * take 的门：面板重启接旧核心时 pick_seq 可能非 0，
@@ -161,12 +164,12 @@ static int glue_post(uint32_t op, const char *id, const char *new_id,
     /* 拖改的"直播写"是**绝对值**（每次都给完整几何），丢中间几次无害 → 不等，避免拖动手感被
      * 每帧 8ms 的等待拖住。只有"新建 / 删除 / 改名 / 清空"才必须等核心吃掉：丢一次就是真丢
      * （启动批量加载 regions.conf 就是这么丢过 2/3 条）。 */
-    if (op == VT_EDIT_ADD && glue_find(id) >= 0) {
-        vt_shm_post_edit(&e);
+    if (!S_force_wait && op == VT_EDIT_ADD && glue_find(id) >= 0) {
+        if (vt_shm_post_edit(&e) != 0) return -1;   /* 锁拿不到：不写、按失败上报（评审修复 2026-10-05） */
         glue_wake();
         return 0;
     }
-    vt_shm_post_edit(&e);
+    if (vt_shm_post_edit(&e) != 0) return -1;
     glue_wake();
     /* 邮箱是**单槽**的：不等核心吃掉就投下一条，前一条会被覆盖（启动批量加载 regions.conf 时
      * 实测 3 个区域只落地 1 个）。这里等一拍 —— 有唤醒管道时核心是**立刻**醒（通常 ~1ms 内生效），
@@ -332,6 +335,17 @@ int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, 
     return glue_post(VT_EDIT_ADD, id, NULL, type, a1, a2, a3, a4, enabled);
 }
 
+/* 转屏重算批专用（评审修复 2026-10-05）：已存在 id 的 ADD 也**等核心吃掉** —— 批的每帧一条必须条条落地
+ * （不等待分支在核心被占时会被单槽邮箱互相覆盖、批失败计数还恒 0）。 */
+int vtouch_region_add_confirm(const char *id, int type, int a1, int a2, int a3, int a4, int enabled)
+{
+    int rc;
+    S_force_wait = 1;
+    rc = glue_post(VT_EDIT_ADD, id, NULL, type, a1, a2, a3, a4, enabled);
+    S_force_wait = 0;
+    return rc;
+}
+
 int vtouch_region_del(const char *id)
 {
     return glue_post(VT_EDIT_DEL, id, NULL, 0, 0, 0, 0, 0, 0);
@@ -342,9 +356,9 @@ int vtouch_region_rename(const char *old_id, const char *new_id)
     return glue_post(VT_EDIT_RENAME, old_id, new_id, 0, 0, 0, 0, 0, 0);
 }
 
-void vtouch_region_clear(void)
+int vtouch_region_clear(void)
 {
-    glue_post(VT_EDIT_CLEAR, NULL, NULL, 0, 0, 0, 0, 0, 0);
+    return glue_post(VT_EDIT_CLEAR, NULL, NULL, 0, 0, 0, 0, 0, 0);   /* 返回是否真落地（评审修复 2026-10-05） */
 }
 
 /* ---------- 操作 / 取点 / 绑定只读（T2.4；面板 T2.5+ 逐字调用） ---------- */
@@ -374,7 +388,7 @@ static int glue_post_op(uint32_t op, const char *name, const struct vt_op *paylo
     if (name) snprintf(e.id, sizeof e.id, "%s", name);
     if (payload) e.payload = *payload;          /* 结构按值拷：区 B 一页装得下（见 vt_shm.h 的 _Static_assert） */
     e.seq = ++glue_seq;
-    vt_shm_post_edit(&e);
+    if (vt_shm_post_edit(&e) != 0) return -1;   /* 锁拿不到：不写、按失败上报（评审修复 2026-10-05） */
     glue_wake();
     while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
     if (B->edit_applied != e.seq) {
@@ -562,13 +576,17 @@ int vtouch_op_del(const char *name)
 /**
  * (vtouch-doc: vtouch_op_clear)
  * @brief 清空操作表（面板侧入口）。
- * @note    回读校验 = op_count==0；未生效只打一行日志（void 返回，不阻塞面板）。
+ * @note    回读校验 = op_count==0；返回 0 = 已清空、-1 = 投递失败或未清干净（评审修复 2026-10-05：
+ *          scheme_switch ⑤ 需要「清空真落地」判据，原 void 返回值被丢）。
  */
-void vtouch_op_clear(void)
+int vtouch_op_clear(void)
 {
-    if (glue_post_op(VT_EDIT_OP_CLEAR, NULL, NULL) != 0) return;
-    if (S && S->op_count != 0)                       /* 回读校验：没清干净就报一行，别静默 */
+    if (glue_post_op(VT_EDIT_OP_CLEAR, NULL, NULL) != 0) return -1;
+    if (S && S->op_count != 0) {                     /* 回读校验：没清干净就报一行，别静默 */
         fprintf(stderr, "vtouch-ui: 操作表清空未生效（op_count=%d）\n", S->op_count);
+        return -1;
+    }
+    return 0;
 }
 
 /**

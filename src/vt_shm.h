@@ -223,7 +223,7 @@ struct vt_shm_c *vt_shm_c(void);
 /* 面板心跳 + 读核心心跳（返回 0 = 核心还活）。 (vtouch-doc: vt_shm_ui_tick) */
 int  vt_shm_ui_tick(void);
 /* 面板投一条编辑进邮箱（单槽，覆盖式）。 (vtouch-doc: vt_shm_post_edit) */
-void vt_shm_post_edit(const struct vt_shm_edit *e);
+int  vt_shm_post_edit(const struct vt_shm_edit *e);   /* 0 = 已写入；-1 = 没接共享内存 / 锁拿不到（评审修复 2026-10-05） */
 /* 面板发布矩形（seqlock 写侧）。 (vtouch-doc: vt_shm_publish_rect) */
 void vt_shm_publish_rect(int visible, int rot, int x1, int y1, int x2, int y2);
 /* 面板发起一次试查（填参数 → release 写 test_req_seq；返回本次请求序号，0 = 没接共享内存）。 (vtouch-doc: vt_shm_ui_test_post) */

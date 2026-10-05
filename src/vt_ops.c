@@ -842,6 +842,8 @@ static void op_cond_apply(const struct vt_step *st, int hit, const char *word,
 {
     int tier   = hit ? st->a4 : st->a3;                      /* 本侧档位（成立侧 = a4 / 不成立侧 = a3） */
     int target = hit ? st->j1 : st->j2;                      /* 本侧跳转目标（仅档位 = 跳转时有意义） */
+    if (!R.active) return;                                   /* 防御：运行已中止（如停止按钮在视觉搜索中生效）时
+                                                              * 不再落档位 / 写 phase（评审修复 2026-10-05） */
 
     /* 日志（spec §1.3）：不成立侧恒打（四档全列）；成立侧档位 ≠ 继续才打（三档）。
      * 第二词（arg）只有条件步与找图有（区域 / 模板名）；找色没有 —— 不打（spec VISION §8 逐字）。 */
@@ -1211,6 +1213,13 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
         if (timeout_ms > 0) {
             vt_shm_tick();       /* 喂心跳（见上） */
             physical_events();   /* drain 触摸 fd + 转发：搜索期间手指照常响应（评审 I-1 修复；单次路径不动） */
+            vt_shm_edit_apply(); /* 评审修复 2026-10-05：控制通道不再被持续查找挡住 —— 停止按钮 / 面板编辑 /
+                                  * 试一下全走编辑邮箱，原来只喂心跳不消费邮箱 ⇒ 最长 60s 顺延 */
+            if (!R.active) return -2;                    /* 停止按钮已中止本次运行：立即退出（不再补四档） */
+            if (vt_shm_stop_req() || g.stop_flag) {      /* 引擎停请求 / 信号停：让主循环尽快接手退出 */
+                if (err) *err = "已停止";
+                return -2;
+            }
         }
         /* 持续 force=1：每轮都要新帧（复用缓存会原地空转同一画面）；单次照旧允许复用（行为逐字不变）。 */
         if (op_vis_capture(&fr, timeout_ms > 0, err) != 0) break;   /* 原因词已置（`无画面` / `视觉错`） */
@@ -1326,6 +1335,8 @@ static void op_vis_run(const struct vt_step *st)
      * ms（T7.4）：0 = 单次（现状）；>0 = 持续查找超时 —— vis_exec_find 循环抓帧查到命中或超时。 */
     kind = (st->type == OP_STEP_FINDIMAGE) ? 0 : (st->a1 == 1 ? 2 : 1);
     rc = vis_exec_find(kind, st->ref, st->expr, st->a1, st->a2, st->ms, &ox, &oy, &dt, &n, &err);
+    if (!R.active) return;                                   /* 运行已被停止（停止按钮在搜索循环内经编辑邮箱生效）：
+                                                              * 不再补中止 / 补日志 / 走四档（评审修复 2026-10-05） */
     if (rc == -2) { vt_ops_abort(err); return; }             /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
     hit = (rc == 0);
     if (hit) {
@@ -1670,7 +1681,9 @@ static void op_advance(void)
  * 坐标比的是我们写回的 raw（R.rx/R.ry 与 g.virt[slot] 同步；别人插过手，差值一眼可见）。 */
 static void op_selfcheck(void)
 {
-    if (!op_finger_down()) return;
+    if (!op_finger_down() && !R.held) return;    /* 评审修复 2026-10-05：held（按下步持有态）phase 不在
+                                                  * op_finger_down 认的三态里，原来整个「按住」期间零自检
+                                                  * —— 外力抬掉/挪动不记 `op 槽冲突`、不中止（spec §3.5/§3.6） */
     if (!g.virt[R.slot].down) { op_conflict_abort(); return; }
     if (g.virt[R.slot].x != R.rx || g.virt[R.slot].y != R.ry) {
         if (!R.conflict) {

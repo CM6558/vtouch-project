@@ -299,6 +299,8 @@ int logical_to_raw(int logical, int axis, int *raw);
 int raw_to_logical(int raw, int axis, int *logical);
 /* 单调时钟（纳秒），事件时间戳用。 (vtouch-doc: now_ns) */
 uint64_t now_ns(void);
+/* 物理槽「最近一条事件的内核时间戳」（ns；vt_input.c 记、vt_frame.c 的 move/up ts 读；评审修复 2026-10-05）。 */
+extern uint64_t vt_ps_last_ns[MAX_PHYS];
 /* 锚定「单调钟 ↔ 墙钟」偏移（启动时调一次）。 (vtouch-doc: wall_clock_anchor) */
 void wall_clock_anchor(void);
 /* 单调钟纳秒 → 墙钟毫秒（与脚本的 Date.now() 同基准）。 (vtouch-doc: wall_ms_from_mono) */

@@ -3,6 +3,18 @@
 
 static int selected_slot;   /* 当前正被解析的物理槽（-1 = 忽略）*/
 
+/* 物理槽「最近一条事件的内核时间戳」（ns；评审修复 2026-10-05：move/up 的 ts 原来取处理时刻，
+ * 批量读 / 搜索期 pump 会把同批多帧塌到同一时刻）。enqueue_phys_changes 的 move/up ts 读它。 */
+uint64_t vt_ps_last_ns[MAX_PHYS];
+
+/* 内核事件时间戳 → ns（evdev 的 time = CLOCK_MONOTONIC timeval，与 now_ns 同源；
+ * 个别设备不上报（0）→ 回退处理时刻）。 */
+static uint64_t ev_time_ns(const struct input_event *e)
+{
+    uint64_t t = (uint64_t)e->time.tv_sec * 1000000000ull + (uint64_t)e->time.tv_usec * 1000ull;
+    return t ? t : now_ns();
+}
+
 /**
  * (vtouch-doc: validate_device)
  * @brief 认一块设备是不是 Type-B 触摸屏（槽 + tracking id + XY 四轴 + 量程），并把它的能力声明整份抄进 cap_*（供 setup_uinput 镜像）。
@@ -149,16 +161,18 @@ fail:
  */
 static void phys_event_one(const struct input_event *e)
 {
+    uint64_t et = ev_time_ns(e);   /* 内核事件时间戳（评审修复 2026-10-05：原来 move/up 取处理时刻） */
     if (e->type == EV_ABS && e->code == ABS_MT_SLOT) {
         selected_slot = e->value;
         if (selected_slot < 0 || selected_slot >= g.phys_slots) selected_slot = -1;   /* 越界 = 忽略后续槽事件 */
     } else if (e->type == EV_ABS && selected_slot >= 0 && selected_slot < g.phys_slots) {
+        vt_ps_last_ns[selected_slot] = et;           /* 本槽最近一条事件时刻（move/up 的 ts 用它） */
         if (e->code == ABS_MT_TRACKING_ID) {
             if (e->value < 0) {                       /* 抬手 */
                 g.phys[selected_slot].down = 0; g.phys[selected_slot].pending_up = 1;
             } else {                                 /* 按下（原值不用存：身份按下标算） */
                 g.phys[selected_slot].down = 1;
-                g.ps_press_ns[selected_slot] = now_ns();   /* §4.2：down 上报的是「按下时刻」 */
+                g.ps_press_ns[selected_slot] = et;   /* §4.2：down 上报的是「按下时刻」（内核时间戳） */
             }
         } else if (e->code == ABS_MT_POSITION_X) g.phys[selected_slot].x = e->value;
         else if (e->code == ABS_MT_POSITION_Y) g.phys[selected_slot].y = e->value;

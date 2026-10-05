@@ -273,7 +273,11 @@ void enqueue_phys_changes(void)
         if (ui_eaten[i]) continue;
 #endif
         ev.slot = i; ev.action = action; ev.x = lx; ev.y = ly;
-        ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i] : now_ns();
+        /* ts（评审修复 2026-10-05）：down = 按下时刻、move/up = 该槽**最近一条内核事件**的时间戳
+         * （phys_event_one 记的 e->time）；不再取「处理时刻」—— 批量读 / 搜索期 pump 会把同批多帧
+         * 塌到同一时刻（tms 等按 ts 差的判定全歪）。防御：没记到（不应发生）回退处理时刻。 */
+        ev.ts = (action == VT_DOWN) ? g.ps_press_ns[i]
+                                    : (vt_ps_last_ns[i] ? vt_ps_last_ns[i] : now_ns());
         vtq_push(&g.region_q, &ev);                              /* 区域线程（队列唯一消费者） */
         pushed = 1;
     }

@@ -46,9 +46,10 @@ int vtouch_phys_get(int i, int *down, int *lx, int *ly);
 int vtouch_init(int argc, char **argv);
 int vtouch_poll_step(int timeout_ms);
 void vtouch_cleanup(void);
-void vtouch_region_clear(void);
+int vtouch_region_clear(void);
 int vtouch_region_count(void);
 int vtouch_region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);
+int vtouch_region_add_confirm(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);   /* 转屏重算批：已存在 id 也等核心吃掉 */
 int vtouch_region_del(const char *id);                      /* 单条删（不整表重写） */
 int vtouch_region_rename(const char *old_id, const char *new_id);   /* 原地改名（位置不变） */
 int vtouch_region_mark(int i);
@@ -67,7 +68,7 @@ int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int 
 int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
                    const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs/exprs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
 int  vtouch_op_del(const char *name);
-void vtouch_op_clear(void);
+int vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
 void vtouch_op_stop(void);
 int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
@@ -642,8 +643,8 @@ static void region_rot_step(void)
                            g_rr_snap[g_rr_i].type, g_rr_snap[g_rr_i].a1, g_rr_snap[g_rr_i].a2,
                            g_rr_snap[g_rr_i].a3, g_rr_snap[g_rr_i].a4, &n1, &n2, &n3, &n4) == 0 &&
             (n1 != l1 || n2 != l2 || n3 != l3 || n4 != l4)) {   /* 与活值比 ⇒ 重跑幂等（已算好的跳过） */
-            if (vtouch_region_add(g_rr_snap[g_rr_i].id, g_rr_snap[g_rr_i].type, n1, n2, n3, n4,
-                                  g_rr_snap[g_rr_i].en) != 0) g_rr_fail++;
+            if (vtouch_region_add_confirm(g_rr_snap[g_rr_i].id, g_rr_snap[g_rr_i].type, n1, n2, n3, n4,
+                                          g_rr_snap[g_rr_i].en) != 0) g_rr_fail++;   /* 评审修复：批必须条条落地 */
         }
     }
     g_rr_i++;
@@ -1573,6 +1574,24 @@ static int scheme_restore_file(const char *src, const char *dst, int kind)
 /* 切换执行（spec §4；返回码见段首注释）。名字门 = scheme_name_known 承认域（与 scheme_list /
  * scheme_cur_get 同一把尺子 —— 内部兜底名「默认[N]」可切）。name == current → 直接成功（no-op、
  * 零状态修改）。非 static：跨区块入口 —— T2.1「方案」页接线调用（本任务只落执行器；T1.1 文件层函数全 static）。 */
+/* 切换失败回滚（评审修复 2026-10-05 抽公共）：live ← schemes/<cur> 两文件 + 核心表 ← 同一份（clear+load）。
+ * cur 空 = 无源可回（仅告警）。⑤ 清空未生效 / ⑥ current 未写定 共用。 */
+static void scheme_rollback_to(const char *cur)
+{
+    char dp[160];
+    if (!cur[0]) return;
+    snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+    if (scheme_restore_file(dp, REGION_CONF_NEW, 0) != 0)
+        ALOGW("方案 切换：回滚 live regions 失败: %s", strerror(errno));
+    snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
+    if (scheme_restore_file(dp, OPS_CONF_FILE, 1) != 0)
+        ALOGW("方案 切换：回滚 live ops 失败: %s", strerror(errno));
+    vtouch_region_clear();
+    load_regions();
+    vtouch_op_clear();
+    load_ops();
+}
+
 int scheme_switch(const char *name)
 {
     char cur[16], sp[160], dp[160];
@@ -1623,10 +1642,16 @@ int scheme_switch(const char *name)
 
     /* ⑤ 核心替换（spec §4-5）：**先区域后操作**；清空后重放 ⇒ load 的「只补缺 / 重复跳过」均不触发
      * （全量补入）；单条被核心拒 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）。load 可重入
-     * （见 load_regions 段首：hide 表按文件重建；load_ops 无跨调用状态）。 */
-    vtouch_region_clear();
+     * （见 load_regions 段首：hide 表按文件重建；load_ops 无跨调用状态）。
+     * 2026-10-05 评审修复：换表前先**弃转屏重算批**（旧快照不许写回新表）；清空必须真落地
+     * （两个 clear 原来丢返回值 —— 核心被占时会静默跳过、load 的「只补缺」再放大成混合表）。 */
+    g_rr_active = 0; g_rr_i = 0; g_rr_n = 0; g_rr_fail = 0; g_rr_retry = 0;
+    if (vtouch_region_clear() != 0 || vtouch_op_clear() != 0) {
+        ALOGW("方案 切换 %s：核心清空未生效（编辑超时/核心被占）→ 回滚 %s", name, cur[0] ? cur : "-");
+        scheme_rollback_to(cur);
+        return 11;
+    }
     load_regions();
-    vtouch_op_clear();
     load_ops();
 
     /* ⑥ 写 current（失败 → 整体回滚 <cur>；评审 Minor 3 复合边）。单回滚 live 不够：下一拍 save 的
@@ -1638,16 +1663,7 @@ int scheme_switch(const char *name)
             ALOGW("方案 切换 %s：current 未写定（下次启动兜底迁移）", name);
         } else {
             ALOGW("方案 切换 %s：current 未写定 → 回滚 %s", name, cur);
-            snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
-            if (scheme_restore_file(dp, REGION_CONF_NEW, 0) != 0)
-                ALOGW("方案 切换：回滚 live regions 失败: %s", strerror(errno));
-            snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
-            if (scheme_restore_file(dp, OPS_CONF_FILE, 1) != 0)
-                ALOGW("方案 切换：回滚 live ops 失败: %s", strerror(errno));
-            vtouch_region_clear();
-            load_regions();
-            vtouch_op_clear();
-            load_ops();
+            scheme_rollback_to(cur);
             return 10;
         }
     }
@@ -3198,6 +3214,33 @@ static int  g_ope_ex_vl = 0;            /* 表达式子层变量列表（[变量
 static int  g_ope_mv = -1;              /* 步骤移模式（-1 = 关；≥0 = 正在移动的步号） */
 static int  g_ope_ex_field = 0;         /* 子层目标：0 = 计算步（名字 + 表达式）；1 = 字段内联（确认时自动插步） */
 static char g_ope_expr_buf[OPS_EXPR_MAX + 1];   /* 子层编辑缓冲：进入时从 g_ope_exprs[g_ope_se] 快照；[确定] 校验过写回 */
+
+/* 字段[表达式]插步的撤销快照（2026-10-05 评审修复：原实现插步立即生效、参数层 [取消] 只丢缓冲 = 半提交）。
+ * 参数层会话内**首次**插步前整段快照；[取消]（真关层）恢复，[完成] / 保存 / 关层 丢弃。 */
+static int  g_ex_undo_armed;
+static int  g_ex_undo_nsteps;
+static int  g_ex_undo_steps[OPE_MAX_STEPS][8];
+static char g_ex_undo_refs[OPE_MAX_STEPS][REGION_ID_MAX + 1];
+static char g_ex_undo_exprs[OPE_MAX_STEPS][OPS_EXPR_MAX + 1];
+static void ope_field_expr_undo_arm(void)
+{
+    if (g_ex_undo_armed) return;                 /* 会话内只留最早一份（多次插步一并撤销） */
+    g_ex_undo_armed = 1;
+    g_ex_undo_nsteps = g_ope_nsteps;
+    memcpy(g_ex_undo_steps, g_ope_steps, sizeof g_ope_steps);
+    memcpy(g_ex_undo_refs, g_ope_refs, sizeof g_ope_refs);
+    memcpy(g_ex_undo_exprs, g_ope_exprs, sizeof g_ope_exprs);
+}
+static void ope_field_expr_undo_drop(void) { g_ex_undo_armed = 0; }
+static void ope_field_expr_undo_restore(void)
+{
+    if (!g_ex_undo_armed) return;
+    g_ope_nsteps = g_ex_undo_nsteps;
+    memcpy(g_ope_steps, g_ex_undo_steps, sizeof g_ope_steps);
+    memcpy(g_ope_refs, g_ex_undo_refs, sizeof g_ope_refs);
+    memcpy(g_ope_exprs, g_ex_undo_exprs, sizeof g_ope_exprs);
+    g_ex_undo_armed = 0;
+}
 static char g_ope_ex_name[16];          /* 子层变量名缓冲（[改名] 编辑；[确定] 随表达式一起写回该步 ref） */
 static int  g_ope_ex_nm = 0;            /* 子层里的小字符键盘（改变量名）开 */
 static char g_ope_ex_nmmsg[96] = {0};   /* 名字键盘拒收提示 */
@@ -4178,6 +4221,7 @@ static void op_edit_close(void)
     g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
     g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并关（变量 / 区域选择弹层） */
     g_ope_ex = 0; g_ope_ex_field = 0; g_ope_ex_nm = 0; g_ope_ex_msg[0] = 0; g_ope_ex_nmmsg[0] = 0; g_ope_ex_vl = 0; g_ope_mv = -1;   /* 表达式子层（v5 计算步；v10 名字/字段内联）+ 移模式一并关 */
+    ope_field_expr_undo_drop();                      /* 字段[表达式]插步快照一并丢（评审修复 2026-10-05） */
     g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;   /* 视觉步子层（T3.2） */
     if (g_vis_cap) {                                /* 采集覆盖层（T3.2）一并关（防御：正常只能经 [取消] 退出） */
         g_vis_cap = 0; g_vis_cap_wait = 0; g_vis_cap_err = 0;
@@ -4247,6 +4291,7 @@ static void op_edit_save(void)
     int s, k, rc, perr = 0;
     int old_settled = 0;             /* 头顶补删删掉的正是 g_ope_orig：底部「old≠del_owed」门槛的落点 */
     char why[96];
+    ope_field_expr_undo_drop();      /* 保存即定稿：字段[表达式]插步快照丢弃（评审修复 2026-10-05） */
 
     /* 上轮留下的欠账：先补删旧条目（del 超时/未送达会欠着；补成再走正常保存流）。 */
     if (g_ope_del_owed[0]) {
@@ -4460,6 +4505,7 @@ static void ope_field_expr_commit(int se)
         snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "最多 %d 步，插不下自动计算步", OPE_MAX_STEPS);
         return;
     }
+    ope_field_expr_undo_arm();                       /* 会话内首次插步：整段快照（评审修复 2026-10-05） */
     ope_var_auto_name("e", name, sizeof name);        /* 自动名 e1 递增（可稍后在计算步里改名） */
     idx = ope_var_index_alloc();
     if (idx < 0) {
@@ -4872,7 +4918,7 @@ static void draw_num_edit(void)
             ALOGI("op edit 参数取消 第 %d 步", g_ope_se + 1);
             if (g_pick) { g_pick = 0; g_pick_t0 = 0; g_ope_coll = 0; vtouch_pick_cancel(); }   /* 防御：未回的取点请求也一并撤（全丢） */
             if (g_vis_num) { g_vis_num = 0; }        /* 视觉参数层开的数字键盘：回视觉层（g_ope_se 保持） */
-            else g_ope_se = -1;
+            else { g_ope_se = -1; ope_field_expr_undo_restore(); }   /* 真关层：撤销会话内插的计算步（评审修复） */
             g_ne_tgt = 0; g_ne_msg[0] = 0;
             g_need = 1; g_force_frames = 3;
         }
@@ -4912,7 +4958,7 @@ static void draw_num_edit(void)
                             ALOGI("vis edit 第 %d 步 %s = %d", g_ope_se + 1, ope_flabel[type - 1][fi], g_ne_vals[fi]);
                 }
                 if (g_vis_num) { g_vis_num = 0; }            /* 视觉参数层开的数字键盘：回视觉层 */
-                else g_ope_se = -1;
+                else { g_ope_se = -1; ope_field_expr_undo_drop(); }   /* 真关层：插步就此定稿（撤销快照丢弃） */
                 g_ne_tgt = 0; g_ne_msg[0] = 0;
                 g_need = 1; g_force_frames = 3;
             }
@@ -6217,6 +6263,7 @@ static const char *scm_switch_why(int rc)
     case 8:  return "切换失败：写区域文件失败（未切换，原状）";
     case 9:  return "切换失败：写操作文件失败（已回滚，未切换）";
     case 10: return "切换失败：写 current 失败（已整体回滚，未切换）";
+    case 11: return "切换失败：核心清空未生效（已回滚，未切换）";
     default: return "切换失败";
     }
 }

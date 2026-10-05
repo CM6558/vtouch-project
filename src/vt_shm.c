@@ -18,13 +18,16 @@ static struct vt_shm_b   *S_b;
 static struct vt_shm_c   *S_c;
 static void              *S_base;      /* 共享内存基址（两侧都用） */
 
-/* 单槽邮箱的自旋锁：只在「面板投一次编辑 / 核心吃一次编辑」时拿，不在注入热路径上。 */
-static void shm_lock(struct vt_shm_b *b)
+/* 单槽邮箱的自旋锁：只在「面板投一次编辑 / 核心吃一次编辑」时拿，不在注入热路径上。
+ * 2026-10-05 评审修复：上限从「循环计数」改**单调钟**（~20ms），且**返回成败** —— 原实现超限直接
+ * break 后调用方在无锁下继续写、随后 shm_unlock 还会清掉对方仍持有的锁（互斥被第三方释放）。 */
+static int shm_lock(struct vt_shm_b *b)
 {
-    int spins = 0;
+    uint64_t t0 = now_ns();
     while (__sync_lock_test_and_set(&b->lock, 1)) {
-        if (++spins > 2000000) break;          /* 极端情况不要死等，宁可丢这次编辑 */
+        if (now_ns() - t0 > 20000000ull) return -1;    /* 极端情况不要死等：真正放弃这次编辑 */
     }
+    return 0;
 }
 static void shm_unlock(struct vt_shm_b *b) { __sync_lock_release(&b->lock); }
 
@@ -205,7 +208,7 @@ void vt_shm_edit_apply(void)
     int op;
     if (!S_b) return;
     if (S_b->edit.seq == S_b->edit_applied) return;    /* 没新编辑，热路径零成本 */
-    shm_lock(S_b);
+    if (shm_lock(S_b) != 0) return;                    /* 锁拿不到：本轮跳过（不动 edit_applied，下轮重试） */
     memcpy(&e, (const void *)&S_b->edit, sizeof e);
     op = (int)e.op;
     switch (op) {
@@ -422,13 +425,14 @@ int vt_shm_ui_tick(void)
     return 0;
 }
 
-void vt_shm_post_edit(const struct vt_shm_edit *e)
+int vt_shm_post_edit(const struct vt_shm_edit *e)
 {
-    if (!S_b) return;
-    shm_lock(S_b);
+    if (!S_b) return -1;
+    if (shm_lock(S_b) != 0) return -1;                 /* 锁拿不到：不写（调用方按失败处理；评审修复 2026-10-05） */
     memcpy((void *)&S_b->edit, e, sizeof *e);
     S_b->edit.seq = e->seq;
     shm_unlock(S_b);
+    return 0;
 }
 
 void vt_shm_publish_rect(int visible, int rot, int x1, int y1, int x2, int y2)
