@@ -173,6 +173,10 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 snprintf(why, whycap, "第 %d 步时长越界", i + 1);
                 return 0;
             }
+            if (!op_num_ok(st->j1, 0, 60000) || !op_num_ok(st->j2, 0, 60000)) {   /* v2.1：两段停顿 0..60000（0 = 不停） */
+                snprintf(why, whycap, "第 %d 步停顿越界", i + 1);
+                return 0;
+            }
             break;
         case OP_STEP_WAIT:
             if (!op_num_ok(st->ms, 0, 600000)) {
@@ -397,7 +401,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）、滑动 j1/j2 = 按下后停 / 弹起前停（0..60000；0 = 不停；v2.1）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -531,6 +535,7 @@ static struct {
     int      hold;
     int      dur;
     int      nsamp;
+    int      sh1, sh2;                                       /* 滑动两段停顿：按下后停 / 弹起前停（ms；v2.1，2026-10-05g） */
     int      sample;
     int      sx1, sy1, sx2, sy2;                             /* 滑动本步解析后的起终点（变量快照的解析结果） */
     int      rx, ry;
@@ -1467,23 +1472,30 @@ static void op_begin_step(void)
         break;
     }
     case OP_STEP_SWIPE: {
-        int x1, y1, x2, y2, ms;
+        int x1, y1, x2, y2, ms, sh1, sh2;
         if (op_resolve(st->a1, 0, g.logical_width - 1, &x1) != 0 ||
             op_resolve(st->a2, 0, g.logical_height - 1, &y1) != 0 ||
             op_resolve(st->a3, 0, g.logical_width - 1, &x2) != 0 ||
             op_resolve(st->a4, 0, g.logical_height - 1, &y2) != 0 ||
-            op_resolve(st->ms, 1, 60000, &ms) != 0)
+            op_resolve(st->ms, 1, 60000, &ms) != 0 ||
+            op_resolve(st->j1, 0, 60000, &sh1) != 0 ||       /* v2.1（2026-10-05g）：按下后停 / 弹起前停（0 = 不停） */
+            op_resolve(st->j2, 0, 60000, &sh2) != 0)
             return;                                          /* 失败已中止（变量无值 / 结果无值）；滑动 ms 域 ≥1（spec §4） */
-        fprintf(stderr, "vtouchd: op 步 %d/%d 滑动 %d,%d→%d,%d %dms\n",
-                R.step + 1, R.nsteps, x1, y1, x2, y2, ms);
+        if (sh1 || sh2)
+            fprintf(stderr, "vtouchd: op 步 %d/%d 滑动 %d,%d→%d,%d %dms（按下停 %d / 弹起停 %d）\n",
+                    R.step + 1, R.nsteps, x1, y1, x2, y2, ms, sh1, sh2);
+        else
+            fprintf(stderr, "vtouchd: op 步 %d/%d 滑动 %d,%d→%d,%d %dms\n",
+                    R.step + 1, R.nsteps, x1, y1, x2, y2, ms);
         R.sx1 = x1; R.sy1 = y1; R.sx2 = x2; R.sy2 = y2;      /* 采样点插值用解析结果（负数编码已展开） */
         R.dur = ms;
+        R.sh1 = sh1; R.sh2 = sh2;
         R.nsamp = ms / 10;                                   /* N = max(2, dur/10)：10ms 一采样 */
         if (R.nsamp < 2) R.nsamp = 2;
         if (op_finger_ll("down", x1, y1) != 0) { op_conflict_abort(); return; }
         R.sample = 1;
         R.phase = PH_SWIPE_MOVE;
-        R.deadline = R.t0 + (uint64_t)R.sample * (uint64_t)R.dur / (uint64_t)R.nsamp;
+        R.deadline = R.t0 + (uint64_t)R.sh1 + (uint64_t)R.sample * (uint64_t)R.dur / (uint64_t)R.nsamp;
         break;
     }
     case OP_STEP_WAIT: {
@@ -1627,12 +1639,12 @@ static void op_advance(void)
         if (op_finger_ll("move", lx, ly) != 0) { op_conflict_abort(); return; }
         if (op_trace_on())                                   /* L9：默认零输出（判定只一次分支） */
             fprintf(stderr, "vtouchd: op 采样 %s %d/%d %d,%d\n", R.name, R.sample, R.nsamp, lx, ly);
-        if (R.sample >= R.nsamp) {                           /* 末点 = 终点；up 下一拍（隔一帧） */
+        if (R.sample >= R.nsamp) {                           /* 末点 = 终点；up 下一拍（隔一帧 + 弹起前停，v2.1） */
             R.phase = PH_SWIPE_UP;
-            R.deadline = R.t0 + (uint64_t)R.dur;
+            R.deadline = R.t0 + (uint64_t)R.sh1 + (uint64_t)R.dur + (uint64_t)R.sh2;
         } else {
             R.sample++;
-            R.deadline = R.t0 + (uint64_t)R.sample * (uint64_t)R.dur / (uint64_t)R.nsamp;
+            R.deadline = R.t0 + (uint64_t)R.sh1 + (uint64_t)R.sample * (uint64_t)R.dur / (uint64_t)R.nsamp;
         }
         break;
     case PH_SWIPE_UP:

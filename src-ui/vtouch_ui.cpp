@@ -3373,35 +3373,35 @@ static const char *ope_name_why(int rc)
  * 可变量的字段（spec §2.1）多画一个 [变量]（ope_var_ok 判）。条件步的 a3/a4/j1/j2/ref 不在字段表里 ——
  * 它们是步骤行上的行内控件（档位 + 目标格 + 区域下拉）；跳转步的「目标」= a1，走字段表（1 格）；
  * 计算步无数字字段（表达式走表达式子层，不进数字弹层）。 */
-static const int ope_fidx[11][5] = {
-    { 1, 2, 5, -1, -1 },       /* 点按：x, y, 按住 ms */
-    { 1, 2, 3, 4, 5 },         /* 滑动：起点 x, 起点 y, 终点 x, 终点 y, 时长 ms */
-    { 5, -1, -1, -1, -1 },     /* 等待：ms */
-    { 1, 2, -1, -1, -1 },      /* 按下：x, y */
-    { -1, -1, -1, -1, -1 },    /* 弹起：无字段 */
-    { 1, 2, -1, -1, -1 },      /* 区域判断：判定点 x, 判定点 y */
-    { -1, -1, -1, -1, -1 },    /* 开关判断：无数字字段 */
-    { 1, -1, -1, -1, -1 },     /* 跳转：目标步骤（0 = 结束） */
-    { -1, -1, -1, -1, -1 },    /* 计算：无数字字段（表达式子层编辑） */
-    { 1, 5, -1, -1, -1 },      /* 找图（T3.2；T7.4 加持续超时）：阈值 = a1、超时 ms = ms（数字键盘子层编辑） */
-    { 2, 5, -1, -1, -1 },      /* 找色（T3.2；T7.4 加持续超时）：容差 = a2 低 8 位（ne_field_get/set 拆包）、超时 ms = ms */
+static const int ope_fidx[11][7] = {
+    { 1, 2, 5, -1, -1, -1, -1 },       /* 点按：x, y, 按住 ms */
+    { 1, 2, 3, 4, 5, 6, 7 },           /* 滑动：起点 x/y, 终点 x/y, 移动 ms, 按下后停 ms（j1）, 弹起前停 ms（j2）（v2.1） */
+    { 5, -1, -1, -1, -1, -1, -1 },     /* 等待：ms */
+    { 1, 2, -1, -1, -1, -1, -1 },      /* 按下：x, y */
+    { -1, -1, -1, -1, -1, -1, -1 },    /* 弹起：无字段 */
+    { 1, 2, -1, -1, -1, -1, -1 },      /* 区域判断：判定点 x, 判定点 y */
+    { -1, -1, -1, -1, -1, -1, -1 },    /* 开关判断：无数字字段 */
+    { 1, -1, -1, -1, -1, -1, -1 },     /* 跳转：目标步骤（0 = 结束） */
+    { -1, -1, -1, -1, -1, -1, -1 },    /* 计算：无数字字段（表达式子层编辑） */
+    { 1, 5, -1, -1, -1, -1, -1 },      /* 找图（T3.2；T7.4 加持续超时）：阈值 = a1、超时 ms = ms（数字键盘子层编辑） */
+    { 2, 5, -1, -1, -1, -1, -1 },      /* 找色（T3.2；T7.4 加持续超时）：容差 = a2 低 8 位（ne_field_get/set 拆包）、超时 ms = ms */
 };
-static const char *const ope_flabel[11][5] = {
-    { "坐标 x", "坐标 y", "按住时长 ms", "", "" },
-    { "起点 x", "起点 y", "终点 x", "终点 y", "滑动时长 ms" },
-    { "等待时长 ms", "", "", "", "" },
-    { "坐标 x", "坐标 y", "", "", "" },
-    { "", "", "", "", "" },
-    { "判定点 x", "判定点 y", "", "", "" },
-    { "", "", "", "", "" },
-    { "目标", "", "", "", "" },
-    { "", "", "", "", "" },    /* 计算：无数字字段 */
-    { "阈值", "超时 ms", "", "", "" }, /* 找图：阈值 0..255；超时 0..60000（0 = 单次） */
-    { "容差", "超时 ms", "", "", "" }, /* 找色（单点）：容差 0..255；超时 0..60000（0 = 单次） */
+static const char *const ope_flabel[11][7] = {
+    { "坐标 x", "坐标 y", "按住时长 ms", "", "", "", "" },
+    { "起点 x", "起点 y", "终点 x", "终点 y", "移动 ms", "按下后停 ms", "弹起前停 ms" },
+    { "等待时长 ms", "", "", "", "", "", "" },
+    { "坐标 x", "坐标 y", "", "", "", "", "" },
+    { "", "", "", "", "", "", "" },
+    { "判定点 x", "判定点 y", "", "", "", "", "" },
+    { "", "", "", "", "", "", "" },
+    { "目标", "", "", "", "", "", "" },
+    { "", "", "", "", "", "", "" },    /* 计算：无数字字段 */
+    { "阈值", "超时 ms", "", "", "", "", "" }, /* 找图：阈值 0..255；超时 0..60000（0 = 单次） */
+    { "容差", "超时 ms", "", "", "", "", "" }, /* 找色（单点）：容差 0..255；超时 0..60000（0 = 单次） */
 };
 static int ope_nfields(int type)
 {
-    return type == OP_STEP_TAP ? 3 : type == OP_STEP_SWIPE ? 5 : type == OP_STEP_WAIT ? 1 :
+    return type == OP_STEP_TAP ? 3 : type == OP_STEP_SWIPE ? 7 : type == OP_STEP_WAIT ? 1 :
            type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : type == OP_STEP_JUMP ? 1 :
            type == OP_STEP_FINDIMAGE ? 2 : type == OP_STEP_FINDCOLOR ? 2 : 0;
 }
@@ -3464,6 +3464,7 @@ static void ope_num_text(int v, char *out, int outcap)
  * v2 里凡存在的数值字段都可变量 —— 仍按类型/下标写死，防以后加字段时悄悄放行。 */
 static int ope_var_ok(int type, int idx)
 {
+    if (idx == 6 || idx == 7) return type == OP_STEP_SWIPE;   /* v2.1：滑动两段停顿也可用变量 */
     if (idx == 5) return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_WAIT;
     if (idx >= 1 && idx <= 4)
         return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_DOWN || type == OP_STEP_COND_REGION;
@@ -3595,6 +3596,10 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
         return 1;
     }
     if (ope_var_ref(v)) return 1;                     /* -25..-1：负数编码引用（v2 数值字段全可变量；v10 扩 fx/fy 与自定义变量） */
+    if (type == OP_STEP_SWIPE && (idx == 6 || idx == 7)) {   /* v2.1（2026-10-05g）：滑动两段停顿 0..60000（0 = 不停） */
+        if (v < 0 || v > 60000) { snprintf(why, (size_t)whycap, "%s 必须在 0..60000", label); return 0; }
+        return 1;
+    }
     if (idx >= 1 && idx <= 4) {                       /* 坐标字段：x 看逻辑宽、y 看逻辑高 */
         int lim = (idx == 1 || idx == 3) ? g_w : g_h;
         if (v < 0 || v >= lim) { snprintf(why, (size_t)whycap, "%s 必须在 0..%d", label, lim - 1); return 0; }
@@ -3808,7 +3813,12 @@ static void ope_step_text(int si, char *out, int outcap)
         ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
         ope_num_text(s6[3], x2, (int)sizeof x2); ope_num_text(s6[4], y2, (int)sizeof y2);
         ope_num_text(s6[5], ms, (int)sizeof ms);
-        snprintf(out, (size_t)outcap, "%s,%s → %s,%s · %sms", x1, y1, x2, y2, ms);
+        if (s6[6] || s6[7]) {                            /* v2.1：两段停顿非零才显示 */
+            ope_num_text(s6[6], t1, (int)sizeof t1); ope_num_text(s6[7], t2, (int)sizeof t2);
+            snprintf(out, (size_t)outcap, "%s,%s → %s,%s · 移动 %sms · 按下停 %s · 弹起停 %s", x1, y1, x2, y2, ms, t1, t2);
+        } else {
+            snprintf(out, (size_t)outcap, "%s,%s → %s,%s · %sms", x1, y1, x2, y2, ms);
+        }
         break;
     case OP_STEP_WAIT:
         ope_num_text(s6[5], ms, (int)sizeof ms);
@@ -4713,8 +4723,12 @@ static void draw_num_edit(void)
         float fx2 = fixed0 + (float)nrow * 72.0f + (float)(nrow - 1) * 12.0f + 72.0f + 70.0f;
         kh_a = (span - fx1) / 4.0f;
         if (kh_a < 44.0f) { cellh_a = 72.0f; vbh_a = 72.0f; bth_a = 70.0f; kh_a = (span - fx2) / 4.0f; }
+        if (kh_a < 44.0f) {                              /* v2.1：滑动 7 格（4 行）矮屏再加一档（56px 格） */
+            cellh_a = 56.0f; vbh_a = 56.0f; bth_a = 60.0f;
+            kh_a = (span - (fixed0 + (float)nrow * 56.0f + (float)(nrow - 1) * 12.0f + 56.0f + 60.0f)) / 4.0f;
+        }
         if (kh_a > 88.0f) kh_a = 88.0f;
-        if (kh_a < 44.0f) kh_a = 44.0f;
+        if (kh_a < 36.0f) kh_a = 36.0f;
     }
     cellh = cellh_a;
     cy0 = y0 + 44 + (var_ok ? 72.0f : 0.0f);   /* 三模式行占位（60 + 缝 12） */
