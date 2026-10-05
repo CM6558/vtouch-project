@@ -7400,7 +7400,7 @@ static void build_vis_cap(void)
             ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_cap_msg);
         }
         img_top = y0 + 96.0f;
-        img_bot = b.y - 24.0f - 104.0f - (mode == 2 ? 88.0f : 0.0f);   /* 底：按钮 92+缝 12；点集再让容差行 76+12 */
+        img_bot = b.y - 24.0f - 104.0f - ((mode == 2 || mode == 5) ? 88.0f : 0.0f);   /* 底：按钮 92+缝 12；点集（含重编辑）再让容差行 76+12 */
         if (img_bot < img_top + 120.0f) img_bot = img_top + 120.0f;    /* 极矮兜底 */
         /* 缩放行（Task 7.2；模板/点集）：[＋] [－] [适应] + 当前值；插在标题/提示与画面之间（矮屏收一档） */
         if (mode != 3) {
@@ -7616,7 +7616,7 @@ static void build_vis_cap(void)
                                     IM_COL32(59, 130, 246, 255), 2.0f, 0, 2.5f);
                     }
                 }
-                if (mode == 2) {
+                if (mode == 2 || mode == 5) {   /* 点集编辑 / 点集重编辑（2026-10-05c：mode 5 同画） */
                     /* 基准 + 参考点标记（显示层；帧坐标 → 屏坐标 = ix + fx*sc） */
                     char lb[44];
                     int k;
