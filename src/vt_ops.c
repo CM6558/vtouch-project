@@ -1762,8 +1762,8 @@ void vt_ops_tick(void)
     if (R.frozen) {
         /* 解冻（帧关后的第一次 tick）：把本步起点 t0、到点 deadline、起跑时刻 t_start 一起平移
          * 暂停时长 —— 操作从暂停点原样继续（剩余时间不变），完成日志的「用时」因此不含暂停。
-         * deadline 必须跟着一起平移：它是先前按旧 t0 算好的绝对值，只动 t0 会让下一步动作立刻
-         * 补发，而且 op_next_step 的 t0 = deadline 会把这笔平移又拉回去。 */
+         * deadline 必须跟着一起平移：它是先前按旧 t0 算好的绝对值，只动 t0 会让下一步动作立刻补发。
+         * （2026-10-05h 起 op_next_step 取**实际时刻**，不再有「t0 = deadline 会把平移拉回去」这条旧行为。） */
         uint64_t pause_ms;
         now = op_now_ms();
         pause_ms = now - R.frozen_since;

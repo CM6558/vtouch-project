@@ -3502,7 +3502,7 @@ static int ope_var_index_refed(int index)
 {
     int i, k;
     for (i = 0; i < g_ope_nsteps; i++)
-        for (k = 1; k <= 5; k++)
+        for (k = 1; k <= 7; k++)            /* 1..7：含滑动 j1/j2（按下后停/弹起前停，v2.1；评审修复 2026-10-05） */
             if (ope_var_ok(g_ope_steps[i][0], k) && g_ope_steps[i][k] == OP_VAR_V0 - index) return 1;
     return 0;
 }

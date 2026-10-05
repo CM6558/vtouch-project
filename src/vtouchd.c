@@ -60,6 +60,8 @@
 
 #include "vt_internal.h"
 
+static uint64_t S_emit_fail_since;         /* 重发连续失败起点（单调毫秒；0 = 没在失败；评审修复 2026-10-05） */
+
 /* ===== §1 共享状态（唯一定义在这里）===== */
 #ifdef VT_UI
 /* VT_UI 构建：状态本体放进共享内存（面板只读映射同一份）。启动早期 g 指向引导副本
@@ -254,13 +256,21 @@ int vtouch_poll_step(void)
     }
     if (p[0].revents & POLLIN) physical_events();
     if (g.g_reemit && g.u_fd >= 0) {
-        /* g_emit_fail 的**唯一所有者**（评审 C16）：数的是「重发连续失败次数」，成功即归零；
-         * 5ms 一拍 ⇒ 200 拍 ≈ 1s 连续失败才停机（真到这一步说明 uinput 已经不收事了）。
+        /* g_emit_fail 的**唯一所有者**（评审 C16）：数的是「重发连续失败次数」，成功即归零。
+         * 停机判据 = **单调钟**持续失败 ≥1s（2026-10-05 评审修复：原判据「200 拍」的前提是「5ms 一拍」，
+         * 但 poll 会因任何可读事件提前返回（输入/客户端/面板/触发）⇒ 负载下 200 次重试远快于 1s 烧完、
+         * 提前停机；计数现在只进日志）。
          * 物理路径那边只提交、不计数 —— 它失败时置的就是这个 g_reemit，下一拍必然在这里被计到。 */
-        if (emit_frame() == 0) { g.g_reemit = 0; g.g_emit_fail = 0; }
-        else if (++g.g_emit_fail >= 200) {
-            fprintf(stderr, "vtouchd: uinput 连续 %d 次写失败（约 1s）→ 停止（物理触摸回系统）\n", g.g_emit_fail);
-            return -1;
+        if (emit_frame() == 0) {
+            g.g_reemit = 0; g.g_emit_fail = 0; S_emit_fail_since = 0;
+        } else {
+            uint64_t nw = now_ns() / 1000000ull;
+            if (!S_emit_fail_since) S_emit_fail_since = nw;      /* 首次失败：记连续失败起点 */
+            g.g_emit_fail++;
+            if (nw - S_emit_fail_since >= 1000) {
+                fprintf(stderr, "vtouchd: uinput 连续 %d 次写失败（持续 ≥1s）→ 停止（物理触摸回系统）\n", g.g_emit_fail);
+                return -1;
+            }
         }
     }
     if (p[0].revents & (POLLHUP | POLLERR)) {
@@ -270,7 +280,7 @@ int vtouch_poll_step(void)
     if (p[1].revents & POLLIN) {
         int ncf = accept4(g.listen_fd, NULL, NULL, SOCK_CLOEXEC);
         if (ncf >= 0) {
-            struct timeval rtv = { .tv_sec = 0, .tv_usec = 300000 };   /* 握手最多被拖 300ms */
+            struct timeval rtv = { .tv_sec = 0, .tv_usec = 300000 };   /* 单次 recv 超时 300ms（整段握手总预算 1000ms，见 vt_ws.c VT_HS_TOTAL_MS） */
             struct timeval stv = { .tv_sec = 0, .tv_usec = 20000 };    /* 写超时（第二道保险） */
             int one = 1;
             if (g.client_fd >= 0) { fprintf(stderr, "vtouchd: 新连接，踢掉旧客户端\n"); drop_client(); }
@@ -286,6 +296,8 @@ int vtouch_poll_step(void)
                 g.client_fd = ncf;
                 ws_input_reset();
                 outq_reset();
+                p[2].revents = 0;            /* 评审修复 2026-10-05：p[2]/p[3] 装的是**旧 fd** 的 poll 结果， */
+                p[3].revents = 0;            /* 不清零会把旧连接的 HUP/ERR 算到新连接头上（新连接同轮被踢） */
                 fprintf(stderr, "vtouchd: ws client connected\n");
             }
         }

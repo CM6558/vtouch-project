@@ -216,7 +216,8 @@ int region_rename(const char *old_id, const char *new_id)
         if (strcmp(g.regions[i].id, old_id) != 0) continue;
         memset(g.regions[i].id, 0, sizeof g.regions[i].id);
         memcpy(g.regions[i].id, new_id, n);
-        region_gen++;
+        /* 不改 region_gen（2026-10-05 评审修复：C4 残留 —— 改名不动表位，区域线程私有状态按位置索引
+         * 仍有效；bump 只会让整表清零、丢 up / 多报 enter）。 */
         fprintf(stderr, "vtouchd: region rename %s -> %s\n", old_id, new_id);
         pthread_mutex_unlock(&g.region_lock);
         return 0;

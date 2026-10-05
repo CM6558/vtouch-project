@@ -213,7 +213,10 @@ int vt_panel_start(int shm_fd)
     int wfds[2] = { -1, -1 };
 
     if (shm_fd < 0) return -1;
-    S_shm_ok = 1;                          /* 过了这关才值得重启：重启走的就是这个 fd（见看门狗） */
+    S_shm_fd = shm_fd;                     /* 评审修复 2026-10-05：先落 fd 再置门 —— 重启走的就是这个 fd；
+                                            * 若等 fork 前才赋值，首启在自解包/stat/pack_env 早退后，看门狗
+                                            * 每 ~3s 的重试都传 -1 秒退，面板永远起不来 */
+    S_shm_ok = 1;                          /* 过了这关才值得重启（见看门狗） */
     if (!dir || !*dir) dir = VT_PANEL_DIR_DEFAULT;
     snprintf(S_dir, sizeof S_dir, "%s", dir);
     mkdir(S_dir, 0755);                            /* 目录可能还不存在（B 方案：设备上只有核心一个文件） */
@@ -247,7 +250,11 @@ int vt_panel_start(int shm_fd)
     snprintf(S_uidirenv, sizeof S_uidirenv, "VTOUCH_UI_DIR=%s", S_dir);
     snprintf(S_shmfd, sizeof S_shmfd, "VTOUCH_SHM_FD=%d", VT_SHM_FD);
     snprintf(S_corepid, sizeof S_corepid, "VTOUCH_CORE_PID=%d", (int)getpid());
-    snprintf(S_wakefd, sizeof S_wakefd, "VTOUCH_WAKE_FD=%d", VT_PANEL_WAKE_FD);
+    if (wfds[1] >= 0)
+        snprintf(S_wakefd, sizeof S_wakefd, "VTOUCH_WAKE_FD=%d", VT_PANEL_WAKE_FD);
+    else
+        S_wakefd[0] = 0;                   /* 评审修复 2026-10-05：没建 pipe 就不传 —— pack_env 的 S_wakefd[0]
+                                            * 守卫原来恒真（字符串总以 'V' 开头），子进程 fd 4 可能是别的东西 */
     snprintf(S_w, sizeof S_w, "%d", g.logical_width);
     snprintf(S_h, sizeof S_h, "%d", g.logical_height);
 
@@ -261,7 +268,6 @@ int vt_panel_start(int shm_fd)
 
     if (pack_env(&env) != 0) return -1;
     cloexec_all(shm_fd);                       /* 硬性检查项，见文件头注释 */
-    S_shm_fd = shm_fd;
 
     pid = fork();
     if (pid < 0) {
