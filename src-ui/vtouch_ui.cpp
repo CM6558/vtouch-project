@@ -84,6 +84,7 @@ int  vtouch_region_kind(const char *id, int kind);                     /* 开关
  * 定义见 src-ui/ui_glue.c（单跑模式见 src-ui/ui_stubs.c）。 */
 void vtouch_vis_panel_capture_req(void);
 int  vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf);
+void vtouch_vis_cap_interval_set(int ms);   /* 抓帧间隔（2026-10-05f；ui.conf 载入/改值时同步给抓帧线程） */
 int  vtouch_vis_panel_err_take(int *err);
 /* 试查（Task 7.1）：「试一下」→ 核心执行一次查找（投递/取结果；定义见 src-ui/ui_glue.c，
  * 单跑模式见 src-ui/ui_stubs.c）。 */
@@ -172,8 +173,11 @@ static Dot g_dots[64];
  * 屏幕上画圈，很吵。要临时打开：核心侧 env `VTOUCH_UI_MARK=1`，或面板侧边栏里的「触摸标记」按钮
  * （按钮的取值落盘到 /data/local/vtouch-runtime/ui.conf，重启保留）。 */
 static int g_show_mark = 0;
+static int g_cap_ms = 0;                 /* 抓帧间隔 ms（0 = 全速；2026-10-05f；抓帧线程读） */
 static int g_uiconf_loaded = 0;
 #define UI_CONF_PATH "/data/local/vtouch-runtime/ui.conf"
+/* ui.conf：新格式 key=value 逐行（mark / cap_ms）；旧格式（单值 0/1 = mark）照读兼容。
+ * 载入后把 cap_ms 同步给 glue（抓帧线程经 JNI 每轮取）。 */
 static void ui_conf_load_once(void)
 {
     FILE *f;
@@ -181,21 +185,38 @@ static void ui_conf_load_once(void)
     if (g_uiconf_loaded) return;
     g_uiconf_loaded = 1;
     e = getenv("VTOUCH_UI_MARK");
-    if (e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O')) { g_show_mark = 1; return; }
+    if (e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O')) g_show_mark = 1;
     f = fopen(UI_CONF_PATH, "r");
-    if (!f) return;
-    {
-        char b[32] = {0};
-        size_t n = fread(b, 1, sizeof b - 1, f);
+    if (f) {
+        char line[64];
+        if (fgets(line, sizeof line, f)) {
+            if (strchr(line, '=') == NULL) {                 /* 旧格式：单值 = mark */
+                if (line[0] == '1' || line[0] == 'o' || line[0] == 'O') g_show_mark = 1;
+            } else {
+                do {
+                    char *eq = strchr(line, '=');
+                    if (eq) {
+                        *eq = 0;
+                        if (!strcmp(line, "mark")) g_show_mark = (eq[1] == '1');
+                        else if (!strcmp(line, "cap_ms")) {
+                            int v = atoi(eq + 1);
+                            if (v < 0) v = 0;
+                            if (v > 2000) v = 2000;
+                            g_cap_ms = v;
+                        }
+                    }
+                } while (fgets(line, sizeof line, f));
+            }
+        }
         fclose(f);
-        if (n > 0 && (b[0] == '1' || b[0] == 'o' || b[0] == 'O')) g_show_mark = 1;
     }
+    vtouch_vis_cap_interval_set(g_cap_ms);                   /* 同步给抓帧线程（2026-10-05f） */
 }
 static void ui_conf_save(void)
 {
     FILE *f = fopen(UI_CONF_PATH, "w");
     if (!f) return;
-    fprintf(f, "%d\n", g_show_mark);
+    fprintf(f, "mark=%d\ncap_ms=%d\n", g_show_mark, g_cap_ms);
     fclose(f);
 }
 static int g_prev_on[64];
@@ -6096,7 +6117,7 @@ static const char *const g_help_lines[] = {
     "17. 找图：先存好模板（「模板」页截屏框选），步骤里选模板名——在当前画面里找这块图案（可以限定区域）；找到就把命中坐标写进 fx（x）/fy（y）（系统预置变量，后面的步骤直接引用），走「成立」档；没找到走「不成立」档。打开「颜色校验」后，明暗像但颜色不同的图案会被跳过（旧模板重存一次即可生效）。",
     "18. 找色：按颜色找像素——填颜色（十六进制）和容差（0–255）；「多点找色」还要选一个点集（基准色 + 参考点，在「模板」页吸色点选生成）。找到同样写 fx/fy 走「成立」档，没找到走「不成立」档。",
     "19. 试一下：找图/找色步骤（和「模板」页）里点「试一下」——当场找一次，马上显示「命中 (x, y)」或「未命中」，并把找到的位置在屏幕上框出来（约 2 秒）。编辑时先用它验证模板/颜色找不找得到；旁边可以直接调阈值/容差（±1、±10），调一下立刻重试。",
-    "20. 持续查找：找图/找色打开「持续查找」并设个超时（毫秒）——它会一遍遍重新找，找到就停、返回坐标；一直没找到就到超时为止（走「不成立」档）。",
+    "20. 持续查找：找图/找色打开「持续查找」并设个超时（毫秒）——它会一遍遍重新找，找到就停、返回坐标；一直没找到就到超时为止（走「不成立」档）。找多快可以在「模板」页调（抓帧间隔：0 = 全速）。",
     "21. 自定义变量：计算步骤可以存进自己命名的变量（默认 v1、v2…，名字可改，最多 16 个）——不再只有固定的 4 个槽；找图/找色、按下/弹起这些是系统预置名字（fx/fy、触发按下x…）。任何字段编辑时都能在「变量」列表里选它们；表达式编辑里也有「变量」按钮，点开就是全部变量（含预置），点一条直接插进去。",
     "22. 字段直接写算式：坐标、时长这些格子里点「表达式」可以直接写算式（比如 按下x+100）——确定后自动在这步前面生成一条「计算」步骤（名字默认 e1，可改），格子指向它。原来的「计算」步骤照样能用。",
     "23. 截帧选择器：截帧后可以用 [＋]/[－]/[适应] 缩放、拖画面平移；选择框四角拖着改大小、框里拖着整体挪；[确认] 后框会留着，还能继续调整。",
@@ -8236,6 +8257,22 @@ static void page_template(void)
                 g_need = 1; g_force_frames = 2;
             }
             ImGui::PopID();
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+    /* 抓帧间隔（2026-10-05f）：抓帧线程与面板渲染解耦后的抓帧节奏（0 = 全速）；点一下循环预设。 */
+    {
+        static const int presets[8] = { 0, 5, 10, 20, 33, 50, 100, 200 };
+        char lab[80];
+        int k, cur = 0;
+        for (k = 0; k < 8; k++) if (presets[k] == g_cap_ms) { cur = k; break; }
+        snprintf(lab, sizeof lab, "抓帧间隔：%d ms%s（点一下切换）", g_cap_ms, g_cap_ms == 0 ? " = 全速" : "");
+        if (btn_light(lab, ImVec2(ImGui::GetContentRegionAvail().x, 72))) {
+            g_cap_ms = presets[(cur + 1) % 8];
+            vtouch_vis_cap_interval_set(g_cap_ms);
+            ui_conf_save();
+            ALOGI("vis 抓帧间隔 → %d ms", g_cap_ms);
+            g_need = 1; g_force_frames = 2;
         }
         ImGui::Dummy(ImVec2(0, 6));
     }

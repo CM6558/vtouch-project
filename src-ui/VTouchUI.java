@@ -26,6 +26,7 @@ public class VTouchUI {
     /* 面板侧抓帧（T3.2）：模板 / 点集 / 找色吸色用；与核心帧区请求协议**完全独立的旁路**
      * （请求位与缓冲全在 JNI C 的静态区，不进共享内存、不干扰核心请求）。 */
     static native int nativeVisPanelPoll();                     /* 1 = 面板要一帧（读到即清） */
+    static native int nativeVisCapInterval();                   /* 抓帧间隔 ms（0 = 全速；抓帧线程每轮取，2026-10-05f） */
     static native int nativeVisPanelFrame(Object hb, int rotation);  /* 拷进面板侧缓冲；0 = 成功，负 = 错误码 */
     static native void nativeVisPanelFail(int err);             /* Java 侧失败（token/反射/capture） */
 
@@ -229,7 +230,7 @@ public class VTouchUI {
         }
     }
 
-    static boolean visInitReflect() {
+    static synchronized boolean visInitReflect() {   /* 抓帧线程/渲染线程都会首调（2026-10-05f） */
         if (visReflectOk) return true;
         try {
             visBldCls = Class.forName("android.window.ScreenCapture$DisplayCaptureArgs$Builder");
@@ -377,6 +378,35 @@ public class VTouchUI {
         }
     }
 
+    /* 抓帧工作线程（2026-10-05f）：抓帧与面板渲染解耦 —— skip-screenshot 生效时由本线程轮询请求并抓帧
+     * （渲染循环不再抓），两次抓帧之间的最小间隙 = nativeVisCapInterval()（0 = 全速；面板「模板」页可设、
+     * 落 ui.conf）。老 ROM（skipShotOk=false）不启本线程，仍走渲染循环旧路径（含隐藏/沉降）。
+     * 线程安全：抓帧链自身的跨线程协议已就位（面板侧帧缓冲 = 双缓冲 + 原子 gen；核心帧区 = shm seq 协议）。 */
+    static void capWorkerLoop() {
+        Log.i(TAG, "vis 抓帧线程启动（间隔由面板设置控制，0 = 全速）");
+        long warnT = 0;
+        for (;;) {
+            try {
+                int vreq = nativeVisPollRequest();
+                boolean pneed = nativeVisPanelPoll() != 0;
+                if (vreq != 0 || pneed) {
+                    if (vreq != 0) captureToShm(vreq);
+                    if (pneed) captureToPanel();
+                    int iv = nativeVisCapInterval();
+                    Thread.sleep(iv > 0 ? iv : 1);
+                } else {
+                    Thread.sleep(2);
+                }
+            } catch (InterruptedException ie) {
+                return;
+            } catch (Throwable t) {
+                long now4 = System.currentTimeMillis();
+                if (now4 - warnT > 3000) { warnT = now4; Log.w(TAG, "vis 抓帧线程异常（继续）", t); }
+                try { Thread.sleep(50); } catch (Throwable t2) { }
+            }
+        }
+    }
+
     static Surface newSurface(Object layer) throws Throwable {
         Class<?> surfCls = Class.forName("android.view.Surface");
         java.lang.reflect.Constructor<?> ctor = surfCls.getDeclaredConstructor(SCC);
@@ -474,6 +504,13 @@ public class VTouchUI {
          *     观察窗（回调常早于状态更新，直接读会拿到旧值 → 白做一次换绑、还漏掉这次旋转）；
          *     注册失败回落 320ms 轮询，注册成功也留 2s 一次的漏事件保险。
          * 变化处理顺序：先遮挡 → 再改 buffer / 换新 Surface → native 首帧上屏 → 恢复。 */
+        if (skipShotOk) {            /* 抓帧工作线程（2026-10-05f）：免隐藏生效时抓帧与渲染解耦 */
+            Thread capT = new Thread(new Runnable() {
+                public void run() { capWorkerLoop(); }
+            }, "vt-cap");
+            capT.setDaemon(true);
+            capT.start();
+        }
         mainTh = Thread.currentThread();
         boolean vis = true;          /* 逻辑可见性（native 说的要不要显示） */
         boolean needShow = false;    /* 抓帧恢复失败：下一轮补恢复（否则面板会一直不可见） */
@@ -649,7 +686,9 @@ public class VTouchUI {
                     }
                 }
             }
-            {
+            if (!skipShotOk) {
+                /* 老 ROM 回退路径（skipShotOk=false）：渲染循环内隐藏 + 沉降 + 抓帧（含保持隐藏窗口，T7.4）。
+                 * skip-screenshot 生效时抓帧已移交 vt-cap 工作线程（2026-10-05f）——本块整段跳过。 */
                 int vreq = nativeVisPollRequest();
                 boolean pneed = nativeVisPanelPoll() != 0;
                 if (vreq != 0 || pneed) {

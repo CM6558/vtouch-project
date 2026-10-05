@@ -962,6 +962,28 @@ int vtouch_vis_panel_err_take(int *err)
     return 1;
 }
 
+/**
+ * (vtouch-doc: vtouch_vis_cap_interval_set)
+ * @brief 设置抓帧最小间隔（ms；0 = 全速；面板「模板」页改、落 ui.conf）。
+ * @param   ms  间隔毫秒（<0 按 0、>2000 按 2000）
+ * @note    写侧 = 渲染线程（ui_conf 加载 / 改值时）；读侧 = Java 抓帧线程（JNI nativeVisCapInterval 每轮取）。
+ *          抓帧线程与渲染循环解耦（2026-10-05f）：间隔只作用于抓帧线程两次抓帧之间的最小间隙。
+ */
+static volatile int s_cap_ms;
+void vtouch_vis_cap_interval_set(int ms)
+{
+    if (ms < 0) ms = 0;
+    if (ms > 2000) ms = 2000;
+    __atomic_store_n(&s_cap_ms, ms, __ATOMIC_RELEASE);
+}
+
+/* 抓帧线程读间隔（JNI；0 = 全速）。 */
+JNIEXPORT jint JNICALL Java_VTouchUI_nativeVisCapInterval(JNIEnv *env, jclass cls)
+{
+    (void)env; (void)cls;
+    return (jint)__atomic_load_n(&s_cap_ms, __ATOMIC_ACQUIRE);
+}
+
 /* Java 主循环轮询：面板要帧没有（1 = 有，读到即清）。 */
 JNIEXPORT jint JNICALL Java_VTouchUI_nativeVisPanelPoll(JNIEnv *env, jclass cls)
 {
