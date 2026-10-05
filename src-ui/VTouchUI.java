@@ -211,6 +211,8 @@ public class VTouchUI {
     static final int VIS_KEEP_HIDDEN_MS = 150;
     static boolean visHideLogged;
     static boolean visKeepLogged;        /* 「复用保持隐藏」首次日志（限频，同 visHideLogged 口径） */
+    static boolean skipShotOk;           /* 图层 skip-screenshot 已设（免隐藏抓帧）；makeLayer 探测成功置 true，
+                                          * 老 ROM 无此方法 → false（回退隐藏+沉降路径，行为同 2026-10-05） */
     static void visWarn(String msg, Throwable t) {
         long now0 = System.currentTimeMillis();
         if (!visWarned) {
@@ -383,6 +385,15 @@ public class VTouchUI {
                 sc, 0.0f, 0.0f);
         txnCall(t, "setAlpha", new Class<?>[]{SCC, float.class}, sc, 1.0f);
         txnCall(t, "setTrustedOverlay", new Class<?>[]{SCC, boolean.class}, sc, true);
+        /* 免隐藏抓帧（2026-10-05b）：图层标记 skip-screenshot —— 本层不进任何截图/抓屏（含
+         * captureDisplay），抓帧不再需要把面板 alpha 归 0（消除「闪一下」）。老 ROM 无此方法
+         * → skipShotOk 保持 false，抓帧回退「隐藏 + 沉降」路径。 */
+        try {
+            txnCall(t, "setSkipScreenshot", new Class<?>[]{SCC, boolean.class}, sc, true);
+            if (!skipShotOk) { skipShotOk = true; Log.i(TAG, "vis 抓帧：图层 skip-screenshot 已设（免隐藏抓帧）"); }
+        } catch (Throwable t2) {
+            skipShotOk = false;
+        }
         txnCall(t, "show", new Class<?>[]{SCC}, sc);
         TXN.getMethod("apply").invoke(t);
         return sc;
@@ -593,6 +604,9 @@ public class VTouchUI {
              * **抓帧前隐藏面板**（2026-10-05）：面板在合成画面里，不隐藏则帧中带面板 UI 与区域；
              * 可见图层 alpha 归 0 → 沉降 → 抓。转屏遮挡（guard）期间 alpha 归遮挡逻辑管，
              * 不隐藏直接抓（面板彼时本就不可见/过渡中）。
+             * **免隐藏抓帧**（2026-10-05b）：图层 setSkipScreenshot 生效（Android 13+）时完全跳过
+             * 隐藏 / 沉降 / 保持窗口 —— 帧里天然没有面板与区域，用户无感（不再「闪一下」）；
+             * 老 ROM 无此方法 → skipShotOk=false，回退上面的隐藏路径。
              * **自动保持隐藏**（T7.4）：抓完不立即恢复 —— 记 capHideUntil = now + 150ms；
              * 窗内又来请求 → 复用隐藏态（跳过隐藏 + 40ms 沉降，~60fps 搜索）；150ms 无请求 → 自动恢复
              * （失败置 needShow 下轮补，同旧口径）。单次查找 = 面板隐藏总时长 ~200ms（沉降 + 抓 + 窗口）。 */
@@ -619,7 +633,7 @@ public class VTouchUI {
                 boolean pneed = nativeVisPanelPoll() != 0;
                 if (vreq != 0 || pneed) {
                     boolean hid = false;
-                    if (!guard) {
+                    if (!guard && !skipShotOk) {   /* skip-screenshot 生效：帧天然无面板/区域，无需隐藏（不闪） */
                         if (capHide) {
                             hid = true;    /* 复用隐藏态：跳过隐藏 + 沉降（保持隐藏窗口内） */
                             if (!visKeepLogged) {

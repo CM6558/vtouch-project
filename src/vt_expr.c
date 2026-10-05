@@ -17,7 +17,8 @@
  *   vt_expr_eval 用真实值求值，运行时同一套判定兜底（spec §5「编辑期已拦，这里是防御」）。
  * v10（spec EDITOR_V2 §Task 7.5）：变量空间 = 预置 7（触发 5 + fx/fy）+ 自定义命名变量（≤16，名字表
  *   随调用传入）；引用未写的触发数据 → NO_VAR（变量无值）；引用未写的 fx/fy / 自定义变量 → NO_SLOT
- *   （结果无值）；名字不在表里 → BAD（未知名字）。
+ *   （结果无值）；名字不在表里 → BAD（未知名字）。v4 旧名 r1..r4 仅解析兼容（r1/r2 = fx/fy、
+ *   r3/r4 = 恒未写 → NO_SLOT；自定义同名优先；不进 UI 列表）。
  *
  * 守卫：整文件在 #ifdef VT_UI 内 —— 默认（无面板）构建里本文件是空 TU（build.sh 用通配把 src 下的 .c 一起链）。
  * 零核心依赖：只 include 标准头 + 自家头，宿主 gcc 可直接编译（宿主单测见 build/test_vt_expr.c，不入库）。
@@ -142,7 +143,8 @@ static void ex_tok(struct ex_ctx *c)
 }
 
 /* 标识符分类：精确匹配（长度 + 逐字节）。预置名 / 函数命中出类别与下标；否则查自定义变量名表
- * （表由调用方给；空名 = 空槽）；全不中 → NAME_UNKNOWN（调用方报 `未知名字`）。 */
+ * （表由调用方给；空名 = 空槽）；再退 v4 旧名 r1..r4（仅解析兼容：r1/r2 = fx/fy、r3/r4 = 恒未写
+ * → 运行期 结果无值；自定义同名时上面的表先命中）；全不中 → NAME_UNKNOWN（调用方报 `未知名字`）。 */
 static int ex_name_kind(const struct ex_ctx *c, const char *s, int n, int *idx)
 {
     int i;
@@ -168,6 +170,10 @@ static int ex_name_kind(const struct ex_ctx *c, const char *s, int n, int *idx)
             if (l > 0 && l < 16 && (int)l == n && !memcmp(c->names[i], s, l)) { *idx = i; return NAME_CUSTOM; }
         }
     }
+    /* v4 旧名兼容（2026-10-05 上机修复）：r1/r2 = 找图/找色写的槽 1/2 → 映射 fx/fy（NAME_RES 位 0/1）；
+     * r3/r4 = v4 里只有计算步写 → 恒未写（NAME_RES 位 2/3 永不置位 → 运行期 `结果无值`，与 v4 一致）。
+     * 仅解析兼容、不进 UI 变量列表；自定义变量同名时上面的循环先命中（v4 翻译出的 r<k> 计算步照常生效）。 */
+    if (n == 2 && s[0] == 'r' && s[1] >= '1' && s[1] <= '4') { *idx = s[1] - '1'; return NAME_RES; }
     return NAME_UNKNOWN;
 }
 
@@ -456,7 +462,7 @@ static int ex_run(const char *s, int mode_eval, const struct vt_expr_env *env,
  * @param   why      非法时写入短中文原因（可 NULL / 0 容）
  * @param   whycap   why 缓冲长度
  * @return  0 合法；-1 非法（why 已填原因；成功时 why 为空串）。
- * @note    语法与语义逐字照 spec §2（递归下降；+ - * /；atan2/sin/cos/abs/min/max/sqrt（三角函数按度、atan2(0,0)=0）；小数；空白忽略；全小写精确匹配）。变量空间（v10，EDITOR_V2 §Task 7.5）：预置 tdx..tms / fx / fy + names 表里的自定义名；都不中 → `未知名字`。边界：长度 ≤ 63、括号嵌套 ≤ 8、token ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各 1 个；token 上限先于长度检查，三条边界都可触发、各有 why）。静态常量折叠：变量视为未知值并传播 —— 「除零 / 负数开方 / 结果非有限」只在完全由常量决定时拦下（不会误拒 `1/tdx` 这类），运行期由 vt_expr_eval 同一套判定兜底。
+ * @note    语法与语义逐字照 spec §2（递归下降；+ - * /；atan2/sin/cos/abs/min/max/sqrt（三角函数按度、atan2(0,0)=0）；小数；空白忽略；全小写精确匹配）。变量空间（v10，EDITOR_V2 §Task 7.5）：预置 tdx..tms / fx / fy + names 表里的自定义名；v4 旧名 r1..r4 仅解析兼容（r1/r2 = fx/fy、r3/r4 = 恒未写 → 运行期 结果无值；自定义同名时优先；不进 UI 列表）；都不中 → `未知名字`。边界：长度 ≤ 63、括号嵌套 ≤ 8、token ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各 1 个；token 上限先于长度检查，三条边界都可触发、各有 why）。静态常量折叠：变量视为未知值并传播 —— 「除零 / 负数开方 / 结果非有限」只在完全由常量决定时拦下（不会误拒 `1/tdx` 这类），运行期由 vt_expr_eval 同一套判定兜底。
  */
 int vt_expr_check(const char *s, const char (*names)[16], int nnames, char *why, size_t whycap)
 {
@@ -476,7 +482,7 @@ int vt_expr_check(const char *s, const char (*names)[16], int nnames, char *why,
  * @param   env      求值环境：trig_vals/trig_mask（触发数据）、fx/fy（命中坐标，res_mask 位 0/1）、names/vals/var_mask（自定义变量表，位 0..15）、nnames（表条数）
  * @param   out      输出（仅返回 OK 时有意义；出错不写）
  * @return  VT_EXPR_OK；VT_EXPR_NO_VAR（变量无值）/ VT_EXPR_NO_SLOT（结果无值）/ VT_EXPR_BAD（表达式错）。
- * @note    与 check 同一套解析与判定：语法错、除零、负数开方、结果非有限（inf/NaN）、超限都返回 BAD；引用 mask 缺位的触发数据 / 未写的 fx/fy / 未写的自定义变量返回 NO_VAR / NO_SLOT（按求值顺序，先遇到先报）。
+ * @note    与 check 同一套解析与判定：语法错、除零、负数开方、结果非有限（inf/NaN）、超限都返回 BAD；引用 mask 缺位的触发数据 / 未写的 fx/fy / 未写的自定义变量返回 NO_VAR / NO_SLOT（按求值顺序，先遇到先报）。v4 旧名 r1..r4 仅解析兼容（r1/r2 = fx/fy；r3/r4 = 恒未写 → NO_SLOT；自定义同名时优先）。
  */
 int vt_expr_eval(const char *s, const struct vt_expr_env *env, double *out)
 {

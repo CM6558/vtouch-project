@@ -10,6 +10,7 @@
  * v10 变量空间（spec EDITOR_V2 §Task 7.5）：预置 tdx/tdy/tux/tuy/tms（触发数据）+ fx/fy
  * （最近一次找图/找色命中坐标）+ 自定义命名变量（名字表随调用传入；[A-Za-z_][A-Za-z0-9_]*、
  * 1..15）。引用未写的触发数据 → 变量无值；引用未写的 fx/fy / 自定义变量 → 结果无值。
+ * v4 旧名 r1..r4 仅解析兼容（r1/r2 = fx/fy、r3/r4 = 恒未写；自定义同名优先；不进 UI 列表）。
  */
 #ifndef VT_EXPR_H
 #define VT_EXPR_H
