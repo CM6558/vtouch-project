@@ -1,4 +1,7 @@
-/* vtouch_ui.cpp — 单进程 ImGui 面板/overlay（方案 B）。
+/* vtouch_ui.cpp — 单进程 ImGui 运行悬浮窗（缩编 v0.5；「方案 B」单全屏图层）。
+ * 职责：运行时观察（状态/日志/屏上描边·触发闪）+ 控制（运行/停止、方案切换/重载、显隐、关 UI、退出）+
+ *   区域调整块（框选/拖动缩放/卡四键/触发行，「当场就能调」）+ 热生效-A（外部改盘 mtime → 自动重放）。
+ * 编辑（操作编辑器 / 方案 CRUD / 模板 / 说明）已随缩编 v0.5 归编辑器 app（com.vtouch.editor）。
  * 单全屏图层 → 单 EGL surface → 单 ImGui context → 单 NewFrame/帧。
  * 输入：渲染线程 10ms 快照 phys 表（slot latch），经官方事件 API 喂 ImGui；
  *   edge 事件（down/up/enter/exit）走 ev_cb。Java 只建层，不碰输入。
@@ -49,7 +52,7 @@ static int ui_name_cp_vis(unsigned cp)
 }
 /* 名字合法性（v11）：可见 UTF-8 字符 1..15 个、字节 ≤ VT_NAME_BUF-1；ASCII 仅 [0-9A-Za-z_-]（裸 `-` 拒收）、
  * 非 ASCII 须合法 UTF-8 且非空白/控制/格式字符。var_mode=1 = 变量名口径（首字符不可数字/`-`、不含 `-`）。
- * 返回 0 ok / 1 空 / 2 超长 / 3 非法（与 id_name_ok 等旧返回码对齐）。 */
+ * 返回 0 ok / 1 空 / 2 超长 / 3 非法。 */
 static int ui_name_ok(const char *s, int var_mode)
 {
     size_t n = strlen(s), i = 0;
@@ -88,7 +91,7 @@ static int ui_name_ok(const char *s, int var_mode)
     return 0;
 }
 /* 计算步表达式上限（= 核心 src/vt_internal.h 的 VT_EXPR_MAX；同上独立定义）——
- * vtouch_op_put 的每步表达式表按它定宽（3.1 的编辑层本地副本 g_ope_exprs 同款）。 */
+ * vtouch_op_put 的每步表达式表按它定宽。 */
 #define VT_EXPR_MAX 63
 
 extern "C" {
@@ -116,9 +119,9 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
 /* 接核心时代新增：把面板矩形推给核心（核心据此吞触摸）。入参是**当前屏坐标**，
  * 逆变换回竖屏逻辑坐标由胶水层做（见 src-ui/ui_glue.c）。单跑模式（ui_stubs.c）里是空实现。 */
 void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, int y1, int x2, int y2);
-/* 操作 / 取点 / 绑定：T2.4 胶水新增的 15 个入口 + T3.3 的 2 个写入口，原型逐字（定义见
- * src-ui/ui_glue.c，单跑模式见 src-ui/ui_stubs.c）。T2.5 起面板调用「操作」那一组；取点 T2.8
- * 已接线；绑定读/写（trig/bind/kind）T3.3 已接线；v5 表达式校验（expr_check）T3.1 接线。 */
+/* 操作 / 绑定：胶水出口，原型逐字（定义见 src-ui/ui_glue.c，单跑模式见 src-ui/ui_stubs.c）。
+ * 面板运行时用「操作」那一组（计数/读/运行/停止/状态）；绑定读/写（trig/bind/kind）供区域卡片与
+ * 触发行；v5 表达式校验（expr_check）。取点 / 视觉旁路已随缩编 v0.5 删除。 */
 int  vtouch_op_count(void);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
@@ -131,24 +134,13 @@ int  vtouch_op_run(const char *name);
 void vtouch_op_stop(void);
 int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
 int  vtouch_expr_check(const char *s, const char (*names)[VT_NAME_BUF], int nnames, char *why, int whycap);   /* v5：计算步表达式校验（转发核心 vt_expr_check；v10 起带自定义变量名表；0 = 合法、非 0 = why 填短中文原因） */
-void vtouch_pick_request(void);
-void vtouch_pick_cancel(void);
-int  vtouch_pick_take(int *x, int *y);          /* 1 = 有新坐标 */
 int  vtouch_region_kind_get(int i);
 int  vtouch_region_toggle(int i);
 int  vtouch_region_trig(int i, char *op, int n, int *ev);
 int  vtouch_region_bind(const char *id, const char *opname, int ev);   /* 触发绑定（opname "-"/空 = 解除） */
 int  vtouch_region_kind(const char *id, int kind);                     /* 开关型（0=普通 1=开关型） */
-/* 视觉模板/点集（T3.2）：面板侧抓帧旁路（请求 → 面板侧缓冲取帧/取错；不进共享内存、不动帧区协议）。
- * 定义见 src-ui/ui_glue.c（单跑模式见 src-ui/ui_stubs.c）。 */
-void vtouch_vis_panel_capture_req(void);
-int  vtouch_vis_panel_frame_take(int *w, int *h, int *rot, const unsigned char **buf);
-void vtouch_vis_cap_interval_set(int ms);   /* 抓帧间隔（2026-10-05f；ui.conf 载入/改值时同步给抓帧线程） */
-int  vtouch_vis_panel_err_take(int *err);
-/* 试查（Task 7.1）：「试一下」→ 核心执行一次查找（投递/取结果；定义见 src-ui/ui_glue.c，
- * 单跑模式见 src-ui/ui_stubs.c）。 */
-unsigned vtouch_vis_test_post(int kind, const char *ref, const char *region, int a1, int a2);
-int      vtouch_vis_test_take(unsigned *seq, int *x, int *y, int *err);
+/* 视觉抓帧间隔（2026-10-05f；ui.conf 载入/改值时同步给抓帧线程）——面板侧其余视觉旁路随缩编 v0.5 删除。 */
+void vtouch_vis_cap_interval_set(int ms);
 }
 
 #define LOGT "VTouchUI"
@@ -284,105 +276,6 @@ static float g_mx = -1, g_my = -1;
 static long g_mdown_t = 0;
 static int g_drag = 0;                 /* 标题栏几何拖拽（快照侧直驱，不走 ImGui 拖拽机） */
 static float g_drag_ox = 0, g_drag_oy = 0;
-/* 取点（T2.8）：[取点] 点下置 1（渲染线程），回填/面板内点击取消清 0（poll 线程的 pick_ev 也会清，
- * 最坏一帧竞态，纯交互态）。g_pick_se/sf 记「发起取点的那一格」（回填目标；滑动四点同理）。 */
-static int g_pick = 0;
-static int g_pick_se = -1;
-static int g_pick_sf = -1;
-/* 取点捕获标记（T3.2）：取点成功后在捕获点画 ~2 秒十字 + 坐标文字（spec §4）。存**竖屏逻辑坐标**
- * （与回填/日志同一套；绘制前 p2c 换算，复用区域轮廓同款）；纯绘制 —— 不参与命中、不吞触摸、
- * 不写共享内存。poll 线程写、渲染线程读（与 g_flash_t 同款「单帧竞态纯装饰」口径）；
- * 多次取点以最新一次为准（重置过期）。 */
-static int g_pickmk_x = 0, g_pickmk_y = 0;
-static long g_pickmk_t = 0;              /* 捕获时刻（now_ms()）；0 = 无标记 */
-#define PICK_MARK_MS 2000                /* 标记存活时长（~2 秒） */
-/* 试查（Task 7.1「试一下」）：找图/找色步骤参数层 + 模板页发起 → 核心执行一次查找 → 结果行 +
- * 屏幕标记。整条链都在渲染线程（点击、轮询、绘制同线程；等待期间每拍轮询 test_res_seq，≤10ms）。 */
-static int g_vis_test_on = 0;            /* 请求在途（等待结果） */
-static unsigned g_vis_test_seq = 0;      /* 本次请求序号（与核心结果序号比对认领） */
-static long g_vis_test_t0 = 0;           /* 发起时刻（now_ms()；1.5s 超时判据） */
-static int g_vis_test_err = 0;           /* 结果码：0 命中 / -1 未命中 / 1..4 错误码（核心）/ 面板内部态见下 */
-static char g_vis_test_msg[96] = {0};    /* 结果行文本（固定槽显示） */
-#define VIS_TEST_TMO_MS 1500             /* 等待超时（1.5s 无响应 →「超时（无响应）」） */
-#define VIS_TEST_WAIT   (-2)             /* 面板内部显示态：等待结果 */
-#define VIS_TEST_TMO    (-3)             /* 面板内部显示态：超时（无响应） */
-#define VIS_TEST_NOCORE (-4)             /* 面板内部显示态：没接核心 */
-/* 试查命中标记（Task 7.1）：命中后在命中点画 ~2 秒方框 + 坐标文字（找图 = 模板 w×h 按方向映射、
- * 找色 = 固定 80×80 居中）；纯绘制 —— 不参与命中、不吞触摸、不写共享内存（同取点标记口径）。 */
-static int g_vis_testmk_x = 0, g_vis_testmk_y = 0;
-static long g_vis_testmk_t = 0;          /* 命中时刻（now_ms()）；0 = 无标记 */
-static int g_vis_testmk_kind = 0;        /* 0 = 找图 / 1|2 = 找色（方框口径不同） */
-static int g_vis_testmk_tw = 80, g_vis_testmk_th = 80, g_vis_testmk_trot = 0;   /* 模板 w/h + 抓取方向（找色 = 80/80） */
-#define VIS_TEST_MARK_MS 2000            /* 标记存活时长（~2 秒，同取点标记） */
-/* 编辑层（T2.6/T2.4）里「渲染与吞触摸都要读」的三个标量定义在这里（g_ope_ 一族其余在 T2.6 区块）：
- * 文件前段的快照/吞触摸判据（ui_rect_now / snapshot_touches）要用它们 —— C++ 变量不能像函数那样
- * 先声明后定义（后置带初值的定义会判重定义），所以把定义搬前。
- * 视觉（T3.2）一族同理由：ui_rect_now（采集覆盖层整屏吞）与编辑层开关（op_edit_close/open）都要读。 */
-static int g_ope_i = -1;                 /* 正在编辑的操作下标（-1 = 编辑层关；三态矩形的判据） */
-static int g_ope_coll = 0;               /* 编辑层收起态（取点自动收起 / 手动收起共用；1 = 收成底部条） */
-#define VIS_PTS_MAX 16                   /* 点集参考点上限（= 核心 VT_VIS_PTS_MAX；面板不 include 核心头） */
-static int g_vis_cap = 0;                /* 采集覆盖层（T3.2）：0=关 1=模板框选 2=点集编辑 3=吸色（找色步 [取点]） */
-static int g_vis_cap_wait = 0;           /* 等帧中（请求已发） */
-static int g_vis_cap_err = 0;            /* 抓帧失败码（显示用；-1 = 3s 超时哨兵） */
-static long g_vis_cap_t0 = 0;            /* 请求时刻（超时判据；now_ms()） */
-static const unsigned char *g_vis_img = 0;   /* 面板侧帧缓冲（ui_glue.c 内；只读，紧排 w*4） */
-static int g_vis_img_w = 0, g_vis_img_h = 0, g_vis_img_rot = 0;
-static int g_vis_drag = 0;               /* 采集层拖动中（模板框选 / 点选轻点判据共用） */
-static int g_vis_gest = 0;               /* 采集层手势（Task 7.2）：0 无/待定 1 新框 2 移动 3 角缩放 4 平移 */
-static int g_vis_gest_corner = 0;        /* 角缩放：0..3 = 左上/右上/左下/右下 */
-static int g_vis_gest_box[4] = {0, 0, 0, 0};   /* 手势起点框（帧坐标；移动/角缩放用） */
-static float g_vis_zoom = 1.0f;          /* 采集层缩放（Task 7.2）：1x..8x（1 = 适应）；步进 0.25 */
-static float g_vis_pan_x = 0, g_vis_pan_y = 0;   /* 采集层平移（屏像素；缩放 >1x 时有效；锚点 = 画面中心） */
-static float g_vis_pmx = 0, g_vis_pmy = 0;       /* 平移增量基准（屏坐标） */
-static int g_vis_magf = -1;              /* 已应用放大滤波（-1 未设 0 线性 1 最近邻；纹理重建后复位） */
-static float g_vis_dx0 = 0, g_vis_dy0 = 0;   /* 拖动起点（屏坐标） */
-static int g_vis_sel[4] = {0, 0, 0, 0};  /* 已定框选（帧坐标 x0,y0,x1,y1 含端点） */
-static int g_vis_sel_on = 0;             /* 框选有效 */
-static int g_vis_base_x = -1, g_vis_base_y = -1;   /* 点集基准点（帧坐标；-1 = 未选） */
-static uint32_t g_vis_base_rgb = 0;      /* 点集基准色 */
-static int g_vis_base_tol = 8;           /* 基准容差（默认 8；写盘时每点 tol = 它，v1 不逐点编辑） */
-static int g_vis_pts_n = 0;              /* 参考点数（≤ VIS_PTS_MAX） */
-static int g_vis_pts_x[VIS_PTS_MAX], g_vis_pts_y[VIS_PTS_MAX];
-static uint32_t g_vis_pts_rgb[VIS_PTS_MAX];
-static char g_vis_cap_msg[128] = {0};    /* 采集层就地提示（上限等；2026-10-05 重编辑消息加长到 128） */
-static unsigned char *g_vis_re_img = 0;  /* 模板重编辑：合成预览缓冲（RGBA，malloc；关层/换帧释放，2026-10-05） */
-static char g_vis_reedit_name[VT_NAME_BUF] = {0}; /* 模板重编辑：被编辑模板名（同名 = 覆盖保存判据） */
-static int  g_vis_re_w = 0, g_vis_re_h = 0, g_vis_re_x = 0, g_vis_re_y = 0;   /* 原区域（像素） */
-static int  g_vis_re_has_xy = 0;         /* 原区域存在（新格式 .tmpl 尾扩展） */
-static int  g_vis_re_pending = 0;        /* 等待首帧后摆框（重编辑） */
-static int  g_vis_re_fresh = 0;          /* 当前图 = 新截帧（1）还是合成预览（0） */
-static int  g_vis_overwrite = 0;         /* 保存允许覆盖（重编辑同名校验放行） */
-static int  g_vis_tmpl_tol = 8;          /* 模板页 [试一下] 阈值（默认 8 = 新步口径；0..255） */
-static void vis_re_img_free(void);
-static void vis_pts_restore(void);
-static int  g_vis_re_pts_n = 0;          /* 重编辑点集：恢复数据（参考点个数） */
-static int  g_vis_re_pts_dx[16], g_vis_re_pts_dy[16];   /* 恢复数据：相对偏移（VIS_PTS_MAX=16） */
-static uint32_t g_vis_re_pts_rgb[16];    /* 恢复数据：参考点颜色 */
-static uint32_t g_vis_re_base_rgb = 0;   /* 恢复数据：基准色 */
-static int  g_vis_re_base_tol = 8;       /* 恢复数据：基准容差 */
-static int  g_vis_re_pts_has_xy = 0;     /* 恢复数据：基准位置存在（新格式 .pts 尾扩展） */
-static int  g_vis_re_pts_bx = 0, g_vis_re_pts_by = 0;   /* 恢复数据：基准位置 */
-static int  g_vis_re_pts_restored = 1;   /* 1 = 无待恢复（防钩子重复） */
-static int g_vis_kb = 0;                 /* 采集层命名键盘子层：0=关 1=模板 2=点集 */
-static char g_vis_kb_buf[VT_NAME_BUF] = {0}, g_vis_kb_msg[72] = {0};
-static int g_vis_kb_up = 0;
-static int g_vis_pick_se = -1;           /* 吸色回填目标步（-1 = 非吸色会话） */
-static int g_vis_ed = 0;                 /* 视觉步参数层（编辑层子层）：0=关 1=找图 2=找色（g_ope_se = 步号） */
-static int g_vis_num = 0;                /* 数字键盘子层（从视觉参数层进；复用 draw_num_edit） */
-static int g_vis_tl = 0;                 /* 模板列表子层 */
-static int g_vis_pl = 0;                 /* 点集列表子层 */
-static int g_vis_hex = 0;                /* 颜色十六进制键盘子层 */
-static char g_vis_hexbuf[8] = {0}, g_vis_hexmsg[72] = {0};
-static int g_vis_hexup = 0;
-static char g_vis_edmsg[96] = {0};       /* 视觉参数层就地提示 */
-static unsigned int g_vis_tex = 0;       /* 采集图像 GL 纹理（0 = 未建；渲染线程独占） */
-static int g_vis_tex_w = 0, g_vis_tex_h = 0;
-static int g_vis_tex_dirty = 0;          /* 新帧到达 → 下一帧上传 */
-static long g_pick_t0 = 0;               /* 取点发起时刻（now_ms()；0 = 无）—— 面板自带 20s 兜底计时 */
-/* 取点弹回抑制（T2.4 修复轮 1，评审 Important 1）：编辑层「收起→展开」跃迁的那一帧 / 条上取消那一下，
- * 还按着的手指一律抑制到抬起（1 = 该 slot 不喂 ImGui）—— 否则矩形回整屏后会被快照锁存成面板鼠标
- * （1315 不要求 down_edge），抬手时在弹回层里发一次真点击（取点取消 / 回填 / 20s 超时三路通吃）。 */
-static int g_pick_finger[64];
 /* g_need 无锁置位：只由渲染线程清零，其余线程只置 1（单字对齐存取原子；
  * 极小概率与清零竞态丢一次重画，按钮路径当前帧本就带新状态，WS 路径下次事件补画） */
 static volatile int g_need = 1;
@@ -413,10 +306,8 @@ static int g_scr_on = 0;                 /* 面板内非标题按下：潜在滚
 #define SCR_SIDE 1                       /* 侧栏 */
 #define SCR_LIST 2                       /* 区域列表（区域页） */
 #define SCR_SHEET 3                       /* 内容页 */
-#define SCR_KB 4                         /* 名称/数字键盘（内容超高时手动拖滚） */
 static int g_scr_target = SCR_NONE;      /* 按下时按实区锁定滚动容器 */
 static volatile float g_dbg_scroll = 0;  /* 最近一次应用到的滚动位置（日志用） */
-static float g_kb_sc = 0;                /* 键盘（名称/数字）手动滚动偏移：内容超出可用高时生效 */
 static volatile float g_list_scroll = 0; /* 区域列表子窗真实 ScrollY（渲染侧回读） */
 static volatile float g_list_max = 0;    /* 区域列表子窗 ScrollMaxY（判断是否真的可滚） */
 static volatile float g_card0_y = 0;     /* 首卡提交时的屏幕 Y（验证滚动是否真作用到内容） */
@@ -427,7 +318,7 @@ static volatile float g_list_w = 0;      /* 区域列表子窗宽 */
 static volatile float g_pan_r[4] = {0, 0, 0, 0};   /* 面板窗口真实屏幕矩形 */
 /* 各容器实区（渲染侧每帧发布，快照侧按下时读；单帧竞态最坏错判一次命中，
  * 与既有遥测同风格，纯交互判定不做严格同步） */
-static volatile float g_zone_title[4], g_zone_side[4], g_zone_sheet[4], g_zone_list[4], g_zone_kb[4];
+static volatile float g_zone_title[4], g_zone_side[4], g_zone_sheet[4], g_zone_list[4];
 static int in_zone(const volatile float *z, float x, float y)
 {
     return x >= z[0] && x < z[2] && y >= z[1] && y < z[3];
@@ -438,8 +329,8 @@ static int save_regions(void);   /* 定义见下：WS 线程只置位，实际�
 static volatile int g_save_pending = 0;
 static long g_save_retry_t = 0;   /* 落盘失败后的下次重试时刻（0=可立即尝试） */
 /* 操作表（ops.conf，T2.7）落盘走**独立**的 pending/退避，不与区域表共用一个：
- * 两块文件、两条时间线 —— 一块写失败不该把另一块的改动一起卡住。编辑动作（新建/删除/编辑层
- * [完成]）只置位，实际写盘同样在渲染线程（唯一写者，节奏照 g_save_pending 那套）。 */
+ * 两块文件、两条时间线 —— 一块写失败不该把另一块的改动一起卡住。表变更只置位，
+ * 实际写盘同样在渲染线程（唯一写者，节奏照 g_save_pending 那套）。 */
 static volatile int g_ops_save_pending = 0;
 static long g_ops_save_retry_t = 0;
 /* 面板状态里引用了「已不存在的区域 id」要清理（面板自身改表：单条删/改名是面板自带能力，
@@ -447,6 +338,7 @@ static long g_ops_save_retry_t = 0;
  * 真正的清理放渲染线程做 —— g_hidden/g_sel_id 归它管，跨线程改同一份数组才是新问题。 */
 static volatile int g_prune_req = 0;
 static void ui_region_changed(void) { g_prune_req = 1; g_need = 1; g_force_frames = 2; g_save_pending = 1; }
+static void hr_files_note(void);   /* T8 热生效-A：面板自写后刷新轮询基线（定义见「方案切换」段后） */
 
 /* 「关闭 UI」/恢复：want 1=显示 0=关闭 2=取反；返回 1=现在显示 / 0=现在关闭。
  * 只改标志 + 让 Java 侧轮询到（g_want_layer），不碰 region/核心锁 —— 可以被 WS 线程
@@ -763,14 +655,7 @@ static long g_edit_last = 0;
 static char g_hidden[32][VT_NAME_BUF];
 static int g_nhide = 0;
 
-/* 区域改名：id 就是脚本监听的键。面板是 composer 图层，收不到系统输入法，
- * 所以内置一副触摸键盘（点一下一个字符）。默认 id 由框选自动给（r1/c1…）。 */
-static int  g_name_i = -1;             /* 正在改名的区域下标，-1 = 关 */
-static char g_name_old[VT_NAME_BUF] = {0};      /* 原名 */
-static char g_name_buf[VT_NAME_BUF] = {0};      /* 编辑缓冲 */
-static int  g_name_up = 0;             /* 大写档 */
-static char g_name_msg[72] = {0};      /* 非法/重名提示 */
-
+/* 区域改名：id 就是脚本监听的键。改名入口已归编辑器 app（缩编 v0.5），面板只按 id 显示/监听。 */
 static int is_hidden(const char *id)
 {
     for (int i = 0; i < g_nhide; i++) if (!strcmp(g_hidden[i], id)) return 1;
@@ -863,6 +748,7 @@ static int save_regions(void)
     g_save_pending = 0;      /* 只有真落盘成功才清请求（唯一写者=渲染线程 / 启动期主线程） */
     g_save_retry_t = 0;
     scheme_mirror();         /* v4：镜像 live → schemes/<current>（失败告警不阻塞，见「方案文件层」） */
+    hr_files_note();         /* T8 自写豁免：刷新热生效轮询基线 */
     return 0;
 }
 /* 核心表里有没有这个 id（面板只读区 A 的现役表；启动回灌「只补缺」靠它）。 */
@@ -1020,8 +906,8 @@ static void load_regions(void)
  * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
 #define OPS_CONF_VER  5
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
-#define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS / 编辑层 OPE_MAX_STEPS（面板不 include 核心头） */
-#define OPS_EXPR_MAX  63        /* 计算步表达式上限（同核心 VT_EXPR_MAX；编辑层 g_ope_exprs 与 conf 第 10 字段按它定宽） */
+#define OPS_MAX_STEPS 32        /* 同核心 MAX_STEPS（面板不 include 核心头，独立定义） */
+#define OPS_EXPR_MAX  63        /* 计算步表达式上限（同核心 VT_EXPR_MAX；conf 第 10 字段按它定宽） */
 static_assert(OPS_EXPR_MAX == VT_EXPR_MAX, "同核心 VT_EXPR_MAX");
 
 /* 核心操作表里有没有这个名字（启动回灌「只补缺」靠它；与 region_exists 同款）。 */
@@ -1078,10 +964,20 @@ static int save_ops(void)
     g_ops_save_retry_t = 0;
     scheme_mirror();             /* v4：镜像 live → schemes/<current>（失败告警不阻塞，见「方案文件层」） */
     ALOGI("ops.conf 已存 %d 条", n);
+    hr_files_note();             /* T8 自写豁免：刷新热生效轮询基线 */
     return 0;
 }
-/* ope_var_ok 定义在编辑层（本文件后段）—— 这里先声明：翻译只翻「允许变量」的字段（防找色 a2 误翻）。 */
-static int ope_var_ok(int type, int idx);
+/* 该字段允不允许变量引用（spec §2.1）：点按/滑动/等待的时长；点按/滑动/按下/区域判断的坐标。
+ * v2 里凡存在的数值字段都可变量 —— 仍按类型/下标写死，防以后加字段时悄悄放行。
+ * （缩编 v0.5：定义从编辑层上移——旧表翻译 ops_translate_old 还在用。） */
+static int ope_var_ok(int type, int idx)
+{
+    if (idx == 6 || idx == 7) return type == OP_STEP_SWIPE;   /* v2.1：滑动两段停顿也可用变量 */
+    if (idx == 5) return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_WAIT;
+    if (idx >= 1 && idx <= 4)
+        return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_DOWN || type == OP_STEP_COND_REGION;
+    return 0;
+}
 
 /* v1..v4 → v5 翻译（spec EDITOR_V2 §Task 7.5「读端兼容」矩阵；一条记录一份，结算前调用一次）：
  *   · 计算步（t=9）：名字 = ref 非空 ? ref : "r<a1>"（v4 的 a1=1..4 是槽号）；索引按步序分配（同名复用）；
@@ -1342,6 +1238,7 @@ static int scheme_cur_set(const char *name)
         remove(tmppath);
         return -1;
     }
+    hr_files_note();             /* T8 自写豁免：刷新热生效轮询基线 */
     return 0;
 }
 /* 写「空表合法文件」= 本表当前版本行一行（spec §2；.tmp + rename 同口径）。0 / -1。 */
@@ -1389,6 +1286,7 @@ static int scheme_copy_file(const char *src, const char *dst, int kind)
     if (fclose(out) != 0 && !err) err = errno;
     if (!err && rename(tmppath, dst) != 0) err = errno;
     if (err) { remove(tmppath); errno = err; return -1; }
+    hr_files_note();             /* T8 自写豁免：本文件被写（live/方案侧）后刷新轮询基线 */
     return 0;
 }
 /* 计数文件里按 `prefix` 开头的行数（迁移日志「区域 N / 操作 M」口径：从文件解析，空/缺 = 0）。 */
@@ -1606,12 +1504,6 @@ static int scheme_precheck(const char *name)
         return rc;
     }
 }
-/* 关闭操作编辑覆盖层（定义在操作编辑区块 T2.6；切换的静默边界要关掉它 —— 含全部子层与取点态）。 */
-static void op_edit_close(void);
-/* 视觉（T3.2）：视觉步参数层（定义在文件后段视觉区块；draw_op_edit 的分发要用）；
- * 名字校验（ope_step_check 的区域/模板/点集名校验要用）。 */
-static void draw_vis_edit(void);
-static int vis_name_ok(const char *n);
 /* 回滚复制（评审 I2 / Minor 3）：scheme_copy_file 的「源缺失 → 写空表」语义在回滚方向是危险的
  * （源没了还写空表 = 把 live 清掉）—— 源缺失直接 -1（调用方告警、保持现状）；其余照常复制。0 / -1。 */
 static int scheme_restore_file(const char *src, const char *dst, int kind)
@@ -1642,28 +1534,20 @@ static void scheme_rollback_to(const char *cur)
     load_ops();
 }
 
+static int S_scm_force = 0;   /* T8 热生效：强制重放标志（仅 scheme_reload 置位；绕过同名 no-op） */
 int scheme_switch(const char *name)
 {
     char cur[VT_NAME_BUF], sp[160], dp[160];
     int rc, rst = 0;
 
     if (!name || !scheme_name_known(name)) return 1;
-    if (scheme_cur_get(cur) == 0 && strcmp(cur, name) == 0) return 0;    /* 已是当前 → no-op */
+    if (!S_scm_force && scheme_cur_get(cur) == 0 && strcmp(cur, name) == 0) return 0;    /* 已是当前 → no-op（S_scm_force=1 时强制重放，T8） */
     rc = scheme_precheck(name);                                          /* ① 预检：坏 → 拒切、原状 */
     if (rc != 0) return rc;
 
-    /* ② 静默边界（spec §4-2）：操作在跑 → 停（VT_EDIT_OP_STOP 的胶水入口 = vtouch_op_stop）；
-     * 取点态 / 编辑覆盖层（操作编辑层含子层；区域改名弹层）开着 → 关（复用现有 close 路径）。 */
+    /* ② 静默边界（spec §4-2）：操作在跑 → 停（VT_EDIT_OP_STOP 的胶水入口 = vtouch_op_stop）。
+     * （缩编 v0.5：操作编辑层 / 取点态 / 区域改名弹层已删，相应复位分支一并移除。） */
     if (vtouch_op_status(NULL, NULL, &rst) == 0 && rst) vtouch_op_stop();
-    if (g_ope_i >= 0) {
-        op_edit_close();                 /* 既有 close 路径：内含取点撤单 + 全部子层 / 收起态复位 */
-    } else if (g_pick) {                 /* 防御：取点态理论上总伴随编辑层开着 */
-        g_pick = 0; g_pick_t0 = 0;
-        vtouch_pick_cancel();
-    }
-    if (g_name_i >= 0) {                 /* 区域改名弹层：无 close 函数，照 draw_name_edit 取消分支复位 */
-        g_name_i = -1; g_name_msg[0] = 0;
-    }
 
     /* ③ flush 旧（兜底镜像，spec §4-3；失败仅告警、不中断） */
     if (cur[0]) {
@@ -1732,6 +1616,67 @@ int scheme_switch(const char *name)
     g_need = 1; g_force_frames = 3;
     return 0;
 }
+/* T8 热生效-A：强制重放「当前方案」（绕过同名 no-op）——面板 mtime 轮询与方案页 [重载] 键共用。
+ * 返回 = scheme_switch 码表（0 成功）；无 current → -1。 */
+static int scheme_reload(void)
+{
+    char cur[VT_NAME_BUF];
+    if (scheme_cur_get(cur) != 0 || !cur[0]) return -1;
+    S_scm_force = 1;
+    int rc = scheme_switch(cur);
+    S_scm_force = 0;
+    if (rc == 0) ALOGI("方案 重载 %s（热生效）", cur);
+    return rc;
+}
+
+/* ---- T8 热生效-A（缩编 v0.5）：live 两文件 + current 的 mtime/size 轮询 → 防抖 → 强制重放当前方案。
+ * 让「app 侧修改」无需重启核心即生效（~1–2s）；面板自身写盘经 hr_files_note() 刷新基线（自写豁免）。 ---- */
+#define HR_POLL_MS     1000           /* 轮询节律 */
+#define HR_DEBOUNCE_MS 600            /* 变化稳定窗口（写入可能还在进行；原子 rename 通常瞬时） */
+static long hr_next_t = 0;            /* 下次轮询时刻（now_ms） */
+static long hr_chg_t = 0;             /* 首次发现变化的时刻（0 = 无）；防抖用 */
+static long hr_mtime[3] = {-2, -2, -2};   /* 基线：regions/ops/current 的 mtime（ms 精度） */
+static long hr_size[3] = {-1, -1, -1};    /* 基线：size */
+
+static void hr_stat3(long *mt, long *sz)
+{
+    struct stat st;
+    const char *paths[3] = { REGION_CONF_NEW, OPS_CONF_FILE, SCHEME_CUR };
+    for (int i = 0; i < 3; i++) {
+        if (stat(paths[i], &st) != 0) { mt[i] = -1; sz[i] = -1; continue; }
+        mt[i] = (long)st.st_mtime * 1000L + (long)(st.st_mtim.tv_nsec / 1000000L);
+        sz[i] = (long)st.st_size;
+    }
+}
+/* 面板自写后调：把基线刷成「刚写完」的状态 ⇒ 自写不会触发重放（自写豁免）。 */
+static void hr_files_note(void)
+{
+    hr_stat3(hr_mtime, hr_size);
+    hr_chg_t = 0;
+}
+/* 渲染线程每拍调（内部自节流）：外部变化稳定后 → 强制重放当前方案。 */
+static void hr_poll(void)
+{
+    long now = now_ms(), mt[3], sz[3];
+    if (now < hr_next_t) return;
+    hr_next_t = now + HR_POLL_MS;
+    hr_stat3(mt, sz);
+    if (hr_mtime[0] == -2) {                       /* 首巡：只记基线 */
+        for (int i = 0; i < 3; i++) { hr_mtime[i] = mt[i]; hr_size[i] = sz[i]; }
+        return;
+    }
+    int diff = 0;
+    for (int i = 0; i < 3; i++) if (mt[i] != hr_mtime[i] || sz[i] != hr_size[i]) diff = 1;
+    if (!diff) { hr_chg_t = 0; return; }
+    if (hr_chg_t == 0) { hr_chg_t = now; return; } /* 首次发现：进防抖窗 */
+    if (now - hr_chg_t < HR_DEBOUNCE_MS) return;   /* 未稳 */
+    {
+        int rc = scheme_reload();
+        if (rc != 0) ALOGW("热生效：重载失败 rc=%d（保持现状，等下次变化）", rc);
+        hr_files_note();                           /* 成功/失败都刷基线（同一次变化不重试） */
+    }
+}
+
 static void gen_id(char *out, int circle)
 {
     for (int k = 1; k < 100; k++) {
@@ -1770,31 +1715,11 @@ static void push_ring(int x, int y)
     r->on = 1; r->x = x; r->y = y; r->t = now_ms();
 }
 
-/* 编辑层收起条（取点 / 手动共用）几何：底部居中一条（当前屏坐标）。
- * 「那一小块」= 其余整屏可点：取点收起时 = 取点落点；手动收起时 = 看游戏（编辑状态全保留）。 */
-#define OPE_BAR_H 92
-static void ope_bar_rect(float *x1, float *y1, float *x2, float *y2)
-{
-    float w = (float)g_scr_w - 48;
-    if (w > 960) w = 960;
-    *x1 = ((float)g_scr_w - w) * 0.5f; *x2 = *x1 + w;
-    *y2 = (float)g_scr_h - 24; *y1 = *y2 - OPE_BAR_H;
-}
-/* 「面板占屏」状态矩形（当前屏坐标）：吞触摸与喂 ImGui 共用同一个判据（三态，T2.4）——
- *   编辑层展开 → 整屏（编辑时不让误触漏进游戏）；
- *   编辑层收起（取点 / 手动）→ 底部收起条那一小块（其余整屏可点；取点收起时 = 取点落点）；
- *   编辑层关闭 → 面板窗口（现状）。 */
+/* 「面板占屏」状态矩形（当前屏坐标）：吞触摸与喂 ImGui 共用同一个判据 —— 缩编 v0.5 后恒为
+ * 面板窗口（编辑层 / 采集覆盖层已删；区域框选直接在面板窗内做，不改变矩形）。 */
 static void ui_rect_now(float *x1, float *y1, float *x2, float *y2)
 {
-    if (g_vis_cap) {                 /* 采集覆盖层（T3.2）：整屏吞（框选/点选/吸色都在整屏层上做） */
-        *x1 = 0; *y1 = 0; *x2 = (float)g_scr_w - 1; *y2 = (float)g_scr_h - 1;
-        return;
-    }
-    if (g_ope_i >= 0) {
-        if (g_ope_coll) ope_bar_rect(x1, y1, x2, y2);
-        else { *x1 = 0; *y1 = 0; *x2 = (float)g_scr_w - 1; *y2 = (float)g_scr_h - 1; }
-        return;
-    }
+    /* 吞触摸矩形 = 面板窗（缩编 v0.5：采集覆盖层/编辑层已删；区域框选不改变矩形）。 */
     *x1 = g_pan_x; *y1 = g_pan_y;
     *x2 = g_pan_x + panel_w(); *y2 = g_pan_y + panel_h();
 }
@@ -1816,10 +1741,6 @@ static int ui_consume_cb(int lx, int ly)
     p2c(lx, ly, &sx, &sy);
     return ui_hit_rect((float)sx, (float)sy) ? 1 : 0;
 }
-
-/* 取点结果落点（T2.8）：ui_ev_cb 收到 pick_ev 时转发过来。定义在 T2.6 区块 —— g_ope_ 与 g_ne_
- * 一族全局都定义在文件后段，这里只能先声明（与 op_edit_open 同款前向声明）。 */
-static void pick_ev_apply(int px, int py);
 
 /* ev 回调（poll 线程）：无锁写。单写者（poll）+单读者（render），定界数组，
  * 行内 snprintf 自带 NUL，最坏一帧内看到新旧混排的一行日志/闪错一次 id，
@@ -1847,10 +1768,6 @@ static void ui_ev_cb(const char *line)
             g_ex_enter = !strcmp(ev, "enter");
             g_ex_t = now_ms();
         }
-    }
-    {
-        int px, py;
-        if (sscanf(line, "pick_ev %d %d", &px, &py) == 2) pick_ev_apply(px, py);   /* 取点结果（T2.8） */
     }
     g_ov_need = 1;
 }
@@ -1987,13 +1904,11 @@ static void panel_press(int slot, int x, int y)
         g_scr_on = 0; g_scr_target = SCR_NONE;
     } else {
         g_drag = 0;
-        g_scr_target = in_zone(g_zone_kb, fx, fy) ? SCR_KB
-                     : in_zone(g_zone_list, fx, fy) ? SCR_LIST
+        g_scr_target = in_zone(g_zone_list, fx, fy) ? SCR_LIST
                      : in_zone(g_zone_sheet, fx, fy) ? SCR_SHEET
                      : in_zone(g_zone_side, fx, fy) ? SCR_SIDE : SCR_NONE;
-        /* 键盘（名称/数字）里允许拖滚（内容超高时的兜底）；其它覆盖层照旧「只点不滚」 */
-        g_scr_on = (g_scr_target == SCR_KB) ||
-                   (g_scr_target != SCR_NONE && g_name_i < 0);
+        /* 缩编 v0.5：键盘/编辑层已删，落在任何实区即可拖滚 */
+        g_scr_on = (g_scr_target != SCR_NONE);
         g_scr_lx = fx; g_scr_ly = fy; g_scr_moved = 0;
     }
     ALOGI("panel down %d,%d drag=%d scr=%d", x, y, g_drag, g_scr_target);
@@ -2043,9 +1958,8 @@ static void snapshot_touches(void)
      * 拖走、起框选、甚至改动区域表并落盘（而屏幕上什么都看不见，只能靠 regions.conf 发现）。 */
     int ui_live = (!g_ui_off && g_want_layer) ? 1 : 0;
     /* 把"面板现在占哪块屏幕、可不可见"推给核心：核心在注入前拿它决定这只手是给面板还是给 App。
-     * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。T2.4 起矩形是**三态**的
-     * （编辑层整屏 / 编辑层收起条 / 面板窗口，见 ui_rect_now）：编辑层打开时整屏吞，
-     * 收起时只吞底部条（其余整屏 = 取点落点 / 看游戏）。 */
+     * 必须**每帧**推 —— 拖面板/换方向/关 UI 都会改变这块矩形。缩编 v0.5：矩形 = 面板窗口
+     * （编辑层 / 采集覆盖层已删，见 ui_rect_now）。 */
     /* 稳定窗内一律**不吞**（宁放不吞）：转屏瞬间坐标系正在换，而吞触摸判定是"按下问一次、
      * 锁存整段手势"，一次错判会让手指整段被吞或整段漏吞（老面板在进程内的谓词里也是这个规矩，
      * 现在挪到"推给核心的矩形"上）。 */
@@ -2057,14 +1971,6 @@ static void snapshot_touches(void)
                                (int)rx1, (int)ry1, (int)rx2, (int)ry2);
     }
     if (n > 64) n = 64;
-    /* 取点弹回抑制（T2.4 修复 1）：编辑层「收起 → 展开」跃迁的那一帧，凡还按着的手指一律抑制到
-     * 抬起 —— 矩形回整屏后，快照锁存（1315，不要求 down_edge）会把这些手指锁成面板鼠标，抬手时
-     * 在弹回层里发一次真点击（取点取消 / 回填 / 20s 超时三路通吃）。用**当前帧的按下集合**（d，
-     * 见下面每槽的置位）而不是上一帧快照 g_prev_on：手指首见按下与跃迁同帧的窄竞态（poll 线程先
-     * 吃到 pick_ev、渲染线程同帧才首见该手指）也盖住。 */
-    static int prev_coll = 0;
-    int coll_fell = prev_coll && !g_ope_coll;   /* 本帧检测到「收起 → 展开」跃迁 */
-    prev_coll = g_ope_coll;
     for (i = 0; i < n; i++) {
         int d = 0, x = 0, y = 0;
         if (vtouch_phys_get(i, &d, &x, &y) != 0) d = 0;
@@ -2073,33 +1979,18 @@ static void snapshot_touches(void)
         p2c(x, y, &sx, &sy);
         int down_edge = d && !g_prev_on[i];
         int up_edge = !d && g_prev_on[i];
-        int in_p = d && ui_live && ui_hit_rect((float)sx, (float)sy);   /* 隐藏时不认面板命中；三态矩形（T2.4） */
+        int in_p = d && ui_live && ui_hit_rect((float)sx, (float)sy);   /* 隐藏时不认面板命中 */
         if (d) {
             any = 1;
-            if (coll_fell) g_pick_finger[i] = 1;   /* 弹回抑制（T2.4 修复 1）：跃迁帧还按着的手指不许被锁存 */
             if (!g_dots[i].on) g_dots[i].tn = 0;
             g_dots[i].on = 1; g_dots[i].x = x; g_dots[i].y = y;
             int k = g_dots[i].tn % 12;
             g_dots[i].tx[k] = x; g_dots[i].ty[k] = y;
             g_dots[i].tn++;
-            /* 取点态（T2.8/T2.4）：收起条上点按 = 取消（「点这里取消」）。这一下不喂 ImGui ——
-             * 它就是「取消」这个动作本身（吞掉，免得顺带点到别的）。取消后自动弹回编辑层
-             * （参数层保持）；这里 in_p 在取点态 = 底部条（ui_rect_now 三态），不会误吃取点落点。
-             * 手指还按着：g_pick_finger 抑制到抬起 —— 弹回后矩形回整屏也不许锁存成点击（T2.4 修复 1）。 */
-            int pick_cancel = 0;
-            if (down_edge && ui_live && in_p && g_pick) {
-                pick_cancel = 1;
-                g_pick_finger[i] = 1;                    /* 抑制到抬起（T2.4 修复 1）：这一下是「取消」不是点击 */
-                g_pick = 0; g_pick_t0 = 0;
-                g_ope_coll = 0;                          /* 自动弹回编辑层 */
-                vtouch_pick_cancel();
-                g_need = 1; g_force_frames = 2;
-                ALOGI("取点 取消（收起条点按）→ 弹回编辑层");
-            }
             /* 手势优先于鼠标：框选 / 选中拖改（面板内一律走鼠标，保证按钮可用）。
-             * 编辑层开着（含收起态）屏上手势一律不跑：展开时整屏给编辑，收起时整屏给游戏/取点，
-             * 都不是框选/拖改的语境（不然收起态里点游戏会顺手改区域表并落盘）。 */
-            if (down_edge && ui_live && !in_p && !g_pick && g_ope_i < 0) {   /* 隐藏/取点态不开始框选/拖改（否则会改表并落盘；取点态里外侧按下 = 取点动作本身） */
+             * 面板窗外按下 = 框选/拖改入口（缩编 v0.5：编辑层已删，不再有「整屏给编辑」
+             * 的模态；隐藏中由 ui_live 拦掉，见上一行）。 */
+            if (down_edge && ui_live && !in_p) {   /* 隐藏中不开始框选/拖改（否则会改表并落盘） */
                 if (g_cap_mode && g_cap_slot < 0) {
                     g_cap_slot = i;
                     g_cap_x0 = g_cap_x1 = x; g_cap_y0 = g_cap_y1 = y;
@@ -2140,13 +2031,12 @@ static void snapshot_touches(void)
             }
             if (ui_live && i == g_cap_slot) { g_cap_x1 = x; g_cap_y1 = y; }
             if (ui_live && i == g_edit_slot) edit_apply_live(x, y);
-            if (ui_live && !pick_cancel && !g_pick_finger[i] && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
+            if (ui_live && g_mslot < 0 && in_p && i != g_cap_slot && i != g_edit_slot) {
                 panel_press(i, sx, sy);            /* 面板鼠标走当前屏坐标 */
             } else if (ui_live && i == g_mslot) {
                 panel_drag_move(sx, sy);
             }
         } else {
-            g_pick_finger[i] = 0;                    /* 抑制到抬起：抬起即清位（T2.4 修复 1） */
             if (g_prev_on[i] && g_dots[i].on) push_ring(g_dots[i].x, g_dots[i].y);
             g_dots[i].on = 0;
             if (i == g_mslot) panel_release();
@@ -2268,7 +2158,6 @@ static ImVector<ImWchar> g_font_extra;   /* 追加码点（= 已尝试集；不�
 static int g_font_have_ttf = 0;          /* TTF 装载成功（fallback 时不折腾） */
 static int g_font_dirty = 0;             /* 有新增码点待进图集（帧间重建） */
 static int g_glyph_tick = 0;
-static int vis_list(const char *ext, char (*names)[VT_NAME_BUF], int max);   /* 前向声明（本体在后面） */
 
 static int ui_extra_has(unsigned cp)
 {
@@ -2322,13 +2211,6 @@ static void ui_glyph_scan_all(int heavy)
         int sn = scheme_list(names, SCHEME_LIST_MAX);
         for (k = 0; k < sn; k++) ui_glyph_scan(names[k]);
         if (scheme_cur_get(cur) == 0) ui_glyph_scan(cur);
-    }
-    {
-        char nm[64][VT_NAME_BUF];
-        k = vis_list(".tmpl", nm, 64);
-        for (i = 0; i < k; i++) ui_glyph_scan(nm[i]);
-        k = vis_list(".pts", nm, 64);
-        for (i = 0; i < k; i++) ui_glyph_scan(nm[i]);
     }
 }
 /* 帧间重建：Clear → 基础盘 + 源码字 + 扩集 → 两档重加 → Build → 重传纹理。 */
@@ -2455,43 +2337,6 @@ static void build_overlay(int sw, int sh)
                 } else {
                     dl->AddText(ImVec2((float)a1, (float)(type == 1 ? a2 - a3 - 34 : a2 - 34)), col, lbl);
                 }
-            }
-        }
-        /* 取点捕获标记（T3.2）：~2 秒十字 + 坐标文字（x,y 十进制 = 竖屏逻辑坐标）。
-         * 纯绘制（spec §4）：不参与命中、不吞触摸、不写共享内存；过期即不画（渲染循环补擦除帧）。 */
-        if (g_pickmk_t && t - g_pickmk_t < PICK_MARK_MS) {
-            int mx, my;
-            p2c(g_pickmk_x, g_pickmk_y, &mx, &my);
-            ImU32 mc = IM_COL32(255, 140, 0, 255);          /* 橙：与区域红/绿、触点蓝区分 */
-            const float arm = 48.0f;
-            dl->AddLine(ImVec2((float)mx - arm, (float)my), ImVec2((float)mx + arm, (float)my), mc, 6.0f);
-            dl->AddLine(ImVec2((float)mx, (float)my - arm), ImVec2((float)mx, (float)my + arm), mc, 6.0f);
-            char mkb[32];
-            snprintf(mkb, sizeof mkb, "%d,%d", g_pickmk_x, g_pickmk_y);
-            dl->AddText(ImVec2((float)mx + arm + 10.0f, (float)my - 30.0f), mc, mkb);
-        }
-        /* 试查命中标记（Task 7.1）：~2 秒方框 + 坐标文字（x,y = 竖屏逻辑坐标）。
-         * 找图 = 模板 w×h 按（模板抓取方向 → 当前方向）的旋转映射（奇步宽高互换，同核心模板旋转口径）；
-         * 找色 = 固定 80×80 居中。纯绘制（同取点标记口径）：不参与命中、不吞触摸、不写共享内存。 */
-        if (g_vis_testmk_t && t - g_vis_testmk_t < VIS_TEST_MARK_MS) {
-            int tmx, tmy, tbx, tby, tbw, tbh;
-            ImU32 tc = IM_COL32(0, 200, 0, 255);            /* 绿：与取点橙 / 触点蓝区分 */
-            p2c(g_vis_testmk_x, g_vis_testmk_y, &tmx, &tmy);
-            if (g_vis_testmk_kind == 0) {
-                int steps = (g_vis_testmk_trot - g_rot) & 3;
-                tbw = (steps & 1) ? g_vis_testmk_th : g_vis_testmk_tw;
-                tbh = (steps & 1) ? g_vis_testmk_tw : g_vis_testmk_th;
-                tbx = tmx; tby = tmy;                       /* 命中点 = 匹配框左上（帧锚点；p2c 后与帧坐标同点） */
-            } else {
-                tbw = 80; tbh = 80;
-                tbx = tmx - 40; tby = tmy - 40;             /* 找色：命中像素居中 */
-            }
-            dl->AddRect(ImVec2((float)tbx, (float)tby),
-                        ImVec2((float)(tbx + tbw - 1), (float)(tby + tbh - 1)), tc, 0, 0, 6.0f);
-            {
-                char tkb[32];
-                snprintf(tkb, sizeof tkb, "%d,%d", g_vis_testmk_x, g_vis_testmk_y);
-                dl->AddText(ImVec2((float)tbx, (float)(tby - 34)), tc, tkb);
             }
         }
         /* 框选橡皮筋 + 提示（手势坐标是竖屏的，画之前换算） */
@@ -2772,46 +2617,6 @@ static void del_region(const char *id)
     ALOGI("del %s n=%d", id, vtouch_region_count());
 }
 
-/* 名字合法性：0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_id 自己不算） */
-static int id_name_ok(const char *old_id, const char *s)
-{
-    int i, k = vtouch_region_count();
-    int rc = ui_name_ok(s, 0);               /* v11：UTF-8 可见字符 1..15、字节 ≤47；裸 `-` 拒收 */
-    if (rc) return rc;
-    for (i = 0; i < k; i++) {
-        char id[VT_NAME_BUF]; int t, b1, b2, b3, b4, en;
-        if (vtouch_get_region(i, id, sizeof id, &t, &b1, &b2, &b3, &b4, &en) != 0) continue;
-        if (!strcmp(id, s) && strcmp(id, old_id)) return 4;
-    }
-    return 0;
-}
-/* 原地改名：core 里位置不变 ⇒ 槽位命中状态不重置 ⇒ **按住手指改名不再丢 up** */
-static void rename_region(const char *old_id, const char *new_id)
-{
-    if (vtouch_region_rename(old_id, new_id) != 0) {
-        ALOGW("rename_region 失败（重名/超长/没这条）: %s -> %s", old_id, new_id);
-        ev_note("改名失败：%s", new_id);
-        return;
-    }
-    if (!strcmp(g_sel_id, old_id)) snprintf(g_sel_id, sizeof g_sel_id, "%s", new_id);
-    for (int j = 0; j < g_nhide; j++)
-        if (!strcmp(g_hidden[j], old_id)) snprintf(g_hidden[j], VT_NAME_BUF, "%s", new_id);
-    save_regions();
-    g_force_frames = 3;
-    ALOGI("rename %s -> %s n=%d", old_id, new_id, vtouch_region_count());
-}
-
-static void name_open(int i, const char *id)
-{
-    g_name_i = i;
-    snprintf(g_name_old, sizeof g_name_old, "%s", id);
-    snprintf(g_name_buf, sizeof g_name_buf, "%s", id);
-    g_name_up = 0;
-    g_name_msg[0] = 0;
-    g_need = 1; g_force_frames = 3;
-    ALOGI("name open i=%d id=%s", i, id);
-}
-
 /* ---- 标题栏：唯一拖动区（整条无控件，按住即拖窗） ---- */
 static void build_titlebar(float ww)
 {
@@ -2889,10 +2694,8 @@ static void build_sidebar(void)
         if (nav_btn("区域列表", g_nav == 0 && g_sheet, bw)) { g_nav = 0; g_sheet = 1; g_need = 1; }
         if (nav_btn("操作",     g_nav == 1 && g_sheet, bw)) { g_nav = 1; g_sheet = 1; g_need = 1; }
         if (nav_btn("方案",     g_nav == 5 && g_sheet, bw)) { g_nav = 5; g_sheet = 1; g_need = 1; }
-        if (nav_btn("模板",     g_nav == 6 && g_sheet, bw)) { g_nav = 6; g_sheet = 1; g_vis_test_on = 0; g_vis_test_seq = 0; g_vis_test_msg[0] = 0; g_need = 1; }
         if (nav_btn("事件日志", g_nav == 2 && g_sheet, bw)) { g_nav = 2; g_sheet = 1; g_need = 1; }
         if (nav_btn("设置",     g_nav == 3 && g_sheet, bw)) { g_nav = 3; g_sheet = 1; g_need = 1; }
-        if (nav_btn("说明",     g_nav == 4 && g_sheet, bw)) { g_nav = 4; g_sheet = 1; g_need = 1; }
         ImGui::Dummy(ImVec2(0, 8));
         ImGui::TextDisabled("框选工具");
         if (nav_btn(g_cap_mode == 1 ? "矩形 · 进行中" : "矩形框选", g_cap_mode == 1, bw)) {
@@ -3020,17 +2823,11 @@ static void region_card(int i, const char *id, int type, int a1, int a2, int a3,
                             en ? IM_COL32(34, 197, 94, 255) : IM_COL32(161, 161, 170, 255));
         ImGui::Dummy(ImVec2(28, 44));
         ImGui::SameLine();
-        /* id 就是脚本监听的键：点它改名（框选自动给 r1/c1…） */
+        /* id 显示为普通文本（改名归编辑器 app，缩编 v0.5）；脚本按 id 监听。 */
         {
-            char chip[40];
-            snprintf(chip, sizeof chip, "%s", id);
-            float cw2 = ImGui::CalcTextSize(chip).x + 52;
-            if (cw2 < 130) cw2 = 130;
-            if (btn_light(chip, ImVec2(cw2, 56))) name_open(i, id);
-            ImGui::SameLine();
             ImGui::AlignTextToFramePadding();
-            char head[112];
-            snprintf(head, sizeof head, "%s%s%s   点名字改名", type == 1 ? "圆形" : "矩形",
+            char head[128];
+            snprintf(head, sizeof head, "%s   %s%s%s", id, type == 1 ? "圆形" : "矩形",
                      en ? "" : " · 已停用", hid ? " · 已隐藏" : "");
             text_meta_s(head);
         }
@@ -3135,7 +2932,7 @@ static void page_regions(void)
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
 }
-/* ---- 操作页（T2.5）：卡片列表 + 运行/停止/新建/删除；数据全部实时读核心（只读区 A）----
+/* ---- 操作页（缩编 v0.5）：只读卡片 + [运行]/[停止]；数据全部实时读核心（只读区 A）----
  * 运行状态由渲染线程每拍看一眼（ops_run_watch）：一变就请求重画 —— 不然面板静止不重绘，
  * 「运行中 · 第 k/n 步」会永远停在按下那一刻的读数上。 */
 
@@ -3151,61 +2948,8 @@ static void ops_run_watch(void)
     g_need = 1;
 }
 
-/* 默认名：opN，N = 第一个没被占用的序号（与 gen_id 同款逻辑：从 1 起扫，99 兜底）。 */
-static void gen_op_name(char *out)
-{
-    int k, n = vtouch_op_count();
-    for (k = 1; k < 100; k++) {
-        char tmp[16];
-        int used = 0;
-        snprintf(tmp, sizeof tmp, "op%d", k);
-        for (int i = 0; i < n; i++) {
-            char nm[VT_NAME_BUF];
-            if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) == 0 && !strcmp(nm, tmp)) {
-                used = 1;
-                break;
-            }
-        }
-        if (!used) { snprintf(out, VT_NAME_BUF, "%s", tmp); return; }
-    }
-    snprintf(out, VT_NAME_BUF, "op99");
-}
-
-/* ＋新建：默认 1 步「等待 100ms」—— 安全中性、核心必过（点按/滑动要坐标，面板此刻没有可用的
- * 默认值；等待既不碰坐标也不占虚拟槽），参数交给编辑层（T2.6）再改。 */
-static void op_new(void)
-{
-    const int wait100[8] = { OP_STEP_WAIT, 0, 0, 0, 0, 100, 0, 0 };
-    char nm[VT_NAME_BUF];
-    gen_op_name(nm);
-    if (vtouch_op_put(nm, "", 0, wait100, NULL, NULL, 1, NULL) == 0) {   /* refs/exprs=NULL：等待步无区域引用/表达式（全空口径）；out_err=NULL */
-        ALOGI("op new %s", nm);
-        g_ops_save_pending = 1;      /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
-        g_force_frames = 3;
-    } else {
-        ALOGW("op new 失败 %s（核心拒或编辑超时）", nm);
-        ev_note("新建操作失败：%s", nm);
-    }
-}
-
-/* 删除（与区域卡片同款：立即删，失败进事件日志）。 */
-static void op_del_by_name(const char *name)
-{
-    if (vtouch_op_del(name) != 0) {
-        ALOGW("op del 失败 %s", name);
-        ev_note("删除操作失败：%s", name);
-        return;
-    }
-    ALOGI("op del %s n=%d", name, vtouch_op_count());
-    g_ops_save_pending = 1;          /* 表变了 → 渲染线程那一拍写 ops.conf（T2.7） */
-    g_force_frames = 3;
-}
-
-/* 打开操作编辑覆盖层（T2.6：快照 + 校验；定义在 page_ops 之后，op_card 的 [编辑] 先用）。 */
-static void op_edit_open(int i, const char *name);
-
-/* 一张操作卡片：名字 + 元信息行（步数/门控/自动关）+ 运行中行 + 等宽三键。
- * run_i/run_step/run_state 是页头本帧读好传下来的 op_status 读数。 */
+/* 一张操作卡片（缩编 v0.5）：名字 + 元信息行（步数/门控/自动关）+ 运行中行 + [运行]/[停止] 单键。
+ * 新建/编辑/删除已归编辑器 app。run_i/run_step/run_state 是页头本帧读好传下来的 op_status 读数。 */
 static void op_card(int i, const char *name, int steps, const char *gate, int autoff,
                     int run_i, int run_step, int run_state)
 {
@@ -3238,8 +2982,8 @@ static void op_card(int i, const char *name, int steps, const char *gate, int au
             snprintf(m, sizeof m, "运行中 · 第 %d/%d 步", k, steps);
             text_meta_s(m);
         }
-        /* 等宽三键（gap 12，键高 76 保手指可点）：运行/停止 · 编辑 · 删除 */
-        float bw = (ImGui::GetContentRegionAvail().x - 2 * 12) / 3.0f;
+        /* 单键全宽（键高 76 保手指可点）：运行 / 停止 */
+        float bw = ImGui::GetContentRegionAvail().x;
         if (is_run) {
             if (btn_dark("停止", ImVec2(bw, 76))) {
                 ALOGI("op stop %s", name);
@@ -3255,10 +2999,6 @@ static void op_card(int i, const char *name, int steps, const char *gate, int au
                 g_force_frames = 3;
             }
         }
-        ImGui::SameLine();
-        if (btn_light("编辑", ImVec2(bw, 76))) op_edit_open(i, name);   /* 编辑覆盖层（T2.6） */
-        ImGui::SameLine();
-        if (btn_red("删除", ImVec2(bw, 76))) op_del_by_name(name);
     }
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
@@ -3291,14 +3031,9 @@ static void page_ops(void)
     } else {
         text_meta_s("空闲");
     }
-    ImGui::Dummy(ImVec2(0, 4));
-    if (btn_blue("＋新建", ImVec2(260, 84))) op_new();
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    text_meta_s("默认 1 步「等待 100ms」");
-    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::Dummy(ImVec2(0, 8));
     if (n == 0) {
-        text_meta_w("还没有操作：点「＋新建」加一条");
+        text_meta_w("还没有操作（在编辑器 app 里新建）；这里可以看运行状态、手动运行/停止。");
         return;
     }
     /* 列表自成一格可滚容器（与区域列表同款；拖动滚动目标同走 SCR_LIST —— 谁在显谁发布实区） */
@@ -3321,2941 +3056,6 @@ static void page_ops(void)
     ImGui::PopStyleColor();
 }
 
-/* ==== T2.6：操作编辑覆盖层 + 数字弹层 ================================================
- * 编辑对象是**打开那一刻的快照**（面板本地副本）：改名/增删排序步骤/换参数都只动副本，
- * [完成] 才由 vtouch_op_put 整条落表 —— 编辑半途核心表怎么动都不会把这轮编辑甩掉。
- * 范围口径照核心单点校验（src/vt_ops.c 的 op_valid）：名字 v11 规则（可见字符 1..15、字节 ≤47；裸 `-` 除外）；步数 1..32；
- * 坐标 0..竖屏逻辑宽高-1；时长 点按 0..60000 / 滑动 1..60000 / 等待 0..600000；
- * v3 增量：条件步两档位 0..3（档位 = 跳转 → 该侧目标 0..当前步数）；跳转步目标 0..当前步数（0 = 结束）。
- * 面板预检是**硬门**：非法值拒收 + 就地提示（不只提示）；最终仍以核心为准（put 回读失败
- * 就地提示、覆盖层不关）。 */
-
-#define OPE_MAX_STEPS 32                /* = 核心 MAX_STEPS（面板不 include 核心头，独立定义） */
-
-/* g_ope_i / g_ope_coll / g_pick_t0 的定义已上移到取点区块（文件前段的吞触摸/快照判据要读它们）。 */
-static char g_ope_orig[VT_NAME_BUF] = {0};       /* 打开时的原名（改过名后 [完成] 照它删旧条目） */
-static char g_ope_name[VT_NAME_BUF] = {0};       /* 编辑中的名字（名字子层改，[完成] 才落表） */
-static char g_ope_gate[VT_NAME_BUF] = {0};       /* 门控区域 id（空 = 无） */
-static int  g_ope_autoff = 0;           /* 跑完自动关 */
-static int  g_ope_nsteps = 0;           /* 步骤数（本地副本 1..32） */
-static int  g_ope_steps[OPE_MAX_STEPS][8];   /* 本地副本：每步 type,a1,a2,a3,a4,ms,j1,j2（v3 模型 [8]，字段序同核心 vt_step；ref 另存 g_ope_refs） */
-static char g_ope_refs[OPE_MAX_STEPS][VT_NAME_BUF];   /* 本地副本：每步区域引用（条件步 ref；空 = 无） */
-static char g_ope_exprs[OPE_MAX_STEPS][OPS_EXPR_MAX + 1];   /* 本地副本：每步表达式（计算步 expr；空 = 无；v5） */
-static char g_ope_msg[128] = {0};       /* [完成] 拒收/失败的就地提示（红字；放得下 v2 长文案） */
-static int  g_ope_kb = 0;               /* 名字子层（字符键盘）开 */
-static char g_ope_kbmsg[72] = {0};      /* 名字子层里的拒收提示 */
-static int  g_ope_up = 0;               /* 名字子层大小写档 */
-static int  g_ope_se = -1;              /* 参数弹层：正在编第几步（-1 = 关） */
-static int  g_ope_sf = 0;               /* 参数弹层：激活格（字段序号，0 起） */
-static int  g_ne_tgt = 0;               /* 参数弹层模式：0 = 全字段一屏；1 = 成立目标（j1）；2 = 不成立目标（j2） */
-static int  g_ope_vl = 0;               /* 变量选择弹层开（参数弹层的 [变量]；1 = 开） */
-static int  g_ope_rl = -1;              /* 区域选择弹层：正在选第几步的 ref（-1 = 关） */
-static int  g_ope_pv = 0;               /* 预览页（T2.5）：全屏只读层开（编辑层头 [预览] 进、[关闭] 返回） */
-/* 表达式子层（v5 计算步；v10：计算步 = 名字 + 表达式、字段 [表达式] 模式 = 内联插步）：T3.1 建状态 + 入口；
- * 完整 UI（名字行 / 字符键盘 6×3 / 插入 chips（预置 7 + 自定义变量 + 函数）/ 公式快捷行 / 变量图例 /
- * 矮屏自适应 + 拖滚兜底）在 draw_ope_expr。 */
-static int  g_ope_ex = 0;               /* 1 = 开（子层分发在 draw_op_edit 顶部 g_ope_se 之前） */
-static int  g_ope_ex_vl = 0;            /* 表达式子层变量列表（[变量] 按钮；点一条把名字插到表达式末尾） */
-static int  g_ope_mv = -1;              /* 步骤移模式（-1 = 关；≥0 = 正在移动的步号） */
-static int  g_ope_ex_field = 0;         /* 子层目标：0 = 计算步（名字 + 表达式）；1 = 字段内联（确认时自动插步） */
-static char g_ope_expr_buf[OPS_EXPR_MAX + 1];   /* 子层编辑缓冲：进入时从 g_ope_exprs[g_ope_se] 快照；[确定] 校验过写回 */
-
-/* 字段[表达式]插步的撤销快照（2026-10-05 评审修复：原实现插步立即生效、参数层 [取消] 只丢缓冲 = 半提交）。
- * 参数层会话内**首次**插步前整段快照；[取消]（真关层）恢复，[完成] / 保存 / 关层 丢弃。 */
-static int  g_ex_undo_armed;
-static int  g_ex_undo_nsteps;
-static int  g_ex_undo_steps[OPE_MAX_STEPS][8];
-static char g_ex_undo_refs[OPE_MAX_STEPS][VT_NAME_BUF];
-static char g_ex_undo_exprs[OPE_MAX_STEPS][OPS_EXPR_MAX + 1];
-static void ope_field_expr_undo_arm(void)
-{
-    if (g_ex_undo_armed) return;                 /* 会话内只留最早一份（多次插步一并撤销） */
-    g_ex_undo_armed = 1;
-    g_ex_undo_nsteps = g_ope_nsteps;
-    memcpy(g_ex_undo_steps, g_ope_steps, sizeof g_ope_steps);
-    memcpy(g_ex_undo_refs, g_ope_refs, sizeof g_ope_refs);
-    memcpy(g_ex_undo_exprs, g_ope_exprs, sizeof g_ope_exprs);
-}
-static void ope_field_expr_undo_drop(void) { g_ex_undo_armed = 0; }
-static void ope_field_expr_undo_restore(void)
-{
-    if (!g_ex_undo_armed) return;
-    g_ope_nsteps = g_ex_undo_nsteps;
-    memcpy(g_ope_steps, g_ex_undo_steps, sizeof g_ope_steps);
-    memcpy(g_ope_refs, g_ex_undo_refs, sizeof g_ope_refs);
-    memcpy(g_ope_exprs, g_ex_undo_exprs, sizeof g_ope_exprs);
-    g_ex_undo_armed = 0;
-}
-static char g_ope_ex_name[VT_NAME_BUF];          /* 子层变量名缓冲（[改名] 编辑；[确定] 随表达式一起写回该步 ref） */
-static int  g_ope_ex_nm = 0;            /* 子层里的小字符键盘（改变量名）开 */
-static char g_ope_ex_nmmsg[96] = {0};   /* 名字键盘拒收提示 */
-static char g_ope_ex_msg[72] = {0};     /* 子层拒收提示（红字；[确定] 不过时层不关） */
-static char g_ope_saved_as[VT_NAME_BUF] = {0};   /* 本会话最近一次 put 成功的名字（[完成] 重试豁免自己刚写进表的名字）；开层/关层清空 */
-static char g_ope_del_owed[VT_NAME_BUF] = {0};   /* 尚欠删除的旧名（del 超时/未送达留下的账，再点 [完成] 先补删）；开层/关层清空 */
-/* 参数弹层 v3 本地缓冲（全字段一屏 / 原子落）：每格 = {值, 文本}（结构说明见 ope_num_load）。
- * 层内编辑只改缓冲；[完成] 全字段校验全过才一次写回 g_ope_steps，[取消] 全丢（含取点/变量改动）。 */
-static int  g_ne_vals[8];               /* 每格值：字面值 ≥ 0 / 负数编码引用 -25..-1（触发 -1..-5 / fx/fy -6/-7 / 退役 -8/-9 / 自定义 -10..-25；目标模式单格 = j1/j2） */
-static char g_ne_text[8][8];            /* 每格字面输入文本（≤6 位数字；变量态 / 目标格「结束」留空） */
-static char g_ne_msg[72] = {0};         /* 参数弹层就地提示（范围/位数的硬门反馈 + [完成] 拒收） */
-/* 目标模式槽位（ne_open_target 的 slot 参数）：1 = 成立目标（j1）/ 2 = 不成立目标（j2）。 */
-#define NE_TGT_J1 1
-#define NE_TGT_J2 2
-
-/* 自绘字符键盘弹层（区域改名 / 操作改名共用：面板收不到系统输入法，字符全靠点）。
- * 画在当前窗口内并盖住底下内容（调用方那一帧干脆不画底下，免得底下按钮还能吃点击）：
- * 标题 + 当前值框（带原名对照）+ 6x6 字符键 + 特殊键（_ - 大小写 退格）+ 取消/确定。
- * top = sheet 顶边距（相对窗口顶；面板窗里有标题栏用 TITLE_H+10，编辑层整屏窗用 12）。
- * buf 上限 15 字符、up 是大写档；本函数只画/只改，语义留给调用方：
- * 返回 0 = 无动作 / 1 = 取消 / 2 = 确定。 */
-static int draw_char_kb(const char *title, const char *oldname, char *buf, int bufc,
-                        int *up, char *msg, int msgc, float top)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImVec2 wp = ImGui::GetWindowPos();
-    float ww = ImGui::GetWindowWidth(), wh = ImGui::GetWindowHeight();
-    ImVec2 a(wp.x + 12, wp.y + top), b(wp.x + ww - 12, wp.y + wh - 12);
-    int act = 0;
-    /* —— 矮屏/横屏兜底（1）：超高内容手动拖滚的状态（隔帧重开 = 回顶）—— */
-    {
-        static int lf = -1;
-        if (ImGui::GetFrameCount() - lf > 1) g_kb_sc = 0;
-        lf = ImGui::GetFrameCount();
-        if (g_scroll_acc != 0 && g_scr_target == SCR_KB) { g_kb_sc += g_scroll_acc; g_scroll_acc = 0; }
-    }
-    int cap = bufc - 1;
-    if (cap > 15) cap = 15;
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    float x0 = a.x + 26, y0 = a.y + 24, cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    text_meta_s(title);
-    /* 当前输入 + 原名对照 */
-    ImGui::PushStyleColor(ImGuiCol_Border, BLUE500);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.976f, 0.980f, 0.984f, 1.00f));
-    ImGui::BeginChild("##nameval", ImVec2(cw, 96), ImGuiChildFlags_Border, ImGuiWindowFlags_NoScrollbar);
-    {
-        char show[48];
-        snprintf(show, sizeof show, "%s", buf[0] ? buf : "(空)");
-        ImVec2 tp = ImGui::GetCursorScreenPos();
-        ImDrawList *d2 = ImGui::GetWindowDrawList();
-        d2->AddText(ImVec2(tp.x + 18, tp.y + 28), IM_COL32(24, 24, 27, 255), show);
-        if (oldname && oldname[0] && strcmp(oldname, buf)) {
-            char old[48];
-            snprintf(old, sizeof old, "原名 %s", oldname);
-            d2->AddText(ImVec2(tp.x + 22 + ImGui::CalcTextSize(show).x + 26, tp.y + 34),
-                        IM_COL32(161, 161, 170, 255), old);
-        }
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
-    if (msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 146));
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", msg);
-    }
-    /* 字符键：6 列 x 6 行 = a-z + 0-9。高度自适应（矮屏/横屏）：键高按可用高算、两档紧凑；
-     * 仍放不下 → 键区手动拖滚（g_zone_kb + SCR_KB：内容随 g_kb_sc 整体位移、裁剪在卡片内）。 */
-    static const char *krow[6] = { "abcdef", "ghijkl", "mnopqr", "stuvwx", "yz0123", "456789" };
-    float gap = 10.0f, kw = (cw - 5 * gap) / 6.0f;
-    float sph = 76.0f, bth = 92.0f, kh = 76.0f;
-    {
-        float avail_kb = b.y - (y0 + 196.0f);                        /* 键区可用高 */
-        float fixed_bot = sph + gap + 12.0f + bth + 6.0f * gap;     /* 特殊行+按钮行+缝 */
-        float khn = (avail_kb - fixed_bot) / 6.0f;
-        if (khn < 56.0f) {
-            sph = 62.0f; bth = 70.0f;
-            fixed_bot = sph + gap + 12.0f + bth + 6.0f * gap;
-            khn = (avail_kb - fixed_bot) / 6.0f;
-        }
-        kh = khn < 76.0f ? khn : 76.0f;
-        if (kh < 40.0f) kh = 40.0f;                                  /* 再矮由手动滚动兜底 */
-    }
-    {
-        float kb_ch = 6.0f * (kh + gap) + sph + gap + 12.0f + bth;   /* 键区内容总高 */
-        float kb_max = kb_ch - (b.y - (y0 + 196.0f));
-        if (kb_max < 0) kb_max = 0;
-        if (g_kb_sc < 0) g_kb_sc = 0;                                /* 下限 clamp：与上限对称（拖滚不为负） */
-        if (g_kb_sc > kb_max) g_kb_sc = kb_max;
-        pub_zone(g_zone_kb);                                         /* 拖键区滚（超高时） */
-        ImGui::PushClipRect(ImVec2(a.x + 4, y0 + 192.0f), ImVec2(b.x - 4, b.y - 4), true);
-    }
-    float ky = y0 + 196 - g_kb_sc;
-    for (int r = 0; r < 6; r++) {
-        for (int c = 0; c < 6; c++) {
-            char lab[2] = { krow[r][c], 0 };
-            if (lab[0] >= 'a' && lab[0] <= 'z' && *up) lab[0] = (char)(lab[0] - 'a' + 'A');
-            ImGui::PushID(100 + r * 6 + c);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + c * (kw + gap), ky + r * (kh + gap)));
-            if (btn_light(lab, ImVec2(kw, kh))) {
-                int n = (int)strlen(buf);
-                if (n < cap) { buf[n] = lab[0]; buf[n + 1] = 0; }
-                else snprintf(msg, (size_t)msgc, "最多 15 个字符");
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::PopID();
-        }
-    }
-    /* 特殊键：_ - 大小写 退格 */
-    float fy = ky + 6 * (kh + gap);
-    {
-        float sw2 = (cw - 3 * gap) / 4.0f;
-        const char *sp[4] = { "_", "-", *up ? "小写" : "大写", "退格" };
-        for (int c = 0; c < 4; c++) {
-            ImGui::PushID(200 + c);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + c * (sw2 + gap), fy));
-            if (btn_light(sp[c], ImVec2(sw2, sph))) {
-                if (c == 0 || c == 1) {
-                    int n = (int)strlen(buf);
-                    if (n < cap) { buf[n] = sp[c][0]; buf[n + 1] = 0; }
-                } else if (c == 2) {
-                    *up = !*up;
-                } else {
-                    int n = (int)strlen(buf);
-                    if (n > 0) buf[n - 1] = 0;
-                }
-                msg[0] = 0;
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::PopID();
-        }
-    }
-    /* 取消 / 确定 */
-    float by = fy + sph + gap + 12, bw2 = (cw - gap) * 0.5f;
-    ImGui::PushID(300);
-    ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if (btn_light("取消", ImVec2(bw2, bth))) act = 1;
-    ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + gap, by));
-    if (btn_blue("确定", ImVec2(bw2, bth))) act = 2;
-    ImGui::PopID();
-    ImGui::PopClipRect();                        /* 键区裁剪到此（含取消/确定） */
-    return act;
-}
-
-/* 操作名合法性（照核心 vt_id_ok：v11 UTF-8 可见字符 1..15、字节 ≤47，裸 `-` 除外；与区域改名同一把尺子，撞的是别的操作名）：
- * 0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_name 自己不算；本会话刚 put 成功的名字 saved_as
- * 也不算 —— 删旧失败的 [完成] 重试必须能过这一关，否则表里刚写进去的新名会把自己判成「被别人用了」）。 */
-static int ope_name_ok(const char *old_name, const char *s)
-{
-    int i, k = vtouch_op_count();
-    int rc = ui_name_ok(s, 0);               /* v11：UTF-8 可见字符 1..15、字节 ≤47；裸 `-` 拒收 */
-    if (rc) return rc;
-    for (i = 0; i < k; i++) {
-        char nm[VT_NAME_BUF];
-        if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) != 0) continue;
-        if (!strcmp(nm, s) && strcmp(nm, old_name) && strcmp(nm, g_ope_saved_as)) return 4;
-    }
-    return 0;
-}
-static const char *ope_name_why(int rc)
-{
-    return rc == 1 ? "名字不能为空" : rc == 2 ? "最多 15 个字符" :
-           rc == 3 ? "只能用 a-z A-Z 0-9 _ -" : "这个名字已经被别的操作用了";
-}
-
-/* 字段模型（v5 九类型）：字段序号 → g_ope_steps 下标（0=type、1..4=坐标参数、5=ms）；-1 = 该类型没这个字段。
- * 坐标字段（下标 1..4）在数字弹层里会多画一个 [取点]（T2.8 已接线：核心吞一次触摸回填）；
- * 可变量的字段（spec §2.1）多画一个 [变量]（ope_var_ok 判）。条件步的 a3/a4/j1/j2/ref 不在字段表里 ——
- * 它们是步骤行上的行内控件（档位 + 目标格 + 区域下拉）；跳转步的「目标」= a1，走字段表（1 格）；
- * 计算步无数字字段（表达式走表达式子层，不进数字弹层）。 */
-static const int ope_fidx[11][7] = {
-    { 1, 2, 5, -1, -1, -1, -1 },       /* 点按：x, y, 按住 ms */
-    { 1, 2, 3, 4, 5, 6, 7 },           /* 滑动：起点 x/y, 终点 x/y, 移动 ms, 按下后停 ms（j1）, 弹起前停 ms（j2）（v2.1） */
-    { 5, -1, -1, -1, -1, -1, -1 },     /* 等待：ms */
-    { 1, 2, -1, -1, -1, -1, -1 },      /* 按下：x, y */
-    { -1, -1, -1, -1, -1, -1, -1 },    /* 弹起：无字段 */
-    { 1, 2, -1, -1, -1, -1, -1 },      /* 区域判断：判定点 x, 判定点 y */
-    { -1, -1, -1, -1, -1, -1, -1 },    /* 开关判断：无数字字段 */
-    { 1, -1, -1, -1, -1, -1, -1 },     /* 跳转：目标步骤（0 = 结束） */
-    { -1, -1, -1, -1, -1, -1, -1 },    /* 计算：无数字字段（表达式子层编辑） */
-    { 1, 5, -1, -1, -1, -1, -1 },      /* 找图（T3.2；T7.4 加持续超时）：阈值 = a1、超时 ms = ms（数字键盘子层编辑） */
-    { 2, 5, -1, -1, -1, -1, -1 },      /* 找色（T3.2；T7.4 加持续超时）：容差 = a2 低 8 位（ne_field_get/set 拆包）、超时 ms = ms */
-};
-static const char *const ope_flabel[11][7] = {
-    { "坐标 x", "坐标 y", "按住时长 ms", "", "", "", "" },
-    { "起点 x", "起点 y", "终点 x", "终点 y", "移动 ms", "按下后停 ms", "弹起前停 ms" },
-    { "等待时长 ms", "", "", "", "", "", "" },
-    { "坐标 x", "坐标 y", "", "", "", "", "" },
-    { "", "", "", "", "", "", "" },
-    { "判定点 x", "判定点 y", "", "", "", "", "" },
-    { "", "", "", "", "", "", "" },
-    { "目标", "", "", "", "", "", "" },
-    { "", "", "", "", "", "", "" },    /* 计算：无数字字段 */
-    { "阈值", "超时 ms", "", "", "", "", "" }, /* 找图：阈值 0..255；超时 0..60000（0 = 单次） */
-    { "容差", "超时 ms", "", "", "", "", "" }, /* 找色（单点）：容差 0..255；超时 0..60000（0 = 单次） */
-};
-static int ope_nfields(int type)
-{
-    return type == OP_STEP_TAP ? 3 : type == OP_STEP_SWIPE ? 7 : type == OP_STEP_WAIT ? 1 :
-           type == OP_STEP_DOWN ? 2 : type == OP_STEP_COND_REGION ? 2 : type == OP_STEP_JUMP ? 1 :
-           type == OP_STEP_FINDIMAGE ? 2 : type == OP_STEP_FINDCOLOR ? 2 : 0;
-}
-static const char *ope_tname(int type)
-{
-    switch (type) {
-    case OP_STEP_TAP:         return "点按";
-    case OP_STEP_SWIPE:       return "滑动";
-    case OP_STEP_WAIT:        return "等待";
-    case OP_STEP_DOWN:        return "按下";
-    case OP_STEP_UP:          return "弹起";
-    case OP_STEP_COND_REGION: return "区域判断";
-    case OP_STEP_COND_TOGGLE: return "开关判断";
-    case OP_STEP_JUMP:        return "跳转";
-    case OP_STEP_CALC:        return "计算";
-    case OP_STEP_FINDIMAGE:   return "找图";
-    case OP_STEP_FINDCOLOR:   return "找色";
-    default:                  return "?";
-    }
-}
-
-/* 预置变量中文名（spec §1.1 逐字 + v5 §6 + v10 §Task 7.5）：下标 0..6 ↔ 值 -1..-7（触发 5 + fx/fy）。
- * 自定义变量（-10..-25）显示各自的变量名（扫计算步取，见 ope_var_name_at）。 */
-static const char *const ope_vname_tab[7] = { "触发按下x", "触发按下y", "触发弹起x", "触发弹起y", "触发时长",
-                                              "命中x", "命中y" };
-static const char *ope_vname(int v)      /* 值是预置变量引用 → 中文名；不是 → NULL */
-{
-    if (v >= OP_VAR_FY && v <= OP_VAR_TDX) return ope_vname_tab[OP_VAR_TDX - v];
-    return NULL;
-}
-/* 负数编码引用判据（-25..-1：触发 / fx/fy / 退役 / 自定义都算「变量态」）。 */
-static int ope_var_ref(int v)
-{
-    return v >= OP_VAR_V15 && v <= OP_VAR_TDX;
-}
-/* 变量索引 → 名字（扫计算步取；同名步共享同一索引，取首个；找不到 = NULL）。 */
-static const char *ope_var_name_at(int index)
-{
-    int i;
-    for (i = 0; i < g_ope_nsteps; i++) {
-        if (g_ope_steps[i][0] == OP_STEP_CALC && g_ope_steps[i][1] == index && g_ope_refs[i][0])
-            return g_ope_refs[i];
-    }
-    return NULL;
-}
-/* 数值字段显示文本：预置变量 → 中文名；自定义变量 → 变量名（悬空显示「未定义变量」）；字面值 → 数字。 */
-static void ope_num_text(int v, char *out, int outcap)
-{
-    const char *n = ope_vname(v);
-    if (n) { snprintf(out, (size_t)outcap, "%s", n); return; }
-    if (v >= OP_VAR_V15 && v <= OP_VAR_RET1) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名（I1 修复：原条件 v>=-9&&v<=-10 恒假） */
-        const char *cn = ope_var_name_at(OP_VAR_V0 - v);
-        if (cn) snprintf(out, (size_t)outcap, "%s", cn);
-        else snprintf(out, (size_t)outcap, "未定义变量");
-        return;
-    }
-    snprintf(out, (size_t)outcap, "%d", v);   /* 退役槽（-8/-9）等防御分支：原样显示 */
-}
-/* 该字段允不允许变量引用（spec §2.1）：点按/滑动/等待的时长；点按/滑动/按下/区域判断的坐标。
- * v2 里凡存在的数值字段都可变量 —— 仍按类型/下标写死，防以后加字段时悄悄放行。 */
-static int ope_var_ok(int type, int idx)
-{
-    if (idx == 6 || idx == 7) return type == OP_STEP_SWIPE;   /* v2.1：滑动两段停顿也可用变量 */
-    if (idx == 5) return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_WAIT;
-    if (idx >= 1 && idx <= 4)
-        return type == OP_STEP_TAP || type == OP_STEP_SWIPE || type == OP_STEP_DOWN || type == OP_STEP_COND_REGION;
-    return 0;
-}
-
-/* ---- 自定义命名变量（v10，spec EDITOR_V2 §Task 7.5）：收集 / 索引分配 / 改名 ---- */
-
-/* 自定义变量名合法性（v10 起；v11 UTF-8）：ui_name_ok(var 模式)，同核心 op_var_name_ok 尺子。 */
-static int ope_varname_ok(const char *s)
-{
-    return ui_name_ok(s, 1) == 0;            /* v11：UTF-8 可见字符 1..15；首字符不可数字/`-` */
-}
-/* 名字 → 变量索引（扫计算步；无 = -1）。 */
-static int ope_var_index_of(const char *name)
-{
-    int i;
-    for (i = 0; i < g_ope_nsteps; i++) {
-        if (g_ope_steps[i][0] == OP_STEP_CALC && g_ope_refs[i][0] && strcmp(g_ope_refs[i], name) == 0)
-            return g_ope_steps[i][1];
-    }
-    return -1;
-}
-/* 索引是否已被某个计算步使用。 */
-static int ope_var_index_used(int index) { return ope_var_name_at(index) != NULL; }
-/* 索引是否被字段引用（编码 -10..-25）—— 只扫「允许变量」的字段（找色的 a2 是打包色值，
- * 可为任意负值，绝不能误当引用；判据与 ope_var_ok 同款）。 */
-static int ope_var_index_refed(int index)
-{
-    int i, k;
-    for (i = 0; i < g_ope_nsteps; i++)
-        for (k = 1; k <= 7; k++)            /* 1..7：含滑动 j1/j2（按下后停/弹起前停，v2.1；评审修复 2026-10-05） */
-            if (ope_var_ok(g_ope_steps[i][0], k) && g_ope_steps[i][k] == OP_VAR_V0 - index) return 1;
-    return 0;
-}
-/* 分配一个空闲变量索引：优先未被字段引用的空闲位（防悬空引用被新名字复活）；全被引用取最小空闲。
- * 返回 -1 = 16 个全占。 */
-static int ope_var_index_alloc(void)
-{
-    int i, first = -1;
-    for (i = 0; i < OP_VAR_IDX_N; i++) {
-        if (ope_var_index_used(i)) continue;
-        if (first < 0) first = i;
-        if (!ope_var_index_refed(i)) return i;
-    }
-    return first;
-}
-/* 自动名：prefix（"v"/"e"）+ 递增序号 —— 取最小未用的 `prefixN`（N ≥ 1；≤999 兜底）。out 容量 ≥ 17。 */
-static void ope_var_auto_name(const char *prefix, char *out, int outcap)
-{
-    int n;
-    for (n = 1; n <= 999; n++) {
-        snprintf(out, (size_t)outcap, "%s%d", prefix, n);
-        if (ope_var_index_of(out) < 0) return;
-    }
-}
-/* 从计算步动态收集自定义变量（名字按步序首次出现、索引取该步 a1；重名只收一份）。返回条数（≤max）。 */
-static int ope_vars_collect(char (*names)[VT_NAME_BUF], int *idx, int max)
-{
-    int i, k, cnt = 0;
-    for (i = 0; i < g_ope_nsteps && cnt < max; i++) {
-        if (g_ope_steps[i][0] != OP_STEP_CALC || !g_ope_refs[i][0]) continue;
-        for (k = 0; k < cnt; k++) if (!strcmp(names[k], g_ope_refs[i])) break;
-        if (k < cnt) continue;
-        snprintf(names[cnt], VT_NAME_BUF, "%s", g_ope_refs[i]);
-        idx[cnt] = g_ope_steps[i][1];
-        cnt++;
-    }
-    return cnt;
-}
-/* 变量表一致性预检（[完成] 保存前）：由计算步构建 vars[索引] = 名字；冲突（同名多索引 / 同索引多名）→ -1。
- * 与核心 op_valid 的变量表校验同款（双保险，拒在出门前）。 */
-static int ope_vars_build(char (*vars)[VT_NAME_BUF])
-{
-    int i, k;
-    for (i = 0; i < OP_VAR_IDX_N; i++) vars[i][0] = 0;
-    for (i = 0; i < g_ope_nsteps; i++) {
-        int idx;
-        if (g_ope_steps[i][0] != OP_STEP_CALC || !g_ope_refs[i][0]) continue;
-        idx = g_ope_steps[i][1];
-        if (idx < 0 || idx >= OP_VAR_IDX_N) return -1;
-        if (vars[idx][0] && strcmp(vars[idx], g_ope_refs[i])) return -1;      /* 同索引多名 */
-        snprintf(vars[idx], VT_NAME_BUF, "%s", g_ope_refs[i]);
-        for (k = 0; k < OP_VAR_IDX_N; k++)
-            if (k != idx && vars[k][0] && !strcmp(vars[k], g_ope_refs[i])) return -1;   /* 同名多索引 */
-    }
-    return 0;
-}
-
-/* 参数字段的范围硬门（照核心 op_valid 的尺子）：1 = 合法；不然 why 写人话（字段名 + 范围）。
- * v10：数值字段可为负数编码引用（-25..-1：触发 -1..-5 / fx/fy -6/-7 / 退役 -8/-9 / 自定义 -10..-25），放行
- * （跳转目标除外——它是控制流编号，不可变量）；字面值照旧按
- * 类型/坐标轴分档；跳转步目标在字段层先按 0..OPE_MAX_STEPS 收（0 = 结束），保存预检再按当前步数收紧。 */
-static int ne_check(const char *label, int type, int fi, int v, char *why, int whycap)
-{
-    int idx;
-    if (type < OP_STEP_TAP || type > OP_STEP_FINDCOLOR || fi < 0 || fi >= ope_nfields(type)) {
-        snprintf(why, (size_t)whycap, "步骤类型非法");
-        return 0;
-    }
-    idx = ope_fidx[type - 1][fi];
-    if (type == OP_STEP_JUMP) {                       /* 跳转目标：0..32（0 = 结束） */
-        if (v < 0 || v > OPE_MAX_STEPS) {
-            snprintf(why, (size_t)whycap, "%s 必须在 0..%d（0 = 结束）", label, OPE_MAX_STEPS);
-            return 0;
-        }
-        return 1;
-    }
-    if (type == OP_STEP_FINDIMAGE || type == OP_STEP_FINDCOLOR) {   /* 视觉步字段（T3.2；T7.4 加持续超时）：
-                                                                     * fi 0 = 阈值 / 容差 0..255；fi 1 = 超时 ms 0..60000（0 = 单次） */
-        if (fi == 1) {
-            if (v < 0 || v > 60000) {
-                snprintf(why, (size_t)whycap, "%s 必须在 0..60000（0 = 单次）", label);
-                return 0;
-            }
-            return 1;
-        }
-        if (type == OP_STEP_FINDCOLOR) v = (int)((uint32_t)v & 0xFFu);   /* 找色：a2 = (颜色<<8)|容差 打包，先拆低 8 位（修复轮） */
-        if (v < 0 || v > 255) {
-            snprintf(why, (size_t)whycap, "%s 必须在 0..255", label);
-            return 0;
-        }
-        return 1;
-    }
-    if (ope_var_ref(v)) return 1;                     /* -25..-1：负数编码引用（v2 数值字段全可变量；v10 扩 fx/fy 与自定义变量） */
-    if (type == OP_STEP_SWIPE && (idx == 6 || idx == 7)) {   /* v2.1（2026-10-05g）：滑动两段停顿 0..60000（0 = 不停） */
-        if (v < 0 || v > 60000) { snprintf(why, (size_t)whycap, "%s 必须在 0..60000", label); return 0; }
-        return 1;
-    }
-    if (idx >= 1 && idx <= 4) {                       /* 坐标字段：x 看逻辑宽、y 看逻辑高 */
-        int lim = (idx == 1 || idx == 3) ? g_w : g_h;
-        if (v < 0 || v >= lim) { snprintf(why, (size_t)whycap, "%s 必须在 0..%d", label, lim - 1); return 0; }
-        return 1;
-    }
-    if (type == OP_STEP_TAP) {
-        if (v < 0 || v > 60000) { snprintf(why, (size_t)whycap, "%s 必须在 0..60000", label); return 0; }
-    } else if (type == OP_STEP_SWIPE) {
-        if (v < 1 || v > 60000) { snprintf(why, (size_t)whycap, "%s 必须在 1..60000", label); return 0; }
-    } else {
-        if (v < 0 || v > 600000) { snprintf(why, (size_t)whycap, "%s 必须在 0..600000", label); return 0; }
-    }
-    return 1;
-}
-
-/* 整步校验（[完成] 预检用；单点仍是核心 op_valid，这里只是不让明显非法的载荷出门）。
- * 条件步：两档位 a3/a4 ∈ 0..3；档位 = 跳转 → 该侧目标（不成立侧 = j2、成立侧 = j1）∈ 0..当前步数；ref 必须已选。
- * 跳转步：目标 a1 ∈ 0..当前步数（0 = 结束）。其余档位的目标忽略（照核心 op_valid 口径）。
- * 计算步（v10；v11 起 UTF-8）：a1 ∈ 0..15（变量索引）；ref = 变量名（可见字符 1..15）；expr 非空且过同源
- * vtouch_expr_check（名字表 = 当前计算步收集）；其余字段必须 0。 */
-static int ope_step_check(int si, const int *s6, char *why, int whycap)
-{
-    int t = s6[0], nf, fi;
-    if (t < OP_STEP_TAP || t > OP_STEP_FINDCOLOR) {
-        snprintf(why, (size_t)whycap, "第 %d 步类型非法", si + 1);
-        return 0;
-    }
-    nf = ope_nfields(t);
-    for (fi = 0; fi < nf; fi++) {
-        char f[72];
-        if (!ne_check(ope_flabel[t - 1][fi], t, fi, s6[ope_fidx[t - 1][fi]], f, (int)sizeof f)) {
-            snprintf(why, (size_t)whycap, "第 %d 步：%s", si + 1, f);
-            return 0;
-        }
-    }
-    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
-        if (s6[3] < OP_COND_ABORT || s6[3] > OP_COND_JUMP) {
-            snprintf(why, (size_t)whycap, "第 %d 步：不成立行为非法", si + 1);
-            return 0;
-        }
-        if (s6[4] < OP_COND_ABORT || s6[4] > OP_COND_JUMP) {
-            snprintf(why, (size_t)whycap, "第 %d 步：成立行为非法", si + 1);
-            return 0;
-        }
-        if (s6[4] == OP_COND_JUMP && (s6[6] < 0 || s6[6] > g_ope_nsteps)) {   /* 成立侧目标 = j1 */
-            snprintf(why, (size_t)whycap, "第 %d 步成立侧跳转目标超出步数", si + 1);
-            return 0;
-        }
-        if (s6[3] == OP_COND_JUMP && (s6[7] < 0 || s6[7] > g_ope_nsteps)) {   /* 不成立侧目标 = j2 */
-            snprintf(why, (size_t)whycap, "第 %d 步不成立侧跳转目标超出步数", si + 1);
-            return 0;
-        }
-        if (!g_ope_refs[si][0]) {
-            snprintf(why, (size_t)whycap, "第 %d 步：请选择区域", si + 1);
-            return 0;
-        }
-    } else if (t == OP_STEP_JUMP) {
-        if (s6[1] < 0 || s6[1] > g_ope_nsteps) {         /* 目标 0 = 结束；1..当前步数 = 目标步骤 */
-            snprintf(why, (size_t)whycap, "第 %d 步跳转目标超出步数", si + 1);
-            return 0;
-        }
-    } else if (t == OP_STEP_CALC) {
-        /* 计算步（v10）：变量索引 0..15；ref = 变量名；expr 非空且过同源 vtouch_expr_check（名字表 = 收集）；
-         * 其余字段必须 0（防御镜像核心 op_valid 的计算步口径）。 */
-        char w2[72];
-        if (s6[1] < 0 || s6[1] >= OP_VAR_IDX_N) {
-            snprintf(why, (size_t)whycap, "第 %d 步：变量索引必须在 0..%d", si + 1, OP_VAR_IDX_N - 1);
-            return 0;
-        }
-        if (s6[2] || s6[3] || s6[4] || s6[5] || s6[6] || s6[7]) {
-            snprintf(why, (size_t)whycap, "第 %d 步：计算步其它字段必须为空", si + 1);
-            return 0;
-        }
-        if (!ope_varname_ok(g_ope_refs[si])) {
-            snprintf(why, (size_t)whycap, "第 %d 步：变量名非法（1..15，字母/下划线开头）", si + 1);
-            return 0;
-        }
-        if (!g_ope_exprs[si][0]) {
-            snprintf(why, (size_t)whycap, "第 %d 步：表达式为空（点 [参数] 编辑）", si + 1);
-            return 0;
-        }
-        {
-            char names[OP_VAR_IDX_N][VT_NAME_BUF];
-            int  nidx[OP_VAR_IDX_N];
-            int  nv = ope_vars_collect(names, nidx, OP_VAR_IDX_N);
-            w2[0] = 0;
-            if (vtouch_expr_check(g_ope_exprs[si], (const char (*)[VT_NAME_BUF])names, nv, w2, (int)sizeof w2) != 0) {
-                snprintf(why, (size_t)whycap, "第 %d 步：表达式错（%s）", si + 1, w2[0] ? w2 : "非法");
-                return 0;
-            }
-        }
-    } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
-        /* 视觉步（T3.2 v8；T7.4 扩 ms）：镜像核心 op_valid —— 找图 ref=模板名（必填）、expr=区域名（空或合法）、
-         * a1=阈值 0..255、a2=0、ms=0..60000（0 = 单次、>0 = 持续查找超时）；找色 a1=模式、单点 ref 空 +
-         * a2=(颜色<<8)|容差、多点 ref=点集名（必填）+ a2=0；两类型 a3/a4 档位、j1/j2 目标域（同条件步）。 */
-        if (s6[5] < 0 || s6[5] > 60000) {
-            snprintf(why, (size_t)whycap, "第 %d 步：持续超时必须在 0..60000（0 = 单次）", si + 1);
-            return 0;
-        }
-        if (t == OP_STEP_FINDIMAGE) {
-            if (s6[1] < 0 || s6[1] > 255) {
-                snprintf(why, (size_t)whycap, "第 %d 步：阈值必须在 0..255", si + 1);
-                return 0;
-            }
-            if (s6[2] != 0 && s6[2] != 1) {          /* v2.1（2026-10-05e）：a2 = 颜色校验 0/1 */
-                snprintf(why, (size_t)whycap, "第 %d 步：找图字段必须为 0/1", si + 1);
-                return 0;
-            }
-            if (!g_ope_refs[si][0]) {
-                snprintf(why, (size_t)whycap, "第 %d 步：请选择模板（点 [参数]）", si + 1);
-                return 0;
-            }
-            if (vis_name_ok(g_ope_refs[si]) != 0) {
-                snprintf(why, (size_t)whycap, "第 %d 步：模板名非法（1..15 个可见字符）", si + 1);
-                return 0;
-            }
-        } else {
-            if (s6[1] != 0 && s6[1] != 1) {
-                snprintf(why, (size_t)whycap, "第 %d 步：模式非法（0/1）", si + 1);
-                return 0;
-            }
-            if (s6[1] == 1) {                 /* 多点：点集名必填 + a2 必须 0（基准色/容差/点表在 .pts） */
-                if (!g_ope_refs[si][0]) {
-                    snprintf(why, (size_t)whycap, "第 %d 步：请选择点集（多点必填）", si + 1);
-                    return 0;
-                }
-                if (vis_name_ok(g_ope_refs[si]) != 0) {
-                    snprintf(why, (size_t)whycap, "第 %d 步：点集名非法（1..15 个可见字符）", si + 1);
-                    return 0;
-                }
-                if (s6[2] != 0) {
-                    snprintf(why, (size_t)whycap, "第 %d 步：多点模式字段必须为空", si + 1);
-                    return 0;
-                }
-            } else if (g_ope_refs[si][0]) {   /* 单点：点集名必须空 */
-                snprintf(why, (size_t)whycap, "第 %d 步：单点模式不能带点集", si + 1);
-                return 0;
-            }
-        }
-        if (s6[3] < OP_COND_ABORT || s6[3] > OP_COND_JUMP) {
-            snprintf(why, (size_t)whycap, "第 %d 步：不成立行为非法", si + 1);
-            return 0;
-        }
-        if (s6[4] < OP_COND_ABORT || s6[4] > OP_COND_JUMP) {
-            snprintf(why, (size_t)whycap, "第 %d 步：成立行为非法", si + 1);
-            return 0;
-        }
-        if (s6[4] == OP_COND_JUMP && (s6[6] < 0 || s6[6] > g_ope_nsteps)) {
-            snprintf(why, (size_t)whycap, "第 %d 步成立侧跳转目标超出步数", si + 1);
-            return 0;
-        }
-        if (s6[3] == OP_COND_JUMP && (s6[7] < 0 || s6[7] > g_ope_nsteps)) {
-            snprintf(why, (size_t)whycap, "第 %d 步不成立侧跳转目标超出步数", si + 1);
-            return 0;
-        }
-        if (g_ope_exprs[si][0] && vis_name_ok(g_ope_exprs[si]) != 0) {
-            snprintf(why, (size_t)whycap, "第 %d 步：区域名非法（1..15 个可见字符）", si + 1);
-            return 0;
-        }
-    }
-    return 1;
-}
-
-/* 档位 + 目标 → 人话（摘要用；目标 0 = 结束）。词表照 spec §8 / 计划 Global Constraints。 */
-static void ope_tier_text(int tier, int target, char *out, int outcap)
-{
-    switch (tier) {
-    case OP_COND_CONT: snprintf(out, (size_t)outcap, "继续下一步"); break;
-    case OP_COND_SKIP: snprintf(out, (size_t)outcap, "跳过下一步"); break;
-    case OP_COND_JUMP: snprintf(out, (size_t)outcap, target == 0 ? "跳到结束" : "跳到第 %d 步", target); break;
-    default:           snprintf(out, (size_t)outcap, "中止"); break;   /* OP_COND_ABORT（非法值兜底同款） */
-    }
-}
-
-/* 条件档位的循环序（spec §1.1 固定序：继续下一步 → 跳过下一步 → 跳到… → 中止 → 回继续）。 */
-static int ope_tier_next(int tier)
-{
-    switch (tier) {
-    case OP_COND_CONT: return OP_COND_SKIP;
-    case OP_COND_SKIP: return OP_COND_JUMP;
-    case OP_COND_JUMP: return OP_COND_ABORT;
-    default:           return OP_COND_CONT;   /* 中止 / 非法值兜底：回「继续下一步」 */
-    }
-}
-/* 循环钮文字（档位名；「跳到…」只是档位名，具体目标在旁边的目标格）。 */
-static const char *ope_tier_name(int tier)
-{
-    switch (tier) {
-    case OP_COND_CONT: return "继续下一步";
-    case OP_COND_SKIP: return "跳过下一步";
-    case OP_COND_JUMP: return "跳到…";
-    default:           return "中止";         /* OP_COND_ABORT（非法值兜底同款） */
-    }
-}
-
-/* 步骤行参数文本（T3.1 摘要；v3 起两档全显）：坐标/时长格显示变量中文名或原值；条件步 = 区域名 +
- * 成立/不成立两档（跳转档带目标）；跳转步 = 目标（「跳到 第 N 步」/「跳到 结束」）；
- * 计算步（v10）= `计算 → <名> = <表达式>`（默认名 v1/v2…，spec §7.5）。 */
-static void ope_step_text(int si, char *out, int outcap)
-{
-    const int *s6 = g_ope_steps[si];
-    const char *ref = g_ope_refs[si];
-    char x1[24], y1[24], x2[24], y2[24], ms[24], t1[24], t2[24];
-    switch (s6[0]) {
-    case OP_STEP_TAP:
-        ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
-        ope_num_text(s6[5], ms, (int)sizeof ms);
-        snprintf(out, (size_t)outcap, "%s,%s · 按住 %sms", x1, y1, ms);
-        break;
-    case OP_STEP_SWIPE:
-        ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
-        ope_num_text(s6[3], x2, (int)sizeof x2); ope_num_text(s6[4], y2, (int)sizeof y2);
-        ope_num_text(s6[5], ms, (int)sizeof ms);
-        if (s6[6] || s6[7]) {                            /* v2.1：两段停顿非零才显示 */
-            ope_num_text(s6[6], t1, (int)sizeof t1); ope_num_text(s6[7], t2, (int)sizeof t2);
-            snprintf(out, (size_t)outcap, "%s,%s → %s,%s · 移动 %sms · 按下停 %s · 弹起停 %s", x1, y1, x2, y2, ms, t1, t2);
-        } else {
-            snprintf(out, (size_t)outcap, "%s,%s → %s,%s · %sms", x1, y1, x2, y2, ms);
-        }
-        break;
-    case OP_STEP_WAIT:
-        ope_num_text(s6[5], ms, (int)sizeof ms);
-        snprintf(out, (size_t)outcap, "%sms", ms);
-        break;
-    case OP_STEP_DOWN:
-        ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
-        snprintf(out, (size_t)outcap, "%s,%s", x1, y1);
-        break;
-    case OP_STEP_UP:
-        snprintf(out, (size_t)outcap, "松开");
-        break;
-    case OP_STEP_COND_REGION:
-        ope_num_text(s6[1], x1, (int)sizeof x1); ope_num_text(s6[2], y1, (int)sizeof y1);
-        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);       /* 成立侧：档 a4、目标 j1 */
-        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);       /* 不成立侧：档 a3、目标 j2 */
-        snprintf(out, (size_t)outcap, "%s,%s · %s · 成立 → %s / 不成立 → %s", x1, y1,
-                 ref[0] ? ref : "未选区域", t1, t2);
-        break;
-    case OP_STEP_COND_TOGGLE:
-        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
-        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
-        snprintf(out, (size_t)outcap, "%s · 成立 → %s / 不成立 → %s",
-                 ref[0] ? ref : "未选区域", t1, t2);
-        break;
-    case OP_STEP_JUMP:
-        if (s6[1] == 0) snprintf(out, (size_t)outcap, "跳到 结束");
-        else snprintf(out, (size_t)outcap, "跳到 第 %d 步", s6[1]);
-        break;
-    case OP_STEP_CALC:
-        /* 摘要 = `计算 → <名> = <表达式>`（v10；空名/空表达式防御显示，完整表达式进子层看） */
-        snprintf(out, (size_t)outcap, "计算 → %s = %s", ref[0] ? ref : "(未命名)",
-                 g_ope_exprs[si][0] ? g_ope_exprs[si] : "(空)");
-        break;
-    case OP_STEP_FINDIMAGE:
-        /* 摘要（T3.2）：模板 / 区域 / 阈值 + 成立/不成立两档（跳转档带目标；同条件步口径） */
-        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
-        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
-        snprintf(out, (size_t)outcap, "模板 %s · %s · 阈值 %d%s · 成立 → %s / 不成立 → %s",
-                 ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", s6[1],
-                 s6[2] ? " · 颜色校验" : "", t1, t2);
-        break;
-    case OP_STEP_FINDCOLOR:
-        ope_tier_text(s6[4], s6[6], t1, (int)sizeof t1);
-        ope_tier_text(s6[3], s6[7], t2, (int)sizeof t2);
-        if (s6[1] == 1)
-            snprintf(out, (size_t)outcap, "多点 · 点集 %s · %s · 成立 → %s / 不成立 → %s",
-                     ref[0] ? ref : "未选", g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", t1, t2);
-        else
-            snprintf(out, (size_t)outcap, "单点 #%06X 容差 %d · %s · 成立 → %s / 不成立 → %s",
-                     (unsigned)(((uint32_t)s6[2] >> 8) & 0xFFFFFFu), (int)((uint32_t)s6[2] & 0xFFu),
-                     g_ope_exprs[si][0] ? g_ope_exprs[si] : "全屏", t1, t2);
-        break;
-    default:
-        snprintf(out, (size_t)outcap, "类型非法（%d）", s6[0]);
-        break;
-    }
-}
-
-/* 参数弹层缓冲小工具（v3 全字段一屏 / 目标模式共用） */
-static int ne_parse(const char *s)       /* 字面文本 → 值（空串 = 0，承 v2 口径；文本只含数字） */
-{
-    int v = 0;
-    for (; *s; s++) v = v * 10 + (*s - '0');
-    return v;
-}
-/* 该格是不是「目标格」：跳转步的「目标」（fi=0）/ 目标模式单格（j1、j2）—— 0..32、0 显示「结束」。 */
-static int ne_is_target(int type, int fi)
-{
-    if (g_ne_tgt) return 1;
-    return type == OP_STEP_JUMP && fi == 0;
-}
-/* 格的标签：目标模式 = 成立目标 / 不成立目标；其余照字段表。 */
-static const char *ne_label(int type, int fi)
-{
-    if (g_ne_tgt) return g_ne_tgt == NE_TGT_J1 ? "成立目标" : "不成立目标";
-    return ope_flabel[type - 1][fi];
-}
-/* 格的显示文本：变量 → 中文名；目标格值 0 → 「结束」；字面 → 输入文本（空串 → 「(空)」）。 */
-static void ne_cell_text(int type, int fi, char *out, int outcap)
-{
-    int v = g_ne_vals[fi];
-    const char *vn = ope_vname(v);
-    if (vn) { snprintf(out, (size_t)outcap, "%s", vn); return; }
-    if (v >= OP_VAR_V15 && v <= OP_VAR_RET1) {         /* 自定义变量（-10..-25）/ 退役槽（-8/-9）：扫计算步显示变量名（I1 修复：原条件 v>=-9&&v<=-10 恒假） */
-        const char *cn = ope_var_name_at(OP_VAR_V0 - v);
-        if (cn) snprintf(out, (size_t)outcap, "%s", cn);
-        else snprintf(out, (size_t)outcap, "未定义变量");
-        return;
-    }
-    if (ne_is_target(type, fi) && v == 0) { snprintf(out, (size_t)outcap, "结束"); return; }
-    if (g_ne_text[fi][0]) { snprintf(out, (size_t)outcap, "%s", g_ne_text[fi]); return; }
-    snprintf(out, (size_t)outcap, "(空)");
-}
-/* 目标格范围硬门（[完成] 用）：0..32（0 = 结束）；保存预检再按当前步数收紧（op_edit_save）。 */
-static int ne_check_target(const char *label, int v, char *why, int whycap)
-{
-    if (v < 0 || v > OPE_MAX_STEPS) {
-        snprintf(why, (size_t)whycap, "%s 必须在 0..%d（0 = 结束）", label, OPE_MAX_STEPS);
-        return 0;
-    }
-    return 1;
-}
-
-/* 视觉步（T3.2）字段语义值读写：默认 = 字段直存 g_ope_steps[idx]；找色的容差字段特殊 ——
- * a2 是打包值 (颜色<<8)|容差，字段值 = 低 8 位（写回只改低 8 位，颜色段保留）。 */
-static int ne_field_get(int se, int type, int fi)
-{
-    int idx = ope_fidx[type - 1][fi];
-    if (type == OP_STEP_FINDCOLOR && idx == 2) return (int)((uint32_t)g_ope_steps[se][2] & 0xFFu);
-    return g_ope_steps[se][idx];
-}
-static void ne_field_set(int se, int type, int fi, int v)
-{
-    int idx = ope_fidx[type - 1][fi];
-    if (type == OP_STEP_FINDCOLOR && idx == 2) {
-        g_ope_steps[se][2] = (int)(((uint32_t)g_ope_steps[se][2] & ~0xFFu) | ((uint32_t)v & 0xFFu));
-        return;
-    }
-    g_ope_steps[se][idx] = v;
-}
-
-/* 参数弹层 v3：进层快照 —— 把该步全部数值字段（目标模式 = j1/j2 单格）装进本地缓冲。
- * 每格 = {值, 文本}：g_ne_vals[fi] 存语义值（字面值 ≥ 0 / 变量引用 -9..-1）；g_ne_text[fi] 存字面
- * 输入文本（变量态留空 = 显示中文名；目标格值 0 留空 = 显示「结束」）。层内编辑只改缓冲；
- * [完成] 全字段校验全过才一次写回 g_ope_steps，[取消] 全丢。类型/字段非法 → 直接关层。 */
-static void ope_num_load(void)
-{
-    int type, nf, fi, v;
-    memset(g_ne_vals, 0, sizeof g_ne_vals);
-    memset(g_ne_text, 0, sizeof g_ne_text);
-    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; g_ne_tgt = 0; return; }
-    type = g_ope_steps[g_ope_se][0];
-    if (g_ne_tgt) {                                  /* 目标模式：单格 j1/j2；类型非法就关层 */
-        if (type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE &&
-            type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) { g_ope_se = -1; g_ne_tgt = 0; return; }
-        v = g_ope_steps[g_ope_se][5 + g_ne_tgt];
-        g_ne_vals[0] = v;
-        if (v > 0) snprintf(g_ne_text[0], sizeof g_ne_text[0], "%d", v);
-        g_ope_sf = 0;
-        return;
-    }
-    nf = ope_nfields(type);
-    if (nf == 0 || g_ope_sf < 0 || g_ope_sf >= nf) { g_ope_se = -1; return; }
-    for (fi = 0; fi < nf; fi++) {
-        v = ne_field_get(g_ope_se, type, fi);        /* 视觉步容差走拆包读（ne_field_get） */
-        g_ne_vals[fi] = v;
-        if (v < 0) continue;                         /* 变量引用：文本留空（显示中文名） */
-        if (ne_is_target(type, fi) && v == 0) continue;   /* 目标格 0 = 结束：文本留空（显示「结束」） */
-        snprintf(g_ne_text[fi], sizeof g_ne_text[fi], "%d", v);
-    }
-}
-
-/* 条件目标格键盘模式入口（T2.3 行控件调用；调用方式 = ne_open_target(第几步, NE_TGT_J1|NE_TGT_J2)）。
- * 打开参数弹层目标模式：单格「成立目标 / 不成立目标」，键盘编 0..32（0 显示「结束」），无变量/取点；
- * 层内只改缓冲，[完成] 校验过写回 g_ope_steps[se][6|7]（j1/j2），[取消] 全丢。 */
-static void ne_open_target(int se, int slot)
-{
-    if (se < 0 || se >= g_ope_nsteps || (slot != NE_TGT_J1 && slot != NE_TGT_J2)) return;
-    if (g_ope_steps[se][0] != OP_STEP_COND_REGION && g_ope_steps[se][0] != OP_STEP_COND_TOGGLE &&
-        g_ope_steps[se][0] != OP_STEP_FINDIMAGE && g_ope_steps[se][0] != OP_STEP_FINDCOLOR) return;
-    g_ope_se = se; g_ope_sf = 0; g_ne_tgt = slot;
-    ope_num_load();
-    g_ne_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 目标格开 第 %d 步 %s（现值 %d）", se + 1,
-          slot == NE_TGT_J1 ? "成立目标" : "不成立目标", g_ope_steps[se][5 + slot]);
-}
-
-/* 取点结果落点（T2.8；ui_ev_cb 从 poll 线程转发，见其上方的前向声明）：
- * v3：结果把激活格所在坐标对两格同填（(1,2) 或 (3,4)；字面值、中断变量态）——只改本地缓冲，
- * [完成] 才随全字段一次写回（参数层没开着 / 开在别的步 → 无处可落，丢弃）+ 退取点态 + 重画。
- * 捕获标记（T3.2）照旧：记下捕获点 + 时刻，绘制在渲染线程（build_overlay），与回填成败无关。 */
-static void pick_ev_apply(int px, int py)
-{
-    g_pickmk_x = px; g_pickmk_y = py; g_pickmk_t = now_ms();
-    if (g_pick) {
-        int se = g_pick_se, sf = g_pick_sf, t, nf, idx, fi, p;
-        if (se >= 0 && se < g_ope_nsteps && se == g_ope_se && !g_ne_tgt) {   /* 参数层还开着同一步才有缓冲可落 */
-            t = g_ope_steps[se][0];
-            nf = ope_nfields(t);
-            if (sf >= 0 && sf < nf) {
-                idx = ope_fidx[t - 1][sf];
-                if (idx >= 1 && idx <= 4 && t != OP_STEP_JUMP) {   /* 坐标格（跳转的 a1 = 目标编号，不是坐标） */
-                    p = (idx == 1 || idx == 2) ? 1 : 3;            /* 所在坐标对起点：1=(x,y)、3=(x2,y2) */
-                    for (fi = 0; fi < nf; fi++) {
-                        int c = ope_fidx[t - 1][fi];
-                        if (c == p || c == p + 1) {                /* 两格同填：字面值、中断变量态 */
-                            g_ne_vals[fi] = (c == p) ? px : py;
-                            snprintf(g_ne_text[fi], sizeof g_ne_text[fi], "%d", g_ne_vals[fi]);
-                        }
-                    }
-                    g_ope_vl = 0;                              /* 防御：变量列表开着时也退回参数层（结果已进缓冲） */
-                    g_ne_msg[0] = 0;
-                    ALOGI("取点 回填 第 %d 步 参数 x,y = %d,%d", se + 1, px, py);
-                }
-            }
-        }
-    }
-    g_pick = 0;                          /* 退取点态（不管回填成没成：这一轮取点结束了） */
-    if (g_pick_t0) {                     /* 只在「这一轮取点确实在飞」时收尾：计时复位 + 弹回编辑层
-                                          * （参数层保持 —— g_ope_se 不动）。带外 pick_ev（非取点态）
-                                          * 不许展开手动收起的编辑层。 */
-        g_pick_t0 = 0;
-        g_ope_coll = 0;
-    }
-    g_need = 1; g_force_frames = 2;      /* 重画 */
-}
-
-/* 加一步：默认值必须核心必过 —— 点按 = 逻辑屏中心按住 50ms；滑动 = 中心 → 中心下方 200px、300ms；
- * 等待 = 100ms；按下 / 区域判断 = 中心点（区域判断还须选区域，默认空、[完成] 预检拦）；弹起 / 开关判断 = 无字段；
- * 跳转 = 目标 1（spec §2.1 缺省）；条件步默认 成立继续 / 不成立中止（spec §1.1）；
- * 计算（v10）= 默认名 v1/v2…（索引取空闲位）、表达式空（加完调用方立即开表达式子层，spec §7.5）；
- * 找图（T3.2）= 阈值 8、模板待选；找色 = 单点、颜色 #000000 容差 8、点集待选（加完调用方立即开参数层）。
- * 坐标默认取屏中心是唯一「任何逻辑尺寸都必合法」的取法（精确落点交给 [参数]/[取点]）。 */
-static void ope_add_step(int type)
-{
-    int cx = g_w / 2, cy = g_h / 2;
-    int *s6;
-    if (g_ope_nsteps >= OPE_MAX_STEPS) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "最多 %d 步", OPE_MAX_STEPS);
-        g_force_frames = 2;
-        return;
-    }
-    if (type == OP_STEP_CALC && ope_var_index_alloc() < 0) {   /* 16 个变量全占：加不进（同步数上限口径） */
-        snprintf(g_ope_msg, sizeof g_ope_msg, "变量最多 %d 个（先删掉不用的计算步）", OP_VAR_IDX_N);
-        g_force_frames = 2;
-        return;
-    }
-    s6 = g_ope_steps[g_ope_nsteps];
-    memset(s6, 0, sizeof g_ope_steps[0]);
-    s6[0] = type;
-    g_ope_refs[g_ope_nsteps][0] = 0;                 /* 新步 ref 清空（条件步未选区域） */
-    g_ope_exprs[g_ope_nsteps][0] = 0;               /* 新步 expr 清空（v5；计算步待编辑） */
-    if (type == OP_STEP_TAP) {
-        s6[1] = cx; s6[2] = cy; s6[5] = 50;
-    } else if (type == OP_STEP_SWIPE) {
-        s6[1] = cx; s6[2] = cy; s6[3] = cx; s6[4] = cy + 200; if (s6[4] >= g_h) s6[4] = g_h - 1; s6[5] = 300;
-    } else if (type == OP_STEP_DOWN || type == OP_STEP_COND_REGION) {
-        s6[1] = cx; s6[2] = cy;
-    } else if (type == OP_STEP_WAIT) {
-        s6[5] = 100;
-    } else if (type == OP_STEP_JUMP) {
-        s6[1] = 1;                                   /* 跳转目标默认 1（spec §2.1 缺省） */
-    } else if (type == OP_STEP_CALC) {
-        char vn[VT_NAME_BUF];
-        ope_var_auto_name("v", vn, sizeof vn);       /* 默认名 v1/v2…（可改名；spec §7.5 点 6） */
-        s6[1] = ope_var_index_alloc();               /* 变量索引（0..15；顶部已确认有空位）；其余 0、expr 空 */
-        snprintf(g_ope_refs[g_ope_nsteps], sizeof g_ope_refs[0], "%s", vn);
-    } else if (type == OP_STEP_FINDIMAGE) {
-        s6[1] = 8;                                   /* 找图：阈值默认 8（spec VISION §11-#5） */
-    } else if (type == OP_STEP_FINDCOLOR) {
-        s6[1] = 0;                                   /* 找色：模式默认单点 */
-        s6[2] = 8;                                   /* 颜色 #000000、容差 8（打包 (0<<8)|8） */
-    }
-    /* 弹起 / 开关判断：无字段（s6 已清零）。条件步与视觉步默认：不成立中止（a3=0）/ 成立继续（a4=CONT）。 */
-    if (type == OP_STEP_COND_REGION || type == OP_STEP_COND_TOGGLE ||
-        type == OP_STEP_FINDIMAGE || type == OP_STEP_FINDCOLOR) s6[4] = OP_COND_CONT;
-    g_ope_nsteps++;
-    g_ope_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 加一步 %s（现 %d 步）", ope_tname(type), g_ope_nsteps);
-}
-
-/* 步骤上移/下移（±1）：行序 = 执行序（核心按表顺序跑）；到头不动。 */
-static void ope_move(int i, int d)
-{
-    int j = i + d, t6[8];
-    char tr[VT_NAME_BUF], te[OPS_EXPR_MAX + 1];
-    if (j < 0 || j >= g_ope_nsteps) return;
-    memcpy(t6, g_ope_steps[i], sizeof t6);
-    memcpy(g_ope_steps[i], g_ope_steps[j], sizeof t6);
-    memcpy(g_ope_steps[j], t6, sizeof t6);
-    memcpy(tr, g_ope_refs[i], sizeof tr);            /* ref 跟着步一起动 */
-    memcpy(g_ope_refs[i], g_ope_refs[j], sizeof tr);
-    memcpy(g_ope_refs[j], tr, sizeof tr);
-    memcpy(te, g_ope_exprs[i], sizeof te);           /* expr 跟着步一起动（v5） */
-    memcpy(g_ope_exprs[i], g_ope_exprs[j], sizeof te);
-    memcpy(g_ope_exprs[j], te, sizeof te);
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 步骤 %d %s", i + 1, d < 0 ? "上移" : "下移");
-}
-
-/* 步骤移动（移模式，2026-10-05 item）：把第 from 步移到 to 位（0 基目标位）—— 复用 ope_move 逐步挪
- * （≤32 步，代价可忽略；ref/expr 跟着走）。from == to 不动；越界夹取。 */
-static void ope_move_to(int from, int to)
-{
-    int f0 = from;
-    if (from < 0 || from >= g_ope_nsteps) return;
-    if (to < 0) to = 0;
-    if (to > g_ope_nsteps - 1) to = g_ope_nsteps - 1;
-    while (from < to) { ope_move(from, +1); from++; }
-    while (from > to) { ope_move(from, -1); from--; }
-    if (f0 != to) ALOGI("op edit 步骤 移动 第 %d 步 → 第 %d 位", f0 + 1, to + 1);
-}
-
-/* 删一步：至少留 1 步（核心校验 1..32，本地先拦，免得 [完成] 才报）。 */
-static void ope_del_step(int i)
-{
-    int j;
-    if (g_ope_nsteps <= 1) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "至少保留 1 步");
-        g_force_frames = 2;
-        return;
-    }
-    for (j = i; j + 1 < g_ope_nsteps; j++) {
-        memcpy(g_ope_steps[j], g_ope_steps[j + 1], sizeof g_ope_steps[0]);
-        memcpy(g_ope_refs[j], g_ope_refs[j + 1], sizeof g_ope_refs[0]);   /* ref 跟着步一起动 */
-        memcpy(g_ope_exprs[j], g_ope_exprs[j + 1], sizeof g_ope_exprs[0]);   /* expr 跟着步一起动（v5） */
-    }
-    g_ope_nsteps--;
-    g_ope_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 删一步（现 %d 步）", g_ope_nsteps);
-}
-
-/* 门控行：点击循环 无 → 各 kind==toggle 区域（按区域表顺序）→ 无。读核心现表（区域随时可改）、
- * 不缓存；悬空值或被取消开关型的旧值，下一次点击即归「无」。 */
-static void ope_gate_cycle(void)
-{
-    char ids[32][VT_NAME_BUF];
-    int n = 0, i, cnt = vtouch_region_count();
-    for (i = 0; i < cnt && n < 32; i++) {
-        char id[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
-        if (vtouch_region_kind_get(i) != 1) continue;
-        if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
-        snprintf(ids[n], sizeof ids[n], "%s", id);
-        n++;
-    }
-    g_need = 1; g_force_frames = 2;
-    if (n == 0) {
-        g_ope_gate[0] = 0;                       /* 顺手清门控值：没开关型区域了，别让保存写出悬空 id（核心容忍但清理更干净） */
-        snprintf(g_ope_msg, sizeof g_ope_msg, "没有开关型区域：门控只认开关型（在区域页设）");
-        return;
-    }
-    g_ope_msg[0] = 0;
-    if (!g_ope_gate[0]) { snprintf(g_ope_gate, sizeof g_ope_gate, "%s", ids[0]); return; }
-    for (i = 0; i < n; i++) if (!strcmp(ids[i], g_ope_gate)) break;
-    if (i + 1 < n) snprintf(g_ope_gate, sizeof g_ope_gate, "%s", ids[i + 1]);
-    else g_ope_gate[0] = 0;                          /* 到末尾（含悬空值）→ 回「无」 */
-}
-
-/* 关闭编辑覆盖层（含全部子层状态）：[取消] 与保存全成都走它。
- * T2.4 边界：关层时若在取点态 → 撤单（核心 pick_mode 清掉）+ 恢复矩形（g_ope_i=-1 后
- * 三态矩形下一帧回到面板窗口）；收起态一并复位（下次开层是展开态）。 */
-static void op_edit_close(void)
-{
-    g_ope_i = -1;
-    if (g_pick) {                                    /* 防御：正常流程取点中只能点收起条，走不到关层 */
-        g_pick = 0; g_pick_t0 = 0;
-        vtouch_pick_cancel();
-        ALOGI("取点 取消（关编辑层）");
-    }
-    g_ope_coll = 0;                                  /* 收起态复位（会话态只活在开层期间） */
-    g_ope_pv = 0;                                    /* 预览页（T2.5）一并关（防御：正常只能经 [关闭] 退出） */
-    g_ope_kb = 0; g_ope_kbmsg[0] = 0;
-    g_ope_se = -1; g_ne_tgt = 0; g_ne_msg[0] = 0;
-    g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并关（变量 / 区域选择弹层） */
-    g_ope_ex = 0; g_ope_ex_field = 0; g_ope_ex_nm = 0; g_ope_ex_msg[0] = 0; g_ope_ex_nmmsg[0] = 0; g_ope_ex_vl = 0; g_ope_mv = -1;   /* 表达式子层（v5 计算步；v10 名字/字段内联）+ 移模式一并关 */
-    ope_field_expr_undo_drop();                      /* 字段[表达式]插步快照一并丢（评审修复 2026-10-05） */
-    g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;   /* 视觉步子层（T3.2） */
-    if (g_vis_cap) {                                /* 采集覆盖层（T3.2）一并关（防御：正常只能经 [取消] 退出） */
-        g_vis_cap = 0; g_vis_cap_wait = 0; g_vis_cap_err = 0;
-        g_vis_kb = 0; g_vis_pick_se = -1;
-    }
-    g_ope_msg[0] = 0;
-    g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态只活在开层期间（[取消] 也丢账：旧条目可去列表里删） */
-    g_need = 1; g_force_frames = 3;
-}
-
-/* 打开编辑覆盖层：按下标读一条快照（名字核不上/读步失败就拒 —— 表在点按与打开之间动过）。
- * 定义在 page_ops 之后（op_card 的 [编辑] 按钮用它，先有原型声明）。 */
-static void op_edit_open(int i, const char *name)
-{
-    char nm[VT_NAME_BUF], gate[VT_NAME_BUF];
-    int steps = 0, autoff = 0, s;
-    if (!name || !name[0]) return;
-    if (vtouch_get_op(i, nm, sizeof nm, &steps, gate, sizeof gate, &autoff) != 0 || strcmp(nm, name)) {
-        ALOGW("op edit open 失败（表动过？）: %s", name);
-        ev_note("打开编辑失败：%s", name);
-        return;
-    }
-    if (steps < 1 || steps > OPE_MAX_STEPS) {
-        ALOGW("op edit open 步数异常 %d（%s）", steps, name);
-        ev_note("打开编辑失败：%s", name);
-        return;
-    }
-    memset(g_ope_refs, 0, sizeof g_ope_refs);        /* 本地 ref 副本先清（读入逐步覆盖） */
-    memset(g_ope_exprs, 0, sizeof g_ope_exprs);      /* 本地 expr 副本先清（v5；读入逐步覆盖） */
-    for (s = 0; s < steps; s++) {
-        if (vtouch_get_op_step(i, s, &g_ope_steps[s][0], &g_ope_steps[s][1], &g_ope_steps[s][2],
-                               &g_ope_steps[s][3], &g_ope_steps[s][4], &g_ope_steps[s][5],
-                               g_ope_refs[s], (int)sizeof g_ope_refs[s],
-                               &g_ope_steps[s][6], &g_ope_steps[s][7],
-                               g_ope_exprs[s], (int)sizeof g_ope_exprs[s]) != 0) {   /* v3：j1/j2（成立/不成立侧跳转目标）；v5：expr（计算步表达式） */
-            ALOGW("op edit 读第 %d 步失败 %s", s + 1, name);
-            ev_note("打开编辑失败：%s", name);
-            return;
-        }
-    }
-    g_ope_i = i;
-    snprintf(g_ope_orig, sizeof g_ope_orig, "%s", nm);
-    snprintf(g_ope_name, sizeof g_ope_name, "%s", nm);
-    snprintf(g_ope_gate, sizeof g_ope_gate, "%s", gate);
-    g_ope_autoff = autoff ? 1 : 0;
-    g_ope_nsteps = steps;
-    g_ope_msg[0] = 0; g_ope_kbmsg[0] = 0; g_ope_kb = 0; g_ope_up = 0;
-    g_ope_se = -1; g_ope_sf = 0; g_ne_tgt = 0; g_ne_msg[0] = 0;
-    g_ope_vl = 0; g_ope_rl = -1;                    /* 子层状态一并清（变量 / 区域选择弹层） */
-    g_ope_ex = 0; g_ope_ex_field = 0; g_ope_ex_nm = 0; g_ope_ex_msg[0] = 0; g_ope_ex_nmmsg[0] = 0; g_ope_ex_vl = 0; g_ope_mv = -1;   /* 表达式子层（v5 计算步；v10 名字/字段内联）+ 移模式一并清 */
-    g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;   /* 视觉步子层一并清 */
-    g_vis_cap = 0; g_vis_cap_wait = 0; g_vis_cap_err = 0; g_vis_kb = 0; g_vis_pick_se = -1;      /* 采集覆盖层（防御） */
-    g_ope_coll = 0; g_pick_t0 = 0;                  /* 收起态 / 取点计时清零（防御：正常流程关层已清） */
-    g_ope_pv = 0;                                   /* 预览页状态清零（防御；会话态只活在开层期间） */
-    g_ope_saved_as[0] = 0; g_ope_del_owed[0] = 0;   /* 会话态开层清零（只服务本次编辑） */
-    g_need = 1; g_force_frames = 3;
-    ALOGI("op edit open i=%d %s（%d 步）", i, name, steps);
-}
-
-/* [完成] 保存流：先补上轮欠账（旧名没删掉）→ 面板预检（硬门）→ vtouch_op_put 整条落表 →
- * 改过名再删旧名 → **全成**才关层。任何一步失败：就地提示、覆盖层不关（改完可再点 [完成]）。
- * 删旧失败记成 g_ope_del_owed，重试点先补删 —— 「再点 [完成] 重试」这条路曾因名字查重把自己
- * 刚 put 的新名判成「被别人用了」而走不通，saved_as 豁免 + 补删台账一起把它接通。 */
-static void op_edit_save(void)
-{
-    int flat[OPE_MAX_STEPS * 8];
-    int s, k, rc, perr = 0;
-    int old_settled = 0;             /* 头顶补删删掉的正是 g_ope_orig：底部「old≠del_owed」门槛的落点 */
-    char why[96];
-    ope_field_expr_undo_drop();      /* 保存即定稿：字段[表达式]插步快照丢弃（评审修复 2026-10-05） */
-
-    /* 上轮留下的欠账：先补删旧条目（del 超时/未送达会欠着；补成再走正常保存流）。 */
-    if (g_ope_del_owed[0]) {
-        if (vtouch_op_del(g_ope_del_owed) != 0) {
-            snprintf(g_ope_msg, sizeof g_ope_msg, "旧条目『%s』仍未删除成功，再点 [完成] 重试", g_ope_del_owed);
-            ALOGW("op edit 旧条目仍未删除 %s", g_ope_del_owed);
-            g_force_frames = 2;
-            return;
-        }
-        old_settled = !strcmp(g_ope_del_owed, g_ope_orig);   /* 记在清零前：这个旧名已确认不在表里 */
-        g_ope_del_owed[0] = 0;
-        g_ops_save_pending = 1;      /* 表里少了一条（欠账补删掉）→ 落盘（T2.7） */
-    }
-    rc = ope_name_ok(g_ope_orig, g_ope_name);
-    if (rc != 0) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "%s", ope_name_why(rc));
-        ALOGI("op edit 拒收：名字 rc=%d", rc);
-        g_force_frames = 2;
-        return;
-    }
-    if (g_ope_nsteps < 1 || g_ope_nsteps > OPE_MAX_STEPS) {
-        snprintf(g_ope_msg, sizeof g_ope_msg, "步数必须在 1..%d", OPE_MAX_STEPS);
-        g_force_frames = 2;
-        return;
-    }
-    for (s = 0; s < g_ope_nsteps; s++) {
-        if (!ope_step_check(s, g_ope_steps[s], why, (int)sizeof why)) {
-            snprintf(g_ope_msg, sizeof g_ope_msg, "%s", why);
-            ALOGI("op edit 拒收：%s", why);
-            g_force_frames = 2;
-            return;
-        }
-    }
-    {   /* 变量表一致性（v10）：同名多索引 / 同索引多名 → 拒（与核心 op_valid 同款，拒在出门前） */
-        char vars[OP_VAR_IDX_N][VT_NAME_BUF];
-        if (ope_vars_build(vars) != 0) {
-            snprintf(g_ope_msg, sizeof g_ope_msg, "变量表冲突（同名多索引或同索引多名）——检查计算步");
-            ALOGI("op edit 拒收：变量表冲突");
-            g_force_frames = 2;
-            return;
-        }
-    }
-    for (s = 0; s < g_ope_nsteps; s++)
-        for (k = 0; k < 8; k++) flat[s * 8 + k] = g_ope_steps[s][k];   /* v3：flat 8/步（含 j1/j2） */
-    /* ref / expr 通道：g_ope_refs / g_ope_exprs 直接递（每步一格，空串 = 无）—— 条件步的 ref、
-     * 计算步的表达式（v5 T3.1 接真实数据）由此进核心 */
-    if (vtouch_op_put(g_ope_name, g_ope_gate, g_ope_autoff, flat, g_ope_refs, g_ope_exprs, g_ope_nsteps, &perr) != 0) {
-        if (perr == 3)   /* out_err 3 = 核心拒收（投递成功但回读不通过） */
-            snprintf(g_ope_msg, sizeof g_ope_msg, "保存被核心拒（名字/步类型/坐标/时长/区域引用照核心校验，含表满）");
-        else             /* 1 = 未投递（参数非法）/ 2 = 编辑未送达（超时） */
-            snprintf(g_ope_msg, sizeof g_ope_msg, "保存未送达（编辑超时或面板未接共享内存）");
-        ALOGW("op edit put 失败 %s（原因码 %d）", g_ope_name, perr);
-        g_force_frames = 2;
-        return;
-    }
-    snprintf(g_ope_saved_as, sizeof g_ope_saved_as, "%s", g_ope_name);   /* 登记成功名：重试时它在表里，不再判成重名 */
-    g_ops_save_pending = 1;                      /* 整条已落表 → 渲染线程那一拍写 ops.conf（T2.7） */
-    /* 需要删旧名 ⟺ 改过名 且 旧名不是刚补删掉的那个（old≠del_owed：del_owed 补成后已按规格清零，
-     * settled 承接同一条门槛 —— 回读已确认表里没有它，再删一次纯属空转）。 */
-    if (strcmp(g_ope_orig, g_ope_name) && !old_settled) {
-        if (vtouch_op_del(g_ope_orig) != 0) {        /* 改了名但旧名没删掉：表里会两条 → 记账，下次 [完成] 先补删 */
-            snprintf(g_ope_del_owed, sizeof g_ope_del_owed, "%s", g_ope_orig);
-            snprintf(g_ope_msg, sizeof g_ope_msg, "已保存；旧条目『%s』删除失败——再点 [完成] 重试", g_ope_orig);
-            ALOGW("op edit 旧条目删除失败 %s", g_ope_orig);
-            g_force_frames = 2;
-            return;
-        }
-    }
-    ALOGI("op edit save %s（%d 步%s）", g_ope_name, g_ope_nsteps,
-          strcmp(g_ope_orig, g_ope_name) ? "，改名" : "");
-    {
-        char line[96];
-        snprintf(line, sizeof line, "操作已保存：%s · %d 步", g_ope_name, g_ope_nsteps);
-        ev_log_push(line);                           /* 事件日志一行（成功路径，不带 '!' 前缀） */
-    }
-    op_edit_close();
-}
-
-/* 条件步一侧（成立 / 不成立）的行内控件：循环钮 + 档位 = 跳到… 时该侧出现的目标格。
- * 循环钮文字随档位（ope_tier_name），点击按固定序推进（ope_tier_next：继续下一步 → 跳过下一步 →
- * 跳到… → 中止）；目标格显示「第 N 步」/「结束」，点它开目标模式数字键盘编 0..32
- * （ne_open_target，槽 = j1 / j2）。slot 传 NE_TGT_J1（成立侧：档 = a4、目标 = j1）或
- * NE_TGT_J2（不成立侧：档 = a3、目标 = j2）。 */
-static void ope_cond_side(int i, int slot)
-{
-    const int *s6 = g_ope_steps[i];
-    int *tier = &g_ope_steps[i][slot == NE_TGT_J1 ? 4 : 3];
-    int tgt = s6[slot == NE_TGT_J1 ? 6 : 7];
-    const char *side = slot == NE_TGT_J1 ? "成立" : "不成立";
-    char lab[48];
-    float aw = ImGui::GetContentRegionAvail().x;
-    ImGui::PushID(slot);                             /* 两侧同标签（如都是「第 5 步」）也要 ID 唯一 */
-    snprintf(lab, sizeof lab, "%s：%s", side, ope_tier_name(*tier));
-    if (*tier == OP_COND_JUMP) {                     /* 跳到…：循环钮 + 目标格并排 */
-        char cell[24], t2[24];
-        float tw = 240.0f, bw = aw - 12 - tw;
-        if (bw < 200.0f) bw = 200.0f;                /* 极窄窗兜底 */
-        if (btn_light(lab, ImVec2(bw, 72))) {
-            *tier = ope_tier_next(*tier);
-            ope_tier_text(*tier, tgt, t2, (int)sizeof t2);
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 条件行为 第 %d 步 %s → %s", i + 1, side, t2);
-        }
-        ImGui::SameLine();
-        if (tgt == 0) snprintf(cell, sizeof cell, "结束");
-        else snprintf(cell, sizeof cell, "第 %d 步", tgt);
-        if (btn_blue(cell, ImVec2(tw, 72))) ne_open_target(i, slot);   /* 点目标格：编 0..32（0 = 结束） */
-    } else if (btn_light(lab, ImVec2(aw, 72))) {
-        char t2[24];
-        *tier = ope_tier_next(*tier);
-        ope_tier_text(*tier, tgt, t2, (int)sizeof t2);
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 条件行为 第 %d 步 %s → %s", i + 1, side, t2);
-    }
-    ImGui::PopID();
-}
-
-/* 表达式子层入口（v5 计算步；v10：名字 + 表达式）：
- * 计算步的 [参数] 与「＋计算」都走它 —— g_ope_se = 该步、g_ope_ex = 1（子层分发在 draw_op_edit 顶部）、
- * 表达式与名字从该步快照进子层缓冲（[确定] 才写回）。 */
-static void ope_expr_open(int se)
-{
-    if (se < 0 || se >= g_ope_nsteps) return;
-    if (g_ope_steps[se][0] != OP_STEP_CALC) return;   /* 防御：只有计算步有「名字 + 表达式」编辑 */
-    g_ope_se = se;
-    g_ope_ex = 1;
-    g_ope_ex_field = 0;
-    snprintf(g_ope_expr_buf, sizeof g_ope_expr_buf, "%s", g_ope_exprs[se]);
-    snprintf(g_ope_ex_name, sizeof g_ope_ex_name, "%s", g_ope_refs[se]);
-    g_ope_ex_nm = 0; g_ope_ex_nmmsg[0] = 0;
-    g_ope_ex_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 表达式开 第 %d 步（变量 %s）", se + 1, g_ope_ex_name);
-}
-
-/* 字段内联表达式入口（v10 ⑦）：字段编辑器的 [表达式] 模式 —— g_ope_ex_field = 1，
- * 确认时自动在该步前插入 `计算 <自动名 e1…> = <表达式>` 并把字段指向该变量。 */
-static void ope_expr_open_field(int se, int sf)
-{
-    int type, idx;
-    if (se < 0 || se >= g_ope_nsteps) return;
-    type = g_ope_steps[se][0];
-    if (type < OP_STEP_TAP || type > OP_STEP_FINDCOLOR) return;
-    if (sf < 0 || sf >= ope_nfields(type)) return;
-    idx = ope_fidx[type - 1][sf];
-    if (!ope_var_ok(type, idx)) return;               /* 防御：只有可变量字段有这模式 */
-    g_ope_se = se;
-    g_ope_ex = 1;
-    g_ope_ex_field = 1;
-    g_ope_expr_buf[0] = 0;                            /* 字段表达式从空开始 */
-    g_ope_ex_name[0] = 0;
-    g_ope_ex_nm = 0; g_ope_ex_nmmsg[0] = 0;
-    g_ope_ex_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 字段表达式开 第 %d 步 格 %d/%d", se + 1, sf + 1, ope_nfields(type));
-}
-
-/* 子层 [确定] 的名字表：把「待生效改名」（newname 非空 = 本步的新名字替代旧名字）算进去，
- * 供表达式校验用（计算步改名后引用新名字不误报）；newname = NULL = 原样收集。返回条数。
- * 注（评审 M1）：字段模式（se = 被编辑的非计算步）下 newname 恒不生效 —— 「将创建的自动名 eN」
- * 不在表内，表达式里引用 eN 编辑期即按未知名字拒收（比「不误报」更严；运行期自引用亦必 结果无值）。 */
-static int ope_expr_names_for_check(int se, const char *newname, char (*names)[VT_NAME_BUF])
-{
-    int i, k, cnt = 0;
-    for (i = 0; i < g_ope_nsteps; i++) {
-        const char *nm;
-        if (g_ope_steps[i][0] != OP_STEP_CALC) continue;
-        nm = (i == se && newname && newname[0]) ? newname : g_ope_refs[i];
-        if (!nm[0]) continue;
-        for (k = 0; k < cnt; k++) if (!strcmp(names[k], nm)) break;
-        if (k == cnt && cnt < OP_VAR_IDX_N) snprintf(names[cnt++], VT_NAME_BUF, "%s", nm);
-    }
-    return cnt;
-}
-
-/* 应用改名（子层 [确定] 成功路径）：
- *   · 新名 == 旧名：无操作；
- *   · 新名已被别的步用：合并 —— 本步 a1 改为该名索引；旧名若无其他步用则自然消失（引用它的字段悬空 → 结果无值）；
- *   · 新名全新：本步独占旧名（无其他步用同名）→ 原地改名（索引不变）；否则（旧名仍被其他步使用）→ 本步拿新索引。
- * 返回 0 成功；-1 无空闲索引（16 个全占）。 */
-static int ope_var_rename(int se, const char *newname)
-{
-    const char *oldname = g_ope_refs[se];
-    int other = 0, i, idx;
-    if (!strcmp(oldname, newname)) return 0;
-    for (i = 0; i < g_ope_nsteps; i++) {              /* 旧名是否被别的计算步使用（除本步外） */
-        if (i == se || g_ope_steps[i][0] != OP_STEP_CALC) continue;
-        if (!strcmp(g_ope_refs[i], oldname)) { other = 1; break; }
-    }
-    idx = ope_var_index_of(newname);                  /* 新名已存在 → 合并到它 */
-    if (idx < 0) {
-        if (other) {
-            idx = ope_var_index_alloc();
-            if (idx < 0) return -1;
-        } else {
-            idx = g_ope_steps[se][1];                 /* 独占：原地改名，索引不变 */
-        }
-    }
-    snprintf(g_ope_refs[se], sizeof g_ope_refs[se], "%s", newname);
-    g_ope_steps[se][1] = idx;
-    return 0;
-}
-
-/* 字段内联表达式确认（v10 ⑦）：自动命名（e1 递增）→ 在该步前插入计算步 → 字段指向该变量。
- * 插步会右移其后所有步：1 基跳转目标 ≥ 插入位+1 的一律 +1（0 = 结束不动），既有跳转语义不变。 */
-static void ope_field_expr_commit(int se)
-{
-    char name[VT_NAME_BUF];
-    int idx, i;
-    if (g_ope_nsteps >= OPE_MAX_STEPS) {
-        snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "最多 %d 步，插不下自动计算步", OPE_MAX_STEPS);
-        return;
-    }
-    ope_field_expr_undo_arm();                       /* 会话内首次插步：整段快照（评审修复 2026-10-05） */
-    ope_var_auto_name("e", name, sizeof name);        /* 自动名 e1 递增（可稍后在计算步里改名） */
-    idx = ope_var_index_alloc();
-    if (idx < 0) {
-        snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "变量最多 %d 个，先删掉不用的计算步", OP_VAR_IDX_N);
-        return;
-    }
-    for (i = g_ope_nsteps; i > se; i--) {             /* 后移一格（ref/expr 跟着走） */
-        memcpy(g_ope_steps[i], g_ope_steps[i - 1], sizeof g_ope_steps[0]);
-        memcpy(g_ope_refs[i], g_ope_refs[i - 1], sizeof g_ope_refs[0]);
-        memcpy(g_ope_exprs[i], g_ope_exprs[i - 1], sizeof g_ope_exprs[0]);
-    }
-    memset(g_ope_steps[se], 0, sizeof g_ope_steps[0]);          /* 插入新计算步（该步前） */
-    g_ope_steps[se][0] = OP_STEP_CALC;
-    g_ope_steps[se][1] = idx;
-    snprintf(g_ope_refs[se], sizeof g_ope_refs[0], "%s", name);
-    snprintf(g_ope_exprs[se], sizeof g_ope_exprs[0], "%s", g_ope_expr_buf);
-    g_ope_nsteps++;
-    for (i = 0; i < g_ope_nsteps; i++) {              /* 跳转目标位移：原 1 基目标 ≥ se+1 的步都右移了一格 */
-        if (g_ope_steps[i][0] == OP_STEP_JUMP) {
-            if (g_ope_steps[i][1] >= se + 1) g_ope_steps[i][1]++;
-        } else if (g_ope_steps[i][0] == OP_STEP_COND_REGION || g_ope_steps[i][0] == OP_STEP_COND_TOGGLE ||
-                   g_ope_steps[i][0] == OP_STEP_FINDIMAGE || g_ope_steps[i][0] == OP_STEP_FINDCOLOR) {
-            if (g_ope_steps[i][4] == OP_COND_JUMP && g_ope_steps[i][6] >= se + 1) g_ope_steps[i][6]++;
-            if (g_ope_steps[i][3] == OP_COND_JUMP && g_ope_steps[i][7] >= se + 1) g_ope_steps[i][7]++;
-        }
-    }
-    g_ne_vals[g_ope_sf] = OP_VAR_V0 - idx;            /* 字段指向新变量（参数层缓冲；文本清空） */
-    g_ne_text[g_ope_sf][0] = 0;
-    g_ope_ex = 0; g_ope_ex_field = 0;
-    g_ope_se = se + 1;                                /* 原步右移一格；返回字段编辑器继续编 */
-    g_need = 1; g_force_frames = 3;
-    ALOGI("op edit 表达式插步 第 %d 步前 计算 %s = %s（字段 %d 指向该变量）",
-          se + 1, name, g_ope_exprs[se], g_ope_sf + 1);
-}
-
-/* 视觉步参数层入口（T3.2）：找图/找色的 [参数] 与「＋找图/＋找色」都走它 ——
- * g_ope_se = 该步、g_vis_ed = 1（子层分发在 draw_op_edit 顶部、draw_num_edit 之前）。 */
-static void ope_vis_open(int se)
-{
-    int t;
-    if (se < 0 || se >= g_ope_nsteps) return;
-    t = g_ope_steps[se][0];
-    if (t != OP_STEP_FINDIMAGE && t != OP_STEP_FINDCOLOR) return;   /* 防御：只有视觉步有参数层 */
-    g_ope_se = se;
-    g_vis_ed = 1;
-    g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
-    g_vis_edmsg[0] = 0;
-    g_vis_test_on = 0; g_vis_test_seq = 0; g_vis_test_msg[0] = 0;   /* 试查固定槽清空（M3：换步不串台） */
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 视觉参数开 第 %d 步 %s", se + 1, ope_tname(t));
-}
-
-/* 步骤行：`i. 点按` + 参数小字一行（摘要），下面按键 [参数（无字段的类型不画；计算步 = 表达式子层入口、
- * 视觉步 = 视觉参数层入口）] [移动][删]（行高 72 保手指可点；[移动] = 移模式，2026-10-05 item：点目标行
- * 一步到位、其它行按钮全隐防误触）。条件步（区域判断 / 开关判断）再加三行：
- * 区域下拉 + 成立 / 不成立各一枚四档循环钮（继续下一步 → 跳过下一步 → 跳到… → 中止；档位 = 跳到… 时
- * 该侧出现目标格）。视觉步（找图/找色，T3.2）复用同一对四档循环钮（无区域下拉行 —— 区域在参数层选）。 */
-static void ope_step_row(int i)
-{
-    const int *s6 = g_ope_steps[i];
-    int t = s6[0], nf = ope_nfields(t);
-    int has_par = (nf > 0 || t == OP_STEP_CALC);   /* 计算步无数字字段，但 [参数] = 表达式子层入口（v5） */
-    char tb[32], p[176];         /* 摘要缓冲：v3 条件串最坏 ~113B（变量名 + 区域名 + 两侧档位词）→ 96 不够 */
-    ope_step_text(i, p, sizeof p);
-    ImGui::PushID(2000 + i);
-    snprintf(tb, sizeof tb, "%d. %s", i + 1, ope_tname(t));
-    ImGui::TextUnformatted(tb);
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    text_meta_s(p);
-    if (g_ope_mv >= 0) {                             /* 移模式（2026-10-05 item）：整行 = 放置目标（其它按钮全隐，防误触） */
-        float mw = ImGui::GetContentRegionAvail().x;
-        if (i == g_ope_mv) {
-            char ml[40];
-            snprintf(ml, sizeof ml, "移动中：第 %d 步 · 点此取消", i + 1);
-            if (btn_blue(ml, ImVec2(mw, 72))) {
-                g_ope_mv = -1;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("op edit 步骤 移动取消");
-            }
-        } else {
-            char ml[40];
-            snprintf(ml, sizeof ml, "↓ 放这里（第 %d 位）", i + 1);
-            if (btn_light(ml, ImVec2(mw, 72))) {
-                int mv = g_ope_mv;
-                g_ope_mv = -1;
-                ope_move_to(mv, i);
-                g_need = 1; g_force_frames = 2;
-            }
-        }
-        ImGui::Dummy(ImVec2(0, 4));
-        ImGui::PopID();
-        return;
-    }
-    {
-        int nbtn = (has_par ? 1 : 0) + 2;            /* [参数] + 移动 + 删 */
-        float bw = (ImGui::GetContentRegionAvail().x - (nbtn - 1) * 12) / nbtn;   /* 缝按真实 SameLine 间距 12 扣 */
-        if (has_par) {
-            if (btn_blue("参数", ImVec2(bw, 72))) {
-                if (t == OP_STEP_CALC) {
-                    ope_expr_open(i);                /* 计算步：开表达式子层（不开数字键盘） */
-                } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
-                    ope_vis_open(i);                 /* 视觉步：开参数层（模板/区域/阈值 或 模式/颜色/容差/点集） */
-                } else {                             /* 其余：进参数弹层，全字段一屏（v3；点格切换激活） */
-                    g_ope_se = i; g_ope_sf = 0; g_ne_tgt = 0;
-                    ope_num_load();
-                    g_ne_msg[0] = 0;
-                    g_need = 1; g_force_frames = 2;
-                    ALOGI("op edit 参数开 第 %d 步 %s（%d 格）", i + 1, ope_tname(t), nf);
-                }
-            }
-            ImGui::SameLine();
-        }
-        if (btn_light("移动", ImVec2(bw, 72))) {     /* 移模式（2026-10-05 item）：点目标行一步到位（长距离不再连点、防误触） */
-            g_ope_mv = i;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 步骤 移模式开 第 %d 步", i + 1);
-        }
-        ImGui::SameLine();
-        if (btn_red("删", ImVec2(bw, 72))) ope_del_step(i);
-    }
-    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE) {
-        /* 条件参数：区域下拉（开关判断的列表只列开关型，见 draw_ope_rlist）+ 两枚四档循环钮
-         * （成立 / 不成立各一，行内循环编辑；档位 = 跳到… 时该侧出现目标格，见 ope_cond_side） */
-        char g[48];
-        float aw = ImGui::GetContentRegionAvail().x;
-        snprintf(g, sizeof g, "区域：%s", g_ope_refs[i][0] ? g_ope_refs[i] : "未选");
-        if (btn_light(g, ImVec2(aw, 72))) {
-            g_ope_rl = i;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 区域列表开 第 %d 步 %s", i + 1, ope_tname(t));
-        }
-        ope_cond_side(i, NE_TGT_J1);                 /* 成立侧：档 = a4、目标 = j1 */
-        ope_cond_side(i, NE_TGT_J2);                 /* 不成立侧：档 = a3、目标 = j2 */
-    } else if (t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {
-        /* 视觉步（T3.2）：成立 / 不成立四档照搬条件步控件（参数化同一实现，防两处漂移 ——
-         * 字段映射相同：a4/j1 = 成立侧、a3/j2 = 不成立侧）；模板/区域/阈值等在 [参数] 子层编辑。 */
-        ope_cond_side(i, NE_TGT_J1);
-        ope_cond_side(i, NE_TGT_J2);
-    }
-    ImGui::Dummy(ImVec2(0, 4));                      /* 行间缝 */
-    ImGui::PopID();
-}
-
-/* 名字子层（操作改名）：整面盖住编辑覆盖层，字符键盘复用 draw_char_kb。
- * [确定] 走面板硬门（合法 + 不撞别的操作名）：拒收就地提示、子层不关。 */
-static void draw_ope_name_kb(void)
-{
-    int act = draw_char_kb("给操作起个名字：脚本/触发绑定按名字认它（与别的操作重名会被拒）",
-                           g_ope_orig, g_ope_name, (int)sizeof g_ope_name, &g_ope_up,
-                           g_ope_kbmsg, (int)sizeof g_ope_kbmsg, 12.0f);   /* 编辑层整屏窗：顶边距 12 */
-    if (act == 1) {
-        g_ope_kb = 0; g_ope_kbmsg[0] = 0;
-        g_need = 1; g_force_frames = 3;
-        ALOGI("op edit 改名取消");
-    } else if (act == 2) {
-        int rc = ope_name_ok(g_ope_orig, g_ope_name);
-        if (rc == 0) {
-            g_ope_kb = 0; g_ope_kbmsg[0] = 0;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("op edit 改名 -> %s", g_ope_name);
-        } else {
-            snprintf(g_ope_kbmsg, sizeof g_ope_kbmsg, "%s", ope_name_why(rc));
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 改名拒 rc=%d", rc);
-        }
-    }
-}
-
-/* 参数弹层 v3（全字段一屏 / 本地缓冲原子落 / 取点填对）：
- * - 打开 [参数]：该步全部数值字段一次列出（格 = 标签 + 值文本）；点格 = 激活（高亮）；
- *   键盘编激活格；[变量] 仅激活格可变量时显示；[取点] 仅激活格是坐标格时显示。
- * - 本地缓冲原子落：进层快照全部字段（ope_num_load）→ 层内只改缓冲（取点/变量也只改缓冲）→
- *   [完成] 全字段校验全过才一次写回 g_ope_steps（任一不过 → 提示该格 + 激活它 + 停留）；
- *   [取消] 全丢（含取点 / 变量改动）。⚠ 对 v2「逐字段 [确定] 即时落」的有意语义变化（spec §3.1）。
- * - 目标模式（ne_open_target）：单格「成立目标 / 不成立目标」，0..32、0 显示「结束」；无变量 / 取点。 */
-static void draw_num_edit(void)
-{
-    int type, nf, idx, is_coord, var_ok, nbtn, ncol, nrow, fi, col, row, n, bad;
-    const char *label;
-    ImDrawList *dl;
-    ImVec2 wp, a, b, avail;
-    float ww, wh, x0, y0, cw, ry, cellw, cellh, cellgap, cy0, vy, vbh, boxw, btnw, bx, by, ky, kw, kh;
-    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
-    type = g_ope_steps[g_ope_se][0];
-    if (g_ne_tgt && type != OP_STEP_COND_REGION && type != OP_STEP_COND_TOGGLE &&
-        type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
-    nf = g_ne_tgt ? 1 : ope_nfields(type);
-    if (nf == 0) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }
-    if (g_ope_sf < 0 || g_ope_sf >= nf) g_ope_sf = 0;
-    /* 激活格的语义（v10：先算后画 —— 三模式行要按 var_ok 决定画不画） */
-    idx = g_ne_tgt ? (5 + g_ne_tgt) : ope_fidx[type - 1][g_ope_sf];
-    if (idx < 0) { g_ope_se = -1; g_ne_tgt = 0; g_vis_num = 0; return; }     /* 防御：字段表里没有这一格 */
-    label = ne_label(type, g_ope_sf);
-    is_coord = !g_ne_tgt && idx >= 1 && idx <= 4 && type != OP_STEP_JUMP &&
-               type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR;   /* 跳转 a1=目标编号、视觉 a1/a2=阈值/容差：不给 [取点] */
-    var_ok = !g_ne_tgt && ope_var_ok(type, idx);
-
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    avail = ImGui::GetContentRegionAvail();          /* 自适应布局：T2.4 全屏化后自然变大（别写死面板窗口尺寸） */
-    cw = avail.x - 26;
-    if (cw < 420) cw = 420;                          /* 防御下限（现面板宽 864 → ~784） */
-    ry = y0 + avail.y;                               /* 内容区底：键盘 / 按钮从这里往上锚（自适应） */
-    {   /* 标题 */
-        char t[64];
-        if (g_ne_tgt)
-            snprintf(t, sizeof t, "第 %d 步 · %s · %s（0 = 结束）", g_ope_se + 1, ope_tname(type), ne_label(type, 0));
-        else
-            snprintf(t, sizeof t, "第 %d 步 · %s · 参数（点格激活）", g_ope_se + 1, ope_tname(type));
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-        text_meta_s(t);
-    }
-    /* 三模式行（v10，spec §Task 7.5 点 6）：[数值] / [变量] / [表达式]（仅可变量字段显示；目标/视觉字段不显示）。
-     * [变量] = 变量列表覆盖层；[表达式] = 内联表达式子层（确认自动插计算步）。 */
-    if (var_ok) {
-        float mw3 = (cw - 24.0f) / 3.0f;
-        float my = y0 + 40.0f, mh = 60.0f;
-        ImGui::PushID(690);
-        ImGui::SetCursorScreenPos(ImVec2(x0, my));
-        if ((g_ne_vals[g_ope_sf] >= 0) ? btn_blue("数值", ImVec2(mw3, mh)) : btn_light("数值", ImVec2(mw3, mh))) {
-            if (g_ne_vals[g_ope_sf] < 0) {               /* 变量/退役编码 → 回字面输入（清文本重新输入） */
-                g_ne_vals[g_ope_sf] = 0; g_ne_text[g_ope_sf][0] = 0;
-                g_ne_msg[0] = 0;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("op edit 参数模式 第 %d 步 → 数值", g_ope_se + 1);
-            }
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0 + mw3 + 12, my));
-        if ((g_ne_vals[g_ope_sf] < 0) ? btn_blue("变量", ImVec2(mw3, mh)) : btn_light("变量", ImVec2(mw3, mh))) {
-            g_ope_vl = 1;                                /* 变量列表（预置 7 + 自定义；覆盖层） */
-            g_ne_msg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 变量列表开 第 %d 步 参数 %d/%d", g_ope_se + 1, g_ope_sf + 1, nf);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0 + 2.0f * (mw3 + 12), my));
-        if (btn_light("表达式", ImVec2(mw3, mh))) {      /* 内联表达式：确认自动插计算步（v10 ⑦） */
-            ope_expr_open_field(g_ope_se, g_ope_sf);
-        }
-        ImGui::PopID();
-    }
-    /* 全字段一屏：格 = 标签 + 值文本；点格 = 激活（高亮） */
-    cellgap = 12.0f;
-    ncol = (nf >= 2) ? 2 : 1;
-    cellw = (cw - (float)(ncol - 1) * cellgap) / (float)ncol;
-    nrow = (nf + ncol - 1) / ncol;
-    /* —— 矮屏自适应（横屏/小屏）：格子/值框/按钮/键高按可用高收缩（两级；正常全尺寸）—— */
-    float span = ry - y0;
-    float cellh_a = 88.0f, vbh_a = 96.0f, bth_a = 92.0f, kh_a;
-    {
-        float fixed0 = 44.0f + 12.0f + 58.0f + 24.0f + 3.0f * 10.0f + (var_ok ? 72.0f : 0.0f);   /* 标题/缝/提示槽/底缝/键缝/三模式行 */
-        float fx1 = fixed0 + (float)nrow * 88.0f + (float)(nrow - 1) * 12.0f + 96.0f + 92.0f;
-        float fx2 = fixed0 + (float)nrow * 72.0f + (float)(nrow - 1) * 12.0f + 72.0f + 70.0f;
-        kh_a = (span - fx1) / 4.0f;
-        if (kh_a < 44.0f) { cellh_a = 72.0f; vbh_a = 72.0f; bth_a = 70.0f; kh_a = (span - fx2) / 4.0f; }
-        if (kh_a < 44.0f) {                              /* v2.1：滑动 7 格（4 行）矮屏再加一档（56px 格） */
-            cellh_a = 56.0f; vbh_a = 56.0f; bth_a = 60.0f;
-            kh_a = (span - (fixed0 + (float)nrow * 56.0f + (float)(nrow - 1) * 12.0f + 56.0f + 60.0f)) / 4.0f;
-        }
-        if (kh_a > 88.0f) kh_a = 88.0f;
-        if (kh_a < 36.0f) kh_a = 36.0f;
-    }
-    cellh = cellh_a;
-    cy0 = y0 + 44 + (var_ok ? 72.0f : 0.0f);   /* 三模式行占位（60 + 缝 12） */
-    for (fi = 0; fi < nf; fi++) {
-        char vt[24];
-        int hit, act;
-        col = fi % ncol; row = fi / ncol;
-        ImVec2 p0(x0 + (float)col * (cellw + cellgap), cy0 + (float)row * (cellh + cellgap));
-        ImGui::PushID(700 + fi);
-        ImGui::SetCursorScreenPos(p0);
-        hit = ImGui::InvisibleButton("##cell", ImVec2(cellw, cellh));
-        ImGui::PopID();
-        act = (fi == g_ope_sf);
-        ne_cell_text(type, fi, vt, (int)sizeof vt);
-        dl->AddRectFilled(p0, ImVec2(p0.x + cellw, p0.y + cellh),
-                          act ? IM_COL32(219, 234, 254, 255) : IM_COL32(244, 244, 245, 255), 10.0f);
-        dl->AddRect(p0, ImVec2(p0.x + cellw, p0.y + cellh),
-                    act ? IM_COL32(59, 130, 246, 255) : IM_COL32(228, 228, 231, 255), 10.0f, 0, act ? 3.0f : 1.5f);
-        if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(p0.x + 18, p0.y + 8),
-                                     IM_COL32(113, 113, 122, 255), ne_label(type, fi));
-        else dl->AddText(ImVec2(p0.x + 18, p0.y + 8), IM_COL32(113, 113, 122, 255), ne_label(type, fi));
-        dl->AddText(ImVec2(p0.x + 18, p0.y + 40), IM_COL32(24, 24, 27, 255), vt);
-        if (hit && fi != g_ope_sf) {                 /* 点格 = 激活该格 */
-            g_ope_sf = fi;
-            g_ne_msg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 参数激活 第 %d 步 格 %d/%d", g_ope_se + 1, fi + 1, nf);
-        }
-    }
-    /* 激活格：值框 + [取点]（仅坐标格显示；变量 / 表达式走上面的三模式行） */
-    vy = cy0 + (float)nrow * cellh + (float)(nrow - 1) * cellgap + 12;
-    vbh = vbh_a;
-    btnw = 210;
-    nbtn = (is_coord ? 1 : 0);
-    boxw = cw - (float)nbtn * (btnw + 12);
-    ImGui::PushStyleColor(ImGuiCol_Border, BLUE500);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.976f, 0.980f, 0.984f, 1.00f));
-    ImGui::SetCursorScreenPos(ImVec2(x0, vy));
-    ImGui::BeginChild("##numval", ImVec2(boxw, vbh), ImGuiChildFlags_Border, ImGuiWindowFlags_NoScrollbar);
-    {
-        char show[24];
-        ImVec2 tp;
-        ImDrawList *d2;
-        ne_cell_text(type, g_ope_sf, show, (int)sizeof show);
-        tp = ImGui::GetCursorScreenPos();
-        d2 = ImGui::GetWindowDrawList();
-        if (g_font_meta) d2->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tp.x + 18, tp.y + 8),
-                                     IM_COL32(113, 113, 122, 255), label);
-        else d2->AddText(ImVec2(tp.x + 18, tp.y + 8), IM_COL32(113, 113, 122, 255), label);
-        d2->AddText(ImVec2(tp.x + 18, tp.y + 40), IM_COL32(24, 24, 27, 255), show);
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
-    bx = x0 + boxw + 12;
-    if (is_coord) {
-        ImGui::SetCursorScreenPos(ImVec2(bx, vy));
-        if (btn_light("取点", ImVec2(btnw, vbh))) {
-            /* 取点接线照旧（先 cancel 再 request —— 清掉可能残留的旧请求，核心的 0→1 转变与 20s
-             * 计时从这一次点按起算）；v3 回填进缓冲的一对坐标格（pick_ev_apply）。
-             * T2.4：进取点态 = 编辑层自动收成底部条（「点屏幕上目标位置 · 点这里取消」）；
-             * 回填 / 点条取消 / 20s 兜底超时 → 自动弹回编辑层（参数层保持）。 */
-            g_pick_se = g_ope_se; g_pick_sf = g_ope_sf;
-            vtouch_pick_cancel();
-            vtouch_pick_request();
-            g_pick = 1;
-            g_pick_t0 = now_ms();                    /* 面板自带 20s 兜底计时起点 */
-            g_ope_coll = 1;                          /* 自动收起（收起条 = 取消取点） */
-            g_ne_msg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("取点 请求 第 %d 步 参数 %d/%d（编辑层自动收起）", g_ope_se + 1, g_ope_sf + 1, nf);
-        }
-        bx += btnw + 12;
-    }
-    if (g_pick) {
-        /* 取点态提示条（T2.8）：与错误提示共用固定槽位（键盘位置不动，防误点）。
-         * T2.4 起正常流程这里画不到（进取点态即自动收起，参数层不画）—— 防御保留：
-         * 若某路径让 g_pick 与展开态并存，提示仍指向正确出口（底部条）。 */
-        ImVec2 p1 = ImVec2(x0, vy + vbh + 12), p2 = ImVec2(x0 + cw, p1.y + 46);
-        dl->AddRectFilled(p1, p2, IM_COL32(219, 234, 254, 255), 8);
-        dl->AddRect(p1, p2, IM_COL32(59, 130, 246, 255), 8, 0, 1.5f);
-        dl->AddText(ImVec2(p1.x + 14, p1.y + 3), IM_COL32(29, 78, 216, 255), "点屏幕上目标位置（点底部条取消）");
-    } else if (g_ne_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, vy + vbh + 12));
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ne_msg);
-    }
-    /* 数字键：3 列 x 4 行（1-9 / ⌫ 0），编激活格；底部 [取消] 全丢 / [完成] 全字段校验全过一次写回。
-     * 键盘与按钮自底向上锚（自适应：T2.4 全屏化后自然变大）。 */
-    {
-        static const char *nrow2[3] = { "123", "456", "789" };
-        float gap = 10.0f, bw2;
-        kh = kh_a;                                       /* 矮屏自适应键高（上算） */
-        kw = (cw - 2 * gap) / 3.0f;
-        by = ry - 24 - bth_a;                            /* [取消][完成] 行 */
-        ky = by - 12 - (4 * kh + 3 * gap);               /* 键盘顶 */
-        for (row = 0; row < 3; row++) {
-            for (col = 0; col < 3; col++) {
-                char lab[2] = { nrow2[row][col], 0 };
-                ImGui::PushID(400 + row * 3 + col);
-                ImGui::SetCursorScreenPos(ImVec2(x0 + (float)col * (kw + gap), ky + (float)row * (kh + gap)));
-                if (btn_light(lab, ImVec2(kw, kh))) {
-                    if (g_ne_vals[g_ope_sf] < 0) { g_ne_vals[g_ope_sf] = 0; g_ne_text[g_ope_sf][0] = 0; }  /* 按数字 = 弃变量、改字面输入 */
-                    n = (int)strlen(g_ne_text[g_ope_sf]);
-                    if (n < 6) {
-                        g_ne_text[g_ope_sf][n] = lab[0]; g_ne_text[g_ope_sf][n + 1] = 0;
-                        g_ne_vals[g_ope_sf] = ne_parse(g_ne_text[g_ope_sf]);
-                    } else snprintf(g_ne_msg, sizeof g_ne_msg, "最多 6 位数字");
-                    g_need = 1; g_force_frames = 2;
-                }
-                ImGui::PopID();
-            }
-        }
-        /* 第 4 行：退格 + 0（右格留空） */
-        ImGui::PushID(430);
-        ImGui::SetCursorScreenPos(ImVec2(x0, ky + 3 * (kh + gap)));
-        if (btn_light("退格", ImVec2(kw, kh))) {
-            if (g_ne_vals[g_ope_sf] < 0) { g_ne_vals[g_ope_sf] = 0; g_ne_text[g_ope_sf][0] = 0; }      /* 同上：切回字面输入 */
-            n = (int)strlen(g_ne_text[g_ope_sf]);
-            if (n > 0) g_ne_text[g_ope_sf][n - 1] = 0;
-            g_ne_vals[g_ope_sf] = ne_parse(g_ne_text[g_ope_sf]);
-            g_ne_msg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-        }
-        ImGui::PopID();
-        ImGui::PushID(431);
-        ImGui::SetCursorScreenPos(ImVec2(x0 + kw + gap, ky + 3 * (kh + gap)));
-        if (btn_light("0", ImVec2(kw, kh))) {
-            if (g_ne_vals[g_ope_sf] < 0) { g_ne_vals[g_ope_sf] = 0; g_ne_text[g_ope_sf][0] = 0; }      /* 同上：切回字面输入 */
-            n = (int)strlen(g_ne_text[g_ope_sf]);
-            if (n < 6) {
-                g_ne_text[g_ope_sf][n] = '0'; g_ne_text[g_ope_sf][n + 1] = 0;
-                g_ne_vals[g_ope_sf] = ne_parse(g_ne_text[g_ope_sf]);
-            } else snprintf(g_ne_msg, sizeof g_ne_msg, "最多 6 位数字");
-            g_need = 1; g_force_frames = 2;
-        }
-        ImGui::PopID();
-        /* [取消] 全丢 / [完成] 全字段校验全过才一次写回 */
-        bw2 = (cw - gap) * 0.5f;
-        ImGui::PushID(450);
-        ImGui::SetCursorScreenPos(ImVec2(x0, by));
-        if (btn_light("取消", ImVec2(bw2, bth_a))) {
-            ALOGI("op edit 参数取消 第 %d 步", g_ope_se + 1);
-            if (g_pick) { g_pick = 0; g_pick_t0 = 0; g_ope_coll = 0; vtouch_pick_cancel(); }   /* 防御：未回的取点请求也一并撤（全丢） */
-            if (g_vis_num) { g_vis_num = 0; }        /* 视觉参数层开的数字键盘：回视觉层（g_ope_se 保持） */
-            else { g_ope_se = -1; ope_field_expr_undo_restore(); }   /* 真关层：撤销会话内插的计算步（评审修复） */
-            g_ne_tgt = 0; g_ne_msg[0] = 0;
-            g_need = 1; g_force_frames = 3;
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + gap, by));
-        if (btn_blue("完成", ImVec2(bw2, bth_a))) {
-            bad = -1;
-            {
-                char why[72];
-                if (g_ne_tgt) {
-                    if (!ne_check_target(label, g_ne_vals[0], why, (int)sizeof why)) bad = 0;
-                } else {
-                    for (fi = 0; fi < nf; fi++) {
-                        char f2[72];
-                        if (!ne_check(ope_flabel[type - 1][fi], type, fi, g_ne_vals[fi], f2, (int)sizeof f2)) {
-                            snprintf(why, sizeof why, "%s", f2);
-                            bad = fi;
-                            break;
-                        }
-                    }
-                }
-                if (bad >= 0) {                              /* 任一不过：提示该格 + 激活它 + 停留 */
-                    g_ope_sf = bad;
-                    snprintf(g_ne_msg, sizeof g_ne_msg, "%s", why);
-                    ALOGI("op edit 参数拒收 第 %d 步 格 %d：%s", g_ope_se + 1, bad + 1, why);
-                    g_force_frames = 2;
-                }
-            }
-            if (bad < 0) {                                   /* 全过：一次写回全部字段（目标模式 = j1/j2 单格） */
-                if (g_ne_tgt) {
-                    g_ope_steps[g_ope_se][5 + g_ne_tgt] = g_ne_vals[0];
-                    ALOGI("op edit 参数完成 第 %d 步 %s = %d", g_ope_se + 1, label, g_ne_vals[0]);
-                } else {
-                    for (fi = 0; fi < nf; fi++) ne_field_set(g_ope_se, type, fi, g_ne_vals[fi]);   /* 视觉容差走拆包写 */
-                    ALOGI("op edit 参数完成 第 %d 步（%d 格）", g_ope_se + 1, nf);
-                    if (g_vis_num)                           /* 视觉参数层：每格一行（T7.4：阈值/容差 + 超时 ms） */
-                        for (fi = 0; fi < nf; fi++)
-                            ALOGI("vis edit 第 %d 步 %s = %d", g_ope_se + 1, ope_flabel[type - 1][fi], g_ne_vals[fi]);
-                }
-                if (g_vis_num) { g_vis_num = 0; }            /* 视觉参数层开的数字键盘：回视觉层 */
-                else { g_ope_se = -1; ope_field_expr_undo_drop(); }   /* 真关层：插步就此定稿（撤销快照丢弃） */
-                g_ne_tgt = 0; g_ne_msg[0] = 0;
-                g_need = 1; g_force_frames = 3;
-            }
-        }
-        ImGui::PopID();
-    }
-}
-
-/* 变量选择弹层（参数弹层的 [变量] 模式）：预置 7（触发 5 + fx/fy）+ 自定义（动态从计算步收集）
- * +「数值」回退 + [取消]。
- * v10：选中 / 回退只改本地缓冲（g_ne_vals / g_ne_text）—— [完成] 才随全字段一次写回，[取消] 全丢。
- * 预置变量 → 缓冲值存 -1..-7；自定义变量 → -10..-25（索引扫计算步取）、文本清空（格 / 值框显示变量名）；
- * 「数值」→ 回字面输入（从引用切回才清文本；本来就是字面则保留已输入的数字）。
- * 布局：条目 ≤ 7+16（双列网格 + 可滚 child；条目高按窗高收缩，再矮由滚动兜底）。 */
-static void draw_ope_vlist(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, bww, ih, list_top, list_bot, list_h;
-    int type, nf, idx, v, k, ncus, nall;
-    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
-    int  cidx[OP_VAR_IDX_N];
-    if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps || g_ne_tgt) { g_ope_vl = 0; return; }
-    type = g_ope_steps[g_ope_se][0];
-    nf = ope_nfields(type);
-    if (nf == 0 || g_ope_sf < 0 || g_ope_sf >= nf) { g_ope_vl = 0; g_ope_se = -1; return; }
-    idx = ope_fidx[type - 1][g_ope_sf];
-    if (idx < 0 || !ope_var_ok(type, idx)) { g_ope_vl = 0; return; }
-    v = g_ne_vals[g_ope_sf];
-    ncus = ope_vars_collect(cnames, cidx, OP_VAR_IDX_N);
-    nall = 7 + ncus;
-
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    {
-        char t[96];
-        snprintf(t, sizeof t, "第 %d 步 · %s · %s", g_ope_se + 1, ope_tname(type), ope_flabel[type - 1][g_ope_sf]);
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s("选一个变量（预置 7 + 自定义）；「数值」= 回退数字键盘输入");
-    /* 条目高按窗高收缩；双列网格 + 可滚 child（再矮由滚动兜底） */
-    ih = 84.0f;
-    if (wh < 1000.0f) ih = 64.0f;
-    if (wh < 760.0f) ih = 52.0f;
-    bww = (cw - 36) * 0.5f;                             /* 双列：半宽（child 内缝 12 + 左右内边距 12×2 已扣） */
-    list_top = y0 + 76;
-    list_bot = b.y - 24 - 92 - 12;                      /* 底部给 [数值][取消] 留位 */
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##opvars", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);                              /* 列表实区：拖它滚动（同区域/操作列表口径） */
-    drag_scroll_for(SCR_LIST);
-    for (k = 0; k < nall; k++) {
-        const char *nm;
-        int code;
-        if (k < 7) { nm = ope_vname_tab[k]; code = -(k + 1); }          /* 预置：-1..-7 */
-        else { nm = cnames[k - 7]; code = OP_VAR_V0 - cidx[k - 7]; }    /* 自定义：-10..-25（索引 0..15） */
-        if (k % 2) ImGui::SameLine();
-        ImGui::PushID(600 + k);
-        if ((v == code) ? btn_blue(nm, ImVec2(bww, ih)) : btn_light(nm, ImVec2(bww, ih))) {
-            g_ne_vals[g_ope_sf] = code;                  /* 缓冲存负数编码；显示交给预置名表 / 计算步收集 */
-            g_ne_text[g_ope_sf][0] = 0;
-            g_ope_vl = 0;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("op edit 参数变量 第 %d 步 %s = %s", g_ope_se + 1,
-                  ope_flabel[type - 1][g_ope_sf], nm);
-        }
-        ImGui::PopID();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::PushID(610);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if ((v >= 0 ? btn_blue("数值", ImVec2(bww, 92)) : btn_light("数值", ImVec2(bww, 92)))) {
-        if (v < 0) { g_ne_text[g_ope_sf][0] = 0; g_ne_vals[g_ope_sf] = 0; }   /* 变量 → 字面：清文本重新输入；本来就是字面则保留 */
-        g_ope_vl = 0;
-        g_need = 1; g_force_frames = 3;
-        ALOGI("op edit 参数变量 第 %d 步 %s → 数值输入", g_ope_se + 1, ope_flabel[type - 1][g_ope_sf]);
-    }
-    ImGui::PopID();
-    ImGui::PushID(611);
-    ImGui::SetCursorScreenPos(ImVec2(x0 + bww + 12, b.y - 24 - 92));
-    if (btn_light("取消", ImVec2(bww, 92))) {
-        g_ope_vl = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 变量列表取消 第 %d 步", g_ope_se + 1);
-    }
-    ImGui::PopID();
-}
-
-/* 表达式缓冲追加（字符键 / 插入 chips 共用）：token 原样追加（空白无所谓，spec §6）；追加后超
- * 63 字符 → 红字拒收提示、缓冲不动。 */
-static void ope_expr_add(const char *tok)
-{
-    int n = (int)strlen(g_ope_expr_buf);
-    int tl = (int)strlen(tok);
-    if (n + tl > OPS_EXPR_MAX) {
-        snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "最多 %d 个字符", OPS_EXPR_MAX);
-        return;
-    }
-    memcpy(g_ope_expr_buf + n, tok, (size_t)tl + 1);
-    g_ope_ex_msg[0] = 0;
-}
-
-/* 表达式子层变量列表（[变量] 按钮，2026-10-05 item）：预置 7（中文名 → 插入英文名）+ 自定义变量名。
- * 与字段 [变量] 弹层同款网格（双列 + 可滚）；点一条 = ope_expr_add(名字) + 关层；[取消] 返回子层。 */
-static void draw_ope_ex_vlist(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, bww, ih, list_top, list_bot, list_h;
-    int k, ncus, nall, se = g_ope_se;
-    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
-    int  cidx[OP_VAR_IDX_N];
-    static const char *const raw7[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
-
-    if (se < 0 || se >= g_ope_nsteps || !g_ope_ex) { g_ope_ex_vl = 0; return; }
-    ncus = ope_vars_collect(cnames, cidx, OP_VAR_IDX_N);
-    nall = 7 + ncus;
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    {
-        char t[64];
-        snprintf(t, sizeof t, "第 %d 步 · 插入变量", se + 1);
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s("点一个变量 = 把名字插到表达式末尾（预置 7 + 自定义）");
-    ih = 84.0f;
-    if (wh < 1000.0f) ih = 64.0f;
-    if (wh < 760.0f) ih = 52.0f;
-    bww = (cw - 36) * 0.5f;
-    list_top = y0 + 76;
-    list_bot = b.y - 24 - 92 - 12;
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##opexvars", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    for (k = 0; k < nall; k++) {
-        char lab[40];
-        const char *ins;
-        if (k < 7) { snprintf(lab, sizeof lab, "%s（%s）", ope_vname_tab[k], raw7[k]); ins = raw7[k]; }
-        else       { snprintf(lab, sizeof lab, "%s", cnames[k - 7]); ins = cnames[k - 7]; }
-        if (k % 2) ImGui::SameLine();
-        ImGui::PushID(640 + k);
-        if (btn_light(lab, ImVec2(bww, ih))) {
-            ope_expr_add(ins);
-            g_ope_ex_vl = 0;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("op edit 表达式插变量 第 %d 步 %s", se + 1, ins);
-        }
-        ImGui::PopID();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::PushID(650);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if (btn_light("取消", ImVec2(cw, 92))) {
-        g_ope_ex_vl = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 表达式变量列表取消 第 %d 步", se + 1);
-    }
-    ImGui::PopID();
-}
-
-/* 表达式子层（v5 计算步；v10：计算步 = 名字 + 表达式；字段 [表达式] 模式 = 内联插步）：
- * 整屏卡片（照 draw_num_edit 的 T2.4 口径）—— 标题 + 名字行（计算步 = [变量名] 按钮进字符键盘子层；
- * 字段模式 = 「将创建变量 e<N>」说明）+ 显示框（当前文本 /「(空)」）+ 右侧 [清空] [退格] 并排（退格 = 删末字符）
- * + 变量图例行（小字）+ 字符键 6×3（1..6 / 7 8 9 0 + - / * / ( ) . ,；追加式）
- * + 插入 chips（动态行：预置 7（tdx..fy）+ 自定义变量名 + 函数 7（atan2(…sqrt(）；token 原样追加）
- * + 公式快捷行 5 键（小字；追加式插入整条公式）+ 底 [取消][确定]。
- * 矮屏自适应/拖滚兜底照 draw_char_kb（g_kb_sc / g_zone_kb / SCR_KB 互斥复用）：键高按键区
- * 可用高算、两级紧凑；仍放不下 → 键区手动拖滚（内容随 g_kb_sc 整体位移、裁剪在卡片内、隔帧重置）。
- * [确定]：计算步模式 = 同源 vtouch_expr_check（名字表 = 收集，含待生效改名）→ 过则 ope_var_rename
- * 写回名字 + 写回 g_ope_exprs[g_ope_se] → 关层；字段模式 = 校验过 → ope_field_expr_commit（自动插步 +
- * 字段指向）。[取消]：计算步模式丢弃 + 回步骤列表；字段模式回字段编辑器（表达式全丢）。 */
-static void draw_ope_expr(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, sy, vy, vbh, boxw, btnw, msg_y, ky0, ky, kh, chh, bth, slot_h, msg_h, gap, kw, cw2, bw2, by;
-    float khn, bbot, avail, content, kb_max, leg_h, leg_y, fy, fw5;
-    int se = g_ope_se;
-    int k, r, c, nrows, ntok, ncus;
-    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
-    int  cidx[OP_VAR_IDX_N];
-    char toks[30][24];
-    static const char *const preset7[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
-    static const char *const funcs7[7] = { "atan2(", "sin(", "cos(", "abs(", "min(", "max(", "sqrt(" };
-    if (se < 0 || se >= g_ope_nsteps || !g_ope_ex) { g_ope_ex = 0; return; }
-    if (!g_ope_ex_field && g_ope_steps[se][0] != OP_STEP_CALC) { g_ope_ex = 0; return; }   /* 防御：非计算步不该开这层 */
-    if (g_ope_ex_nm) {                       /* 名字键盘子层（改变量名）：盖住整层 */
-        int act = draw_char_kb("变量名：字母/下划线开头，字母/数字/下划线，1..15 字符",
-                               g_ope_refs[se], g_ope_ex_name, (int)sizeof g_ope_ex_name, &g_ope_up,
-                               g_ope_ex_nmmsg, (int)sizeof g_ope_ex_nmmsg, 12.0f);
-        if (act == 1) {
-            g_ope_ex_nm = 0; g_ope_ex_nmmsg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-        } else if (act == 2) {
-            if (!ope_varname_ok(g_ope_ex_name)) {
-                snprintf(g_ope_ex_nmmsg, sizeof g_ope_ex_nmmsg, "变量名要字母/下划线开头，字母/数字/下划线，1..15 字符");
-                g_need = 1; g_force_frames = 2;
-            } else {
-                g_ope_ex_nm = 0; g_ope_ex_nmmsg[0] = 0;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("op edit 变量名 第 %d 步 -> %s", se + 1, g_ope_ex_name);
-            }
-        }
-        return;
-    }
-    if (g_ope_ex_vl) {                       /* 变量列表覆盖层（2026-10-05 item）：点一条把名字插到表达式末尾 */
-        draw_ope_ex_vlist();
-        return;
-    }
-    /* 插入 chips 集（v10）：预置 7 + 自定义变量（动态收集）+ 函数 7；8 枚一行（行数随自定义变量增长，
-     * 超高由拖滚兜底） */
-    ncus = ope_vars_collect(cnames, cidx, OP_VAR_IDX_N);
-    ntok = 0;
-    for (k = 0; k < 7; k++) snprintf(toks[ntok++], sizeof toks[0], "%s", preset7[k]);
-    for (k = 0; k < ncus; k++) snprintf(toks[ntok++], sizeof toks[0], "%s", cnames[k]);
-    for (k = 0; k < 7; k++) snprintf(toks[ntok++], sizeof toks[0], "%s", funcs7[k]);
-    nrows = (ntok + 7) / 8;
-
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);      /* 整屏窗：顶边距 12（同 draw_num_edit） */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-
-    /* —— 矮屏自适应（照 draw_char_kb 口径）：键高按键区可用高算、两级紧凑；仍放不下 → 拖滚兜底 —— */
-    slot_h = 64.0f; vbh = 96.0f; msg_h = 46.0f; chh = 64.0f; bth = 92.0f; gap = 10.0f; leg_h = 24.0f;
-    bbot = b.y - 12.0f;                    /* 键区可见底（内容贴不到卡边，留 12 边距） */
-    ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + leg_h + msg_h;
-    {
-        float chipblock = (float)(nrows + 1) * chh + (float)nrows * gap;   /* chips 行 + 公式行（缝 = chips 行数） */
-        khn = (bbot - ky0 - chipblock - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
-        if (khn > 88.0f) khn = 88.0f;
-        if (khn < 56.0f) {                 /* 紧凑档：名字行 / 显示框 / 小字行（chips/公式）全收一档 */
-            slot_h = 56.0f; vbh = 72.0f; chh = 40.0f; bth = 70.0f;
-            ky0 = y0 + 44.0f + slot_h + 12.0f + vbh + 12.0f + leg_h + msg_h;
-            chipblock = (float)(nrows + 1) * chh + (float)nrows * gap;
-            khn = (bbot - ky0 - chipblock - 12.0f - 2.0f * gap - 12.0f - bth) / 3.0f;
-            if (khn > 88.0f) khn = 88.0f;
-        }
-    }
-    if (khn < 40.0f) khn = 40.0f;          /* 再矮由手动拖滚兜底 */
-    kh = khn;
-
-    /* 标题 */
-    {
-        char t[64];
-        if (g_ope_ex_field) snprintf(t, sizeof t, "第 %d 步 · 字段表达式", se + 1);
-        else snprintf(t, sizeof t, "第 %d 步 · 计算 · 表达式", se + 1);
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-        text_meta_s(t);
-    }
-    /* 名字行（v10）：计算步 = [变量名] 按钮（进字符键盘子层改名）；字段模式 = 「将创建变量 e<N>」说明 */
-    sy = y0 + 44.0f;
-    if (!g_ope_ex_field) {
-        char lab[48];
-        snprintf(lab, sizeof lab, "变量名：%s", g_ope_ex_name[0] ? g_ope_ex_name : "(空)");
-        ImGui::PushID(5150);
-        ImGui::SetCursorScreenPos(ImVec2(x0, sy));
-        if (btn_light(lab, ImVec2(cw, slot_h))) {
-            g_ope_ex_nm = 1; g_ope_ex_nmmsg[0] = 0;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 变量名键盘开 第 %d 步", se + 1);
-        }
-        ImGui::PopID();
-    } else {
-        char lab[64], an[VT_NAME_BUF];
-        ImVec2 p1(x0, sy), p2(x0 + cw, sy + slot_h);
-        ope_var_auto_name("e", an, sizeof an);
-        snprintf(lab, sizeof lab, "将创建变量 %s（确认后自动插到该步前）", an);
-        dl->AddRectFilled(p1, p2, IM_COL32(244, 244, 245, 255), 10.0f);
-        dl->AddRect(p1, p2, IM_COL32(228, 228, 231, 255), 10.0f, 0, 1.5f);
-        dl->AddText(ImVec2(p1.x + 18, p1.y + slot_h * 0.5f - 14.0f), IM_COL32(113, 113, 122, 255), lab);
-    }
-    /* 显示框（当前文本 /「(空)」）+ 右侧 [清空] [退格] 并排两键（框宽 = cw − 2×btnw − 2×gap；
-     * 退格 = 删末字符，与旧键区退格同逻辑） */
-    vy = sy + slot_h + 12.0f;
-    btnw = 210.0f;
-    boxw = cw - 3.0f * btnw - 3.0f * gap;   /* [清空][退格][变量] 三键（2026-10-05 item：变量列表） */
-    ImGui::PushStyleColor(ImGuiCol_Border, BLUE500);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.976f, 0.980f, 0.984f, 1.00f));
-    ImGui::SetCursorScreenPos(ImVec2(x0, vy));
-    ImGui::BeginChild("##opexpr", ImVec2(boxw, vbh), ImGuiChildFlags_Border, ImGuiWindowFlags_NoScrollbar);
-    {
-        ImVec2 tp = ImGui::GetCursorScreenPos();
-        ImDrawList *d2 = ImGui::GetWindowDrawList();
-        char show[OPS_EXPR_MAX + 8];
-        snprintf(show, sizeof show, "%s", g_ope_expr_buf[0] ? g_ope_expr_buf : "(空)");
-        if (vbh >= 88.0f) {                /* 全尺寸：标签 + 值两行（T3.1 壳口径） */
-            if (g_font_meta) d2->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tp.x + 18, tp.y + 8),
-                                         IM_COL32(113, 113, 122, 255), "表达式");
-            else d2->AddText(ImVec2(tp.x + 18, tp.y + 8), IM_COL32(113, 113, 122, 255), "表达式");
-            d2->AddText(ImVec2(tp.x + 18, tp.y + 40), IM_COL32(24, 24, 27, 255), show);
-        } else {                           /* 紧凑档：单行值（框矮，标签省） */
-            d2->AddText(ImVec2(tp.x + 18, tp.y + 12), IM_COL32(24, 24, 27, 255), show);
-        }
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
-    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + gap, vy));
-    if (btn_light("清空", ImVec2(btnw, vbh))) {
-        g_ope_expr_buf[0] = 0;
-        g_ope_ex_msg[0] = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 表达式清空 第 %d 步", se + 1);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + gap + btnw + gap, vy));
-    if (btn_light("退格", ImVec2(btnw, vbh))) {    /* 删末字符（追加式，无光标移动） */
-        int n = (int)strlen(g_ope_expr_buf);
-        if (n > 0) g_ope_expr_buf[n - 1] = 0;
-        g_ope_ex_msg[0] = 0;
-        g_need = 1; g_force_frames = 2;
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0 + boxw + gap + 2.0f * (btnw + gap), vy));
-    if (btn_light("变量", ImVec2(btnw, vbh))) {    /* 变量列表（2026-10-05 item）：预置 7（中文名）+ 自定义，点一条插入 */
-        g_ope_ex_vl = 1;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 表达式变量列表开 第 %d 步", se + 1);
-    }
-    /* 变量图例行（spec §6 v5.1 逐字改 v10：fx/fy 命中坐标替代结果槽；小字层级，框下、键区上） */
-    leg_y = vy + vbh + 12.0f;
-    {
-        const char *lg = "tdx,tdy 按下 · tux,tuy 弹起 · tms 按压时长(ms) · fx,fy 命中坐标";
-        if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(x0, leg_y), IM_COL32(113, 113, 122, 255), lg);
-        else             dl->AddText(ImVec2(x0, leg_y), IM_COL32(113, 113, 122, 255), lg);
-    }
-    /* 拒收提示固定槽（出现/消失不动键区，防误点） */
-    msg_y = leg_y + leg_h;
-    if (g_ope_ex_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, msg_y));
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_ex_msg);
-    }
-    ky0 = msg_y + msg_h;
-    /* —— 键区：字符键 6×3 + 插入 chips 2×8 + 公式快捷行 + 底行（超高时手动拖滚：g_zone_kb + SCR_KB；
-     * 整块随 g_kb_sc 位移，[取消][确定] 随块滚，同 draw_char_kb）—— */
-    avail = bbot - ky0;
-    content = 3.0f * kh + 2.0f * gap + 12.0f + (float)(nrows + 1) * chh + (float)nrows * gap + 12.0f + bth;   /* 字符键 + 缝 + 插入 chips + 公式行 + 缝 + 底行 */
-    kb_max = content - avail;
-    {
-        static int lf = -1;                    /* 隔帧重置：重开/换层 = 回顶（同 draw_char_kb） */
-        if (ImGui::GetFrameCount() - lf > 1) g_kb_sc = 0;
-        lf = ImGui::GetFrameCount();
-        if (g_scroll_acc != 0 && g_scr_target == SCR_KB) { g_kb_sc += g_scroll_acc; g_scroll_acc = 0; }
-        if (kb_max < 0) kb_max = 0;
-        if (g_kb_sc < 0) g_kb_sc = 0;                  /* 下限 clamp：与上限对称（拖滚不为负） */
-        if (g_kb_sc > kb_max) g_kb_sc = kb_max;
-        pub_zone(g_zone_kb);
-        ImGui::PushClipRect(ImVec2(a.x + 4, ky0 - 4), ImVec2(b.x - 4, b.y - 4), true);
-    }
-    ky = ky0 - g_kb_sc;
-    {
-        static const char *krow[3] = { "123456", "7890+-", "*/().," };   /* v5.1：补 `,`（语法全字符集 6×3）；退格移出键区 */
-        kw = (cw - 5.0f * gap) / 6.0f;
-        for (r = 0; r < 3; r++) {
-            for (c = 0; c < 6; c++) {
-                char lab[2] = { krow[r][c], 0 };
-                ImGui::PushID(5300 + r * 6 + c);
-                ImGui::SetCursorScreenPos(ImVec2(x0 + c * (kw + gap), ky + r * (kh + gap)));
-                if (btn_light(lab, ImVec2(kw, kh))) {
-                    ope_expr_add(lab);
-                    g_need = 1; g_force_frames = 2;
-                }
-                ImGui::PopID();
-            }
-        }
-    }
-    {
-        float cy = ky + 3.0f * kh + 2.0f * gap + 12.0f;
-        cw2 = (cw - 7.0f * gap) / 8.0f;
-        if (g_font_meta) ImGui::PushFont(g_font_meta);   /* 小字层级：一排 8 枚，长 token 也放得下 */
-        for (k = 0; k < ntok; k++) {                     /* 动态行（v10）：预置 7 + 自定义变量 + 函数 7 */
-            r = k / 8; c = k % 8;
-            ImGui::PushID(5400 + k);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + c * (cw2 + gap), cy + (float)r * (chh + gap)));
-            if (btn_light(toks[k], ImVec2(cw2, chh))) {
-                ope_expr_add(toks[k]);
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::PopID();
-        }
-        /* 公式快捷行（5 键，小字；追加式插入整条公式 —— spec §6 v5.1 模板逐字） */
-        {
-            static const char *frow[5] = { "释放角度", "偏移X", "偏移Y", "延伸X", "延伸Y" };
-            static const char *ftok[5] = {
-                "atan2(tuy-tdy, tux-tdx)", "tux-tdx", "tuy-tdy",
-                "tdx + cos(atan2(tuy-tdy, tux-tdx)) * 300",
-                "tdy + sin(atan2(tuy-tdy, tux-tdx)) * 300",
-            };
-            fy = cy + (float)nrows * (chh + gap);
-            fw5 = (cw - 4.0f * gap) / 5.0f;
-            for (c = 0; c < 5; c++) {
-                ImGui::PushID(5600 + c);
-                ImGui::SetCursorScreenPos(ImVec2(x0 + c * (fw5 + gap), fy));
-                if (btn_light(frow[c], ImVec2(fw5, chh))) {
-                    ope_expr_add(ftok[c]);
-                    g_need = 1; g_force_frames = 2;
-                }
-                ImGui::PopID();
-            }
-        }
-        if (g_font_meta) ImGui::PopFont();
-    }
-    /* 底：[取消] 丢弃 / [确定] 同源校验 → 写回（随键区块滚） */
-    bw2 = (cw - 12.0f) * 0.5f;
-    by = ky + 3.0f * kh + 2.0f * gap + 12.0f + (float)(nrows + 1) * chh + (float)nrows * gap + 12.0f;   /* v5.1：+ 公式行；v10：chips 行数动态 */
-    ImGui::PushID(5500);
-    ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if (btn_light("取消", ImVec2(bw2, bth))) {
-        if (g_ope_ex_field) {                            /* 字段模式：回字段编辑器（表达式全丢；编辑层不关） */
-            ALOGI("op edit 字段表达式取消 第 %d 步", se + 1);
-            g_ope_ex = 0; g_ope_ex_field = 0; g_ope_ex_msg[0] = 0;
-            g_need = 1; g_force_frames = 3;
-        } else {
-            ALOGI("op edit 表达式取消 第 %d 步", se + 1);
-            g_ope_ex = 0; g_ope_ex_msg[0] = 0; g_ope_se = -1;
-            g_need = 1; g_force_frames = 3;
-        }
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
-    if (btn_blue("确定", ImVec2(bw2, bth))) {
-        char names[OP_VAR_IDX_N][VT_NAME_BUF];
-        char why[72];
-        int nv;
-        why[0] = 0;
-        if (g_ope_ex_field) {                            /* 名字表 = 现存计算步（「将创建」的自动名不在表内 → 引用它编辑期拒收，见 M1 更正） */
-            char gate[VT_NAME_BUF]
-            ope_var_auto_name("e", an, sizeof an);
-            nv = ope_expr_names_for_check(se, an, names);
-        } else {
-            nv = ope_expr_names_for_check(se, g_ope_ex_name, names);   /* 含待生效改名 */
-        }
-        if (vtouch_expr_check(g_ope_expr_buf, (const char (*)[VT_NAME_BUF])names, nv, why, (int)sizeof why) != 0) {
-            snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "%s", why[0] ? why : "表达式错");
-            ALOGI("op edit 计算拒收 第 %d 步：%s", se + 1, g_ope_ex_msg);
-            g_need = 1; g_force_frames = 2;
-        } else if (g_ope_ex_field) {
-            ope_field_expr_commit(se);                   /* 自动插步 + 字段指向（失败在函数内提示、层不关） */
-        } else if (!ope_varname_ok(g_ope_ex_name)) {     /* 名字硬门（字符键盘已预检；防御照款） */
-            snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "变量名非法（1..%d 个可见字符；首字符不可数字/`-`）", OP_VAR_NAME_MAX);
-            g_need = 1; g_force_frames = 2;
-        } else {
-            int rn_rc;
-            if (strcmp(g_ope_refs[se], g_ope_ex_name) != 0)
-                ALOGI("op edit 变量改名 第 %d 步 %s -> %s", se + 1, g_ope_refs[se], g_ope_ex_name);
-            rn_rc = ope_var_rename(se, g_ope_ex_name);
-            if (rn_rc != 0) {
-                snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "变量最多 %d 个，改名失败（先删掉不用的计算步）", OP_VAR_IDX_N);
-                g_need = 1; g_force_frames = 2;
-            } else {
-                snprintf(g_ope_exprs[se], sizeof g_ope_exprs[se], "%s", g_ope_expr_buf);
-                ALOGI("op edit 计算 第 %d 步 %s = %s", se + 1, g_ope_ex_name, g_ope_exprs[se]);
-                g_ope_ex = 0; g_ope_ex_msg[0] = 0; g_ope_se = -1;
-                g_need = 1; g_force_frames = 3;
-            }
-        }
-    }
-    ImGui::PopID();
-    ImGui::PopClipRect();                  /* 键区裁剪到此（含 [取消][确定]，同 draw_char_kb） */
-}
-
-/* 区域选择弹层（条件步的 [区域] 按钮；T3.2 起视觉步 [区域] 也走它）：列表读区域表实时、可滚动；
- * 开关判断只列开关型（spec §7：运行时核心仍校验，双保险）。点一条 → 写进该步 ref、关层。
- * 视觉步（找图/找色）：ref 承载**区域名**（区域限定查找范围），另给「全屏」= 清空引用。 */
-static void draw_ope_rlist(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    int i, n, rli = g_ope_rl, only_tg, vis, avail = 0;
-    if (rli < 0 || rli >= g_ope_nsteps) { g_ope_rl = -1; return; }
-    only_tg = (g_ope_steps[rli][0] == OP_STEP_COND_TOGGLE);
-    vis = (g_ope_steps[rli][0] == OP_STEP_FINDIMAGE || g_ope_steps[rli][0] == OP_STEP_FINDCOLOR);   /* 视觉步：区域 = 查找范围 */
-
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    {
-        char t[80];
-        snprintf(t, sizeof t, "第 %d 步 · %s · 选择区域", rli + 1, ope_tname(g_ope_steps[rli][0]));
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s(vis ? "点一个区域作为查找范围（不限定 = 「全屏」）"
-              : only_tg ? "只列开关型区域（在区域页设）" : "点一个区域作为判定目标（悬空引用运行时报「区域不存在」）");
-    list_top = y0 + 76;
-    list_bot = b.y - 24 - 92 - 12;                   /* 底部给 [取消] 留位 */
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;                      /* 矮屏：列表让位（按钮优先；列表本就可滚） */
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##opregs", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);                           /* 列表实区：拖它滚动（同区域/操作列表的口径） */
-    drag_scroll_for(SCR_LIST);
-    if (vis) {                                       /* 视觉步：可清空区域引用 = 全屏（T3.2） */
-        ImGui::PushID(3050);
-        if ((g_ope_exprs[rli][0] == 0) ? btn_blue("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))
-                                      : btn_light("全屏（不限区域）", ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            g_ope_exprs[rli][0] = 0;
-            g_ope_rl = -1;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("vis edit 第 %d 步 区域=全屏", rli + 1);
-        }
-        ImGui::PopID();
-    }
-    n = vtouch_region_count();
-    for (i = 0; i < n; i++) {
-        char id[VT_NAME_BUF]; int t2, a1, a2, a3, a4, en;
-        if (only_tg && vtouch_region_kind_get(i) != 1) continue;
-        if (vtouch_get_region(i, id, sizeof id, &t2, &a1, &a2, &a3, &a4, &en) != 0) continue;
-        avail++;
-        ImGui::PushID(3000 + i);
-        if ((strcmp(vis ? g_ope_exprs[rli] : g_ope_refs[rli], id) == 0) ? btn_blue(id, ImVec2(ImGui::GetContentRegionAvail().x, 76))
-                                               : btn_light(id, ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            snprintf(vis ? g_ope_exprs[rli] : g_ope_refs[rli], vis ? sizeof g_ope_exprs[rli] : sizeof g_ope_refs[rli], "%s", id);
-            g_ope_rl = -1;
-            g_need = 1; g_force_frames = 3;
-            if (vis) ALOGI("vis edit 第 %d 步 区域=%s", rli + 1, id);
-            else ALOGI("op edit 区域选中 第 %d 步 = %s", rli + 1, id);
-        }
-        ImGui::PopID();
-    }
-    if (avail == 0)
-        text_meta_w(vis ? "还没有区域：可用上面的「全屏」不限定范围"
-                  : only_tg ? "没有开关型区域：先到区域页把某个区域设成开关型" : "还没有区域：先到区域页框一个");
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::PushID(3100);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if (btn_light("取消", ImVec2(cw, 92))) {
-        g_ope_rl = -1;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 区域列表取消 第 %d 步", rli + 1);
-    }
-    ImGui::PopID();
-}
-
-/* ---- 预览页（T2.5，spec §5）：编辑层 [预览] → 全屏**只读**页（步骤总览 + 坐标小地图） ---- */
-
-/* 分支目标文本（预览用）：档位词；跳转档的目标 = `第 N 步` / `结束`（与「跳转行」同口径）。 */
-static void ope_pv_target(int tier, int tgt, char *out, int outcap)
-{
-    switch (tier) {
-    case OP_COND_CONT: snprintf(out, (size_t)outcap, "继续下一步"); break;
-    case OP_COND_SKIP: snprintf(out, (size_t)outcap, "跳过下一步"); break;
-    case OP_COND_JUMP:
-        if (tgt == 0) snprintf(out, (size_t)outcap, "结束");
-        else          snprintf(out, (size_t)outcap, "第 %d 步", tgt);
-        break;
-    default:           snprintf(out, (size_t)outcap, "中止"); break;   /* OP_COND_ABORT（非法值兜底同款） */
-    }
-}
-
-/* 预览清单行（T2.5）：`N. 类型` + 参数摘要（**逐字 ope_step_text** 出文本；meta 字体，超宽自动折行）；
- * 条件步再两行分支 `├ 成立 → …` / `└ 不成立 → …`（档位词；跳转档目标 = `第 N 步` / `结束`）；
- * 跳转步的摘要行 = `→ 第 N 步` / `→ 结束`（spec §5 的「跳转行」）。纯只读文本，无任何控件。 */
-static void ope_preview_row(int i)
-{
-    const int *s6 = g_ope_steps[i];
-    int t = s6[0];
-    char tb[48], p[176], tg[32], b1[80], b2[80];
-    ImGui::PushID(5000 + i);
-    if (t == OP_STEP_JUMP) {
-        if (s6[1] == 0) snprintf(tg, sizeof tg, "结束");
-        else            snprintf(tg, sizeof tg, "第 %d 步", s6[1]);
-        snprintf(tb, sizeof tb, "%d. %s → %s", i + 1, ope_tname(t), tg);
-        ImGui::TextUnformatted(tb);
-    } else {
-        snprintf(tb, sizeof tb, "%d. %s", i + 1, ope_tname(t));
-        ImGui::TextUnformatted(tb);
-        ImGui::SameLine();
-        ImGui::AlignTextToFramePadding();
-        ope_step_text(i, p, sizeof p);
-        meta_push();
-        ImGui::TextWrapped("%s", p);
-        meta_pop();
-    }
-    if (t == OP_STEP_COND_REGION || t == OP_STEP_COND_TOGGLE ||
-        t == OP_STEP_FINDIMAGE || t == OP_STEP_FINDCOLOR) {   /* 视觉步（T3.2）：同条件步两行分支 */
-        ope_pv_target(s6[4], s6[6], tg, (int)sizeof tg);      /* 成立侧：档 a4 / 目标 j1 */
-        snprintf(b1, sizeof b1, "├ 成立 → %s", tg);
-        ope_pv_target(s6[3], s6[7], tg, (int)sizeof tg);      /* 不成立侧：档 a3 / 目标 j2 */
-        snprintf(b2, sizeof b2, "└ 不成立 → %s", tg);
-        meta_push();
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40);    /* 缩进一档（分支从属该步） */
-        ImGui::TextUnformatted(b1);
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 40);
-        ImGui::TextUnformatted(b2);
-        meta_pop();
-    }
-    ImGui::Dummy(ImVec2(0, 6));                               /* 行间缝 */
-    ImGui::PopID();
-}
-
-/* 逻辑坐标 → 小地图坐标（越界贴边）：先把值夹回 [0,g_w-1]/[0,g_h-1] 再等比映射；标记中心再夹进
- * 地图内缘 16px（保标记完整可见）；oob 置 1 = 发生过越界（由标签加「越界」标注）。 */
-static void pv_xy(int x, int y, float mx0, float my0, float mw, float mh,
-                  float *ox, float *oy, int *oob)
-{
-    float fx = (float)x, fy = (float)y;
-    int o = 0;
-    if (fx < 0) { fx = 0; o = 1; } else if (fx > (float)(g_w - 1)) { fx = (float)(g_w - 1); o = 1; }
-    if (fy < 0) { fy = 0; o = 1; } else if (fy > (float)(g_h - 1)) { fy = (float)(g_h - 1); o = 1; }
-    *ox = mx0 + fx * mw / (float)g_w;
-    *oy = my0 + fy * mh / (float)g_h;
-    if (*ox < mx0 + 16) *ox = mx0 + 16;
-    if (*ox > mx0 + mw - 16) *ox = mx0 + mw - 16;
-    if (*oy < my0 + 16) *oy = my0 + 16;
-    if (*oy > my0 + mh - 16) *oy = my0 + mh - 16;
-    *oob = o;
-}
-
-/* 点标签（步号；越界加「越界」后缀）：meta 字体；避让 = 与已放标签太近就下移一行（自定口径：
- * 先到先占、后来者让位；≤32 点、最多下移 32 行）；右边缘翻到点左侧、顶边翻到点下方。 */
-static void pv_label(float *lx, float *ly, int *nl, float px, float py, int step1, int oob,
-                     float mx0, float mx1, float my0, float my1)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    char t[24];
-    float tx, ty, tw;
-    int i, k, hit;
-    if (oob) snprintf(t, sizeof t, "%d 越界", step1);
-    else     snprintf(t, sizeof t, "%d", step1);
-    tw = g_font_meta ? g_font_meta->CalcTextSizeA(g_font_meta->FontSize, 1e9f, 0.0f, t).x
-                     : ImGui::CalcTextSize(t).x;
-    tx = px + 18; ty = py - 46;                       /* 默认：点右上角 */
-    if (tx + tw > mx1 - 6) tx = px - 18 - tw;         /* 右边缘：翻到点的左侧 */
-    if (tx < mx0 + 6) tx = mx0 + 6;
-    if (ty < my0 + 6) ty = py + 26;                   /* 顶边：翻到点下方 */
-    for (k = 0; k < OPE_MAX_STEPS; k++) {             /* 避让：与已放标签重叠 → 下移一行 */
-        hit = 0;
-        for (i = 0; i < *nl; i++)
-            if (tx - lx[i] > -110 && tx - lx[i] < 110 && ty - ly[i] > -46 && ty - ly[i] < 46) { hit = 1; break; }
-        if (!hit) break;
-        ty += 46;
-    }
-    if (ty > my1 - 40) ty = my1 - 40;                 /* 兜底贴底（极端多标签才到） */
-    if (*nl < OPE_MAX_STEPS) { lx[*nl] = tx; ly[*nl] = ty; (*nl)++; }
-    if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(tx, ty), IM_COL32(24, 24, 27, 255), t);
-    else             dl->AddText(ImVec2(tx, ty), IM_COL32(24, 24, 27, 255), t);
-}
-
-/* 小地图（T2.5）：竖屏逻辑比例图 —— g_w×g_h 等比缩入矩形 (mx0,my0,mw,mh)。
- * 标记：点按 = 蓝点 / 按下 = 橙点 / 区域判断判定点 = 紫叉 / 滑动 = 带箭头连线（箭头 = 终点）；
- * 每点旁标步号；越界坐标贴边 + 标签加「越界」；坐标格是变量引用（-25..-1）→ 不画该点（列表照显示）。 */
-static void draw_preview_map(float mx0, float my0, float mw, float mh)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    float lx[OPE_MAX_STEPS], ly[OPE_MAX_STEPS];
-    int nl = 0, i;
-    dl->AddRectFilled(ImVec2(mx0, my0), ImVec2(mx0 + mw, my0 + mh), IM_COL32(250, 250, 250, 255), 10.0f);
-    dl->AddRect(ImVec2(mx0, my0), ImVec2(mx0 + mw, my0 + mh), IM_COL32(212, 212, 216, 255), 10.0f, 0, 2.0f);
-    for (i = 0; i < g_ope_nsteps; i++) {
-        const int *s6 = g_ope_steps[i];
-        int t = s6[0], oob1 = 0, oob2 = 0;
-        float px1 = 0, py1 = 0, px2 = 0, py2 = 0;
-        if (t == OP_STEP_TAP || t == OP_STEP_DOWN || t == OP_STEP_COND_REGION) {
-            if (ope_var_ref(s6[1]) || ope_var_ref(s6[2])) continue;   /* 变量引用坐标 → 不画该点 */
-            pv_xy(s6[1], s6[2], mx0, my0, mw, mh, &px1, &py1, &oob1);
-            if (t == OP_STEP_TAP) {
-                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_BLUE);
-            } else if (t == OP_STEP_DOWN) {
-                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_ORANGE);
-            } else {
-                dl->AddLine(ImVec2(px1 - 14, py1 - 14), ImVec2(px1 + 14, py1 + 14), PV_PURPLE, 6.0f);
-                dl->AddLine(ImVec2(px1 - 14, py1 + 14), ImVec2(px1 + 14, py1 - 14), PV_PURPLE, 6.0f);
-            }
-            pv_label(lx, ly, &nl, px1, py1, i + 1, oob1, mx0, mx0 + mw, my0, my0 + mh);
-        } else if (t == OP_STEP_SWIPE) {
-            float dx, dy, len;
-            if (ope_var_ref(s6[1]) || ope_var_ref(s6[2]) || ope_var_ref(s6[3]) || ope_var_ref(s6[4])) continue;
-            pv_xy(s6[1], s6[2], mx0, my0, mw, mh, &px1, &py1, &oob1);
-            pv_xy(s6[3], s6[4], mx0, my0, mw, mh, &px2, &py2, &oob2);
-            dx = px2 - px1; dy = py2 - py1; len = sqrtf(dx * dx + dy * dy);
-            if (len >= 1.0f) {
-                float ux = dx / len, uy = dy / len, ah = 24.0f;   /* 箭头长（沿单位向量 u） */
-                dl->AddLine(ImVec2(px1, py1), ImVec2(px2, py2), PV_BLUE, 6.0f);
-                dl->AddTriangleFilled(ImVec2(px2, py2),
-                                      ImVec2(px2 - ux * ah - uy * ah * 0.55f, py2 - uy * ah + ux * ah * 0.55f),
-                                      ImVec2(px2 - ux * ah + uy * ah * 0.55f, py2 - uy * ah - ux * ah * 0.55f),
-                                      PV_BLUE);
-            } else {
-                dl->AddCircleFilled(ImVec2(px1, py1), 13.0f, PV_BLUE);   /* 零长滑动兜底：画成点 */
-            }
-            pv_label(lx, ly, &nl, px1, py1, i + 1, oob1 || oob2, mx0, mx0 + mw, my0, my0 + mh);
-        }
-        /* 等待 / 弹起 / 开关判断 / 跳转 / 计算：无坐标 → 图上无标记 */
-    }
-}
-
-/* 预览页小字（meta 字体；无 meta 字体时退回默认字体，同其它手绘文字）。 */
-static void pv_text(float x, float y, const char *s)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    if (g_font_meta) dl->AddText(g_font_meta, g_font_meta->FontSize, ImVec2(x, y), IM_COL32(63, 63, 70, 255), s);
-    else             dl->AddText(ImVec2(x, y), IM_COL32(63, 63, 70, 255), s);
-}
-
-/* 小地图图例（预览页地图右侧）：左边画与地图同款的样本形状，右边文字说明
- * （形状自绘，不依赖特殊字形；特殊字形只有 ├ / └ / → / 「」，字库随源码自动收录）。 */
-static void pv_legend(float x, float y)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    float cy = y;
-    pv_text(x, cy, "小地图 · 竖屏逻辑坐标等比");
-    cy += 46;
-    dl->AddCircleFilled(ImVec2(x + 16, cy + 14), 13.0f, PV_BLUE);
-    pv_text(x + 44, cy, "点按");
-    cy += 52;
-    dl->AddCircleFilled(ImVec2(x + 16, cy + 14), 13.0f, PV_ORANGE);
-    pv_text(x + 44, cy, "按下");
-    cy += 52;
-    dl->AddLine(ImVec2(x + 4, cy + 2), ImVec2(x + 28, cy + 26), PV_PURPLE, 6.0f);
-    dl->AddLine(ImVec2(x + 4, cy + 26), ImVec2(x + 28, cy + 2), PV_PURPLE, 6.0f);
-    pv_text(x + 44, cy, "区域判断 判定点");
-    cy += 52;
-    dl->AddLine(ImVec2(x + 2, cy + 14), ImVec2(x + 26, cy + 14), PV_BLUE, 6.0f);
-    dl->AddTriangleFilled(ImVec2(x + 44, cy + 14), ImVec2(x + 24, cy + 6), ImVec2(x + 24, cy + 22), PV_BLUE);
-    pv_text(x + 60, cy, "滑动（箭头 = 终点）");
-    cy += 52;
-    pv_text(x, cy, "每点旁标步号；越界点标签带「越界」");
-    cy += 40;
-    pv_text(x, cy, "变量引用坐标不画点（列表照显示）");
-}
-
-/* 预览页（T2.5，spec §5）：编辑层 [预览] → 全屏**只读**页（无编辑 / 无取点）——
- * 上 = 步骤总览（全宽可滚；摘要逐字 ope_step_text；条件双行分支；跳转行 → 第 N 步 / 结束）；
- * 下 = 小地图带（竖屏逻辑 g_w×g_h 等比缩入 + 图例）；[关闭] 回编辑层。
- * 只读口径：本页只画文本/图形 + 一个 [关闭]；不改 g_ope_steps、不碰取点态。
- * 吞触摸矩形照旧：三态判据只看 g_ope_i / g_ope_coll（编辑层开 = 整屏），本页不改它们。 */
-static void draw_op_preview(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, content_top, content_bot, content_h, band_h, list_h;
-    int i;
-    if (g_ope_i < 0) { g_ope_pv = 0; return; }       /* 防御：编辑层关着不该进这 */
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);                /* T2.4 整屏窗：顶边距 12 */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    {
-        char t[96];
-        snprintf(t, sizeof t, "预览 · %s · %d 步 · 只读", g_ope_name, g_ope_nsteps);
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s("清单与编辑层同口径；小地图 = 竖屏逻辑坐标等比图（[关闭] 返回编辑）");
-
-    content_top = y0 + 76;
-    content_bot = b.y - 24 - 92 - 12;                /* 底部 [关闭] 92 高 + 12 缝 */
-    content_h = content_bot - content_top;
-    if (content_h < 320) content_h = 320;            /* 极窄窗兜底（正常 ≥2000） */
-    band_h = content_h * 0.42f;                      /* 下带（小地图）自适应；上限防大屏空耗 */
-    if (band_h < 340) band_h = 340;
-    if (band_h > 1100) band_h = 1100;
-    list_h = content_h - band_h - 12;
-    if (list_h < 140) { list_h = 140; band_h = content_h - list_h - 12; if (band_h < 200) band_h = 200; }
-
-    /* 上：步骤总览（全宽、可滚；只读文本 —— 拖列表滚动照常） */
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, content_top));
-    ImGui::BeginChild("##opvlist", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    for (i = 0; i < g_ope_nsteps; i++) ope_preview_row(i);
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-
-    /* 下：小地图带（地图按 g_w:g_h 等比缩入左半区；右半区图例） */
-    {
-        float by0 = content_top + list_h + 12, bh = band_h;
-        float legw = cw * 0.5f, mapw0 = cw - legw - 12;
-        float sc = mapw0 / (float)g_w, sy = bh / (float)g_h, mw2, mh2, mx0, my0;
-        if (sy < sc) sc = sy;                        /* 等比：取小者（缩入可用区域） */
-        mw2 = (float)g_w * sc; mh2 = (float)g_h * sc;
-        mx0 = x0 + (mapw0 - mw2) * 0.5f;             /* 地图在左半区居中 */
-        my0 = by0 + (bh - mh2) * 0.5f;
-        draw_preview_map(mx0, my0, mw2, mh2);
-        pv_legend(x0 + mapw0 + 24, by0 + 6);
-    }
-
-    /* [关闭] 回编辑层 */
-    ImGui::PushID(5100);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if (btn_light("关闭", ImVec2(cw, 92))) {
-        g_ope_pv = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 预览关（回编辑层）");
-    }
-    ImGui::PopID();
-}
-
-/* 横屏编辑器（T7.3，⑤）：左右分栏 —— 左 ~60% 步骤列表（主区，整高滚动）；右 ~40% 控制栏，
- * 自上而下：名字行 / 门控·自动关行 / 加步区（3 列 × 4 行竖排，按列分组：基础 / 控制 / 条件）/
- * [预览][收起] / [取消][完成]。名字与提示槽顶锚、两排钮底锚，余量留中间。
- * 窄档（44px 长文案放不下）门控/自动关/加步整组降 30px 小字（同标题栏「降一档字号」口径）；
- * 极窄只留「门控 / 自动关」；加步「＋」前缀与判断短文案按实算宽度定档（同竖屏 cw 阈值口径）。 */
-static void draw_op_edit_land(float x0, float y0, float cw, float wh)
-{
-    float by = wh - 36.0f;                   /* 内容底（= b.y - 24） */
-    float lw = (cw - 12.0f) * 0.6f;          /* 左：步骤列表（主区） */
-    float rw = cw - 12.0f - lw;              /* 右：控制栏（~40%） */
-    float rx = x0 + lw + 12.0f;
-    float hn, hr, hd, bw3, gy, slot;         /* 名字 / 通用行 / [取消][完成] 行高；加步钮宽；门控行 y；提示槽高 */
-    int sm, mini, plus, plus4, j4, sm2;
-    char t[80];
-
-    /* 右栏三档自适应（同竖屏「按可用高定档」口径；内容 = 名字 + 提示槽 + 6 行 + [取消][完成] + 8 缝）。
-     * 提示槽：宽裕档 92（提示可两行换行，M-1 修复）；紧档 46（单行裁剪）。 */
-    hn = 84.0f; hr = 76.0f; hd = 92.0f; slot = 92.0f;
-    if (by - y0 < 84.0f + 92.0f + 6.0f * 76.0f + 92.0f + 8.0f * 12.0f) { hn = 64.0f; hr = 58.0f; hd = 70.0f; }
-    if (by - y0 < 64.0f + 92.0f + 6.0f * 58.0f + 70.0f + 8.0f * 12.0f) { hn = 56.0f; hr = 48.0f; hd = 60.0f; slot = 46.0f; }
-    /* 窄档判定（按实算宽度反推：「放得下才用长文案」；44px 字形宽 = 字号、按钮内缝 32） */
-    sm    = ((rw - 12.0f) * 0.545f < 252.0f);   /* 「自动关：开」（44px）放不下 → 降 30px 小字档 */
-    mini  = ((rw - 12.0f) * 0.455f < 152.0f);   /* 「门控：无」（30px）也放不下 → 只留「门控 / 自动关」 */
-    bw3   = (rw - 24.0f) / 3.0f;
-    plus  = (bw3 >= 164.0f);                    /* 加步「＋X」（三字 44px）放得下 */
-    plus4 = (bw3 >= 252.0f);                    /* 「＋区域判断」（五字）放得下 */
-    j4    = (bw3 >= 208.0f);                    /* 「区域判断」（四字）放得下 */
-    sm2   = ((rw - 12.0f) * 0.5f < 120.0f);     /* 两字钮（44px）放不下 → 降 30px */
-
-    /* 左栏：标题 + 列表（整高滚动；窄档缩短文案，防越栏被右栏盖住 —— M-1 修复） */
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    if (lw < 640.0f) snprintf(t, sizeof t, "步骤 · %d 步", g_ope_nsteps);
-    else snprintf(t, sizeof t, "步骤 · %d 步（最多 %d；列表可上下拖动滚）", g_ope_nsteps, OPE_MAX_STEPS);
-    text_meta_s(t);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 36.0f));
-    ImGui::BeginChild("##opsteps", ImVec2(lw, by - y0 - 36.0f), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);                   /* 列表实区：拖它滚动（同竖屏口径） */
-    drag_scroll_for(SCR_LIST);
-    for (int i = 0; i < g_ope_nsteps; i++) ope_step_row(i);
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-
-    /* 右栏 · 名字行（顶锚；点它开改名子层） */
-    ImGui::SetCursorScreenPos(ImVec2(rx, y0));
-    if (btn_light(g_ope_name, ImVec2(rw, hn))) {
-        g_ope_kb = 1; g_ope_kbmsg[0] = 0; g_ope_up = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 改名子层开 %s", g_ope_name);
-    }
-    /* 右栏 · 提示槽（固定占位：出现提示时下面整块不动，防误点；宽裕档两行换行 + 槽内裁剪，M-1 修复） */
-    if (g_ope_msg[0]) {
-        float my0 = y0 + hn + 12.0f;
-        ImGui::PushClipRect(ImVec2(rx, my0), ImVec2(rx + rw, my0 + slot), true);
-        ImGui::SetCursorScreenPos(ImVec2(rx, my0));
-        if (slot >= 92.0f) ImGui::PushTextWrapPos(rx + rw);
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
-        if (slot >= 92.0f) ImGui::PopTextWrapPos();
-        ImGui::PopClipRect();
-    }
-    /* 右栏 · 门控 · 自动关 · 加步（窄档整组 30px 小字） */
-    gy = y0 + hn + 12.0f + slot + 12.0f;
-    if (sm) meta_push();
-    if (mini) snprintf(t, sizeof t, "门控");
-    else snprintf(t, sizeof t, "门控：%s", g_ope_gate[0] ? g_ope_gate : "无");
-    ImGui::SetCursorScreenPos(ImVec2(rx, gy));
-    if (btn_light(t, ImVec2((rw - 12.0f) * 0.455f, hr))) ope_gate_cycle();
-    if (mini) snprintf(t, sizeof t, "自动关");
-    else snprintf(t, sizeof t, "自动关：%s", g_ope_autoff ? "开" : "关");
-    ImGui::SetCursorScreenPos(ImVec2(rx + (rw - 12.0f) * 0.455f + 12.0f, gy));
-    if (btn_light(t, ImVec2((rw - 12.0f) * 0.545f, hr))) {
-        g_ope_autoff = !g_ope_autoff;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 自动关 %s", g_ope_autoff ? "开" : "关");
-    }
-    {
-        /* 加步（3 列 × 4 行竖排：按列分组 —— 基础 / 控制 / 条件；第 12 格空。加完开子层同竖屏口径） */
-        float c2 = rx + bw3 + 12.0f, c3 = rx + 2.0f * (bw3 + 12.0f);
-        float a1 = gy + hr + 12.0f;
-        float a2 = a1 + hr + 12.0f, a3 = a2 + hr + 12.0f, a4 = a3 + hr + 12.0f;
-        ImGui::SetCursorScreenPos(ImVec2(rx, a1));
-        if (btn_light(plus ? "＋点按" : "点按", ImVec2(bw3, hr))) ope_add_step(OP_STEP_TAP);
-        ImGui::SetCursorScreenPos(ImVec2(rx, a2));
-        if (btn_light(plus ? "＋滑动" : "滑动", ImVec2(bw3, hr))) ope_add_step(OP_STEP_SWIPE);
-        ImGui::SetCursorScreenPos(ImVec2(rx, a3));
-        if (btn_light(plus ? "＋等待" : "等待", ImVec2(bw3, hr))) ope_add_step(OP_STEP_WAIT);
-        ImGui::SetCursorScreenPos(ImVec2(rx, a4));
-        if (btn_light(plus ? "＋找图" : "找图", ImVec2(bw3, hr))) {
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_FINDIMAGE);
-            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(c2, a1));
-        if (btn_light(plus ? "＋按下" : "按下", ImVec2(bw3, hr))) ope_add_step(OP_STEP_DOWN);
-        ImGui::SetCursorScreenPos(ImVec2(c2, a2));
-        if (btn_light(plus ? "＋弹起" : "弹起", ImVec2(bw3, hr))) ope_add_step(OP_STEP_UP);
-        ImGui::SetCursorScreenPos(ImVec2(c2, a3));
-        if (btn_light(plus ? "＋跳转" : "跳转", ImVec2(bw3, hr))) ope_add_step(OP_STEP_JUMP);
-        ImGui::SetCursorScreenPos(ImVec2(c2, a4));
-        if (btn_light(plus ? "＋找色" : "找色", ImVec2(bw3, hr))) {
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_FINDCOLOR);
-            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(c3, a1));
-        if (btn_light(plus4 ? "＋区域判断" : (j4 ? "区域判断" : "区域"), ImVec2(bw3, hr))) ope_add_step(OP_STEP_COND_REGION);
-        ImGui::SetCursorScreenPos(ImVec2(c3, a2));
-        if (btn_light(plus4 ? "＋开关判断" : (j4 ? "开关判断" : "开关"), ImVec2(bw3, hr))) ope_add_step(OP_STEP_COND_TOGGLE);
-        ImGui::SetCursorScreenPos(ImVec2(c3, a3));
-        if (btn_light(plus ? "＋计算" : "计算", ImVec2(bw3, hr))) {
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_CALC);
-            if (g_ope_nsteps > n0) ope_expr_open(g_ope_nsteps - 1);
-        }
-        /* 第 3 列第 4 行：空（11 键 = 4+4+3） */
-    }
-    if (sm) meta_pop();
-    /* 右栏 · [预览][收起] / [取消][完成]（底锚两排；窄档两字钮 30px） */
-    {
-        float bw = (rw - 12.0f) * 0.5f;
-        float py = by - hd - 12.0f - hr;
-        if (sm2) meta_push();
-        ImGui::SetCursorScreenPos(ImVec2(rx, py));
-        if (btn_light("预览", ImVec2(bw, hr))) {
-            g_ope_pv = 1;                    /* 全屏只读页（T2.5）；吞触摸矩形照旧整屏 */
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 预览开（%d 步）", g_ope_nsteps);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(rx + bw + 12.0f, py));
-        if (btn_light("收起", ImVec2(bw, hr))) {
-            g_ope_coll = 1;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 收起（编辑状态保留；点条展开）");
-        }
-        ImGui::SetCursorScreenPos(ImVec2(rx, by - hd));
-        if (btn_light("取消", ImVec2(bw, hd))) {    /* 取消 = 丢本轮编辑回操作页（改名弹层同款语义） */
-            ALOGI("op edit 取消（丢编辑）");
-            op_edit_close();
-        }
-        ImGui::SetCursorScreenPos(ImVec2(rx + bw + 12.0f, by - hd));
-        if (btn_blue("完成", ImVec2(bw, hd))) op_edit_save();
-        if (sm2) meta_pop();
-    }
-}
-
-/* 编辑层主屏（T2.4 起按**当前屏整屏**绘制，见 build_edit_layer）：头部（名字行 + [预览][收起]）/
- * 步骤列表（可滚）/ 加步（v5 三行九类型 3×3）/ 门控循环 / 跑完自动关 / [取消][完成]。
- * 子层（名字键盘、数字弹层、变量选择、区域选择、表达式、预览页）开着时本屏不画（子层整面盖住）。
- * T7.3（⑤）：横屏（g_scr_w > g_scr_h）整屏改左右分栏（draw_op_edit_land）；竖屏本函数为现状布局
- * 收紧行高（加步 4×3 紧凑置底）；竖屏列表保底 120px 给不出时也退分栏（硬约束兜底）。 */
-static void draw_op_edit(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, msg_h, ly, by_bottom, done_y, autooff_y, gate_y, add_y1, add_y2, add_y3, list_top, list_bot, list_h;
-
-    if (g_ope_pv) { draw_op_preview(); return; }     /* 预览页（T2.5）：只读层，最高优先（编辑层头 [预览] 进） */
-    if (g_ope_kb) { draw_ope_name_kb(); return; }
-    if (g_ope_vl) { draw_ope_vlist(); return; }      /* 变量选择弹层（数字弹层之上） */
-    if (g_ope_rl >= 0) { draw_ope_rlist(); return; } /* 区域选择弹层（条件步） */
-    if (g_ope_ex) { draw_ope_expr(); return; }       /* 表达式子层（v5 计算步）—— 在 g_ope_se 之前 */
-    if (g_vis_ed) { draw_vis_edit(); return; }       /* 视觉步参数层（T3.2）—— 数字键盘在它内部（g_vis_num） */
-    if (g_ope_se >= 0) { draw_num_edit(); return; }
-
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);      /* T2.4 整屏窗：顶边距 12（不再避面板标题栏） */
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    /* T7.3 布局重排（⑤）：横屏（g_scr_w > g_scr_h）左右分栏 —— 左步骤列表（主区）/ 右控制栏。 */
-    if (g_scr_w > g_scr_h) { draw_op_edit_land(x0, y0, cw, wh); return; }
-    /* ---- 竖屏几何（T7.3：先算后画 —— 兜底判定要在落笔之前）----
-     * 步骤区标题 + 底部按钮锚点（从底往上排，列表拿中间剩下的高度） */
-    msg_h = 46.0f;                           /* 提示槽固定占位：出现提示时下面整块不动，防误点 */
-    ly = y0 + 68 + 84 + 12 + msg_h;
-    /* 底部按钮行高自适应（矮屏/横屏）：先压矮按钮、再让列表，保证 [取消]/[完成]/加步/门控/自动关
-     * 永远在屏内可点（列表内部本就可滚）。两档紧凑，阈值按「底锚区可用高」算；v5 加步三行 → 5 行 bh_row。
-     * T7.3：默认行高收紧（76→64 / 92→80）—— 加步区 4×3 紧凑置底，列表（主区）多拿高度。 */
-    float bh_row = 64.0f, bh_done = 80.0f;
-    {
-        float avail_b = (b.y - 24.0f) - (ly + 36.0f);
-        if (avail_b < 140.0f + 80.0f + 5.0f * (64.0f + 12.0f)) { bh_row = 56.0f; bh_done = 68.0f; }
-        if (avail_b < 80.0f + 68.0f + 5.0f * (56.0f + 12.0f)) { bh_row = 48.0f; bh_done = 60.0f; }
-    }
-    by_bottom = b.y - 24;
-    done_y = by_bottom - bh_done;
-    autooff_y = done_y - 12 - bh_row;
-    gate_y = autooff_y - 12 - bh_row;
-    add_y3 = gate_y - 12 - bh_row;           /* 加步第三行（最下）：区域判断 / 开关判断 / 计算 */
-    add_y2 = add_y3 - 12 - bh_row;           /* 加步第二行：按下 / 弹起 / 跳转 */
-    add_y1 = add_y2 - 12 - bh_row;           /* 加步第一行（最上）：点按 / 滑动 / 等待 */
-    list_top = ly + 36;
-    list_bot = add_y1 - 12;
-    list_h = list_bot - list_top;
-    /* T7.3 硬约束兜底：竖屏连列表 120px 保底都给不出（极矮 / 方形屏）→ 退横屏分栏，保全元素可达 */
-    if (list_h < 120.0f) { draw_op_edit_land(x0, y0, cw, wh); return; }
-    /* 头部：名字小字 + 右 [收起] 钮（T2.4：收成底部条，编辑状态全保留；点条再展开 ——
-     * 「一边看游戏一边改」用。收起态与子层叠加规则：收起只画条，子层状态原样保留，展开即回原层）。 */
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    text_meta_s("名字（脚本按名字认它；与别的操作重名会被拒）");
-    {
-        float bw = 150.0f;                       /* 头排两钮：预览 + 收起（窄屏也放得下） */
-        ImGui::SetCursorScreenPos(ImVec2(x0 + cw - 2 * bw - 12, y0 - 8));
-        if (btn_light("预览", ImVec2(bw, 64))) {
-            g_ope_pv = 1;                        /* 全屏只读页（T2.5）；吞触摸矩形照旧整屏（ui_rect_now 只看 g_ope_i/g_ope_coll） */
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 预览开（%d 步）", g_ope_nsteps);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0 + cw - bw, y0 - 8));
-        if (btn_light("收起", ImVec2(bw, 64))) {
-            g_ope_coll = 1;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 收起（编辑状态保留；点条展开）");
-        }
-    }
-    /* 名字行（点它开字符键盘子层） */
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 68));
-    if (btn_light(g_ope_name, ImVec2(cw, 84))) {
-        g_ope_kb = 1; g_ope_kbmsg[0] = 0; g_ope_up = 0;
-        g_need = 1; g_force_frames = 2;
-        ALOGI("op edit 改名子层开 %s", g_ope_name);
-    }
-    /* 就地提示（[完成] 拒收 / 步数门 / 门控提示） */
-    if (g_ope_msg[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 68 + 84 + 12));
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_ope_msg);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, ly));
-    {
-        char t[80];
-        snprintf(t, sizeof t, "步骤 · %d 步（最多 %d；列表可上下拖动滚）", g_ope_nsteps, OPE_MAX_STEPS);
-        text_meta_s(t);
-    }
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##opsteps", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);                           /* 列表实区：拖它滚动（同区域/操作列表的口径） */
-    drag_scroll_for(SCR_LIST);
-    for (int i = 0; i < g_ope_nsteps; i++) ope_step_row(i);
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    /* 加步（v8 十一类型，三行 4×3：点按/滑动/等待/找图 · 按下/弹起/跳转/找色 · 区域判断/开关判断/计算；
-     * 第 12 格空。行数不变 ⇒ 上面的 5 行自适应阈值口径不动）/ 门控 / 自动关 / 收尾 */
-    {
-        float bw4 = (cw - 3 * 12) / 4.0f;
-        float cx2 = x0 + bw4 + 12, cx3 = x0 + 2 * (bw4 + 12), cx4 = x0 + 3 * (bw4 + 12);
-        ImGui::SetCursorScreenPos(ImVec2(x0, add_y1));
-        if (btn_light("＋点按", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_TAP);
-        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y1));
-        if (btn_light("＋滑动", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_SWIPE);
-        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y1));
-        if (btn_light("＋等待", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_WAIT);
-        ImGui::SetCursorScreenPos(ImVec2(cx4, add_y1));
-        if (btn_light("＋找图", ImVec2(bw4, bh_row))) {   /* 加完立即开视觉参数层（选模板，同计算步口径） */
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_FINDIMAGE);
-            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0, add_y2));
-        if (btn_light("＋按下", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_DOWN);
-        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y2));
-        if (btn_light("＋弹起", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_UP);
-        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y2));
-        if (btn_light("＋跳转", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_JUMP);
-        ImGui::SetCursorScreenPos(ImVec2(cx4, add_y2));
-        if (btn_light("＋找色", ImVec2(bw4, bh_row))) {
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_FINDCOLOR);
-            if (g_ope_nsteps > n0) ope_vis_open(g_ope_nsteps - 1);
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0, add_y3));
-        if (btn_light(cw < 1050.0f ? "区域判断" : "＋区域判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_REGION);
-        ImGui::SetCursorScreenPos(ImVec2(cx2, add_y3));
-        if (btn_light(cw < 1050.0f ? "开关判断" : "＋开关判断", ImVec2(bw4, bh_row))) ope_add_step(OP_STEP_COND_TOGGLE);
-        ImGui::SetCursorScreenPos(ImVec2(cx3, add_y3));
-        if (btn_light("＋计算", ImVec2(bw4, bh_row))) {   /* 加完立即开表达式子层（spec §6；步满加不进则不弹） */
-            int n0 = g_ope_nsteps;
-            ope_add_step(OP_STEP_CALC);
-            if (g_ope_nsteps > n0) ope_expr_open(g_ope_nsteps - 1);
-        }
-        /* 第 4 列第 3 行：空（11 键 = 4+4+3） */
-    }
-    {
-        char g[72];
-        snprintf(g, sizeof g, "门控开关：%s", g_ope_gate[0] ? g_ope_gate : "无");
-        ImGui::SetCursorScreenPos(ImVec2(x0, gate_y));
-        if (btn_light(g, ImVec2(cw, bh_row))) ope_gate_cycle();
-        ImGui::SetCursorScreenPos(ImVec2(x0, autooff_y));
-        if (btn_light(g_ope_autoff ? "跑完自动关：开" : "跑完自动关：关", ImVec2(cw, bh_row))) {
-            g_ope_autoff = !g_ope_autoff;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 自动关 %s", g_ope_autoff ? "开" : "关");
-        }
-    }
-    {
-        float bw2 = (cw - 12) * 0.5f;
-        ImGui::SetCursorScreenPos(ImVec2(x0, done_y));
-        if (btn_light("取消", ImVec2(bw2, bh_done))) {    /* 取消 = 丢本轮编辑回操作页（改名弹层同款语义） */
-            ALOGI("op edit 取消（丢编辑）");
-            op_edit_close();
-        }
-        ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, done_y));
-        if (btn_blue("完成", ImVec2(bw2, bh_done))) op_edit_save();
-    }
-}
-
 static void page_log(void)
 {
     char meta[32];
@@ -6268,139 +3068,37 @@ static void page_settings(void)
 {
     page_header("设置", "");
     ImGui::Dummy(ImVec2(0, 4));
-    ImGui::TextDisabled("叠加层显隐");
-    if (g_ov_show) {
-        if (btn_dark("显隐：显", ImVec2(260, 84))) { g_ov_show = 0; g_force_frames = 3; }
-    } else {
-        if (btn_light("显隐：隐", ImVec2(260, 84))) { g_ov_show = 1; g_force_frames = 3; }
-    }
-    ImGui::TextDisabled("只影响绘制，监听不停");
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::TextDisabled("操作");
-    ImGui::TextWrapped("拖标题栏移窗，其它地方不拖窗");
-    ImGui::TextWrapped("标题栏右侧箭头按钮：整窗收成一条，再点一次展开");
-    ImGui::TextWrapped("区域列表内上下拖动滚动");
-    ImGui::TextWrapped("矩形/圆形框选：到屏上拖，松手生成");
-    ImGui::TextWrapped("选中后：拖框内移动，拖四角黄块缩放");
-    ImGui::TextWrapped("点区域卡片上的名字可改 id（脚本按 id 监听）");
-    ImGui::TextWrapped("改完自动存 regions.conf，重启还在");
-}
-
-/* 说明页（v8 视觉）：18 条术语 —— 1–15 承 v4 §12、16 为 v5 新增；第 12 条更新 + 17/18 新增逐字照
- * docs/VISION_PLAN.md §12（面板文案唯一来源）。数组内容从 spec 机器提取（条目为单行、无加粗标记，
- * 按行原样），提取结果逐字节复核 —— 改文案先改 spec、再按同一规则重提，别手改这里。 */
-static const char *const g_help_lines[] = {
-    "1. 触发：给区域绑一条操作；手指碰到这个区域就会跑那条操作。",
-    "2. 时机·按下：手指碰到区域的那一刻就跑。",
-    "3. 时机·完整按压：手指碰到、抬起后跑（按一下、抬起来，才算数）。",
-    "4. 开关型：把区域当开关——每完整按压一次，「开/关」翻转一次（绿色 = 开）。",
-    "5. 门控：操作的门禁——绑一个开关型区域，它开着，操作才允许跑。",
-    "6. 跑完自动关：操作正常跑完后，自动把门控开关翻回「关」。",
-    "7. 取点：点 [取点]，然后去屏幕上点一下——那个坐标对（x 和 y）一次填进正在编辑的位置，并在屏上标一下。",
-    "8. 变量（触发数据）：这次触发的那根手指——触发按下x / 触发按下y（按下位置）、触发弹起x / 触发弹起y（抬起位置）、触发时长（按下到抬起的毫秒数）。「完整按压」触发时全都有； 「按下」触发只有按下位置；面板手动运行没有。",
-    "9. 按下 / 弹起：两条分开的步骤——按下 = 按住不放；弹起 = 松开。中间可以夹「等待」「判断」。",
-    "10. 区域判断：检查一个点在不在某个区域内；成立 / 不成立两侧各选接下来做什么：继续下一步、跳过下一步、跳到第 N 步、中止（可以只配一侧，另一侧走默认）。",
-    "11. 开关判断：检查某个开关型区域现在是不是「开」；成立 / 不成立两侧的选项同「区域判断」。",
-    "12. 中止原因速查：变量无值 / 结果无值 / 表达式错 / 槽占用 / 未按下 / 区域不存在 / 非开关型 / 条件不成立 / 条件中止 / 未命中 / 无画面 / 模板不存在 / 视觉错 / 跳转超限。",
-    "13. 跳转：直接跳到指定步骤继续——往前跳 = 跳过中间步骤；往后跳 = 循环（比如跳回第 1 步重来）。目标也可以选「结束」直接完成操作；单次运行跳转超过 200 次会自动中止（防死循环）。",
-    "14. 方案：把当前的区域和操作整体存成一个命名方案；切换方案 = 换成那一套（编辑会自动存回当前方案）。",
-    "15. 方案管理：「方案」页可以新建（空白）、从当前另存为、重命名、删除；当前方案不能删（先切到别的方案再删）。",
-    "16. 计算：算一个数存进自己命名的变量——用触发数据（tdx/tdy=按下坐标、tux/tuy=弹起坐标、tms=按压时长毫秒）、找图/找色的命中坐标（fx/fy）、数字和已有变量做加减乘除，也能用 atan2、sin、cos、abs、min、max、sqrt（三角函数按度）。变量名字可以自己改（默认 v1、v2…）；算好的变量可以当坐标、时长用在后面的步骤里。",
-    "17. 找图：先存好模板（「模板」页截屏框选），步骤里选模板名——在当前画面里找这块图案（可以限定区域）；找到就把命中坐标写进 fx（x）/fy（y）（系统预置变量，后面的步骤直接引用），走「成立」档；没找到走「不成立」档。打开「颜色校验」后，明暗像但颜色不同的图案会被跳过（旧模板重存一次即可生效）。",
-    "18. 找色：按颜色找像素——填颜色（十六进制）和容差（0–255）；「多点找色」还要选一个点集（基准色 + 参考点，在「模板」页吸色点选生成）。找到同样写 fx/fy 走「成立」档，没找到走「不成立」档。",
-    "19. 试一下：找图/找色步骤（和「模板」页）里点「试一下」——当场找一次，马上显示「命中 (x, y)」或「未命中」，并把找到的位置在屏幕上框出来（约 2 秒）。编辑时先用它验证模板/颜色找不找得到；旁边可以直接调阈值/容差（±1、±10），调一下立刻重试。",
-    "20. 持续查找：找图/找色打开「持续查找」并设个超时（毫秒）——它会一遍遍重新找，找到就停、返回坐标；一直没找到就到超时为止（走「不成立」档）。找多快可以在「模板」页调（抓帧间隔：0 = 全速）。",
-    "21. 自定义变量：计算步骤可以存进自己命名的变量（默认 v1、v2…，名字可改，最多 16 个）——不再只有固定的 4 个槽；找图/找色、按下/弹起这些是系统预置名字（fx/fy、触发按下x…）。任何字段编辑时都能在「变量」列表里选它们；表达式编辑里也有「变量」按钮，点开就是全部变量（含预置），点一条直接插进去。",
-    "22. 字段直接写算式：坐标、时长这些格子里点「表达式」可以直接写算式（比如 按下x+100）——确定后自动在这步前面生成一条「计算」步骤（名字默认 e1，可改），格子指向它。原来的「计算」步骤照样能用。",
-    "23. 截帧选择器：截帧后可以用 [＋]/[－]/[适应] 缩放、拖画面平移；选择框四角拖着改大小、框里拖着整体挪；[确认] 后框会留着，还能继续调整。",
-    "24. 模板/点集重编辑：列表里点「编辑」——模板先看到已存的样子（点「重新截帧」重选区域，会尽量恢复上次框的位置）；点集一进入就摆到画面上（旧文件先摆在画面中间，用 [重选基准] 挪位；容差可直接调，[存点集] 保存）。保存：不改名 = 覆盖，改名 = 另存。",
-    "25. 步骤移动：步骤行点「移动」，再点目标位置那一行的「放这里」，一步到位（长距离不用一点点挪）；移动中再点自己那行可取消。",
-};
-static void page_help(void)
-{
-    page_header("说明", "");
-    ImGui::Dummy(ImVec2(0, 6));
-    /* 正文自成一格可滚容器（与区域列表 / 操作页同款：AlwaysVerticalScrollbar + SCR_LIST） */
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::BeginChild("##help", ImVec2(0, 0), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    for (int i = 0; i < (int)(sizeof g_help_lines / sizeof g_help_lines[0]); i++) {
-        ImGui::TextWrapped("%s", g_help_lines[i]);
-        ImGui::Dummy(ImVec2(0, 10));
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-}
-
-/* 改名弹层（区域）：键盘本体抽到 draw_char_kb（与操作改名共用）；这里只留区域改名的语义：
- * 确定走 id_name_ok（合法 + 不撞别的区域），成功才 rename_region。 */
-static void draw_name_edit(void)
-{
-    int act = draw_char_kb("给区域起个名字：脚本就按这个名字认它（默认 r1/c1…，可改）",
-                           g_name_old, g_name_buf, (int)sizeof g_name_buf, &g_name_up,
-                           g_name_msg, (int)sizeof g_name_msg, (float)TITLE_H + 10);   /* 面板窗：sheet 顶在标题栏下 */
-    if (act == 1) {
-        g_name_i = -1; g_name_msg[0] = 0; g_need = 1; g_force_frames = 3;
-        ALOGI("name cancel");
-    } else if (act == 2) {
-        int rc = id_name_ok(g_name_old, g_name_buf);
-        if (rc == 0) {
-            if (strcmp(g_name_old, g_name_buf)) rename_region(g_name_old, g_name_buf);
-            g_name_i = -1; g_name_msg[0] = 0; g_need = 1; g_force_frames = 3;
-        } else {
-            snprintf(g_name_msg, sizeof g_name_msg, "%s",
-                     rc == 1 ? "名字不能为空" : rc == 2 ? "最多 15 个字符" :
-                     rc == 3 ? "只能用 a-z A-Z 0-9 _ -" : "这个名字已经被别的区域用了");
+    ImGui::TextDisabled("视觉抓帧");
+    /* 抓帧间隔（2026-10-05f；自模板页移入，缩编 v0.5）：抓帧线程与面板渲染解耦后的抓帧节奏（0 = 全速）；
+     * 点一下循环预设（ui.conf 持久化）。 */
+    {
+        static const int presets[8] = { 0, 5, 10, 20, 33, 50, 100, 200 };
+        char lab[80];
+        int k, cur = 0;
+        for (k = 0; k < 8; k++) if (presets[k] == g_cap_ms) { cur = k; break; }
+        snprintf(lab, sizeof lab, "抓帧间隔：%d ms%s（点一下切换）", g_cap_ms, g_cap_ms == 0 ? " = 全速" : "");
+        if (btn_light(lab, ImVec2(ImGui::GetContentRegionAvail().x, 84))) {
+            g_cap_ms = presets[(cur + 1) % 8];
+            vtouch_vis_cap_interval_set(g_cap_ms);
+            ui_conf_save();
+            ALOGI("vis 抓帧间隔 → %d ms", g_cap_ms);
             g_need = 1; g_force_frames = 2;
-            ALOGI("name reject rc=%d", rc);
         }
+        ImGui::Dummy(ImVec2(0, 6));
     }
+    text_meta_w("其它设置在编辑器 app（com.vtouch.editor）；面板 = 运行时窗口（观察 + 控制 + 区域调整）。");
 }
 
-/* ---- 方案页（v4 T2.1）：列表 + 切换 / 新建（空）/ 从当前另存为 / 重命名 / 删除 ----------------------
- * 布局照 spec §6：页头（当前 / 选中）+ 提示槽（固定占位）+ 列表（每行方案名 + [切换]；当前行高亮、
- * 按钮禁用；可滚 + SCR_LIST 拖滚）+ 底部四键；子层 = 名字键盘（draw_char_kb，ASCII）/ 删除确认
- * （小确认层）。接线（spec §5；执行器 = T1.2 的 scheme_switch，返回码见其段首注释）：
- *   切换 = scheme_switch，码表映射就地提示（9/10 是「已回滚」语义，提示里写明）；
- *   新建 = 建目录 + 两空合法文件（不自动切）；另存为 = live 两文件 → schemes/<名>/ + current 改新名；
- *   重命名 = 目录 rename +（current == 旧名时）current 同步，同步失败回滚目录名；
- *   删除 = 拒当前（提示）、确认后删目录。
- * 日志逐字 spec §8：`方案 新建 <名>` / `方案 另存为 <名>` / `方案 改名 <旧> → <新>` / `方案 删除 <名>`
- * （切换的成功日志在 scheme_switch 里；本页另加失败路径 `方案 …失败 …` 诊断词，成功路径零新增）。 */
+
+
+/* ---- 方案页（缩编 v0.5）：列表 + 切换 + [重载当前方案] 兜底键 --------------------------------------
+ * 布局：页头（当前）+ 提示槽（固定占位）+ 列表（方案名 + [切换]；当前行高亮、按钮禁用；
+ * 可滚 + SCR_LIST 拖滚）+ 底部 [重载当前方案]（T8 热生效-A 的手动版）。
+ * CRUD（新建/另存为/重命名/删除）与外层名字键盘已删（归编辑器 app）。
+ * 接线：切换 = scheme_switch；重载 = scheme_reload（绕过同名 no-op 的强制重放）。
+ * 失败路径就地图示（码表 = scheme_switch 段首注释；9/10 是「已回滚」语义，提示里写明）。 */
 
 static char g_scm_msg[128] = {0};       /* 页面提示槽（切换结果 / 拒收 / 操作成败；固定占位） */
-static char g_scm_sel[VT_NAME_BUF] = {0};        /* 列表选中行（重命名 / 删除的作用对象；空 = 未选） */
-static int  g_scm_kb = 0;               /* 名字键盘子层：0=关 1=新建 2=另存为 3=重命名 */
-static char g_scm_kbmsg[72] = {0};      /* 名字键盘子层里的拒收提示 */
-static int  g_scm_kbup = 0;             /* 名字键盘子层大小写档 */
-static char g_scm_name[VT_NAME_BUF] = {0};       /* 名字键盘子层输入缓冲 */
-static char g_scm_ren_old[VT_NAME_BUF] = {0};    /* 重命名子层的旧名（键盘「原名」对照） */
-static char g_scm_del[VT_NAME_BUF] = {0};        /* 删除确认层：待删方案名（空 = 层关） */
-
-/* 面板编辑中的名字（键盘输入/编辑缓冲，含正在打的中文）也要即时进图集（v11）。 */
-static void ui_glyph_scan_edits(void)
-{
-    ui_glyph_scan(g_name_old);
-    ui_glyph_scan(g_name_buf);
-    ui_glyph_scan(g_vis_reedit_name);
-    ui_glyph_scan(g_vis_kb_buf);
-    ui_glyph_scan(g_ope_orig);
-    ui_glyph_scan(g_ope_name);
-    ui_glyph_scan(g_ope_gate);
-    ui_glyph_scan(g_ope_ex_name);
-    ui_glyph_scan(g_ope_saved_as);
-    ui_glyph_scan(g_ope_del_owed);
-    ui_glyph_scan(g_scm_sel);
-    ui_glyph_scan(g_scm_name);
-    ui_glyph_scan(g_scm_ren_old);
-    ui_glyph_scan(g_scm_del);
-}
 
 /* 切换返回码 → 就地提示（码表 = scheme_switch 段首注释；9/10 写明「已回滚」防误读）。 */
 static const char *scm_switch_why(int rc)
@@ -6420,21 +3118,6 @@ static const char *scm_switch_why(int rc)
     default: return "切换失败";
     }
 }
-/* CRUD 失败码 → 就地提示（新建 / 另存为 / 重命名 共用一套码，含义见各 helper 注释）。 */
-static const char *scm_crud_why(int rc)
-{
-    switch (rc) {
-    case 1: return "名字非法：只能 a-z A-Z 0-9 _ -（1..15 字，裸 - 不行）";
-    case 2: return "已有同名方案";
-    case 3: return "方案目录创建失败";
-    case 4: return "方案文件写入失败";
-    case 5: return "current 写入失败（已撤销，未另存）";
-    case 6: return "方案不存在（可能已被删/改名）";
-    case 7: return "目录改名失败";
-    case 8: return "current 同步失败（目录名已回滚）";
-    default: return "操作失败";
-    }
-}
 /* 切换（列表 [切换] 键）：调 T1.2 执行器（预检 / 静默边界 / flush+写 live / 清表重放 / current /
  * 刷新都在里面）；失败只在这里映射提示 + 诊断日志（执行器对预检拒切不打日志 —— 返回值就是接口）。 */
 static void scm_switch_to(const char *name)
@@ -6448,162 +3131,28 @@ static void scm_switch_to(const char *name)
     }
     g_need = 1; g_force_frames = 3;
 }
-/* 删方案目录（spec §5「确认后删目录」）：先删两文件（含 .tmp 残件）再 rmdir。0 / -1（errno 保留）。 */
-static int scm_delete_dir(const char *name)
-{
-    char p[160];
-    snprintf(p, sizeof p, "%s/%s/regions.conf", SCHEME_DIR, name); remove(p);
-    snprintf(p, sizeof p, "%s/%s/regions.conf.tmp", SCHEME_DIR, name); remove(p);
-    snprintf(p, sizeof p, "%s/%s/ops.conf", SCHEME_DIR, name); remove(p);
-    snprintf(p, sizeof p, "%s/%s/ops.conf.tmp", SCHEME_DIR, name); remove(p);
-    snprintf(p, sizeof p, "%s/%s", SCHEME_DIR, name);
-    if (rmdir(p) != 0) return -1;
-    return 0;
-}
-/* 新建（空）（spec §5）：建目录 + 两空合法文件；不自动切换；日志 `方案 新建 <名>`。返回 0 / 1 名字非法
- * / 2 撞名 / 3 建目录失败 / 4 写空文件失败（4 时清掉半建目录，重试不会撞名）。 */
-static int scm_new_empty(const char *name)
-{
-    char path[160];
-    if (scheme_name_ok(name) != 0) return 1;
-    if (scheme_exists(name)) return 2;
-    region_conf_dir();
-    if (mkdir(SCHEME_DIR, 0775) < 0 && errno != EEXIST) return 3;
-    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
-    if (mkdir(path, 0775) < 0) return 3;
-    snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
-    if (scheme_write_empty(path, 0) == 0) {
-        snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
-        if (scheme_write_empty(path, 1) == 0) {
-            ALOGI("方案 新建 %s", name);
-            return 0;
-        }
-    }
-    scm_delete_dir(name);       /* 半建目录清掉：留半份会让下次重试撞名 */
-    return 4;
-}
-/* 从当前另存为（spec §5）：live 两文件复制进 schemes/<名>/ → current 改新名（内容相同，无需动核心）；
- * 日志 `方案 另存为 <名>`。返回 0 / 1 名字非法 / 2 撞名 / 3 建目录失败 / 4 复制失败 / 5 current 写失败
- * （4/5 清掉新目录 = 撤销，重试不会撞名）。 */
-static int scm_save_as(const char *name)
-{
-    char path[160];
-    if (scheme_name_ok(name) != 0) return 1;
-    if (scheme_exists(name)) return 2;
-    region_conf_dir();
-    if (mkdir(SCHEME_DIR, 0775) < 0 && errno != EEXIST) return 3;
-    snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
-    if (mkdir(path, 0775) < 0) return 3;
-    snprintf(path, sizeof path, "%s/%s/regions.conf", SCHEME_DIR, name);
-    if (scheme_copy_file(REGION_CONF_NEW, path, 0) != 0) { scm_delete_dir(name); return 4; }
-    snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, name);
-    if (scheme_copy_file(OPS_CONF_FILE, path, 1) != 0) { scm_delete_dir(name); return 4; }
-    if (scheme_cur_set(name) != 0) { scm_delete_dir(name); return 5; }
-    ALOGI("方案 另存为 %s", name);
-    return 0;
-}
-/* 重命名（spec §5）：目录 rename；若 current == 旧名 → current 写新名（写失败回滚目录名，保
- * live == schemes/<current> 不变量）；日志 `方案 改名 <旧> → <新>`。返回 0 / 1 名字非法 / 2 撞名 /
- * 6 旧方案不存在 / 7 目录改名失败 / 8 current 同步失败（目录名已回滚）。 */
-static int scm_rename(const char *oldn, const char *newn)
-{
-    char po[160], pn[160], cur[VT_NAME_BUF];
-    if (scheme_name_ok(newn) != 0) return 1;
-    if (!strcmp(oldn, newn)) return 0;          /* 同名 = 无操作（键盘 [确定] 直接收层） */
-    if (scheme_exists(newn)) return 2;
-    if (!scheme_exists(oldn)) return 6;
-    snprintf(po, sizeof po, "%s/%s", SCHEME_DIR, oldn);
-    snprintf(pn, sizeof pn, "%s/%s", SCHEME_DIR, newn);
-    if (rename(po, pn) != 0) return 7;
-    if (scheme_cur_get(cur) == 0 && !strcmp(cur, oldn)) {
-        if (scheme_cur_set(newn) != 0) {
-            if (rename(pn, po) != 0)
-                ALOGW("方案 改名 %s → %s：current 同步失败且目录名回滚失败: %s", oldn, newn, strerror(errno));
-            return 8;
-        }
-    }
-    ALOGI("方案 改名 %s → %s", oldn, newn);
-    return 0;
-}
-/* 打开名字键盘子层（1=新建 2=另存为 3=重命名）；重命名预填旧名（键盘「原名」对照 + 可直接改）。 */
-static void scm_kb_open(int mode)
-{
-    g_scm_kb = mode;
-    g_scm_kbmsg[0] = 0;
-    g_scm_kbup = 0;
-    g_scm_name[0] = 0;
-    g_scm_ren_old[0] = 0;
-    if (mode == 3) {
-        snprintf(g_scm_name, sizeof g_scm_name, "%s", g_scm_sel);
-        snprintf(g_scm_ren_old, sizeof g_scm_ren_old, "%s", g_scm_sel);
-    }
-    g_scm_msg[0] = 0;
-    g_need = 1; g_force_frames = 3;
-}
-/* 点名字 = 选中（重命名 / 删除的作用对象）；换选中清旧提示。 */
-static void scm_select(const char *name)
-{
-    snprintf(g_scm_sel, sizeof g_scm_sel, "%s", name);
-    g_scm_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-}
-/* 底部 [重命名]：无选中 / 选中已失效 → 就地提示；否则开名字键盘（预填旧名）。 */
-static void scm_act_rename(void)
-{
-    if (!g_scm_sel[0]) {
-        snprintf(g_scm_msg, sizeof g_scm_msg, "先点一行名字选中要操作的方案");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    if (!scheme_exists(g_scm_sel)) {
-        snprintf(g_scm_msg, sizeof g_scm_msg, "方案不存在（可能已被删/改名）：%s", g_scm_sel);
-        g_scm_sel[0] = 0;
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    scm_kb_open(3);
-}
-/* 底部 [删除]：无选中 / 失效 → 提示；选中 = 当前 → 拒（spec §5：不允许删除当前）；否则开确认层。 */
-static void scm_act_delete(void)
-{
-    char cur[VT_NAME_BUF];
-    if (!g_scm_sel[0]) {
-        snprintf(g_scm_msg, sizeof g_scm_msg, "先点一行名字选中要操作的方案");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    if (!scheme_exists(g_scm_sel)) {
-        snprintf(g_scm_msg, sizeof g_scm_msg, "方案不存在（可能已被删/改名）：%s", g_scm_sel);
-        g_scm_sel[0] = 0;
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    scheme_cur_get(cur);
-    if (cur[0] && !strcmp(cur, g_scm_sel)) {
-        snprintf(g_scm_msg, sizeof g_scm_msg, "当前方案不能删除（先切到别的方案再删）");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    snprintf(g_scm_del, sizeof g_scm_del, "%s", g_scm_sel);
-    g_scm_msg[0] = 0;
-    g_need = 1; g_force_frames = 3;
-}
-/* 一行方案：名字键（点 = 选中）+ [切换]（当前行禁用）；当前行高亮（浅蓝底 + 蓝边，同操作卡运行态口径）。 */
+/* 一行方案：名字（普通文本）+ [切换]（当前行禁用）；当前行高亮（浅蓝底 + 蓝边，同操作卡运行态口径）。
+ * 缩编 v0.5：选中 / 新建 / 另存为 / 重命名 / 删除已归编辑器 app，面板只留切换。 */
 static void scm_row(const char *name, const char *cur)
 {
     int is_cur = cur[0] && !strcmp(name, cur);
-    int is_sel = g_scm_sel[0] && !strcmp(name, g_scm_sel);
     ImGui::PushID(name);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, is_cur ? ImVec4(0.937f, 0.965f, 1.00f, 1.00f) : WHITE);
-    ImGui::PushStyleColor(ImGuiCol_Border, is_cur ? BLUE500 : (is_sel ? BLUE500 : ZINC200));
+    ImGui::PushStyleColor(ImGuiCol_Border, is_cur ? BLUE500 : ZINC200);
     ImGui::BeginChild("row", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY,
                       ImGuiWindowFlags_NoScrollbar);
     {
         float gap = 12.0f, bw = 150.0f;
         float nw = ImGui::GetContentRegionAvail().x - bw - gap;
         if (nw < 120) nw = 120;
-        if (is_sel) { if (btn_blue(name, ImVec2(nw, 84))) scm_select(name); }
-        else        { if (btn_light(name, ImVec2(nw, 84))) scm_select(name); }
+        {
+            /* 名字：普通文本，垂直居中在 84 高的行里（缩编 v0.5；原「点名字选中」已删） */
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImVec2 ts = ImGui::CalcTextSize(name);
+            ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 16, p.y + (84.0f - ts.y) * 0.5f),
+                                                ImGui::GetColorU32(ImGuiCol_Text), name);
+            ImGui::Dummy(ImVec2(nw, 84));
+        }
         ImGui::SameLine();
         if (is_cur) {                       /* 当前行：按钮禁用（spec §6） */
             ImGui::BeginDisabled();
@@ -6612,13 +3161,7 @@ static void scm_row(const char *name, const char *cur)
         } else if (btn_blue("切换", ImVec2(bw, 84))) {
             scm_switch_to(name);
         }
-        if (is_cur || is_sel) {
-            char m[32];
-            if (is_cur && is_sel) snprintf(m, sizeof m, "当前方案 · 已选中");
-            else if (is_cur)      snprintf(m, sizeof m, "当前方案");
-            else                  snprintf(m, sizeof m, "已选中");
-            text_meta_s(m);
-        }
+        if (is_cur) text_meta_s("当前方案");
     }
     ImGui::EndChild();
     ImGui::PopStyleColor(2);
@@ -6627,7 +3170,8 @@ static void scm_row(const char *name, const char *cur)
     ImGui::PopStyleVar();
     ImGui::PopID();
 }
-/* 「方案」页（spec §6）：页头（当前 / 选中）+ 提示槽（固定占位，同编辑层口径）+ 列表 + 底部四键。 */
+/* 「方案」页（缩编 v0.5）：页头 + 提示槽（固定占位）+ 列表（切换）+ [重载当前方案] 兜底键。
+ * CRUD（新建/另存/重命名/删除）与外层名字键盘已删（归编辑器 app）。 */
 static void page_scheme(void)
 {
     char cur[VT_NAME_BUF] = {0}, names[SCHEME_LIST_MAX][VT_NAME_BUF], meta[40], l[64];
@@ -6636,7 +3180,7 @@ static void page_scheme(void)
     n = scheme_list(names, SCHEME_LIST_MAX);
     snprintf(meta, sizeof meta, "%d 个", n);
     page_header("方案", meta);
-    snprintf(l, sizeof l, "当前：%s · 选中：%s", cur[0] ? cur : "—", g_scm_sel[0] ? g_scm_sel : "无");
+    snprintf(l, sizeof l, "当前：%s", cur[0] ? cur : "—");
     text_meta_s(l);
     ImGui::Dummy(ImVec2(0, 4));
     /* 提示槽固定占位：出现提示时下面整块不动，防误点（两行 30px 小字内放得下） */
@@ -6652,8 +3196,8 @@ static void page_scheme(void)
     ImGui::Dummy(ImVec2(0, 4));
     /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
     {
-        float list_h = ImGui::GetContentRegionAvail().y - (84.0f * 2 + 12.0f + 12.0f);
-        if (list_h < 0) list_h = 0;   /* 矮屏：列表让位（底部四键优先可达；正常高屏不受影响） */
+        float list_h = ImGui::GetContentRegionAvail().y - (84.0f + 12.0f + 12.0f);
+        if (list_h < 0) list_h = 0;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
         ImGui::BeginChild("##schemes", ImVec2(0, list_h), ImGuiChildFlags_None,
@@ -6667,1880 +3211,18 @@ static void page_scheme(void)
         ImGui::PopStyleColor();
     }
     ImGui::Dummy(ImVec2(0, 6));
-    /* 底部四键（2x2）：新建（空） / 从当前另存为 / 重命名 / 删除 */
-    {
-        float gap = 12.0f;
-        float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
-        if (btn_blue("新建(空)", ImVec2(bw, 84))) scm_kb_open(1);
-        ImGui::SameLine();
-        if (btn_light("从当前另存为", ImVec2(bw, 84))) scm_kb_open(2);
-        if (btn_light("重命名", ImVec2(bw, 84))) scm_act_rename();
-        ImGui::SameLine();
-        if (btn_red("删除", ImVec2(bw, 84))) scm_act_delete();
-    }
-}
-/* 名字键盘子层（新建 / 另存为 / 重命名 共用；整面盖住面板 —— 本帧不画侧栏/内容页）：
- * [确定] 走各自语义；非法 / 撞名就地拒收（子层不关）；成功关层 + 页面提示 + 日志（spec §8）。 */
-static void draw_scm_kb(void)
-{
-    const char *title = g_scm_kb == 1 ? "给新方案起个名字：只建空表，不切换当前（重名会被拒）"
-                      : g_scm_kb == 2 ? "从当前另存为：把当前内容存成新方案并切过去（重名会被拒）"
-                                      : "重命名方案：起个新名字（存储按名字认它）";
-    int act = draw_char_kb(title, g_scm_kb == 3 ? g_scm_ren_old : NULL,
-                           g_scm_name, (int)sizeof g_scm_name, &g_scm_kbup,
-                           g_scm_kbmsg, (int)sizeof g_scm_kbmsg, (float)TITLE_H + 10);
-    if (act == 1) {
-        g_scm_kb = 0; g_scm_kbmsg[0] = 0;
-        g_need = 1; g_force_frames = 3;
-    } else if (act == 2) {
-        int rc = g_scm_kb == 1 ? scm_new_empty(g_scm_name)
-               : g_scm_kb == 2 ? scm_save_as(g_scm_name)
-                               : scm_rename(g_scm_ren_old, g_scm_name);
+    /* [重载当前方案]（缩编 v0.5/T8）：把外部（app）对方案的修改立即生效（等效「切走再切回」一键版）。 */
+    if (btn_light("重载当前方案（应用外部修改）", ImVec2(ImGui::GetContentRegionAvail().x, 84))) {
+        int rc = scheme_reload();
         if (rc == 0) {
-            if (g_scm_kb == 1) snprintf(g_scm_msg, sizeof g_scm_msg, "已新建方案 %s", g_scm_name);
-            else if (g_scm_kb == 2) snprintf(g_scm_msg, sizeof g_scm_msg, "已另存为 %s（已切到新方案）", g_scm_name);
-            else {
-                if (strcmp(g_scm_ren_old, g_scm_name))
-                    snprintf(g_scm_msg, sizeof g_scm_msg, "已改名 %s → %s", g_scm_ren_old, g_scm_name);
-                else g_scm_msg[0] = 0;                       /* 同名 = 无操作：不提示 */
-                snprintf(g_scm_sel, sizeof g_scm_sel, "%s", g_scm_name);   /* 选中跟着新名 */
-            }
-            g_scm_kb = 0; g_scm_kbmsg[0] = 0;
-            g_need = 1; g_force_frames = 3;
+            char c2[VT_NAME_BUF] = {0};
+            if (scheme_cur_get(c2) == 0) snprintf(g_scm_msg, sizeof g_scm_msg, "已重载当前方案 %s", c2);
         } else {
-            snprintf(g_scm_kbmsg, sizeof g_scm_kbmsg, "%s", scm_crud_why(rc));
-            if (g_scm_kb == 1) ALOGW("方案 新建失败 %s: %s", g_scm_name, scm_crud_why(rc));
-            else if (g_scm_kb == 2) ALOGW("方案 另存为失败 %s: %s", g_scm_name, scm_crud_why(rc));
-            else ALOGW("方案 改名失败 %s → %s: %s", g_scm_ren_old, g_scm_name, scm_crud_why(rc));
-            g_need = 1; g_force_frames = 2;
+            snprintf(g_scm_msg, sizeof g_scm_msg, "%s", scm_switch_why(rc));
+            ALOGW("方案 重载失败 rc=%d", rc);
         }
-    }
-}
-/* 删除确认层（spec §6）：轻遮罩 + 小确认卡，文案逐字「删除方案 <名>？不可恢复」；[取消][删除]。
- * 确认时再核一次「不是当前」（防御；主拒在 [删除] 键入口）：成功才打日志 `方案 删除 <名>` + 提示；
- * 失败关层 + 页面提示（rmdir 失败无「可改的输入」，留层重试无意义）。 */
-static void draw_scm_del(void)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImVec2 wp = ImGui::GetWindowPos();
-    float ww = ImGui::GetWindowWidth(), wh = ImGui::GetWindowHeight();
-    ImVec2 a(wp.x + 12, wp.y + (float)TITLE_H + 10), b(wp.x + ww - 12, wp.y + wh - 12);
-    char t[64];
-    float cw, wrapw, ch, cx, cy;
-    ImVec2 tsz, ca, cb;
-    dl->AddRectFilled(a, b, IM_COL32(24, 24, 27, 110), 14);   /* 轻遮罩：整面盖住（本帧不画底下） */
-    snprintf(t, sizeof t, "删除方案 %s？不可恢复", g_scm_del);
-    cw = 640.0f;
-    if (cw > (b.x - a.x) - 48) cw = (b.x - a.x) - 48;
-    wrapw = cw - 56;
-    tsz = ImGui::CalcTextSize(t, NULL, false, wrapw);
-    ch = tsz.y + 40 + 92 + 32;
-    cx = (a.x + b.x) * 0.5f; cy = (a.y + b.y) * 0.5f;
-    ca = ImVec2(cx - cw * 0.5f, cy - ch * 0.5f); cb = ImVec2(cx + cw * 0.5f, cy + ch * 0.5f);
-    dl->AddRectFilled(ca, cb, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(ca, cb, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    ImGui::SetCursorScreenPos(ImVec2(ca.x + 28, ca.y + 26));
-    ImGui::PushTextWrapPos(ca.x + 28 + wrapw);
-    ImGui::TextUnformatted(t);
-    ImGui::PopTextWrapPos();
-    {
-        float gap = 12.0f, bw = (cw - 28 * 2 - gap) * 0.5f;
-        float by = cb.y - 26 - 92;
-        ImGui::SetCursorScreenPos(ImVec2(ca.x + 28, by));
-        if (btn_light("取消", ImVec2(bw, 92))) {
-            g_scm_del[0] = 0;
-            g_need = 1; g_force_frames = 3;
-        }
-        ImGui::SetCursorScreenPos(ImVec2(ca.x + 28 + bw + gap, by));
-        if (btn_red("删除", ImVec2(bw, 92))) {
-            char cur[VT_NAME_BUF];
-            scheme_cur_get(cur);
-            if (cur[0] && !strcmp(cur, g_scm_del)) {       /* 防御：主拒在 [删除] 键入口 */
-                snprintf(g_scm_msg, sizeof g_scm_msg, "当前方案不能删除（先切到别的方案再删）");
-            } else if (scm_delete_dir(g_scm_del) != 0) {
-                snprintf(g_scm_msg, sizeof g_scm_msg, "删除失败：%s", strerror(errno));
-                ALOGW("方案 删除失败 %s: %s", g_scm_del, strerror(errno));
-            } else {
-                ALOGI("方案 删除 %s", g_scm_del);
-                if (!strcmp(g_scm_sel, g_scm_del)) g_scm_sel[0] = 0;
-                snprintf(g_scm_msg, sizeof g_scm_msg, "已删除方案 %s", g_scm_del);
-            }
-            g_scm_del[0] = 0;
-            g_need = 1; g_force_frames = 3;
-        }
-    }
-}
-
-/* ==== T3.2：视觉（找图/找色）—— 模板/点集管理 + 视觉步参数层 + 采集覆盖层 ====================
- * 三块：
- *   1) 模板页（nav 6）：截帧 → 框选/点选 → 命名 → 存 .tmpl / .pts；列表 / 删除。
- *   2) 采集覆盖层（整屏）：面板侧抓帧（ui_glue.c 旁路；不动核心帧区请求协议）→ ImGui 纹理显示
- *      （等比缩放）→ 模板 = 拖框；点集 = 吸基准色 + 点参考点（显示偏移/色）；吸色 = 点一下回填找色步。
- *   3) 视觉步参数层（编辑层子层，g_vis_ed）：找图 = 模板 / 区域 / 阈值；找色 = 模式 / 颜色 / 取点吸色 /
- *      容差 / 点集；成立/不成立四档在步骤行上复用条件步控件（ope_cond_side）；数字/字符键盘复用现有子层。
- * 文件格式（写端；逐字照实施计划「模板/点集文件格式」，与核心读端 op_vis_read_tmpl / op_vis_read_pts 对账）：
- *   .tmpl = "VTM1" + ver u32=1 + w u16 + h u16 + rot u8 + res u8=0 + gray[w*h]（灰度 = vt_vis_gray_px 单一来源）；
- *   .pts  = "VTP1" + ver u32=1 + n u16 + res u16=0 + base_rgb u32 + base_tol u16 + n×{dx i16, dy i16, rgb u32, tol u16}；
- *   目录 = /data/local/vtouch-runtime/templates/；名字同 vt_id_ok 尺子；重名拒绝（.tmpl / .pts 共用一个名字空间）。
- * 线程：本区块全部跑渲染线程（唯一 UI 线程）；帧数据跨线程只经 ui_glue.c 的 take/err（acquire 读）。
- */
-
-#define VIS_TMPL_DIR REGION_CONF_DIR "/templates"
-#define VIS_CAP_TMO_MS 3000              /* 面板侧抓帧等待上限（超时提示；真机抓帧 ≤25ms） */
-
-/* 模板 / 点集名合法性（与区域 id / 操作名同一把尺子 vt_id_ok）：v11 名字规则（UTF-8 可见字符 1..15、
- * 字节 ≤47；裸 `-` 除外）。0 ok / 1 空 / 2 超长 / 3 非法字符。 */
-static int vis_name_ok(const char *n)
-{
-    return ui_name_ok(n, 0);                 /* v11：同核心 vt_id_ok 尺子 */
-}
-static const char *vis_name_why(int rc)
-{
-    return rc == 1 ? "名字不能为空" : rc == 2 ? "最多 15 个字符" :
-           rc == 3 ? "只能用字母/数字/_/- 或中文等可见字符" : "这个名字已被占用（模板/点集同名也不行）";
-}
-/* 名字是否已被占用（.tmpl / .pts 共用一个名字空间 —— 下拉里两个列表并存，同名会歧义）。 */
-static int vis_name_taken(const char *name)
-{
-    char p[160];
-    struct stat st;
-    snprintf(p, sizeof p, "%s/%s.tmpl", VIS_TMPL_DIR, name);
-    if (stat(p, &st) == 0) return 1;
-    snprintf(p, sizeof p, "%s/%s.pts", VIS_TMPL_DIR, name);
-    return stat(p, &st) == 0;
-}
-/* qsort 比较器：名字按字节序（names 每格 VT_NAME_BUF 字节）。 */
-static int vis_name_cmp(const void *a, const void *b)
-{
-    return strcmp((const char *)a, (const char *)b);
-}
-/* 枚举 VIS_TMPL_DIR 下 *.ext（名字过 vis_name_ok），字母序装进 names（每格 VT_NAME_BUF 字节），返回条数（≤ max）。 */
-static int vis_list(const char *ext, char (*names)[VT_NAME_BUF], int max)
-{
-    DIR *d = opendir(VIS_TMPL_DIR);
-    struct dirent *e;
-    size_t el;
-    int n = 0;
-    if (!d) return 0;
-    el = strlen(ext);
-    while (n < max && (e = readdir(d)) != NULL) {
-        char nm[VT_NAME_BUF];
-        size_t l = strlen(e->d_name);
-        if (l <= el || l > el + VT_NAME_BUF - 1) continue;   /* v11：字节上限（字符数在 vis_name_ok 里判） */
-        if (strcmp(e->d_name + l - el, ext) != 0) continue;
-        memcpy(nm, e->d_name, l - el);
-        nm[l - el] = 0;
-        if (vis_name_ok(nm) != 0) continue;
-        snprintf(names[n], sizeof names[0], "%s", nm);
-        n++;
-    }
-    closedir(d);
-    qsort(names, (size_t)n, sizeof names[0], vis_name_cmp);
-    return n;
-}
-/* 小端写入（格式契约；设备 aarch64 本身小端，仍显式写字节防解释歧义）。 */
-static void vis_put_u16le(FILE *f, unsigned v)
-{
-    fputc((int)(v & 0xFFu), f);
-    fputc((int)((v >> 8) & 0xFFu), f);
-}
-static void vis_put_u32le(FILE *f, unsigned v)
-{
-    vis_put_u16le(f, v & 0xFFFFu);
-    vis_put_u16le(f, (v >> 16) & 0xFFFFu);
-}
-
-/* ---- 面板侧抓帧（采集覆盖层用） ---- */
-
-/* 关采集覆盖层：全部会话态复位（含命名子层 / 框选 / 点集 / 吸色目标）。 */
-static void vis_cap_close(void)
-{
-    g_vis_cap = 0;
-    g_vis_cap_wait = 0; g_vis_cap_err = 0;
-    g_vis_kb = 0; g_vis_kb_msg[0] = 0;
-    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
-    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
-    g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
-    g_vis_pts_n = 0;
-    g_vis_cap_msg[0] = 0;
-    g_vis_pick_se = -1;
-    vis_re_img_free();                       /* 重编辑合成预览一并释放（2026-10-05） */
-    g_vis_reedit_name[0] = 0;
-    g_vis_re_pending = 0; g_vis_re_has_xy = 0;
-    g_vis_re_pts_n = 0; g_vis_re_pts_restored = 1; g_vis_re_pts_has_xy = 0;   /* 点集重编辑状态（2026-10-05b） */
-    g_vis_overwrite = 0;
-    g_need = 1; g_force_frames = 3;
-}
-/* 开采集覆盖层：mode 1=模板框选 2=点集编辑 3=吸色（找色步 [取点]，回填目标 = g_vis_pick_se）。
- * 请求一帧（ui_glue.c 旁路）→ 渲染循环 vis_cap_tick 收帧/超时。 */
-static void vis_cap_start(int mode)
-{
-    g_vis_cap = mode;
-    g_vis_cap_wait = 1; g_vis_cap_err = 0; g_vis_cap_t0 = now_ms();
-    g_vis_kb = 0; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
-    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
-    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
-    g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = 8;
-    g_vis_pts_n = 0;
-    g_vis_cap_msg[0] = 0;
-    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0; g_vis_img_rot = 0;
-    vtouch_vis_panel_capture_req();
-    g_need = 1; g_force_frames = 3;
-    ALOGI("vis 采集开 模式=%s（请求面板侧抓帧）", mode == 1 ? "模板" : mode == 2 ? "点集" : "吸色");
-}
-/* 渲染循环每拍调（采集层开着才做事）：收新帧 / 收失败 / 3s 超时；等帧期间保持重画。
- * 非等待期也收帧：迟到的帧（重截竞态）照样刷新图像。 */
-static void vis_cap_tick(void)
-{
-    int w = 0, h = 0, rot = 0, err = 0;
-    const unsigned char *buf = 0;
-    if (!g_vis_cap) return;
-    if (vtouch_vis_panel_frame_take(&w, &h, &rot, &buf)) {
-        g_vis_img = buf; g_vis_img_w = w; g_vis_img_h = h; g_vis_img_rot = rot;
-        g_vis_cap_wait = 0; g_vis_cap_err = 0;
-        g_vis_tex_dirty = 1;
-        if (g_vis_sel_on) {   /* 新帧尺寸可能变（转屏后重新截帧）：已选框夹回图内（Task 7.2：框保留） */
-            if (g_vis_sel[2] > g_vis_img_w - 1) g_vis_sel[2] = g_vis_img_w - 1;
-            if (g_vis_sel[3] > g_vis_img_h - 1) g_vis_sel[3] = g_vis_img_h - 1;
-            if (g_vis_sel[0] > g_vis_sel[2] - 7) g_vis_sel[0] = g_vis_sel[2] - 7;
-            if (g_vis_sel[1] > g_vis_sel[3] - 7) g_vis_sel[1] = g_vis_sel[3] - 7;
-            if (g_vis_sel[0] < 0) g_vis_sel[0] = 0;
-            if (g_vis_sel[1] < 0) g_vis_sel[1] = 0;
-        }
-        if (g_vis_cap == 5) {                                /* 点集重编辑（2026-10-05b）：到帧后摆基准/等首点 */
-            g_vis_cap_msg[0] = 0;
-            if (g_vis_re_pts_has_xy) {                       /* 新格式：基准直接摆到存的位置（颜色照存） */
-                int bx = g_vis_re_pts_bx, by = g_vis_re_pts_by;
-                if (bx < 0) bx = 0;
-                if (by < 0) by = 0;
-                if (bx > w - 1) bx = w - 1;
-                if (by > h - 1) by = h - 1;
-                g_vis_base_x = bx; g_vis_base_y = by;
-                g_vis_base_rgb = g_vis_re_base_rgb;
-                vis_pts_restore();
-            } else {                                         /* 旧格式：一进入就摆到画面中间（可见），再用 [重选基准] 挪 */
-                g_vis_base_x = w / 2; g_vis_base_y = h / 2;
-                g_vis_base_rgb = g_vis_re_base_rgb;
-                vis_pts_restore();
-                snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg,
-                         "旧文件未记基准位置：已摆到画面中间（%d 个点）—— [重选基准] 后点画面可整组挪位", g_vis_re_pts_n);
-            }
-        }
-        if (g_vis_cap == 4) {
-            g_vis_re_fresh = 1;                              /* 当前图 = 新截帧（可框选） */
-            if (g_vis_re_pending) {                          /* 首帧：用原区域摆框（夹进新帧） */
-                int x0, y0, x1, y1;
-                g_vis_re_pending = 0;
-                x0 = g_vis_re_x; y0 = g_vis_re_y;
-                x1 = x0 + g_vis_re_w - 1; y1 = y0 + g_vis_re_h - 1;
-                if (x0 < 0) x0 = 0;
-                if (y0 < 0) y0 = 0;
-                if (x1 > w - 1) x1 = w - 1;
-                if (y1 > h - 1) y1 = h - 1;
-                if (x1 - x0 >= 7 && y1 - y0 >= 7) {
-                    g_vis_sel[0] = x0; g_vis_sel[1] = y0; g_vis_sel[2] = x1; g_vis_sel[3] = y1;
-                    g_vis_sel_on = 1;
-                }
-            }
-        }
-        ALOGI("vis 采集 帧就绪 %dx%d rot=%d", w, h, rot);
-        g_need = 1; g_force_frames = 3;
-        return;
-    }
-    if (g_vis_cap_wait) {
-        if (vtouch_vis_panel_err_take(&err)) {
-            g_vis_cap_wait = 0; g_vis_cap_err = err ? err : -1;
-            ALOGW("vis 采集 抓帧失败 err=%d", g_vis_cap_err);
-        } else if (now_ms() - g_vis_cap_t0 > VIS_CAP_TMO_MS) {
-            g_vis_cap_wait = 0; g_vis_cap_err = -1;             /* -1 = 超时哨兵 */
-            ALOGW("vis 采集 抓帧超时（%dms）", VIS_CAP_TMO_MS);
-        }
-        g_need = 1;                                             /* 等帧/提示期间保持重画 */
-    }
-}
-
-/* ---- 试查（Task 7.1「试一下」；整条链在渲染线程）---- */
-
-/* 结果码 → 原因词（词表 = 核心 op 中止词；码值 = 核心 src/vt_shm.h 的 VT_TEST_ERR_* ——
- * 面板不 include 核心头，独立定义）。 */
-#define VIS_TEST_ERR_NOPIC  1            /* 无画面 */
-#define VIS_TEST_ERR_VIS    2            /* 视觉错 */
-#define VIS_TEST_ERR_REGION 3            /* 区域不存在 */
-#define VIS_TEST_ERR_TMPL   4            /* 模板不存在 */
-static const char *vis_test_err_word(int err)
-{
-    switch (err) {
-    case VIS_TEST_ERR_NOPIC:  return "无画面";
-    case VIS_TEST_ERR_VIS:    return "视觉错";
-    case VIS_TEST_ERR_REGION: return "区域不存在";
-    case VIS_TEST_ERR_TMPL:   return "模板不存在";
-    default:                  return "未知错误";
-    }
-}
-
-/* 结果行颜色：命中绿 / 未命中灰 / 等待灰 / 错误与超时红。 */
-static ImVec4 vis_test_msg_col(void)
-{
-    if (g_vis_test_on || g_vis_test_err == -1) return ImVec4(0.45f, 0.45f, 0.48f, 1.0f);
-    if (g_vis_test_err == 0) return ImVec4(0.09f, 0.64f, 0.29f, 1.0f);
-    return ImVec4(0.863f, 0.149f, 0.149f, 1.00f);   /* 同 g_vis_edmsg 红 */
-}
-
-/* 读 .tmpl 头（w/h/rot；找图标记方框尺寸用）。0 = 成功；非 0 = 读不到（方框按 80×80 兜底）。 */
-static int vis_test_read_tmpl(const char *name, int *tw, int *th, int *trot)
-{
-    char p[160];
-    unsigned char hd[14];
-    FILE *f;
-    int w, h, rot;
-
-    snprintf(p, sizeof p, "%s/%s.tmpl", VIS_TMPL_DIR, name);
-    f = fopen(p, "rb");
-    if (!f) return -1;
-    if (fread(hd, 1, sizeof hd, f) != sizeof hd) { fclose(f); return -1; }
-    fclose(f);
-    if (hd[0] != 'V' || hd[1] != 'T' || hd[2] != 'M' || hd[3] != '1') return -1;
-    w = (int)hd[8] | ((int)hd[9] << 8);
-    h = (int)hd[10] | ((int)hd[11] << 8);
-    rot = hd[12];
-    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || rot > 3) return -1;
-    *tw = w; *th = h; *trot = rot;
-    return 0;
-}
-
-/* 发起一次试查（面板→核心）：填参数 → release 写 test_req_seq → 写唤醒 pipe → 置等待态 + 请求日志。
- * 单请求在途（g_vis_test_on）；在途时点按只提示、不重发。kind 0 的模板 w×h 先在本地读好（标记用）。 */
-static void vis_test_fire(int kind, const char *ref, const char *region, int a1, int a2)
-{
-    unsigned seq;
-    if (g_vis_test_on) {
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "上一发还在等结果…");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    seq = vtouch_vis_test_post(kind, ref, region, a1, a2);
-    if (!seq) {                                        /* 没接核心（单跑模式 / 附着失败） */
-        g_vis_test_err = VIS_TEST_NOCORE;
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "没接核心（无法试查）");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    g_vis_test_on = 1;
-    g_vis_test_seq = seq;
-    g_vis_test_t0 = now_ms();
-    g_vis_test_err = VIS_TEST_WAIT;
-    snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "等待结果…");
-    g_vis_testmk_kind = kind;
-    g_vis_testmk_tw = 80; g_vis_testmk_th = 80; g_vis_testmk_trot = g_rot;   /* 找色固定 80×80 */
-    if (kind == 0)                                     /* 找图：模板 w×h（读不到按 80×80 兜底） */
-        vis_test_read_tmpl(ref, &g_vis_testmk_tw, &g_vis_testmk_th, &g_vis_testmk_trot);
-    if (kind == 0) ALOGI("vis 试查 请求 找图 %s", ref);
-    else if (kind == 2) ALOGI("vis 试查 请求 找色 多点 %s", ref);
-    else ALOGI("vis 试查 请求 找色 单点 #%06X 容差=%d",
-               (unsigned)(((uint32_t)a2 >> 8) & 0xFFFFFFu), (int)((uint32_t)a2 & 0xFFu));
-    g_need = 1; g_force_frames = 2;
-}
-
-/* 「试一下」发起（步骤参数层）：校验当前步（同源 ope_step_check，不过 → 就地提示、不投）→ 按类型填参数。
- * 参数 = 当前编辑缓冲（未落表的改动也照测）。 */
-static void vis_test_start_se(int se)
-{
-    char why[96];
-    int type = g_ope_steps[se][0], kind, a1, a2;
-    if (!ope_step_check(se, g_ope_steps[se], why, (int)sizeof why)) {
-        snprintf(g_vis_edmsg, sizeof g_vis_edmsg, "%s", why);
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    if (type == OP_STEP_FINDIMAGE) {
-        kind = 0; a1 = g_ope_steps[se][1]; a2 = g_ope_steps[se][2];   /* 找图：a1 = 阈值、a2 = 颜色校验 0/1（v2.1） */
-    } else if (g_ope_steps[se][1] == 1) {
-        kind = 2; a1 = 1; a2 = 0;                      /* 找色多点：点集在 ref */
-    } else {
-        kind = 1; a1 = 0; a2 = g_ope_steps[se][2];     /* 找色单点：a2 = (颜色<<8)|容差 */
-    }
-    vis_test_fire(kind, g_ope_refs[se], g_ope_exprs[se], a1, a2);
-}
-
-/* 「试一下」发起（模板页）：按行内名字直接投（全屏；找图阈值 = 页内快捷值 g_vis_tmpl_tol，默认 8 = 新步口径）。 */
-static void vis_test_start_tmpl(const char *name, int is_pts, int tol)
-{
-    if (is_pts) vis_test_fire(2, name, "", 1, 0);
-    else        vis_test_fire(0, name, "", tol, 0);
-}
-
-/* 渲染循环每拍调（试查在途才做事）：收结果（acquire 轮询 test_res_seq，≤10ms）→ 结果行 + 标记；
- * 1.5s 无响应 →「超时（无响应）」。晚到的陈旧结果（seq 不是本次）不认领、不打断在途。 */
-static void vis_test_tick(void)
-{
-    unsigned seq;
-    int x, y, err;
-    if (!g_vis_test_on) return;
-    if (vtouch_vis_test_take(&seq, &x, &y, &err) && seq == g_vis_test_seq) {
-        g_vis_test_on = 0;
-        g_vis_test_err = err;
-        if (err == 0) {
-            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "命中 (%d, %d)", x, y);
-            g_vis_testmk_x = x; g_vis_testmk_y = y; g_vis_testmk_t = now_ms();
-        } else if (err == -1) {
-            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "未命中");
-        } else {
-            snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "%s", vis_test_err_word(err));
-        }
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    if (now_ms() - g_vis_test_t0 > VIS_TEST_TMO_MS) {
-        g_vis_test_on = 0;
-        g_vis_test_err = VIS_TEST_TMO;
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "超时（无响应）");
-        ALOGI("vis 试查 超时");
-        g_need = 1; g_force_frames = 2;
-    }
-}
-
-/* 采集图像 GL 纹理上传（渲染线程；调用时 GL 上下文已 current）。尺寸变 = 重建，否则子更新。 */
-static void vis_tex_update(const unsigned char *rgba, int w, int h)
-{
-    if (!g_vis_tex) glGenTextures(1, &g_vis_tex);
-    if (!g_vis_tex) return;
-    glBindTexture(GL_TEXTURE_2D, g_vis_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    g_vis_magf = 0;                       /* 滤波被重置为线性；缩放滤波（Task 7.2）下帧按需重设 */
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    if (w != g_vis_tex_w || h != g_vis_tex_h) {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-        g_vis_tex_w = w; g_vis_tex_h = h;
-    } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    }
-}
-/* 面板侧帧缓冲取像素（紧排 w*4，RGBA8888）；越界 → -1。 */
-static int vis_frame_px(const unsigned char *buf, int w, int h, int x, int y, uint32_t *rgb)
-{
-    const unsigned char *p;
-    if (!buf || x < 0 || y < 0 || x >= w || y >= h) return -1;
-    p = buf + ((size_t)y * (size_t)w + (size_t)x) * 4u;
-    if (rgb) *rgb = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
-    return 0;
-}
-/* 点集编辑：一次轻点 —— 首点 = 基准色；其后 = 参考点（≤ VIS_PTS_MAX）。 */
-static void vis_pts_tap(int fx, int fy, uint32_t rgb)
-{
-    if (g_vis_base_x < 0) {
-        g_vis_base_x = fx; g_vis_base_y = fy; g_vis_base_rgb = rgb & 0xFFFFFFu;
-        g_vis_cap_msg[0] = 0;
-        ALOGI("vis 采集 基准色 #%06X @%d,%d（容差 %d）", (unsigned)g_vis_base_rgb, fx, fy, g_vis_base_tol);
-        return;
-    }
-    if (g_vis_pts_n >= VIS_PTS_MAX) {
-        snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "最多 %d 个参考点", VIS_PTS_MAX);
-        return;
-    }
-    g_vis_pts_x[g_vis_pts_n] = fx; g_vis_pts_y[g_vis_pts_n] = fy;
-    g_vis_pts_rgb[g_vis_pts_n] = rgb & 0xFFFFFFu;
-    g_vis_pts_n++;
-    g_vis_cap_msg[0] = 0;
-    ALOGI("vis 采集 参考点 %d +%d,%d #%06X", g_vis_pts_n, fx - g_vis_base_x, fy - g_vis_base_y,
-          (unsigned)(rgb & 0xFFFFFFu));
-}
-/* 吸色（找色步 [取点]）：把颜色回填该步 a2 的颜色段（容差段保留），关采集层回视觉参数层。 */
-static void vis_pick_apply(int fx, int fy, uint32_t rgb)
-{
-    int se = g_vis_pick_se;
-    if (se >= 0 && se < g_ope_nsteps && g_ope_steps[se][0] == OP_STEP_FINDCOLOR) {
-        uint32_t packed = (uint32_t)g_ope_steps[se][2];
-        g_ope_steps[se][2] = (int)(((rgb & 0xFFFFFFu) << 8) | (packed & 0xFFu));
-        ALOGI("vis edit 找色 第 %d 步 颜色=#%06X（吸色 @%d,%d）", se + 1, (unsigned)(rgb & 0xFFFFFFu), fx, fy);
-    }
-    vis_cap_close();
-}
-
-/* ---- 存盘 / 删除 ---- */
-
-/* 存模板（.tmpl 写端；格式逐字照实施计划：VTM1 + ver u32=1 + w u16 + h u16 + rot u8 + res u8=0 + gray[w*h]
- * + 尾扩展 x u16 + y u16 + 平均色 r/g/b u8×3 + res u8（原区域 + 颜色校验存色；旧读端忽略尾部）。
- * 灰度用引擎同源公式 vt_vis_gray_px（vt_vision.h 单一来源，防两处漂移）；.tmp + rename（掉电不留半截）。
- * 返回 0 成功；1 名字非法 / 2 重名（g_vis_overwrite = 1 时跳过，重编辑覆盖） / 3 无可用画面或框选 / 4 建目录失败 / 5 写失败。 */
-static int vis_save_tmpl(const char *name)
-{
-    char path[160], tmppath[168];
-    const unsigned char *buf = g_vis_img;
-    int x0 = g_vis_sel[0], y0 = g_vis_sel[1], x1 = g_vis_sel[2], y1 = g_vis_sel[3];
-    int w, h, x, y;
-    unsigned char *gray;
-    uint64_t sr = 0, sg = 0, sb = 0;                        /* 平均色求和（2026-10-05e） */
-    FILE *f;
-    if (vis_name_ok(name) != 0) return 1;
-    if (vis_name_taken(name) && !g_vis_overwrite) return 2;    /* 重编辑同名 = 覆盖（2026-10-05） */
-    if (!g_vis_sel_on || !buf || g_vis_img_w <= 0 || g_vis_img_h <= 0) return 3;
-    w = x1 - x0 + 1; h = y1 - y0 + 1;
-    if (w < 1 || h < 1 || x0 < 0 || y0 < 0 || x1 >= g_vis_img_w || y1 >= g_vis_img_h) return 3;
-    gray = (unsigned char *)malloc((size_t)w * (size_t)h);
-    if (!gray) return 5;
-    for (y = 0; y < h; y++) {
-        const unsigned char *p = buf + ((size_t)(y0 + y) * (size_t)g_vis_img_w + (size_t)x0) * 4u;
-        for (x = 0; x < w; x++, p += 4) {
-            gray[(size_t)y * (size_t)w + (size_t)x] = vt_vis_gray_px(p[0], p[1], p[2]);
-            sr += p[0]; sg += p[1]; sb += p[2];             /* 平均色（颜色校验用；2026-10-05e） */
-        }
-    }
-    if (mkdir(VIS_TMPL_DIR, 0775) < 0 && errno != EEXIST) { free(gray); return 4; }
-    snprintf(tmppath, sizeof tmppath, "%s/%s.tmpl.tmp", VIS_TMPL_DIR, name);
-    f = fopen(tmppath, "wb");
-    if (!f) { free(gray); return 5; }
-    fputs("VTM1", f);
-    vis_put_u32le(f, 1);
-    vis_put_u16le(f, (unsigned)w);
-    vis_put_u16le(f, (unsigned)h);
-    fputc(g_vis_img_rot & 3, f);
-    fputc(0, f);                                            /* res = 0（保留位） */
-    if (fwrite(gray, 1, (size_t)w * (size_t)h, f) != (size_t)w * (size_t)h) {
-        fclose(f); remove(tmppath); free(gray); return 5;
-    }
-    /* v1 尾扩展（2026-10-05 重编辑 / 2026-10-05e 颜色校验）：灰度后追加 原区域左上 x u16 + y u16
-     * + 平均色 r/g/b u8×3 + res u8（共 8B）—— 旧读端读满灰度即停、忽略尾部（双向兼容）；
-     * 面板按尺寸识别 x/y（4B）与平均色（8B）。 */
-    vis_put_u16le(f, (unsigned)x0);
-    vis_put_u16le(f, (unsigned)y0);
-    {
-        uint64_t nn = (uint64_t)w * (uint64_t)h;
-        fputc((int)((sr / nn) & 0xFFu), f);
-        fputc((int)((sg / nn) & 0xFFu), f);
-        fputc((int)((sb / nn) & 0xFFu), f);
-        fputc(0, f);                                        /* res */
-    }
-    if (fclose(f) != 0) { remove(tmppath); free(gray); return 5; }
-    free(gray);
-    snprintf(path, sizeof path, "%s/%s.tmpl", VIS_TMPL_DIR, name);
-    if (rename(tmppath, path) != 0) { remove(tmppath); return 5; }
-    ALOGI("vis 模板存 %s %dx%d rot=%d（灰度 %uB）", name, w, h, g_vis_img_rot, (unsigned)(w * h));
-    return 0;
-}
-
-/* 读模板（面板侧，重编辑用；2026-10-05）：头 + 灰度 + 可选尾扩展（原区域 x u16 + y u16，按尺寸识别）。
- * 返回 0 成功；1 读失败/格式坏；2 内存失败。gray 输出 malloc（调用方 free）；rx/ry/has_xy 出参。 */
-static int vis_read_tmpl_meta(const char *name, int *w, int *h, int *rot, int *rx, int *ry, int *has_xy,
-                              unsigned char **gray)
-{
-    char path[160];
-    unsigned char hdr[14], tail[4];
-    size_t n, got;
-    FILE *f;
-
-    *has_xy = 0; *rx = 0; *ry = 0; *gray = 0;
-    snprintf(path, sizeof path, "%s/%s.tmpl", VIS_TMPL_DIR, name);
-    f = fopen(path, "rb");
-    if (!f) return 1;
-    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) { fclose(f); return 1; }
-    if (hdr[0] != 'V' || hdr[1] != 'T' || hdr[2] != 'M' || hdr[3] != '1') { fclose(f); return 1; }
-    if (((uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24)) != 1u) {
-        fclose(f); return 1;                                /* ver != 1（2026-10-05b 修复：原式把 ver=1 也拒了） */
-    }
-    *w = (int)hdr[8] | ((int)hdr[9] << 8);
-    *h = (int)hdr[10] | ((int)hdr[11] << 8);
-    *rot = hdr[12];
-    if (*w <= 0 || *h <= 0 || *w > 4096 || *h > 4096 || *rot > 3) { fclose(f); return 1; }
-    n = (size_t)*w * (size_t)*h;
-    *gray = (unsigned char *)malloc(n);
-    if (!*gray) { fclose(f); return 2; }
-    if (fread(*gray, 1, n, f) != n) { free(*gray); *gray = 0; fclose(f); return 1; }
-    got = fread(tail, 1, 4, f);                             /* 尾扩展（可选） */
-    if (got == 4) {
-        *rx = (int)tail[0] | ((int)tail[1] << 8);
-        *ry = (int)tail[2] | ((int)tail[3] << 8);
-        *has_xy = 1;
-    }
-    fclose(f);
-    return 0;
-}
-
-/* 释放重编辑合成预览缓冲（关层/换帧；若 g_vis_img 正指向它一并置 0）。 */
-static void vis_re_img_free(void)
-{
-    if (g_vis_re_img) {
-        if (g_vis_img == g_vis_re_img) g_vis_img = 0;
-        free(g_vis_re_img);
-        g_vis_re_img = 0;
-    }
-    g_vis_re_fresh = 0;
-}
-
-/* 模板重编辑（2026-10-05 item）：读已存模板 → 灰度合成 RGB 直接看 → [重新截帧] 再框选 → 保存（同名 = 覆盖）。
- * 读失败 → 页消息行提示、不开层。 */
-static void vis_reedit_start(const char *name)
-{
-    unsigned char *gray = 0, *rgba;
-    int w = 0, h = 0, rot = 0, rx = 0, ry = 0, has = 0, i;
-    size_t np;
-
-    if (vis_read_tmpl_meta(name, &w, &h, &rot, &rx, &ry, &has, &gray) != 0) {
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "重编辑失败：读不到模板「%s」", name);
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    np = (size_t)w * (size_t)h;
-    rgba = (unsigned char *)malloc(np * 4u);
-    if (!rgba) {
-        free(gray);
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "重编辑失败：内存不足");
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    for (i = 0; i < (int)np; i++) {                         /* 灰度 → RGB 预览 */
-        rgba[i * 4 + 0] = gray[i]; rgba[i * 4 + 1] = gray[i]; rgba[i * 4 + 2] = gray[i]; rgba[i * 4 + 3] = 255;
-    }
-    free(gray);
-    vis_re_img_free();
-    g_vis_re_img = rgba;
-    g_vis_img = rgba; g_vis_img_w = w; g_vis_img_h = h; g_vis_img_rot = rot;
-    g_vis_tex_dirty = 1;
-    snprintf(g_vis_reedit_name, sizeof g_vis_reedit_name, "%s", name);
-    g_vis_re_w = w; g_vis_re_h = h; g_vis_re_x = rx; g_vis_re_y = ry; g_vis_re_has_xy = has;
-    g_vis_re_pending = 0; g_vis_re_fresh = 0;
-    g_vis_cap = 4; g_vis_cap_wait = 0; g_vis_cap_err = 0; g_vis_cap_t0 = 0;
-    g_vis_kb = 0; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0;
-    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
-    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
-    g_vis_pts_n = 0;
-    snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "已存模板「%s」%d×%d —— [重新截帧] 可从当前屏幕重选区域", name, w, h);
-    g_need = 1; g_force_frames = 3;
-    ALOGI("vis 采集开 模式=重编辑（%s %dx%d%s）", name, w, h, has ? " 有原区域" : "");
-}
-
-/* 读点集（面板侧，重编辑用；2026-10-05b）：头 + n×点记录 + 可选尾扩展（基准位置 x u16 + y u16，按尺寸识别）。
- * 返回 0 成功；1 读失败/格式坏。出参：n / base_rgb / base_tol / 点数组（dx/dy/rgb）/ 尾扩展（bx/by/has_xy）。 */
-static int vis_read_pts_meta(const char *name, int *n, uint32_t *base_rgb, int *base_tol,
-                             int *dxs, int *dys, uint32_t *rgbs, int *bx, int *by, int *has_xy)
-{
-    char path[160];
-    unsigned char hdr[18], tail[4];
-    FILE *f;
-    int cnt, i, bt;
-    uint32_t b;
-    size_t got;
-
-    *n = 0; *base_rgb = 0; *base_tol = 8; *bx = 0; *by = 0; *has_xy = 0;
-    snprintf(path, sizeof path, "%s/%s.pts", VIS_TMPL_DIR, name);
-    f = fopen(path, "rb");
-    if (!f) return 1;
-    if (fread(hdr, 1, sizeof hdr, f) != sizeof hdr) { fclose(f); return 1; }
-    if (hdr[0] != 'V' || hdr[1] != 'T' || hdr[2] != 'P' || hdr[3] != '1') { fclose(f); return 1; }
-    if (((uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24)) != 1u) {
-        fclose(f); return 1;                                /* ver != 1 */
-    }
-    cnt = (int)hdr[8] | ((int)hdr[9] << 8);
-    b = (uint32_t)hdr[12] | ((uint32_t)hdr[13] << 8) | ((uint32_t)hdr[14] << 16) | ((uint32_t)hdr[15] << 24);
-    bt = (int)hdr[16] | ((int)hdr[17] << 8);
-    if (cnt < 1 || cnt > 16 || bt > 255) { fclose(f); return 1; }
-    for (i = 0; i < cnt; i++) {
-        unsigned char pt[10];
-        int dx, dy;
-        uint32_t rgb;
-        if (fread(pt, 1, 10, f) != 10) { fclose(f); return 1; }
-        dx = (int)((uint16_t)pt[0] | ((uint16_t)pt[1] << 8));
-        if (dx >= 32768) dx -= 65536;
-        dy = (int)((uint16_t)pt[2] | ((uint16_t)pt[3] << 8));
-        if (dy >= 32768) dy -= 65536;
-        rgb = (uint32_t)pt[4] | ((uint32_t)pt[5] << 8) | ((uint32_t)pt[6] << 16) | ((uint32_t)pt[7] << 24);
-        dxs[i] = dx; dys[i] = dy; rgbs[i] = rgb & 0xFFFFFFu;
-    }
-    got = fread(tail, 1, 4, f);                             /* 尾扩展（可选） */
-    if (got == 4) {
-        *bx = (int)tail[0] | ((int)tail[1] << 8);
-        *by = (int)tail[2] | ((int)tail[3] << 8);
-        *has_xy = 1;
-    }
-    fclose(f);
-    *n = cnt; *base_rgb = b & 0xFFFFFFu; *base_tol = bt;
-    return 0;
-}
-
-/* 点集重编辑（2026-10-05b）：读已存 .pts → 新截帧 → 有基准位置（新格式）到帧后直接摆好基准 + 参考点；
- * 旧格式无位置 → 提示先点一下基准色位置（首点后把已存参考点摆过来）。[存点集] 保存（同名 = 覆盖）。
- * 读失败 → 页消息行提示、不开层。 */
-static void vis_reedit_pts_start(const char *name)
-{
-    int n = 0, bt = 0, bx = 0, by = 0, has = 0;
-    uint32_t brgb = 0;
-
-    if (vis_read_pts_meta(name, &n, &brgb, &bt, g_vis_re_pts_dx, g_vis_re_pts_dy, g_vis_re_pts_rgb,
-                          &bx, &by, &has) != 0) {
-        snprintf(g_vis_test_msg, sizeof g_vis_test_msg, "重编辑失败：读不到点集「%s」", name);
-        g_need = 1; g_force_frames = 2;
-        return;
-    }
-    g_vis_re_pts_n = n;
-    g_vis_re_base_rgb = brgb; g_vis_re_base_tol = bt;
-    g_vis_re_pts_has_xy = has; g_vis_re_pts_bx = bx; g_vis_re_pts_by = by;
-    g_vis_re_pts_restored = 0;                              /* 待恢复（到帧后 / 首点后） */
-    snprintf(g_vis_reedit_name, sizeof g_vis_reedit_name, "%s", name);
-    vis_re_img_free();
-    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;
-    g_vis_cap = 5; g_vis_cap_wait = 1; g_vis_cap_err = 0; g_vis_cap_t0 = now_ms();
-    g_vis_kb = 0; g_vis_kb_buf[0] = 0; g_vis_kb_msg[0] = 0;
-    g_vis_drag = 0; g_vis_gest = 0; g_vis_sel_on = 0;
-    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
-    g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_base_tol = bt;
-    g_vis_pts_n = 0;
-    snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "重编辑点集「%s」（%d 个参考点）—— 正在重新截帧…", name, n);
-    vtouch_vis_panel_capture_req();
-    g_need = 1; g_force_frames = 3;
-    ALOGI("vis 采集开 模式=点集重编辑（%s n=%d%s）", name, n, has ? " 有基准位置" : "");
-}
-
-/* 点集恢复（重编辑）：到帧后（有基准位置）或首点后（旧格式）把已存参考点摆到画面上。
- * 位置夹进帧内；颜色照存（不重采样；用户可再点一下覆盖）。 */
-static void vis_pts_restore(void)
-{
-    int i, placed = 0;
-
-    if (g_vis_re_pts_restored || g_vis_re_pts_n <= 0 || g_vis_base_x < 0) return;
-    for (i = 0; i < g_vis_re_pts_n && g_vis_pts_n < VIS_PTS_MAX; i++) {
-        int px = g_vis_base_x + g_vis_re_pts_dx[i];
-        int py = g_vis_base_y + g_vis_re_pts_dy[i];
-        if (px < 0) px = 0;
-        if (py < 0) py = 0;
-        if (px > g_vis_img_w - 1) px = g_vis_img_w - 1;
-        if (py > g_vis_img_h - 1) py = g_vis_img_h - 1;
-        g_vis_pts_x[g_vis_pts_n] = px; g_vis_pts_y[g_vis_pts_n] = py;
-        g_vis_pts_rgb[g_vis_pts_n] = g_vis_re_pts_rgb[i];
-        g_vis_pts_n++;
-        placed++;
-    }
-    g_vis_re_pts_restored = 1;
-    snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "已恢复 %d 个参考点（点画面可加参考点，[存点集] 保存）", placed);
-    ALOGI("vis 采集 点集恢复 %d 个（基准 @%d,%d）", placed, g_vis_base_x, g_vis_base_y);
-    g_need = 1; g_force_frames = 3;
-}
-/* 存点集（.pts 写端；格式逐字照实施计划：VTP1 + ver u32=1 + n u16 + res u16=0 + base_rgb u32 +
- * base_tol u16 + n×{dx i16, dy i16, rgb u32, tol u16}；每点 tol = 基准容差（v1 不逐点编辑）
- * + 尾扩展 x u16 + y u16（基准位置；2026-10-05b；旧读端忽略尾部））。
- * 返回 0 成功；1 名字非法 / 2 重名 / 3 基准或点数不合法 / 4 建目录失败 / 5 写失败。 */
-static int vis_save_pts(const char *name)
-{
-    char path[160], tmppath[168];
-    FILE *f;
-    int i;
-    if (vis_name_ok(name) != 0) return 1;
-    if (vis_name_taken(name) && !g_vis_overwrite) return 2;    /* 重编辑同名 = 覆盖（2026-10-05b） */
-    if (g_vis_base_x < 0 || g_vis_pts_n < 1 || g_vis_pts_n > VIS_PTS_MAX) return 3;
-    if (mkdir(VIS_TMPL_DIR, 0775) < 0 && errno != EEXIST) return 4;
-    snprintf(tmppath, sizeof tmppath, "%s/%s.pts.tmp", VIS_TMPL_DIR, name);
-    f = fopen(tmppath, "wb");
-    if (!f) return 5;
-    fputs("VTP1", f);
-    vis_put_u32le(f, 1);
-    vis_put_u16le(f, (unsigned)g_vis_pts_n);
-    vis_put_u16le(f, 0);                                    /* res = 0（保留位） */
-    vis_put_u32le(f, g_vis_base_rgb & 0xFFFFFFu);
-    vis_put_u16le(f, (unsigned)g_vis_base_tol);
-    for (i = 0; i < g_vis_pts_n; i++) {
-        int dx = g_vis_pts_x[i] - g_vis_base_x;
-        int dy = g_vis_pts_y[i] - g_vis_base_y;
-        vis_put_u16le(f, (unsigned)(dx & 0xFFFF));          /* i16 小端（负数补码） */
-        vis_put_u16le(f, (unsigned)(dy & 0xFFFF));
-        vis_put_u32le(f, g_vis_pts_rgb[i] & 0xFFFFFFu);
-        vis_put_u16le(f, (unsigned)g_vis_base_tol);         /* v1：每点 tol = 基准容差 */
-    }
-    /* v1 尾扩展（2026-10-05b 点集重编辑）：基准点位置 x u16 + y u16 —— 旧读端（核心 op_vis_read_pts）
-     * 读完点记录即停、忽略尾部（双向兼容）；面板按尺寸识别有无。 */
-    vis_put_u16le(f, (unsigned)(g_vis_base_x < 0 ? 0 : g_vis_base_x));
-    vis_put_u16le(f, (unsigned)(g_vis_base_y < 0 ? 0 : g_vis_base_y));
-    if (fclose(f) != 0) { remove(tmppath); return 5; }
-    snprintf(path, sizeof path, "%s/%s.pts", VIS_TMPL_DIR, name);
-    if (rename(tmppath, path) != 0) { remove(tmppath); return 5; }
-    ALOGI("vis 点集存 %s n=%d 基准 #%06X 容差 %d", name, g_vis_pts_n,
-          (unsigned)(g_vis_base_rgb & 0xFFFFFFu), g_vis_base_tol);
-    return 0;
-}
-/* 删一个模板 / 点集文件（列表 [删除]）；失败进事件日志。 */
-static void vis_del_file(const char *name, int is_pts)
-{
-    char p[160];
-    snprintf(p, sizeof p, "%s/%s.%s", VIS_TMPL_DIR, name, is_pts ? "pts" : "tmpl");
-    if (remove(p) != 0) {
-        ALOGW("vis %s删 失败 %s: %s", is_pts ? "点集" : "模板", name, strerror(errno));
-        ev_note("%s删除失败：%s", is_pts ? "点集" : "模板", name);
-        return;
-    }
-    ALOGI("vis %s删 %s", is_pts ? "点集" : "模板", name);
-    g_need = 1; g_force_frames = 3;
-}
-/* save 返回码 3..5 → 人话（1/2 = 名字域，走 vis_name_why）。 */
-static const char *vis_save_why(int rc)
-{
-    return rc == 3 ? "没有可用的画面/点集内容" : rc == 4 ? "模板目录创建失败" : "写入失败（磁盘/权限）";
-}
-
-/* ---- 采集覆盖层（整屏）：模板框选 / 点集编辑 / 吸色 ---- */
-
-/* 采集层命名键盘（子层）：[确定] 校验名字（同一把尺子 + 重名拒绝）→ 存盘 → 关层；
- * 保存失败留在层里提示（同编辑层口径）。 */
-static void draw_vis_cap_kb(void)
-{
-    const char *title = g_vis_cap == 2 ? "给点集起个名字：多点找色步骤按名字引用（重名会被拒）"
-                     : g_vis_cap == 5 ? "重编辑点集：不改名 = 覆盖原点集；改名 = 另存为新点集"
-                     : g_vis_cap == 4 ? "重编辑模板：不改名 = 覆盖原模板；改名 = 另存为新模板"
-                                       : "给模板起个名字：找图步骤按名字引用（重名会被拒）";
-    int act = draw_char_kb(title, NULL, g_vis_kb_buf, (int)sizeof g_vis_kb_buf, &g_vis_kb_up,
-                           g_vis_kb_msg, (int)sizeof g_vis_kb_msg, 12.0f);
-    if (act == 1) {
-        g_vis_kb = 0; g_vis_kb_msg[0] = 0;                  /* 回采集视图（框选/点选保留） */
-        g_need = 1; g_force_frames = 3;
-        ALOGI("vis 采集 命名取消");
-    } else if (act == 2) {
-        int rc = vis_name_ok(g_vis_kb_buf);
-        int same = ((g_vis_cap == 4 || g_vis_cap == 5) && !strcmp(g_vis_kb_buf, g_vis_reedit_name));   /* 重编辑同名 = 覆盖保存 */
-        if (rc == 0 && !same && vis_name_taken(g_vis_kb_buf)) rc = 4;
-        if (rc == 0) {
-            int sr;
-            g_vis_overwrite = same;
-            sr = (g_vis_cap == 2 || g_vis_cap == 5) ? vis_save_pts(g_vis_kb_buf) : vis_save_tmpl(g_vis_kb_buf);
-            g_vis_overwrite = 0;
-            if (sr != 0) {
-                snprintf(g_vis_kb_msg, sizeof g_vis_kb_msg, "%s", sr <= 2 ? vis_name_why(sr) : vis_save_why(sr));
-                ALOGW("vis 采集 保存失败 %s rc=%d", g_vis_kb_buf, sr);
-                g_need = 1; g_force_frames = 2;
-                return;
-            }
-            ev_log_push(g_vis_cap == 2 ? "点集已保存" : g_vis_cap == 5 ? "点集已更新"
-                       : g_vis_cap == 4 ? "模板已更新" : "模板已保存");
-            vis_cap_close();
-            return;
-        }
-        snprintf(g_vis_kb_msg, sizeof g_vis_kb_msg, "%s", vis_name_why(rc));
-        g_need = 1; g_force_frames = 2;
-    }
-}
-
-/* ---- 采集层缩放/平移 + 选择框调整（Task 7.2） ---- */
-
-/* 缩放值文本（步进 0.25 ⇒ 至多两位小数、尾零去掉）：1 → "1x"、1.25 → "1.25x"、1.5 → "1.5x"。 */
-static void vis_zoom_str(char *b, int n)
-{
-    int v = (int)(g_vis_zoom * 100.0f + 0.5f);
-    if (v % 100 == 0) snprintf(b, n, "%dx", v / 100);
-    else if (v % 10 == 0) snprintf(b, n, "%d.%dx", v / 100, (v / 10) % 10);
-    else snprintf(b, n, "%d.%02dx", v / 100, v % 100);
-}
-/* 缩放步进（[＋]/[－]）：步长 0.25、范围 1x..8x；锚点 = 画面中心 ⇒ 平移量按比例同步（视口中心那一点不动）；
- * 平移夹取留给每帧换算（那里才知道当前视口几何）。 */
-static void vis_zoom_step(int dir)
-{
-    float nz = g_vis_zoom + (dir > 0 ? 0.25f : -0.25f);
-    if (nz < 1.0f) nz = 1.0f;
-    if (nz > 8.0f) nz = 8.0f;
-    if (nz == g_vis_zoom) return;
-    g_vis_pan_x *= nz / g_vis_zoom;
-    g_vis_pan_y *= nz / g_vis_zoom;
-    g_vis_zoom = nz;
-    if (g_vis_zoom <= 1.0f) { g_vis_pan_x = 0; g_vis_pan_y = 0; }
-    g_need = 1; g_force_frames = 2;
-    {
-        char zv[16];
-        vis_zoom_str(zv, sizeof zv);
-        ALOGI("vis 采集 缩放 %s", zv);
-    }
-}
-/* 适应（1x）：缩放与平移一起复位。 */
-static void vis_zoom_fit(void)
-{
-    if (g_vis_zoom == 1.0f && g_vis_pan_x == 0 && g_vis_pan_y == 0) return;
-    g_vis_zoom = 1.0f; g_vis_pan_x = 0; g_vis_pan_y = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("vis 采集 适应（1x）");
-}
-/* 四角手柄命中（屏距口径）：命中半径 VIS_HANDLE_R（≥24px 要求）内取最近角；无 → -1。 */
-#define VIS_HANDLE_R 28.0f
-static int vis_sel_corner_hit(float mx, float my, float ix, float iy, float sc)
-{
-    float ex[4], ey[4], best = VIS_HANDLE_R * VIS_HANDLE_R;
-    int c, hit = -1;
-    ex[0] = ix + g_vis_sel[0] * sc;         ey[0] = iy + g_vis_sel[1] * sc;
-    ex[1] = ix + (g_vis_sel[2] + 1) * sc;   ey[1] = iy + g_vis_sel[1] * sc;
-    ex[2] = ix + g_vis_sel[0] * sc;         ey[2] = iy + (g_vis_sel[3] + 1) * sc;
-    ex[3] = ix + (g_vis_sel[2] + 1) * sc;   ey[3] = iy + (g_vis_sel[3] + 1) * sc;
-    for (c = 0; c < 4; c++) {
-        float dx = mx - ex[c], dy = my - ey[c], d2 = dx * dx + dy * dy;
-        if (d2 <= best) { best = d2; hit = c; }
-    }
-    return hit;
-}
-/* 框内命中（屏距口径）：整框（含端点像素边缘）。 */
-static int vis_sel_hit(float mx, float my, float ix, float iy, float sc)
-{
-    float x0 = ix + g_vis_sel[0] * sc, y0 = iy + g_vis_sel[1] * sc;
-    float x1 = ix + (g_vis_sel[2] + 1) * sc, y1 = iy + (g_vis_sel[3] + 1) * sc;
-    return mx >= x0 && mx <= x1 && my >= y0 && my <= y1;
-}
-/* 放大时用最近邻（看清像素边界 = 精细选择）；1x 回线性。只在状态变化时动 GL（纹理重建会复位）。 */
-static void vis_tex_magf(void)
-{
-    int want = g_vis_zoom > 1.0f ? 1 : 0;
-    if (!g_vis_tex || want == g_vis_magf) return;
-    glBindTexture(GL_TEXTURE_2D, g_vis_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, want ? GL_NEAREST : GL_LINEAR);
-    g_vis_magf = want;
-}
-/* 采集覆盖层（整屏；T3.2；缩放/平移 + 框调整 = Task 7.2）：三态 —— 等帧（wait）/ 失败（err）/ 图像就绪。
- * 图像等比缩放居中（模板/点集可 [＋]/[－]/[适应] 缩放 1x..8x、>1x 拖画面平移）；模板 = 拖框选（松手 ≥8×8
- * 落定、不弹命名；四角手柄/框内拖动调整，[确认] 才命名保存）；点集 = 首点吸基准色、其后加点（显示偏移/色）；
- * 吸色 = 点一下回填找色步颜色。整屏吞触摸（ui_rect_now）；子层 = 命名键盘。 */
-static void build_vis_cap(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, img_top, img_bot, sc = 0, iw = 0, ih = 0, ix = 0, iy = 0;
-    int mode = g_vis_cap;
-    int box_ok = (mode == 1) || (mode == 4 && g_vis_re_fresh);   /* 可框选：模板采集 / 重编辑新帧（2026-10-05） */
-    float sw = (float)g_scr_w, sh = (float)g_scr_h;
-    if (sw <= 0 || sh <= 0) return;
-    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(sw, sh), ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
-    ImGui::Begin("##viscap", 0,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    g_zone_title[0] = g_zone_title[1] = g_zone_title[2] = g_zone_title[3] = 0;
-    g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
-    g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
-    g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
-    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
-    if (g_vis_kb) {
-        draw_vis_cap_kb();
-    } else {
-        dl = ImGui::GetWindowDrawList();
-        wp = ImGui::GetWindowPos();
-        ww = ImGui::GetWindowWidth();
-        wh = ImGui::GetWindowHeight();
-        a = ImVec2(wp.x + 12, wp.y + 12);
-        b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-        dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-        dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-        x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-        ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-        text_meta_s(mode == 1 ? "模板采集 · 拖动框选一块图案（拖四角调整），[确认] 命名保存"
-                   : mode == 4 ? "模板重编辑 · 这是已存模板；[重新截帧] 后重选区域，[确认] 保存（不改名 = 覆盖）"
-                   : mode == 5 ? "点集重编辑 · 已存点集会摆到画面上；点一下可加参考点，[存点集] 保存（不改名 = 覆盖）"
-                   : mode == 2 ? "点集编辑 · 先点一下吸基准色，再点参考点（最多 16 个）"
-                               : "吸色 · 点画面里要取的颜色（回填找色步骤）");
-        if (g_vis_cap_msg[0]) {
-            ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 48));
-            ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_cap_msg);
-        }
-        img_top = y0 + 96.0f;
-        img_bot = b.y - 24.0f - 104.0f - ((mode == 2 || mode == 5) ? 88.0f : 0.0f);   /* 底：按钮 92+缝 12；点集（含重编辑）再让容差行 76+12 */
-        if (img_bot < img_top + 120.0f) img_bot = img_top + 120.0f;    /* 极矮兜底 */
-        /* 缩放行（Task 7.2；模板/点集）：[＋] [－] [适应] + 当前值；插在标题/提示与画面之间（矮屏收一档） */
-        if (mode != 3) {
-            float zh = (img_bot - img_top) < 300.0f ? 46.0f : 64.0f;
-            float zw = (cw - 3 * 12.0f) / 4.0f;
-            char zv[16];
-            ImGui::SetCursorScreenPos(ImVec2(x0, img_top));
-            if (btn_light("＋", ImVec2(zw, zh))) vis_zoom_step(+1);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + zw + 12, img_top));
-            if (btn_light("－", ImVec2(zw, zh))) vis_zoom_step(-1);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (zw + 12), img_top));
-            if (btn_light("适应", ImVec2(zw, zh))) vis_zoom_fit();
-            vis_zoom_str(zv, sizeof zv);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (zw + 12), img_top));
-            btn_light(zv, ImVec2(zw, zh));     /* 当前值（只显示） */
-            img_top += zh + 12.0f;
-        }
-        if (g_vis_cap_wait) {
-            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
-            text_meta_w("抓帧中…（面板向系统要一帧；通常 5~25ms）");
-        } else if (g_vis_cap_err) {
-            char m[128];
-            snprintf(m, sizeof m, "抓帧失败（%s，错误码 %d）：检查系统抓屏是否可用",
-                     g_vis_cap_err == -1 ? "超时" : "错误", g_vis_cap_err);
-            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
-            text_meta_w(m);
-        } else if (g_vis_img && g_vis_img_w > 0 && g_vis_img_h > 0) {
-            float vh = img_bot - img_top;
-            sc = cw / (float)g_vis_img_w;
-            {
-                float sy = vh / (float)g_vis_img_h;
-                if (sy < sc) sc = sy;
-            }
-            sc *= g_vis_zoom;                        /* 显示比例 = 适应比例 × 缩放（Task 7.2） */
-            iw = (float)g_vis_img_w * sc;
-            ih = (float)g_vis_img_h * sc;
-            {   /* 平移夹取：画面不许比视口小（顶到边即停）；每帧按当前视口算（转屏/换窗自动纠正） */
-                float mpx = (iw - cw) * 0.5f, mpy = (ih - vh) * 0.5f;
-                if (mpx < 0) mpx = 0;
-                if (mpy < 0) mpy = 0;
-                if (g_vis_pan_x < -mpx) g_vis_pan_x = -mpx;
-                if (g_vis_pan_x > mpx) g_vis_pan_x = mpx;
-                if (g_vis_pan_y < -mpy) g_vis_pan_y = -mpy;
-                if (g_vis_pan_y > mpy) g_vis_pan_y = mpy;
-            }
-            ix = x0 + (cw - iw) * 0.5f + g_vis_pan_x;
-            iy = img_top + (vh - ih) * 0.5f + g_vis_pan_y;
-            if (g_vis_tex_dirty) { vis_tex_update(g_vis_img, g_vis_img_w, g_vis_img_h); g_vis_tex_dirty = 0; }
-            vis_tex_magf();                          /* 放大 → 最近邻（像素边界可见） */
-            dl->PushClipRect(ImVec2(x0, img_top), ImVec2(x0 + cw, img_bot), true);   /* 放大时画面裁在视口内 */
-            dl->AddRectFilled(ImVec2(ix - 2, iy - 2), ImVec2(ix + iw + 2, iy + ih + 2), IM_COL32(228, 228, 231, 255), 4);
-            if (g_vis_tex)
-                dl->AddImage((ImTextureID)(intptr_t)g_vis_tex, ImVec2(ix, iy), ImVec2(ix + iw, iy + ih));
-            ImGui::PushID(9100);
-            {
-                /* 交互区 = 画面 ∩ 视口（1x 下与原来一致 = 画面本身；>1x 时铺满被画面盖住的视口） */
-                float bx0 = ix > x0 ? ix : x0;
-                float by0 = iy > img_top ? iy : img_top;
-                float bx1 = (ix + iw) < (x0 + cw) ? (ix + iw) : (x0 + cw);
-                float by1 = (iy + ih) < img_bot ? (iy + ih) : img_bot;
-                ImGui::SetCursorScreenPos(ImVec2(bx0, by0));
-                ImGui::InvisibleButton("##img", ImVec2(bx1 - bx0, by1 - by0));
-            }
-            {
-                ImVec2 mp = ImGui::GetIO().MousePos;
-                int act = ImGui::IsItemActive();
-                int deact = ImGui::IsItemDeactivated();
-                if (act && !g_vis_drag) {
-                    /* 起手判手势（Task 7.2）：手柄 > 框内 > （缩放 >1x ? 平移 : 新框）；点集/吸色：待定（轻点 or 平移） */
-                    g_vis_drag = 1;
-                    g_vis_dx0 = mp.x; g_vis_dy0 = mp.y;
-                    g_vis_pmx = mp.x; g_vis_pmy = mp.y;
-                    g_vis_gest = 0;
-                    if (box_ok) {
-                        int corner = -1;
-                        if (g_vis_sel_on) corner = vis_sel_corner_hit(mp.x, mp.y, ix, iy, sc);
-                        if (corner >= 0) {
-                            g_vis_gest = 3; g_vis_gest_corner = corner;
-                            g_vis_gest_box[0] = g_vis_sel[0]; g_vis_gest_box[1] = g_vis_sel[1];
-                            g_vis_gest_box[2] = g_vis_sel[2]; g_vis_gest_box[3] = g_vis_sel[3];
-                        } else if (g_vis_sel_on && vis_sel_hit(mp.x, mp.y, ix, iy, sc)) {
-                            g_vis_gest = 2;
-                            g_vis_gest_box[0] = g_vis_sel[0]; g_vis_gest_box[1] = g_vis_sel[1];
-                            g_vis_gest_box[2] = g_vis_sel[2]; g_vis_gest_box[3] = g_vis_sel[3];
-                        } else {
-                            g_vis_gest = g_vis_zoom > 1.0f ? 4 : 1;
-                        }
-                    }
-                }
-                if (g_vis_drag && act) {
-                    if (g_vis_gest == 1) {
-                        float rx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
-                        float rx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
-                        float ry0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
-                        float ry1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
-                        dl->AddRect(ImVec2(rx0, ry0), ImVec2(rx1, ry1), IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
-                    } else if (g_vis_gest == 2) {
-                        /* 框内拖动 = 整体移动（起点框 + 总位移，帧坐标；夹在图内、尺寸不变） */
-                        int w0 = g_vis_gest_box[2] - g_vis_gest_box[0], h0 = g_vis_gest_box[3] - g_vis_gest_box[1];
-                        int nx = (int)lroundf(g_vis_gest_box[0] + (mp.x - g_vis_dx0) / sc);
-                        int ny = (int)lroundf(g_vis_gest_box[1] + (mp.y - g_vis_dy0) / sc);
-                        if (nx < 0) nx = 0;
-                        if (nx > g_vis_img_w - 1 - w0) nx = g_vis_img_w - 1 - w0;
-                        if (ny < 0) ny = 0;
-                        if (ny > g_vis_img_h - 1 - h0) ny = g_vis_img_h - 1 - h0;
-                        g_vis_sel[0] = nx; g_vis_sel[1] = ny;
-                        g_vis_sel[2] = nx + w0; g_vis_sel[3] = ny + h0;
-                        g_need = 1; g_force_frames = 2;
-                    } else if (g_vis_gest == 3) {
-                        /* 四角手柄拖动 = 缩放框（**起点角 + 位移增量，零跳变**；帧坐标取整、夹在图内、最小 8×8 含端点） */
-                        int x0b = g_vis_gest_box[0], y0b = g_vis_gest_box[1];
-                        int x1b = g_vis_gest_box[2], y1b = g_vis_gest_box[3];
-                        int fx, fy;
-                        if (g_vis_gest_corner == 0 || g_vis_gest_corner == 2)
-                            fx = (int)lroundf(x0b + (mp.x - g_vis_dx0) / sc);
-                        else
-                            fx = (int)lroundf(x1b + (mp.x - g_vis_dx0) / sc);
-                        if (g_vis_gest_corner == 0 || g_vis_gest_corner == 1)
-                            fy = (int)lroundf(y0b + (mp.y - g_vis_dy0) / sc);
-                        else
-                            fy = (int)lroundf(y1b + (mp.y - g_vis_dy0) / sc);
-                        if (fx < 0) fx = 0;
-                        if (fx > g_vis_img_w - 1) fx = g_vis_img_w - 1;
-                        if (fy < 0) fy = 0;
-                        if (fy > g_vis_img_h - 1) fy = g_vis_img_h - 1;
-                        if (g_vis_gest_corner == 0) { x0b = fx; y0b = fy; }
-                        else if (g_vis_gest_corner == 1) { x1b = fx; y0b = fy; }
-                        else if (g_vis_gest_corner == 2) { x0b = fx; y1b = fy; }
-                        else { x1b = fx; y1b = fy; }
-                        if (x1b - x0b < 7) { if (g_vis_gest_corner & 1) x1b = x0b + 7; else x0b = x1b - 7; }
-                        if (y1b - y0b < 7) { if (g_vis_gest_corner & 2) y1b = y0b + 7; else y0b = y1b - 7; }
-                        g_vis_sel[0] = x0b; g_vis_sel[1] = y0b;
-                        g_vis_sel[2] = x1b; g_vis_sel[3] = y1b;
-                        g_need = 1; g_force_frames = 2;
-                    } else if (g_vis_gest == 4) {
-                        /* 平移（缩放 >1x 时拖画面）：增量跟手；夹取交给每帧换算 */
-                        g_vis_pan_x += mp.x - g_vis_pmx;
-                        g_vis_pan_y += mp.y - g_vis_pmy;
-                        g_need = 1; g_force_frames = 2;
-                    } else if (mode != 1) {
-                        /* 点集/吸色：位移超轻点阈值（14px）且缩放 >1x → 转平移（越阈前的位移不算） */
-                        float ddx = mp.x - g_vis_dx0, ddy = mp.y - g_vis_dy0;
-                        if (g_vis_zoom > 1.0f && ddx * ddx + ddy * ddy > 14.0f * 14.0f) {
-                            g_vis_gest = 4;
-                            g_vis_pmx = mp.x; g_vis_pmy = mp.y;
-                        }
-                    }
-                    g_vis_pmx = mp.x; g_vis_pmy = mp.y;
-                }
-                if (deact && g_vis_drag) {
-                    float ddx = mp.x - g_vis_dx0, ddy = mp.y - g_vis_dy0;
-                    int gest = g_vis_gest;
-                    g_vis_drag = 0; g_vis_gest = 0;
-                    if (box_ok) {
-                        if (gest == 1) {
-                            /* 新框落定：显示坐标 → 帧坐标 floor + 夹取；≥8×8 才收（照旧）。不弹命名键盘
-                             * （Task 7.2：框保留、可继续调整，[确认] 才进命名）。 */
-                            float mx0 = g_vis_dx0 < mp.x ? g_vis_dx0 : mp.x;
-                            float mx1 = g_vis_dx0 < mp.x ? mp.x : g_vis_dx0;
-                            float my0 = g_vis_dy0 < mp.y ? g_vis_dy0 : mp.y;
-                            float my1 = g_vis_dy0 < mp.y ? mp.y : g_vis_dy0;
-                            int fx0 = (int)((mx0 - ix) / sc), fx1 = (int)((mx1 - ix) / sc);
-                            int fy0 = (int)((my0 - iy) / sc), fy1 = (int)((my1 - iy) / sc);
-                            if (fx0 < 0) fx0 = 0;
-                            if (fy0 < 0) fy0 = 0;
-                            if (fx1 > g_vis_img_w - 1) fx1 = g_vis_img_w - 1;
-                            if (fy1 > g_vis_img_h - 1) fy1 = g_vis_img_h - 1;
-                            if (fx0 <= fx1 && fy0 <= fy1 && fx1 - fx0 + 1 >= 8 && fy1 - fy0 + 1 >= 8) {
-                                g_vis_sel[0] = fx0; g_vis_sel[1] = fy0;
-                                g_vis_sel[2] = fx1; g_vis_sel[3] = fy1;
-                                g_vis_sel_on = 1;
-                                ALOGI("vis 采集 框选 %d,%d-%d,%d（%dx%d）", fx0, fy0, fx1, fy1,
-                                      fx1 - fx0 + 1, fy1 - fy0 + 1);
-                            }
-                        } else if ((gest == 2 || gest == 3) &&
-                                   (g_vis_sel[0] != g_vis_gest_box[0] || g_vis_sel[1] != g_vis_gest_box[1] ||
-                                    g_vis_sel[2] != g_vis_gest_box[2] || g_vis_sel[3] != g_vis_gest_box[3])) {
-                            ALOGI("vis 采集 调整框 %d,%d-%d,%d（%dx%d）", g_vis_sel[0], g_vis_sel[1],
-                                  g_vis_sel[2], g_vis_sel[3], g_vis_sel[2] - g_vis_sel[0] + 1,
-                                  g_vis_sel[3] - g_vis_sel[1] + 1);
-                        } else if (gest == 4) {
-                            ALOGI("vis 采集 平移 %.0f,%.0f", (double)g_vis_pan_x, (double)g_vis_pan_y);
-                        }
-                    } else if (gest == 4) {
-                        ALOGI("vis 采集 平移 %.0f,%.0f", (double)g_vis_pan_x, (double)g_vis_pan_y);
-                    } else if (ddx * ddx + ddy * ddy <= 14.0f * 14.0f) {
-                        /* 点选（点集 / 吸色）：轻点才算（拖动不算） */
-                        int fx = (int)((mp.x - ix) / sc), fy = (int)((mp.y - iy) / sc);
-                        uint32_t rgb = 0;
-                        if (fx >= 0 && fy >= 0 && fx < g_vis_img_w && fy < g_vis_img_h &&
-                            vis_frame_px(g_vis_img, g_vis_img_w, g_vis_img_h, fx, fy, &rgb) == 0) {
-                            if (mode == 3) vis_pick_apply(fx, fy, rgb);
-                            else {
-                                vis_pts_tap(fx, fy, rgb);
-                                vis_pts_restore();       /* 待恢复组（重编辑 / [重选基准]）首点后回摆（2026-10-05b/c） */
-                            }
-                        }
-                    }
-                    g_need = 1; g_force_frames = 3;
-                }
-                if (box_ok && g_vis_sel_on) {            /* 已选态：框 + 四角手柄（16px 方块；命中半径见 VIS_HANDLE_R） */
-                    ImVec2 q0 = ImVec2(ix + g_vis_sel[0] * sc, iy + g_vis_sel[1] * sc);
-                    ImVec2 q1 = ImVec2(ix + (g_vis_sel[2] + 1) * sc, iy + (g_vis_sel[3] + 1) * sc);
-                    ImVec2 hc[4];
-                    int c;
-                    dl->AddRect(q0, q1, IM_COL32(59, 130, 246, 255), 0, 0, 3.0f);
-                    hc[0] = ImVec2(q0.x, q0.y); hc[1] = ImVec2(q1.x, q0.y);
-                    hc[2] = ImVec2(q0.x, q1.y); hc[3] = ImVec2(q1.x, q1.y);
-                    for (c = 0; c < 4; c++) {
-                        dl->AddRectFilled(ImVec2(hc[c].x - 8, hc[c].y - 8), ImVec2(hc[c].x + 8, hc[c].y + 8),
-                                          IM_COL32(255, 255, 255, 255), 2.0f);
-                        dl->AddRect(ImVec2(hc[c].x - 8, hc[c].y - 8), ImVec2(hc[c].x + 8, hc[c].y + 8),
-                                    IM_COL32(59, 130, 246, 255), 2.0f, 0, 2.5f);
-                    }
-                }
-                if (mode == 2 || mode == 5) {   /* 点集编辑 / 点集重编辑（2026-10-05c：mode 5 同画） */
-                    /* 基准 + 参考点标记（显示层；帧坐标 → 屏坐标 = ix + fx*sc） */
-                    char lb[44];
-                    int k;
-                    if (g_vis_base_x >= 0) {
-                        float bx = ix + g_vis_base_x * sc, by2 = iy + g_vis_base_y * sc;
-                        dl->AddCircle(ImVec2(bx, by2), 16.0f, IM_COL32(255, 140, 0, 255), 32, 4.0f);
-                        dl->AddLine(ImVec2(bx - 22, by2), ImVec2(bx + 22, by2), IM_COL32(255, 140, 0, 255), 4.0f);
-                        dl->AddLine(ImVec2(bx, by2 - 22), ImVec2(bx, by2 + 22), IM_COL32(255, 140, 0, 255), 4.0f);
-                        snprintf(lb, sizeof lb, "基准 #%06X", (unsigned)g_vis_base_rgb);
-                        dl->AddText(ImVec2(bx + 20, by2 + 12), IM_COL32(180, 83, 9, 255), lb);
-                    }
-                    for (k = 0; k < g_vis_pts_n; k++) {
-                        float px = ix + g_vis_pts_x[k] * sc, py = iy + g_vis_pts_y[k] * sc;
-                        ImU32 cc = IM_COL32((g_vis_pts_rgb[k] >> 16) & 0xFF, (g_vis_pts_rgb[k] >> 8) & 0xFF,
-                                            g_vis_pts_rgb[k] & 0xFF, 255);
-                        if (g_vis_base_x >= 0)
-                            dl->AddLine(ImVec2(ix + g_vis_base_x * sc, iy + g_vis_base_y * sc), ImVec2(px, py),
-                                        IM_COL32(59, 130, 246, 140), 2.0f);
-                        dl->AddCircleFilled(ImVec2(px, py), 11.0f, cc);
-                        dl->AddCircle(ImVec2(px, py), 11.0f, IM_COL32(24, 24, 27, 255), 24, 2.0f);
-                        snprintf(lb, sizeof lb, "%d +%d,%d #%06X", k + 1,
-                                 g_vis_pts_x[k] - g_vis_base_x, g_vis_pts_y[k] - g_vis_base_y,
-                                 (unsigned)g_vis_pts_rgb[k]);
-                        dl->AddText(ImVec2(px + 14, py + 10), IM_COL32(24, 24, 27, 255), lb);
-                    }
-                }
-            }
-            ImGui::PopID();
-            dl->PopClipRect();                   /* 画面视口裁剪（Task 7.2）结束 */
-        } else {
-            ImGui::SetCursorScreenPos(ImVec2(x0, img_top + 40));
-            text_meta_w("没有画面");
-        }
-        /* 底部按钮（状态相关） */
-        {
-            float by = b.y - 24.0f - 92.0f;
-            float bw2 = (cw - 12.0f) * 0.5f;
-            if (g_vis_cap_wait) {
-                ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                if (btn_light("取消", ImVec2(cw, 92))) { ALOGI("vis 采集 取消（等帧中）"); vis_cap_close(); }
-            } else if (g_vis_cap_err) {
-                ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                if (btn_light("重试", ImVec2(bw2, 92))) {
-                    g_vis_cap_err = 0; g_vis_cap_wait = 1; g_vis_cap_t0 = now_ms();
-                    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;
-                    vtouch_vis_panel_capture_req();
-                    g_need = 1; g_force_frames = 3;
-                    ALOGI("vis 采集 重试");
-                }
-                ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
-                if (btn_light("返回", ImVec2(bw2, 92))) vis_cap_close();
-            } else if (mode == 2 || mode == 5) {   /* 点集编辑 / 点集重编辑（2026-10-05b） */
-                float ty = by - 12.0f - 76.0f;
-                float tw = 130.0f;
-                char tv[24];
-                ImGui::SetCursorScreenPos(ImVec2(x0, ty));
-                if (btn_light("-", ImVec2(tw, 76))) { if (g_vis_base_tol > 0) g_vis_base_tol--; g_need = 1; g_force_frames = 2; }
-                snprintf(tv, sizeof tv, "基准容差 %d", g_vis_base_tol);
-                ImGui::SetCursorScreenPos(ImVec2(x0 + tw + 12, ty));
-                btn_light(tv, ImVec2(cw - 2 * (tw + 12), 76));   /* 只显示（不可点） */
-                ImGui::SetCursorScreenPos(ImVec2(x0 + cw - tw, ty));
-                if (btn_light("+", ImVec2(tw, 76))) { if (g_vis_base_tol < 255) g_vis_base_tol++; g_need = 1; g_force_frames = 2; }
-                {
-                    float bw3 = (cw - 3 * 12) / 4.0f;
-                    ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                    if (btn_light("取消", ImVec2(bw3, 92))) { ALOGI(mode == 5 ? "vis 采集 取消（点集重编辑）" : "vis 采集 取消（点集）"); vis_cap_close(); }
-                    ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, by));
-                    if (btn_light("重来", ImVec2(bw3, 92))) {
-                        g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0; g_vis_pts_n = 0;
-                        g_vis_cap_msg[0] = 0;
-                        g_vis_re_pts_restored = 1; g_vis_re_pts_n = 0;   /* 重来 = 彻底重来（不再回摆已存/已挪点组） */
-                        g_need = 1; g_force_frames = 3;
-                        ALOGI("vis 采集 点集重来");
-                    }
-                    ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), by));
-                    if (btn_light("重选基准", ImVec2(bw3, 92))) {   /* 2026-10-05c：整组（基准+参考点）挪到新位置 */
-                        if (g_vis_base_x >= 0 && g_vis_pts_n >= 1) {
-                            int i;
-                            g_vis_re_pts_n = g_vis_pts_n;
-                            for (i = 0; i < g_vis_pts_n; i++) {
-                                g_vis_re_pts_dx[i] = g_vis_pts_x[i] - g_vis_base_x;
-                                g_vis_re_pts_dy[i] = g_vis_pts_y[i] - g_vis_base_y;
-                                g_vis_re_pts_rgb[i] = g_vis_pts_rgb[i];
-                            }
-                            g_vis_re_pts_restored = 0;
-                            g_vis_base_x = -1; g_vis_base_y = -1; g_vis_base_rgb = 0;
-                            g_vis_pts_n = 0;
-                            snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg,
-                                     "点一下画面 = 新基准位置（%d 个参考点跟着挪）", g_vis_re_pts_n);
-                            ALOGI("vis 采集 重选基准开（n=%d）", g_vis_re_pts_n);
-                        } else {
-                            snprintf(g_vis_cap_msg, sizeof g_vis_cap_msg, "先有基准和参考点才能重选基准");
-                        }
-                        g_need = 1; g_force_frames = 3;
-                    }
-                    ImGui::SetCursorScreenPos(ImVec2(x0 + 3 * (bw3 + 12), by));
-                    if (g_vis_base_x >= 0 && g_vis_pts_n >= 1) {
-                        if (btn_blue("存点集", ImVec2(bw3, 92))) {
-                            g_vis_kb = 2;
-                            if (mode == 5) snprintf(g_vis_kb_buf, sizeof g_vis_kb_buf, "%s", g_vis_reedit_name);
-                            else g_vis_kb_buf[0] = 0;
-                            g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
-                            ALOGI("vis 采集 点集命名开（n=%d%s）", g_vis_pts_n, mode == 5 ? " 重编辑" : "");
-                        }
-                    } else {
-                        ImGui::BeginDisabled();
-                        btn_light("存点集", ImVec2(bw3, 92));
-                        ImGui::EndDisabled();
-                    }
-                }
-            } else if (mode == 1 || mode == 4) {
-                float bw3 = (cw - 2 * 12.0f) / 3.0f;
-                ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                if (btn_light("取消", ImVec2(bw3, 92))) { ALOGI(mode == 4 ? "vis 采集 取消（重编辑）" : "vis 采集 取消（模板）"); vis_cap_close(); }
-                ImGui::SetCursorScreenPos(ImVec2(x0 + bw3 + 12, by));
-                if (btn_light("重新截帧", ImVec2(bw3, 92))) {
-                    g_vis_cap_err = 0; g_vis_cap_wait = 1; g_vis_cap_t0 = now_ms();
-                    if (mode == 4) {
-                        vis_re_img_free();                       /* 释放合成预览；g_vis_img 一并置 0 */
-                        g_vis_tex_dirty = 0;
-                        if (!g_vis_sel_on) g_vis_re_pending = 1; /* 首帧：到帧后用原区域摆框 */
-                    }
-                    g_vis_img = 0; g_vis_img_w = 0; g_vis_img_h = 0;   /* 框保留（Task 7.2：已选态跨截帧保留、可继续调整） */
-                    vtouch_vis_panel_capture_req();
-                    g_need = 1; g_force_frames = 3;
-                    ALOGI("vis 采集 重新截帧%s", mode == 4 ? "（重编辑）" : "");
-                }
-                ImGui::SetCursorScreenPos(ImVec2(x0 + 2 * (bw3 + 12), by));
-                if (g_vis_sel_on) {
-                    if (btn_blue("确认", ImVec2(bw3, 92))) {   /* 确认 → 命名键盘；取消命名回采集视图、框保留 */
-                        g_vis_kb = 1;
-                        if (mode == 4) snprintf(g_vis_kb_buf, sizeof g_vis_kb_buf, "%s", g_vis_reedit_name);
-                        else g_vis_kb_buf[0] = 0;
-                        g_vis_kb_msg[0] = 0; g_vis_kb_up = 0;
-                        ALOGI(mode == 4 ? "vis 采集 确认（重编辑命名开）" : "vis 采集 确认（模板命名开）");
-                    }
-                } else {
-                    ImGui::BeginDisabled();
-                    btn_light("确认", ImVec2(bw3, 92));
-                    ImGui::EndDisabled();
-                }
-            } else {
-                ImGui::SetCursorScreenPos(ImVec2(x0, by));
-                if (btn_light("取消", ImVec2(cw, 92))) { ALOGI("vis 采集 取消（吸色）"); vis_cap_close(); }
-            }
-        }
-    }
-    ImGui::PopStyleVar(2);
-    ImGui::End();
-    ImGui::PopStyleColor(2);
-    if (g_scr_target == SCR_NONE) g_scroll_acc = 0;   /* 与 build_panel 同款：非滚动容器按下丢弃累积量 */
-}
-
-/* ---- 视觉步参数层（编辑层子层；g_vis_ed） ---- */
-
-/* 视觉步字段数字编辑入口（找图 = 阈值 a1 / 找色 = 容差 a2 低 8 位；T7.4 加第 2 格超时 ms）：复用数字键盘子层
- * （draw_num_edit；字段模型见 ope_fidx 的 10/11 行；[完成] 写回经 ne_field_set 拆包）。sf = 进层激活的格。 */
-static void ne_open_vis_field(int se, int sf)
-{
-    if (se < 0 || se >= g_ope_nsteps) return;
-    if (g_ope_steps[se][0] != OP_STEP_FINDIMAGE && g_ope_steps[se][0] != OP_STEP_FINDCOLOR) return;
-    g_ope_se = se; g_ope_sf = sf; g_ne_tgt = 0;
-    g_vis_num = 1;
-    ope_num_load();
-    g_ne_msg[0] = 0;
-    g_need = 1; g_force_frames = 2;
-    ALOGI("op edit 参数开（视觉） 第 %d 步 %s", se + 1, ope_tname(g_ope_steps[se][0]));
-}
-/* 模板列表子层（找图步 [模板]）：枚举 templates 下的 .tmpl，点一条写回该步 ref（模板名）。 */
-static void draw_vis_tlist(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    char names[64][VT_NAME_BUF];
-    int i, n, se = g_ope_se;
-    if (se < 0 || se >= g_ope_nsteps) { g_vis_tl = 0; return; }
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    {
-        char t[80];
-        snprintf(t, sizeof t, "第 %d 步 · 找图 · 选择模板", se + 1);
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s("templates/ 下的 .tmpl（到「模板」页截帧框选生成）");
-    list_top = y0 + 76;
-    list_bot = b.y - 24 - 92 - 12;
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##vistl", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    n = vis_list(".tmpl", names, 64);
-    for (i = 0; i < n; i++) {
-        ImGui::PushID(3300 + i);
-        if ((strcmp(g_ope_refs[se], names[i]) == 0) ? btn_blue(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))
-                                                   : btn_light(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            snprintf(g_ope_refs[se], sizeof g_ope_refs[se], "%s", names[i]);
-            g_vis_tl = 0;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("vis edit 找图 第 %d 步 模板=%s", se + 1, names[i]);
-        }
-        ImGui::PopID();
-    }
-    if (n == 0) text_meta_w("还没有模板：先到「模板」页截帧框选生成");
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::PushID(3400);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if (btn_light("取消", ImVec2(cw, 92))) {
-        g_vis_tl = 0;
-        g_need = 1; g_force_frames = 2;
-    }
-    ImGui::PopID();
-}
-/* 点集列表子层（找色多点 [点集]）：枚举 templates 下的 .pts，点一条写回该步 ref（点集名）。 */
-static void draw_vis_plist(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    char names[64][VT_NAME_BUF];
-    int i, n, se = g_ope_se;
-    if (se < 0 || se >= g_ope_nsteps) { g_vis_pl = 0; return; }
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    {
-        char t[80];
-        snprintf(t, sizeof t, "第 %d 步 · 找色 · 选择点集", se + 1);
-        text_meta_s(t);
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s("templates/ 下的 .pts（到「模板」页吸色点选生成）");
-    list_top = y0 + 76;
-    list_bot = b.y - 24 - 92 - 12;
-    list_h = list_bot - list_top;
-    if (list_h < 0) list_h = 0;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::SetCursorScreenPos(ImVec2(x0, list_top));
-    ImGui::BeginChild("##vispl", ImVec2(cw, list_h), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    n = vis_list(".pts", names, 64);
-    for (i = 0; i < n; i++) {
-        ImGui::PushID(3600 + i);
-        if ((strcmp(g_ope_refs[se], names[i]) == 0) ? btn_blue(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))
-                                                   : btn_light(names[i], ImVec2(ImGui::GetContentRegionAvail().x, 76))) {
-            snprintf(g_ope_refs[se], sizeof g_ope_refs[se], "%s", names[i]);
-            g_vis_pl = 0;
-            g_need = 1; g_force_frames = 3;
-            ALOGI("vis edit 找色 第 %d 步 点集=%s", se + 1, names[i]);
-        }
-        ImGui::PopID();
-    }
-    if (n == 0) text_meta_w("还没有点集：先到「模板」页「截帧 · 做点集」生成");
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    ImGui::PushID(3700);
-    ImGui::SetCursorScreenPos(ImVec2(x0, b.y - 24 - 92));
-    if (btn_light("取消", ImVec2(cw, 92))) {
-        g_vis_pl = 0;
-        g_need = 1; g_force_frames = 2;
-    }
-    ImGui::PopID();
-}
-/* 颜色十六进制键盘子层（找色单点 [颜色]）：复用字符键盘；[确定] 校验 1..6 位十六进制 →
- * 写回 a2 的颜色段（容差段保留）→ 关层。 */
-static void draw_vis_hex(void)
-{
-    int act = draw_char_kb("颜色（十六进制 RRGGBB，例 ff8800；0-9 a-f）", NULL, g_vis_hexbuf,
-                           (int)sizeof g_vis_hexbuf, &g_vis_hexup, g_vis_hexmsg,
-                           (int)sizeof g_vis_hexmsg, 12.0f);
-    if (act == 1) {
-        g_vis_hex = 0; g_vis_hexmsg[0] = 0;
-        g_need = 1; g_force_frames = 2;
-    } else if (act == 2) {
-        int se = g_ope_se, n = (int)strlen(g_vis_hexbuf), i, ok = (n >= 1 && n <= 6);
-        unsigned c = 0;
-        for (i = 0; ok && i < n; i++) {
-            char ch = g_vis_hexbuf[i];
-            if (ch >= '0' && ch <= '9') c = c * 16u + (unsigned)(ch - '0');
-            else if (ch >= 'a' && ch <= 'f') c = c * 16u + (unsigned)(ch - 'a' + 10);
-            else if (ch >= 'A' && ch <= 'F') c = c * 16u + (unsigned)(ch - 'A' + 10);
-            else ok = 0;
-        }
-        if (!ok || se < 0 || se >= g_ope_nsteps || g_ope_steps[se][0] != OP_STEP_FINDCOLOR) {
-            snprintf(g_vis_hexmsg, sizeof g_vis_hexmsg, "颜色要是 1–6 位十六进制（0-9 a-f）");
-            g_need = 1; g_force_frames = 2;
-            return;
-        }
-        g_ope_steps[se][2] = (int)(((c & 0xFFFFFFu) << 8) | ((uint32_t)g_ope_steps[se][2] & 0xFFu));
-        ALOGI("vis edit 找色 第 %d 步 颜色=#%06X", se + 1, c & 0xFFFFFFu);
-        g_vis_hex = 0; g_vis_hexmsg[0] = 0;
         g_need = 1; g_force_frames = 3;
     }
-}
-/* 视觉步参数层（整屏卡片；T3.2；T7.4 加持续查找）：找图 = 模板 / 区域 / 阈值 / 持续查找 / 超时；
- * 找色 = 模式 / 颜色 / 取点吸色 / 容差（单点）或 点集（多点）/ 持续查找 / 超时。
- * 编辑直接落在编辑层快照（g_ope_steps / g_ope_refs / g_ope_exprs；外层 [取消] 全丢、[完成] 才落表）。
- * [完成] 走同源 ope_step_check（不过 → 就地提示、层不关）；日志 `vis edit …`（spec §8）。 */
-static void draw_vis_edit(void)
-{
-    ImDrawList *dl;
-    ImVec2 wp, a, b;
-    float ww, wh, x0, y0, cw, ry, ry2, bw2, by;
-    int se, type;
-    char lab[96], t[80];
-    if (g_vis_num) { draw_num_edit(); return; }      /* 数字键盘子层（复用；[完成] 写回经 ne_field_set） */
-    if (g_vis_tl) { draw_vis_tlist(); return; }
-    if (g_vis_pl) { draw_vis_plist(); return; }
-    if (g_vis_hex) { draw_vis_hex(); return; }
-    se = g_ope_se;
-    if (se < 0 || se >= g_ope_nsteps) {
-        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
-        g_ope_se = -1;
-        return;
-    }
-    type = g_ope_steps[se][0];
-    if (type != OP_STEP_FINDIMAGE && type != OP_STEP_FINDCOLOR) {
-        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0;
-        g_ope_se = -1;
-        return;
-    }
-    dl = ImGui::GetWindowDrawList();
-    wp = ImGui::GetWindowPos();
-    ww = ImGui::GetWindowWidth();
-    wh = ImGui::GetWindowHeight();
-    a = ImVec2(wp.x + 12, wp.y + 12);
-    b = ImVec2(wp.x + ww - 12, wp.y + wh - 12);
-    dl->AddRectFilled(a, b, IM_COL32(255, 255, 255, 253), 14);
-    dl->AddRect(a, b, IM_COL32(228, 228, 231, 255), 14, 0, 1.5f);
-    x0 = a.x + 26; y0 = a.y + 24; cw = (b.x - x0) - 26;
-    snprintf(t, sizeof t, "第 %d 步 · %s · 参数", se + 1, ope_tname(type));
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0));
-    text_meta_s(t);
-    ImGui::SetCursorScreenPos(ImVec2(x0, y0 + 40));
-    text_meta_s(type == OP_STEP_FINDIMAGE ? "选模板 / 区域 / 阈值 / 颜色校验；成立/不成立在步骤行上编辑"
-                                          : "选模式与颜色（或点集）；成立/不成立在步骤行上编辑");
-    ry = y0 + 84;
-    if (type == OP_STEP_FINDIMAGE) {
-        snprintf(lab, sizeof lab, "模板：%s", g_ope_refs[se][0] ? g_ope_refs[se] : "未选");
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry));
-        if (btn_light(lab, ImVec2(cw, 84))) {
-            g_vis_tl = 1;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("vis edit 模板列表开 第 %d 步", se + 1);
-        }
-        snprintf(lab, sizeof lab, "区域：%s", g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
-        if (btn_light(lab, ImVec2(cw, 84))) {
-            g_ope_rl = se;                           /* 复用区域选择弹层（含「全屏」选项） */
-            g_need = 1; g_force_frames = 2;
-            ALOGI("vis edit 区域列表开 第 %d 步", se + 1);
-        }
-        snprintf(lab, sizeof lab, "阈值：%d（0..255）", g_ope_steps[se][1]);
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 192));
-        if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se, 0);
-        snprintf(lab, sizeof lab, "颜色校验：%s", g_ope_steps[se][2] ? "开" : "关");
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry + 288));
-        if (btn_light(lab, ImVec2(cw, 84))) {    /* v2.1（2026-10-05e）：灰度命中后再验平均色（a2 0/1；旧模板无存色则跳过） */
-            g_ope_steps[se][2] = g_ope_steps[se][2] ? 0 : 1;
-            ALOGI("vis edit 找图 第 %d 步 颜色校验=%s", se + 1, g_ope_steps[se][2] ? "开" : "关");
-            g_need = 1; g_force_frames = 2;
-        }
-        ry2 = ry + 384;                          /* 持续查找行（T7.4）：颜色校验之后 */
-    } else {
-        snprintf(lab, sizeof lab, "模式：%s", g_ope_steps[se][1] == 1 ? "多点" : "单点");
-        ImGui::SetCursorScreenPos(ImVec2(x0, ry));
-        if (btn_light(lab, ImVec2(cw, 84))) {        /* 模式循环：单点 ↔ 多点（切换时清/补 a2 的语义字段） */
-            if (g_ope_steps[se][1] == 1) {
-                g_ope_steps[se][1] = 0;
-                g_ope_refs[se][0] = 0;                 /* 单点：清点集名（残留会拒保存「单点模式不能带点集」；修复轮） */
-                if (g_ope_steps[se][2] == 0) g_ope_steps[se][2] = 8;   /* 颜色 #000000、容差 8 */
-            } else {
-                g_ope_steps[se][1] = 1;
-                g_ope_steps[se][2] = 0;                /* 多点：a2 必须 0（基准色/容差/点表在 .pts） */
-            }
-            g_need = 1; g_force_frames = 2;
-            ALOGI("vis edit 找色 第 %d 步 模式=%s", se + 1, g_ope_steps[se][1] ? "多点" : "单点");
-        }
-        if (g_ope_steps[se][1] == 0) {
-            snprintf(lab, sizeof lab, "颜色：#%06X", (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu));
-            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
-            if (btn_light(lab, ImVec2(cw, 84))) {
-                g_vis_hex = 1;
-                snprintf(g_vis_hexbuf, sizeof g_vis_hexbuf, "%06x",
-                         (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu));
-                g_vis_hexmsg[0] = 0; g_vis_hexup = 0;
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 192));
-            if (btn_light("取点吸色（去屏幕点一下）", ImVec2(cw, 84))) {
-                g_vis_pick_se = se;
-                vis_cap_start(3);
-            }
-            snprintf(lab, sizeof lab, "容差：%d（0..255）", (int)((uint32_t)g_ope_steps[se][2] & 0xFFu));
-            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 288));
-            if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se, 0);
-            ry2 = ry + 384;                      /* 持续查找行（T7.4）：容差之后 */
-        } else {
-            snprintf(lab, sizeof lab, "点集：%s", g_ope_refs[se][0] ? g_ope_refs[se] : "未选");
-            ImGui::SetCursorScreenPos(ImVec2(x0, ry + 96));
-            if (btn_light(lab, ImVec2(cw, 84))) {
-                g_vis_pl = 1;
-                g_need = 1; g_force_frames = 2;
-                ALOGI("vis edit 点集列表开 第 %d 步", se + 1);
-            }
-            ry2 = ry + 192;                      /* 持续查找行（T7.4）：点集之后 */
-        }
-    }
-    /* 持续查找（T7.4）：开/关 + 超时 ms 格 —— 关 = ms 0；开（ms>0）默认 5000；超时格走数字键盘（第 2 格）。 */
-    snprintf(lab, sizeof lab, "持续查找：%s", g_ope_steps[se][5] > 0 ? "开" : "关");
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry2));
-    if (btn_light(lab, ImVec2(cw, 84))) {
-        if (g_ope_steps[se][5] > 0) {
-            g_ope_steps[se][5] = 0;
-            ALOGI("vis edit %s 第 %d 步 持续=关", ope_tname(type), se + 1);
-        } else {
-            g_ope_steps[se][5] = 5000;
-            ALOGI("vis edit %s 第 %d 步 持续=开 超时=5000", ope_tname(type), se + 1);
-        }
-        g_need = 1; g_force_frames = 2;
-    }
-    snprintf(lab, sizeof lab, "超时：%d ms（0 = 单次）", g_ope_steps[se][5]);
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry2 + 96));
-    if (btn_light(lab, ImVec2(cw, 84))) ne_open_vis_field(se, 1);
-    /* 底部锚（M1 修复）：试一下 / 结果行 / 提示槽都锚到 [取消]/[完成] 行上方，矮屏不越界。 */
-    by = b.y - 24.0f - 92.0f;
-    float ry_btn = by - 12.0f - 20.0f - 12.0f - 92.0f;   /* 试一下按钮顶（92px） */
-    float ry_res = by - 12.0f - 20.0f;                    /* 结果行顶（文本 ~20px） */
-    /* 阈值/容差快捷调整（2026-10-05 item）：[−10][−1][值][＋1][＋10]，点一下立即重试 ——
-     * 找图 = 阈值（a1）、找色单点 = 容差（a2 低 8 位）；找色多点无阈值；矮屏与上方行相撞则不画。 */
-    int has_q = (type == OP_STEP_FINDIMAGE || (type == OP_STEP_FINDCOLOR && g_ope_steps[se][1] != 1));
-    float qyB = ry_btn - 104.0f;                 /* 第二行：加减按钮（2026-10-05c 两行布局） */
-    float qyA = qyB - 64.0f - 12.0f;             /* 第一行：标签+值 */
-    if (has_q && qyA < ry2 + 192.0f + 12.0f) has_q = 0;   /* 让位（矮屏） */
-    /* 提示槽（固定占位：出现/消失不动下面；矮屏夹到按钮上方）—— T7.4：锚到持续查找两行之后 */
-    if (g_vis_edmsg[0]) {
-        float y_edmsg = ry2 + 192.0f;
-        float ylim = has_q ? qyA - 32.0f : ry_btn - 32.0f;
-        if (y_edmsg > ylim) y_edmsg = ylim;
-        ImGui::SetCursorScreenPos(ImVec2(x0, y_edmsg));
-        ImGui::TextColored(ImVec4(0.863f, 0.149f, 0.149f, 1.00f), "%s", g_vis_edmsg);
-    }
-    if (has_q) {                                     /* 快捷调整两行（2026-10-05c）：上 = 标签+值，下 = [−10][−1][＋1][＋10] */
-        static const int dlt[4] = { -10, -1, 1, 10 };
-        char vv0[40];
-        int cur = (type == OP_STEP_FINDIMAGE) ? g_ope_steps[se][1]
-                                              : (int)((uint32_t)g_ope_steps[se][2] & 0xFFu);
-        float bwq = (cw - 3.0f * 12.0f) / 4.0f;
-        int d;
-        snprintf(vv0, sizeof vv0, "%s：%d", type == OP_STEP_FINDIMAGE ? "阈值" : "容差", cur);
-        ImGui::PushID(9315);
-        ImGui::SetCursorScreenPos(ImVec2(x0, qyA));
-        {
-            ImVec2 p0 = ImGui::GetCursorScreenPos(), p1 = ImVec2(p0.x + cw, p0.y + 64.0f);
-            dl->AddRectFilled(p0, p1, IM_COL32(244, 244, 245, 255), 10.0f);
-            dl->AddRect(p0, p1, IM_COL32(228, 228, 231, 255), 10.0f, 0, 1.5f);
-            dl->AddText(ImVec2(p0.x + 18, p0.y + 18.0f), IM_COL32(24, 24, 27, 255), vv0);
-            ImGui::InvisibleButton("##qval", ImVec2(cw, 64.0f));
-        }
-        ImGui::PopID();
-        for (d = 0; d < 4; d++) {
-            char bl[8];
-            snprintf(bl, sizeof bl, dlt[d] > 0 ? "+%d" : "%d", dlt[d]);
-            ImGui::PushID(9311 + d);
-            ImGui::SetCursorScreenPos(ImVec2(x0 + (float)d * (bwq + 12.0f), qyB));
-            if (btn_light(bl, ImVec2(bwq, 92))) {
-                int nv = cur + dlt[d];
-                if (nv < 0) nv = 0;
-                if (nv > 255) nv = 255;
-                if (type == OP_STEP_FINDIMAGE) g_ope_steps[se][1] = nv;
-                else g_ope_steps[se][2] = (int)(((uint32_t)g_ope_steps[se][2] & ~0xFFu) | (uint32_t)nv);
-                ALOGI("vis edit %s 第 %d 步 %s=%d（快捷）", ope_tname(type), se + 1,
-                      type == OP_STEP_FINDIMAGE ? "阈值" : "容差", nv);
-                vis_test_start_se(se);                   /* 调完立即重试 */
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::PopID();
-        }
-    }
-    /* 试一下（Task 7.1）：当场执行一次查找 → 结果行 + 屏幕标记（位置见上方底部锚，M1）。 */
-    ImGui::PushID(9300);
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry_btn));
-    if (btn_blue("试一下", ImVec2(cw, 92))) vis_test_start_se(se);
-    ImGui::PopID();
-    /* 试查结果行（固定槽：出现/消失不动下面） */
-    ImGui::SetCursorScreenPos(ImVec2(x0, ry_res));
-    if (g_vis_test_msg[0]) {
-        ImGui::TextColored(vis_test_msg_col(), "%s", g_vis_test_msg);
-    } else {
-        text_meta_s("试一下：当场查找一次，命中位置画到屏幕上");
-    }
-    /* 底：[取消] 丢弃 / [完成] 同源预检 → 关层（外层 [完成] 才落表） */
-    bw2 = (cw - 12.0f) * 0.5f;
-    by = b.y - 24.0f - 92.0f;
-    ImGui::PushID(9200);
-    ImGui::SetCursorScreenPos(ImVec2(x0, by));
-    if (btn_light("取消", ImVec2(bw2, 92))) {
-        ALOGI("vis edit 取消 第 %d 步", se + 1);
-        g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;
-        g_ope_se = -1;
-        g_need = 1; g_force_frames = 3;
-    }
-    ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
-    if (btn_blue("完成", ImVec2(bw2, 92))) {
-        char why[96];
-        if (!ope_step_check(se, g_ope_steps[se], why, (int)sizeof why)) {
-            snprintf(g_vis_edmsg, sizeof g_vis_edmsg, "%s", why);
-            g_need = 1; g_force_frames = 2;
-        } else {
-            if (type == OP_STEP_FINDIMAGE)
-                ALOGI("vis edit 找图 第 %d 步 模板=%s 区域=%s 阈值=%d", se + 1, g_ope_refs[se],
-                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏", g_ope_steps[se][1]);
-            else if (g_ope_steps[se][1] == 1)
-                ALOGI("vis edit 找色 第 %d 步 模式=多点 点集=%s 区域=%s", se + 1, g_ope_refs[se],
-                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
-            else
-                ALOGI("vis edit 找色 第 %d 步 模式=单点 颜色=#%06X 容差=%d 区域=%s", se + 1,
-                      (unsigned)(((uint32_t)g_ope_steps[se][2] >> 8) & 0xFFFFFFu),
-                      (int)((uint32_t)g_ope_steps[se][2] & 0xFFu),
-                      g_ope_exprs[se][0] ? g_ope_exprs[se] : "全屏");
-            g_vis_ed = 0; g_vis_num = 0; g_vis_tl = 0; g_vis_pl = 0; g_vis_hex = 0; g_vis_edmsg[0] = 0;
-            g_ope_se = -1;
-            g_need = 1; g_force_frames = 3;
-        }
-    }
-    ImGui::PopID();
-}
-
-/* ---- 模板页（nav 6）：截帧 / 列表 / 删除 ---- */
-
-/* 模板页（T3.2）：[截帧 · 存模板] / [截帧 · 做点集] + 两个列表（模板 / 点集，各带 [删除]）。
- * 列表读目录实时（同区域/操作列表「每帧重读」口径）；删除立即生效（引用它的步骤运行时报「模板不存在」）。 */
-static void page_template(void)
-{
-    char tms[64][VT_NAME_BUF], pss[64][VT_NAME_BUF];
-    char meta[40];
-    int nt, np, i;
-    nt = vis_list(".tmpl", tms, 64);
-    np = vis_list(".pts", pss, 64);
-    snprintf(meta, sizeof meta, "%d 模板 / %d 点集", nt, np);
-    page_header("模板", meta);
-    text_meta_w("模板 = 截帧框选一块图案（找图用）；点集 = 基准色 + 参考点（多点找色用）。存到 "
-                "/data/local/vtouch-runtime/templates/，重启保留、方案内共享。");
-    ImGui::Dummy(ImVec2(0, 6));
-    {
-        float gap = 12.0f;
-        float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
-        if (btn_blue("截帧 · 存模板", ImVec2(bw, 84))) {
-            g_vis_pick_se = -1;
-            vis_cap_start(1);
-        }
-        ImGui::SameLine();
-        if (btn_light("截帧 · 做点集", ImVec2(bw, 84))) {
-            g_vis_pick_se = -1;
-            vis_cap_start(2);
-        }
-    }
-    ImGui::Dummy(ImVec2(0, 6));
-    /* 试一下阈值两行（2026-10-05c）：上 = 标签+值（整行），下 = [−10][−1][＋1][＋10]（纯 flow，零重叠风险）。 */
-    {
-        static const int dlt2[4] = { -10, -1, 1, 10 };
-        char vv0[40];
-        float avail = ImGui::GetContentRegionAvail().x;
-        float bwq = (avail - 3.0f * 12.0f) / 4.0f;
-        int d;
-        snprintf(vv0, sizeof vv0, "试一下阈值：%d", g_vis_tmpl_tol);
-        btn_light(vv0, ImVec2(avail, 64));               /* 只显示（不可点） */
-        for (d = 0; d < 4; d++) {
-            char bl[8];
-            if (d) ImGui::SameLine();
-            snprintf(bl, sizeof bl, dlt2[d] > 0 ? "+%d" : "%d", dlt2[d]);
-            ImGui::PushID(9360 + d);
-            if (btn_light(bl, ImVec2(bwq, 76))) {
-                g_vis_tmpl_tol += dlt2[d];
-                if (g_vis_tmpl_tol < 0) g_vis_tmpl_tol = 0;
-                if (g_vis_tmpl_tol > 255) g_vis_tmpl_tol = 255;
-                ALOGI("vis 模板页 试一下阈值=%d（快捷）", g_vis_tmpl_tol);
-                g_need = 1; g_force_frames = 2;
-            }
-            ImGui::PopID();
-        }
-        ImGui::Dummy(ImVec2(0, 6));
-    }
-    /* 抓帧间隔（2026-10-05f）：抓帧线程与面板渲染解耦后的抓帧节奏（0 = 全速）；点一下循环预设。 */
-    {
-        static const int presets[8] = { 0, 5, 10, 20, 33, 50, 100, 200 };
-        char lab[80];
-        int k, cur = 0;
-        for (k = 0; k < 8; k++) if (presets[k] == g_cap_ms) { cur = k; break; }
-        snprintf(lab, sizeof lab, "抓帧间隔：%d ms%s（点一下切换）", g_cap_ms, g_cap_ms == 0 ? " = 全速" : "");
-        if (btn_light(lab, ImVec2(ImGui::GetContentRegionAvail().x, 72))) {
-            g_cap_ms = presets[(cur + 1) % 8];
-            vtouch_vis_cap_interval_set(g_cap_ms);
-            ui_conf_save();
-            ALOGI("vis 抓帧间隔 → %d ms", g_cap_ms);
-            g_need = 1; g_force_frames = 2;
-        }
-        ImGui::Dummy(ImVec2(0, 6));
-    }
-    /* 试查（Task 7.1）结果行：固定槽（出现/消失不动下面列表） */
-    if (g_vis_test_msg[0]) {
-        ImGui::TextColored(vis_test_msg_col(), "%s", g_vis_test_msg);
-    } else {
-        text_meta_s("「试一下」：当场执行一次查找，结果在此显示、命中位置画到屏幕上");
-    }
-    ImGui::Dummy(ImVec2(0, 6));
-    /* 列表自成一格可滚容器（与区域 / 操作列表同款；拖动滚动目标同走 SCR_LIST） */
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ZINC50);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
-    ImGui::BeginChild("##tmpls", ImVec2(0, 0), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
-    pub_zone(g_zone_list);
-    drag_scroll_for(SCR_LIST);
-    text_meta_s("模板（.tmpl）");
-    if (nt == 0) text_meta_w("还没有模板：点「截帧 · 存模板」开始");
-    for (i = 0; i < nt; i++) {
-        ImGui::PushID(9400 + i);
-        {
-            float dw = 150.0f, qw = 150.0f, ew = 150.0f;   /* [编辑] / [试一下] / [删除] 宽 */
-            float nw = ImGui::GetContentRegionAvail().x - dw - qw - ew - 36.0f;
-            if (nw < 100.0f) nw = 100.0f;
-            btn_light(tms[i], ImVec2(nw, 76));       /* 只显示（不可点） */
-            ImGui::SameLine();
-            if (btn_light("编辑", ImVec2(ew, 76))) {  /* 重编辑（2026-10-05 item）：看原图 / 重截重选 / 保存（同名覆盖） */
-                g_vis_pick_se = -1;
-                vis_reedit_start(tms[i]);
-            }
-            ImGui::SameLine();
-            if (btn_blue("试一下", ImVec2(qw, 76))) vis_test_start_tmpl(tms[i], 0, g_vis_tmpl_tol);
-            ImGui::SameLine();
-            if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(tms[i], 0);
-        }
-        ImGui::PopID();
-    }
-    ImGui::Dummy(ImVec2(0, 8));
-    text_meta_s("点集（.pts）");
-    if (np == 0) text_meta_w("还没有点集：点「截帧 · 做点集」开始");
-    for (i = 0; i < np; i++) {
-        ImGui::PushID(9500 + i);
-        {
-            float dw = 150.0f, qw = 150.0f, ew = 150.0f;   /* [编辑] / [试一下] / [删除] 宽 */
-            float nw = ImGui::GetContentRegionAvail().x - dw - qw - ew - 36.0f;
-            if (nw < 100.0f) nw = 100.0f;
-            btn_light(pss[i], ImVec2(nw, 76));       /* 只显示（不可点） */
-            ImGui::SameLine();
-            if (btn_light("编辑", ImVec2(ew, 76))) {  /* 点集重编辑（2026-10-05b）：已存点摆到画面上改，同名 = 覆盖 */
-                g_vis_pick_se = -1;
-                vis_reedit_pts_start(pss[i]);
-            }
-            ImGui::SameLine();
-            if (btn_blue("试一下", ImVec2(qw, 76))) vis_test_start_tmpl(pss[i], 1, g_vis_tmpl_tol);
-            ImGui::SameLine();
-            if (btn_red("删除", ImVec2(dw, 76))) vis_del_file(pss[i], 1);
-        }
-        ImGui::PopID();
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
 }
 
 /* ---- 面板：标题栏（唯一拖动区）/ 固定侧栏 / 可滚内容页；收起态只剩标题栏 ---- */
@@ -8558,8 +3240,6 @@ static void build_panel(void)
     /* push/pop 用同一快照：本函数一次调用内可能被标题栏 toggle 改写 g_min，
      * 直接读 g_min 会出现“push 0 次 / pop 2 次”而触发 ImGui 断言崩溃（已实测）。 */
     const int min_bg = g_min;
-    /* 方案页子层（T2.1：名字键盘 / 删除确认）：整面盖住面板 —— 同区域改名 / 操作编辑层的口径 */
-    const int scm_layer = (g_scm_kb || g_scm_del[0]) ? 1 : 0;
     if (min_bg) {                         /* 收起态：半透明白 + 浅描边，尽量不抢眼 */
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(1.00f, 1.00f, 1.00f, 0.86f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.72f, 0.75f, 0.45f));
@@ -8574,28 +3254,18 @@ static void build_panel(void)
         ImVec2 pp = ImGui::GetWindowPos(), ps = ImGui::GetWindowSize();
         g_pan_r[0] = pp.x; g_pan_r[1] = pp.y; g_pan_r[2] = pp.x + ps.x; g_pan_r[3] = pp.y + ps.y;
     }
-    /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作 / 编辑层步骤表 / 说明），其它页不命中 → 不会误滚 */
+    /* 列表实区每帧先清空：只在列表页发布（区域列表 / 操作 / 方案），其它页不命中 → 不会误滚 */
     g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
-    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;   /* 键盘区：只在键盘帧发布 */
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
     build_titlebar(ww);
     if (g_min) {   /* 收起态：只有标题条；清掉侧栏/内容页实区，免上一帧残留命中 */
         g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
         g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
-    } else if (g_name_i >= 0 || g_ope_i >= 0 || scm_layer) {
-        /* 覆盖层（区域改名 / 操作编辑 / 方案名字键盘 / 方案删除确认）整面盖住：同样清底下实区 —— 不然按下可能命中上一帧残留 → 误滚 */
-        g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
-        g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
     }
     if (!g_min) ImGui::Dummy(ImVec2(0, COL_GAP - 10));
-    if (!g_min && scm_layer && g_scm_kb) draw_scm_kb();     /* 方案名字键盘子层：本帧不画侧栏/内容页 */
-    if (!g_min && scm_layer && !g_scm_kb) draw_scm_del();   /* 方案删除确认层（小确认层） */
-    if (!g_min && !scm_layer && g_name_i >= 0) draw_name_edit();   /* 改名弹层：本帧不画侧栏/内容页 */
-    /* 操作编辑层（T2.6/T2.4）不在这里画：编辑层开着时 build_panel 整个不跑（见 draw_frame），
-     * 由 build_edit_layer 按整屏画（展开 = 整屏 sheet；收起 = 底部条）。 */
-    if (!g_min && !scm_layer && g_name_i < 0 && g_ope_i < 0) build_sidebar();
-    if (!g_min && g_sheet && !scm_layer && g_name_i < 0 && g_ope_i < 0) {
+    if (!g_min) build_sidebar();          /* 缩编 v0.5：名字/编辑层覆盖层已删，条件只剩收起态 */
+    if (!g_min && g_sheet) {
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_ChildBg, WHITE);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 12));
@@ -8605,9 +3275,7 @@ static void build_panel(void)
         if (g_nav == 0) page_regions();
         else if (g_nav == 1) page_ops();
         else if (g_nav == 2) page_log();
-        else if (g_nav == 4) page_help();
         else if (g_nav == 5) page_scheme();
-        else if (g_nav == 6) page_template();        /* 模板/点集页（T3.2） */
         else page_settings();
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -8617,68 +3285,6 @@ static void build_panel(void)
     ImGui::PopStyleVar(2);
     ImGui::End();
     if (min_bg) ImGui::PopStyleColor(2);
-}
-
-/* 编辑层收起条（取点 / 手动共用渲染）：底部居中一条（几何见 ope_bar_rect，与吞触摸矩形同源）。
- * 取点收起 = 「点屏幕上目标位置 · 点这里取消」（spec §4.2 逐字）—— 点按 = 取消，走快照侧
- * down_edge 拦截（snapshot_touches：按整条命中、不喂 ImGui，取消更稳），这里只画。
- * 手动收起 = 「编辑中 · 点这里展开」（措辞自定）—— 条本体是按钮，点按 = 展开（状态全保留）。 */
-static void draw_ope_bar(void)
-{
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    float x1, y1, x2, y2;
-    const char *t = g_pick ? "点屏幕上目标位置 · 点这里取消" : "编辑中 · 点这里展开";
-    ope_bar_rect(&x1, &y1, &x2, &y2);
-    dl->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(24, 24, 27, 235), 14.0f);
-    dl->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(82, 82, 91, 255), 14.0f, 0, 1.5f);
-    {
-        ImVec2 ts = ImGui::CalcTextSize(t);
-        dl->AddText(ImVec2((x1 + x2 - ts.x) * 0.5f, (y1 + y2 - ts.y) * 0.5f),
-                    IM_COL32(255, 255, 255, 255), t);
-    }
-    if (!g_pick) {
-        ImGui::SetCursorScreenPos(ImVec2(x1, y1));
-        if (ImGui::InvisibleButton("##opebar", ImVec2(x2 - x1, y2 - y1))) {
-            g_ope_coll = 0;
-            g_need = 1; g_force_frames = 2;
-            ALOGI("op edit 展开（收起条点按）");
-        }
-    }
-}
-
-/* 编辑层窗口（T2.4）：编辑层及其全部子层按**当前屏整屏**绘制（不再局限面板窗口）。
- * 面板主窗口在编辑层开着时不画（build_panel 整个不跑，见 draw_frame）：展开时整屏 sheet 盖住一切；
- * 收起时只剩底部条，其余整屏看游戏（取点收起时 = 取点落点）。
- * 窗口本身整屏、背景透明（sheet / 条自画底色）；编辑层关后本窗不再 Begin（ImGui 自动失活，
- * 下次开层原位复活，无 ini 残留 —— NoSavedSettings）。 */
-static void build_edit_layer(void)
-{
-    float sw = (float)g_scr_w, sh = (float)g_scr_h;
-    if (sw <= 0 || sh <= 0) return;
-    ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(sw, sh), ImGuiCond_Always);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));   /* 整屏透明：sheet/条之外透出游戏 */
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));     /* 窗口描边也隐掉（否则整屏一圈灰线） */
-    ImGui::Begin("##opedit", 0,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    /* 面板窗口本帧不画：四个实区清掉（免上一帧残留命中把滚动错路由）；编辑层自己的列表 child
-     * 会按需重发布（pub_zone）。 */
-    g_zone_title[0] = g_zone_title[1] = g_zone_title[2] = g_zone_title[3] = 0;
-    g_zone_side[0] = g_zone_side[1] = g_zone_side[2] = g_zone_side[3] = 0;
-    g_zone_sheet[0] = g_zone_sheet[1] = g_zone_sheet[2] = g_zone_sheet[3] = 0;
-    g_zone_list[0] = g_zone_list[1] = g_zone_list[2] = g_zone_list[3] = 0;
-    g_zone_kb[0] = g_zone_kb[1] = g_zone_kb[2] = g_zone_kb[3] = 0;   /* 键盘区：只在键盘帧发布 */
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(PAD_X, PAD_Y));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 10));
-    if (g_ope_coll) draw_ope_bar();          /* 收起条（取点 / 手动共用渲染） */
-    else draw_op_edit();                     /* 展开：整屏编辑层（子层自盖） */
-    ImGui::PopStyleVar(2);
-    ImGui::End();
-    ImGui::PopStyleColor(2);
-    if (g_scr_target == SCR_NONE) g_scroll_acc = 0;   /* 与 build_panel 同款：非滚动容器按下丢弃累积量 */
 }
 
 /* 单帧：事件 API 喂输入 → 单 NewFrame → 双内容 → 提交 */
@@ -8707,14 +3313,11 @@ static void draw_frame(int sw, int sh)
     }
     /* v11：用户中文名的字形按需扩集（扫描 → 帧间重建；TTF 兜底时不动） */
     ui_glyph_scan_all((g_glyph_tick++ & 127) == 0);
-    ui_glyph_scan_edits();
     if (g_font_dirty) { g_font_dirty = 0; ui_font_rebuild(); }
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     if (g_ov_show) build_overlay(sw, sh);
-    if (g_vis_cap) build_vis_cap();         /* 采集覆盖层整屏（T3.2）：模板/点集/吸色 —— 最高优先 */
-    else if (g_ope_i >= 0) build_edit_layer();   /* 编辑层整屏（T2.4）：面板主窗口本帧不画 */
-    else build_panel();
+    build_panel();                         /* 缩编 v0.5：采集覆盖层/编辑层已删，只剩叠加层 + 面板 */
     ImGui::Render();
     if (g_mdown && g_mup_pend) { g_mdown = 0; g_mup_pend = 0; g_mslot = -1; }
     glViewport(0, 0, sw, sh);
@@ -8848,21 +3451,10 @@ static void *render_thread_fn(void *)
             g_force_frames = 4;
             ALOGI("surface swapped t=+%.0fms", (double)t_since_start());
         }
-        /* 取点自动收起的 20s 兜底（T2.4，面板自带、与核心同长）：核心侧超时是惰性的（下次按下才判），
-         * 面板这份保证到点就弹回 —— 超时 = 撤单 + 弹回编辑层（参数层保持）。放在快照前：
-         * 超时后这一帧的 in_p / 吞触摸矩形立刻回到编辑层展开态。 */
-        if (g_pick && g_pick_t0 && now_ms() - g_pick_t0 > 20000) {
-            g_pick = 0; g_pick_t0 = 0;
-            g_ope_coll = 0;
-            vtouch_pick_cancel();
-            g_need = 1; g_force_frames = 2;
-            ALOGI("取点 超时（面板 20s 兜底）→ 弹回编辑层");
-        }
         snapshot_touches();
         region_rot_step();        /* 区域跟随旋转：每帧推进一条（编辑邮箱单槽，必须一条一拍） */
         ops_run_watch();          /* 操作运行状态变了 → 请求重画（「运行中 · 第 k/n 步」实时读核心） */
-        vis_cap_tick();           /* 视觉采集（T3.2）：收帧/失败/超时（等帧期间保持重画） */
-        vis_test_tick();          /* 试查（Task 7.1）：收结果/超时（≤10ms 轮询 test_res_seq） */
+        hr_poll();                /* T8 热生效-A：外部改盘 → 防抖 → 自动重放当前方案（自写豁免） */
         int need_draw = g_need;   /* 显式请求的重画：不被下面的静止门吞掉 */
         go = g_need || g_ov_need;
         if (g_force_frames > 0) go = 1;
@@ -8892,10 +3484,6 @@ static void *render_thread_fn(void *)
                 for (i = 0; i < 8 && !ov_active; i++)
                     if (g_rings[i].on && now_ms() - g_rings[i].t < 400) ov_active = 1;
                 for (i = 0; i < 64 && !ov_active; i++) if (g_dots[i].on) ov_active = 1;
-                /* 取点标记（T3.2）同属「由有到无」：过期后补一帧擦掉（否则十字留在屏上） */
-                if (!ov_active && g_pickmk_t && now_ms() - g_pickmk_t < PICK_MARK_MS) ov_active = 1;
-                /* 试查标记（Task 7.1）同款：过期后补一帧擦掉（否则方框留在屏上） */
-                if (!ov_active && g_vis_testmk_t && now_ms() - g_vis_testmk_t < VIS_TEST_MARK_MS) ov_active = 1;
             } else ov_active = 0;
             static int ov_was = 0;
             if (ov_was && !ov_active) { go = 1; g_force_frames = 1; }
