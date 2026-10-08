@@ -114,7 +114,7 @@
 - app 现状：区域只有数字表单 `RegionEdit`（id/类型/坐标/bind/kind；`RegionEdit.java:18-50`）；区域侧无看图器取点（`ImageView/frameToLogic` 只接在素材/步骤）。「区域底图可视化编辑」= app P1.5/P2 项，未做。
 - **v0.5 裁决**：按「运行中当场就能调」口径，「区域调整」归运行时保留（§3.8）⇒ **缺口不再存在**；app 侧框选（§3.6）转**可选后续**（需要「离开游戏做精细编」时再立小案，做法已存档）。
 
-### 3.6 app 侧承接「框选」的做法（**已拍板：做；已完成 2026-10-08**——App v12 [框区域] 悬浮快速通道落地，形态 A 先行，B 留待需要时）
+### 3.6 app 侧承接「框选」的做法（**已拍板：做；已完成 2026-10-08**——形态 A [框区域] 悬浮快速通道 + 形态 B「在帧上框选调整」均已落地，App v12/v12b）
 
 **结论：能做；拼件基本齐，真正的新增件只有四小块。** 证据（`~/vtouch-editor`）：
 
@@ -258,3 +258,4 @@ su -c 'grep -E "面板已启动|regions.conf 共|丢弃清空|方案 切换|区�
 - v0.8（2026-10-08）：**设备侧语法自检接入 + v11 遗留修复** —— 复刻 `check_syntax.sh` 的 UI 判据在设备跑通（imgui v1.91.8 自拉 + `gen_ui_chars.py` + 本机 jni/android 头 + EGL/GLES2 桩头 + `clang++ -fsyntax-only -Wall`）：缩编版 **0 error / 0 warning**；v11 原版同跑校准 = 3 个真错且零噪声 —— ① `g_font_have_ttf` 先用后声明【已修：上移到 `g_font_meta` 旁】；② ③ 操作编辑器缺分号 + `an` 未声明【已随缩编删除】。工具落盘：`~/vtouch-ui-check.sh`（本地，可随时复跑）。
 - v0.9（2026-10-08）：**设备侧全链构建跑通并部署**（Termux 移植版 `build_ui.sh[real]` + `build.sh ui`，脚本 `~/vtouch-devbuild.sh`）—— 产物：classes.dex 20700B / libtestimgui.so 987,616B（strip 后）/ libc++_shared.so 1,423,696B / **vtouchd_ui 2,647,776B（md5 `274e691a…`，已推 /data/local/tmp，与本机逐字节一致）**。静态对账全过：核心 NEEDED = libm/libdl/libc（同 NDK 版）；面板 NEEDED 八项与 NDK 版逐项相同；内嵌三件 `_binary_*_size` 逐字节对上；Termux 注入的 RUNPATH 已净化（→ /system/lib64）。旧部署已备份：`vtouchd_ui.bak-20261008` / `vtouch-ui.bak-20261008`。待办：**起核心**（前台在阅读 app，按纪律未擅自起）+ 真机 8 项回执。
 - v0.10（2026-10-08）：**App 侧 [框区域] 落地**（App v12，形态 A 悬浮快速通道）—— `RegionDraw.java`（命名/换算/落盘纯函数层）+ `ImageView MODE_CIRCLE`（附加）+ CaptureChip 建区浮层（[矩形][圆]切换/[重框]/[建区]、自动命名 r1/c1…、预览行、直写 regions.conf + 镜像、toast 带生效口径）；坐标链=帧像素→竖屏逻辑（frameToLogic）；测试台新增 1 项 → **54 通过 / 0 警告 / 0 失败**；demo region 两轮（矩形+圆）真机全链 ✓。详见 `~/vtouch-editor/.v7-progress.md`。
+- v0.11（2026-10-08）：**App 形态 B 落地（v12b）=「区域可视化编辑」**（用户点名：「我想要的是区域的可视化编辑，面板是用来调整的，app里也需要可以可视化编辑」）—— 编辑页 [在帧上框选调整] → 看图器区域会话（MODE_REGION：预载表单几何 / 矩形·圆 / [重框]·[使用此框] / 逻辑读数跟拖跟新）→ 回填表单 → 既有保存链；`RegionDraw.circleToFrame` 补逻辑圆→帧圆反算。测试台 +3 项（换算往返 rot0 精确·rot1 ±1px / 矩形会话 / 圆会话）→ **57 通过 / 0 警告 / 0 失败**。详见 `~/vtouch-editor/.v7-progress.md`。
