@@ -52,33 +52,26 @@ static int op_num_ok(int v, int lo, int hi)
 
 /**
  * (vtouch-doc: op_var_name_ok)
- * @brief 自定义变量名合法性：[A-Za-z_][A-Za-z0-9_]*、长度 1..OP_VAR_NAME_MAX。
+ * @brief 自定义变量名合法性（v11 放开中文）：首字符 = 字母 / `_` / 非 ASCII 可见码点；其余 = 字母数字 /
+ *        `_` / 非 ASCII 可见码点；1..OP_VAR_NAME_MAX 个字符、字节 ≤ VT_NAME_BUF-1；不含 `-`。
  * @param   s        名字文本
- * @param   n        已量出的长度
+ * @param   n        已量出的字节数
  * @return  1 合法；0 非法。
- * @note    名字存 char[16]（含 NUL），OP_VAR_NAME_MAX = 15（spec EDITOR_V2 §Task 7.5）。
+ * @note    名字存 char[VT_NAME_BUF]（含 NUL）；实现 = vt_region.c 的 vt_name_scan（var 模式）—— 单点。
  *
  * 为什么这么写（原有注释，逐字保留）：
- *   自定义变量名合法性（v10，spec EDITOR_V2 §Task 7.5）：[A-Za-z_][A-Za-z0-9_]*、长度 1..OP_VAR_NAME_MAX
- *   （名字存 char[16]，含 NUL；n = 已量出的长度）。
+ *   自定义变量名合法性（v10，spec EDITOR_V2 §Task 7.5；v11 起 UTF-8）：字面见上（n = 已量出的字节数）。
  */
 static int op_var_name_ok(const char *s, size_t n)
 {
-    size_t i;
-
-    if (n < 1 || n > OP_VAR_NAME_MAX) return 0;
-    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
-    for (i = 1; i < n; i++)
-        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_')) return 0;
-    return 1;
+    return vt_name_scan(s, n, 1);
 }
 
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1）：名字与区域 id 同一把尺子
- * （vt_id_ok：[A-Za-z0-9_-]、1..15；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..11
+ * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1；v11 名字口径见 docs/NAMING_V11_PLAN.md）：名字与区域 id 同一把尺子
+ * （vt_id_ok：UTF-8 可见字符 1..15 个、字节 ≤47；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..11
  * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色）。
  * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
  * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
@@ -88,9 +81,9 @@ static int op_var_name_ok(const char *s, size_t n)
  * 静默不命中，不如当场拒掉让面板报错。
  * 条件步（6/7）：两档位 a3/a4 ∈ 0..3（不成立侧/成立侧）；档位 = 跳转时该侧目标 ∈ 0..step_count
  * （0 = 结束、1..step_count = 目标步骤；j1 = 成立侧、j2 = 不成立侧），其余档位目标**忽略**（不校验、不拒收）；
- * ref 长度 1..REGION_ID_MAX 且过 vt_id_ok —— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
+ * ref 过 vt_id_ok（v11 名字规则）—— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
  * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
- * 计算步（9，v10）：a1 ∈ 0..15（变量索引）；ref = 变量名（[A-Za-z_][A-Za-z0-9_]*、1..15，且必须等于
+ * 计算步（9，v10）：a1 ∈ 0..15（变量索引）；ref = 变量名（v11 起 UTF-8、1..15 字符，且必须等于
  * op->vars[a1] —— 名字表单源）；expr 非空、≤63、且过 vt_expr_check（名字表 = op->vars；不过 → 拒收
  * `表达式错: <why>`）；防御：a2..a4/ms/j1/j2 必须 0。
  * 变量名表（v10，op->vars[16]）：每项空（空槽）或合法名字；非空名字两两不同（同名 = 同一变量，表里只许一份）。
@@ -111,15 +104,15 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     /* 名字来自邮箱载荷，先按数组长度找终止符：未终止（strnlen 顶到 name[] 尾）按非法拒 ——
      * 不让后面的 vt_id_ok / strcmp / 日志去读越界。 */
     n = strnlen(op->name, sizeof op->name);
-    if (n < 1 || n > OP_NAME_MAX || !vt_id_ok(op->name, n)) {
-        snprintf(why, whycap, "名字非法（[A-Za-z0-9_-]、1..%d；裸 `-` 除外）", OP_NAME_MAX);
+    if (n < 1 || !vt_id_ok(op->name, n)) {
+        snprintf(why, whycap, "名字非法（1..%d 个可见字符；裸 `-` 除外）", OP_NAME_MAX);
         return 0;
     }
     /* 门控 id 同款防御（收口）：载荷同样来自邮箱字节 —— 先按数组长度找终止符，超长/未终止即拒；
      * 不查存在性（允许悬空，起跑时解析不到再丢弃 + 日志，安全侧，spec §4.3）。 */
     n = strnlen(op->gate, sizeof op->gate);
-    if (n > REGION_ID_MAX) {
-        snprintf(why, whycap, "门控名非法（[A-Za-z0-9_-]、1..%d 或空；裸 `-` 除外）", REGION_ID_MAX);
+    if (n > 0 && !vt_id_ok(op->gate, n)) {
+        snprintf(why, whycap, "门控名非法（空或 1..%d 个可见字符；裸 `-` 除外）", REGION_ID_MAX);
         return 0;
     }
     if (op->step_count < 1 || op->step_count > MAX_STEPS) {
@@ -132,7 +125,7 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
         size_t vn = strnlen(op->vars[i], sizeof op->vars[i]);
         if (vn == 0) continue;
         if (vn >= sizeof op->vars[i] || !op_var_name_ok(op->vars[i], vn)) {
-            snprintf(why, whycap, "变量表第 %d 项名字非法（[A-Za-z_][A-Za-z0-9_]*、1..%d）", i + 1, OP_VAR_NAME_MAX);
+            snprintf(why, whycap, "变量表第 %d 项名字非法（1..%d 个可见字符；首字符不可数字/`-`）", i + 1, OP_VAR_NAME_MAX);
             return 0;
         }
         for (k = 0; k < i; k++)
@@ -213,8 +206,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             n = strnlen(st->ref, sizeof st->ref);
-            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
-                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+            if (n < 1 || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", i + 1);
                 return 0;
             }
             break;
@@ -233,8 +226,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             n = strnlen(st->ref, sizeof st->ref);
-            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
-                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+            if (n < 1 || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", i + 1);
                 return 0;
             }
             break;
@@ -255,8 +248,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
                 return 0;
             }
-            if (rl < 1 || rl > OP_VAR_NAME_MAX || !op_var_name_ok(st->ref, rl)) {
-                snprintf(why, whycap, "第 %d 步变量名非法（[A-Za-z_][A-Za-z0-9_]*、1..%d）", i + 1, OP_VAR_NAME_MAX);
+            if (rl < 1 || !op_var_name_ok(st->ref, rl)) {
+                snprintf(why, whycap, "第 %d 步变量名非法（1..%d 个可见字符；首字符不可数字/`-`）", i + 1, OP_VAR_NAME_MAX);
                 return 0;
             }
             if (strncmp(op->vars[st->a1], st->ref, sizeof op->vars[0]) != 0) {   /* 名字表单源：a1 位就是这个名字 */
@@ -269,7 +262,7 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             /* 表达式校验用整张名字表（v10）：引用别步定义的自定义变量也合法（运行期未写才 `结果无值`） */
-            if (vt_expr_check(st->expr, (const char (*)[16])op->vars, OP_VAR_IDX_N, w, sizeof w) != 0) {
+            if (vt_expr_check(st->expr, (const char (*)[VT_NAME_BUF])op->vars, OP_VAR_IDX_N, w, sizeof w) != 0) {
                 snprintf(why, whycap, "表达式错: %s", w);
                 return 0;
             }
@@ -304,13 +297,13 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             n = strnlen(st->ref, sizeof st->ref);
-            if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
-                snprintf(why, whycap, "第 %d 步模板引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+            if (n < 1 || !vt_id_ok(st->ref, n)) {
+                snprintf(why, whycap, "第 %d 步模板引用非法（1..15 个可见字符）", i + 1);
                 return 0;
             }
             n = strnlen(st->expr, sizeof st->expr);
-            if (n > 0 && (n > REGION_ID_MAX || !vt_id_ok(st->expr, n))) {
-                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+            if (n > 0 && !vt_id_ok(st->expr, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", i + 1);
                 return 0;
             }
             break;
@@ -344,8 +337,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             n = strnlen(st->ref, sizeof st->ref);
             if (st->a1 == 1) {                   /* 多点：点集名必填 + a2 必须 0（基准色/容差/点表在 .pts） */
-                if (n < 1 || n > REGION_ID_MAX || !vt_id_ok(st->ref, n)) {
-                    snprintf(why, whycap, "第 %d 步点集引用非法（多点必填；[A-Za-z0-9_-]、1..15）", i + 1);
+                if (n < 1 || !vt_id_ok(st->ref, n)) {
+                    snprintf(why, whycap, "第 %d 步点集引用非法（多点必填；1..15 个可见字符）", i + 1);
                     return 0;
                 }
                 if (st->a2 != 0) {
@@ -367,8 +360,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 }
             }
             n = strnlen(st->expr, sizeof st->expr);
-            if (n > 0 && (n > REGION_ID_MAX || !vt_id_ok(st->expr, n))) {
-                snprintf(why, whycap, "第 %d 步区域引用非法（[A-Za-z0-9_-]、1..15）", i + 1);
+            if (n > 0 && !vt_id_ok(st->expr, n)) {
+                snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", i + 1);
                 return 0;
             }
             break;
@@ -384,8 +377,8 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
 /* 拒绝日志：名字可能为空或未终止（载荷直接来自邮箱字节），统一按上限截断打印，绝不越界读。 */
 static void op_reject_log(const char *name, const char *why)
 {
-    char buf[OP_NAME_MAX + 2];
-    size_t n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
+    char buf[VT_NAME_BUF + 1];
+    size_t n = name ? strnlen(name, VT_NAME_BUF) : 0;
 
     if (n == 0) {
         snprintf(buf, sizeof buf, "(空)");
@@ -401,7 +394,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（[A-Za-z0-9_-]、1..15；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）、滑动 j1/j2 = 按下后停 / 弹起前停（0..60000；0 = 不停；v2.1）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 [A-Za-z0-9_-]、1..15；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 长度 1..15 且过 vt_id_ok（存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（v11 名字规则；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）、滑动 j1/j2 = 按下后停 / 弹起前停（0..60000；0 = 不停；v2.1）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 vt_id_ok 规则；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 过 vt_id_ok（v11 规则；存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认
@@ -454,8 +447,8 @@ int vt_ops_del(const char *name)
     int i, k;
 
     if (!name) return -1;
-    n = strnlen(name, OP_NAME_MAX + 1);
-    if (n < 1 || n > OP_NAME_MAX || !vt_id_ok(name, n)) {
+    n = strnlen(name, VT_NAME_BUF);
+    if (n < 1 || !vt_id_ok(name, n)) {
         op_reject_log(name, "名字非法");
         return -1;
     }
@@ -521,10 +514,10 @@ void vt_ops_clear(void)
 static struct {
     int      active;
     int      idx;
-    char     name[OP_NAME_MAX + 1];
+    char     name[VT_NAME_BUF];
     int      nsteps;
     struct vt_step steps[MAX_STEPS];
-    char     gate[REGION_ID_MAX + 1];
+    char     gate[VT_NAME_BUF];
     int      auto_off;
     int      step;
     uint64_t t0;
@@ -546,7 +539,7 @@ static struct {
     double   fx, fy;                                         /* fx/fy：最近一次找图/找色命中坐标（视觉步写、字段引用读；
                                                               * 起跑清零，spec EDITOR_V2 §Task 7.5 —— 替代 v5 的结果槽 r1/r2） */
     unsigned res_mask;                                       /* fx/fy 已写位（位 0 = fx、位 1 = fy；起跑清零） */
-    char     vnames[OP_VAR_IDX_N][16];                       /* 自定义变量名快照（起跑从 op->vars 整表抄；空名 = 空槽） */
+    char     vnames[OP_VAR_IDX_N][VT_NAME_BUF];              /* 自定义变量名快照（起跑从 op->vars 整表抄；空名 = 空槽） */
     double   vvals[OP_VAR_IDX_N];                            /* 自定义变量值（起跑清零；计算步写、字段引用读） */
     unsigned vmask;                                          /* 自定义变量已写位（位 0..15 = 索引；起跑清零） */
     uint64_t t_start;
@@ -596,9 +589,9 @@ static void op_ev_push(const char *what, int i, int n)
  * 一律按上限截断打印，绝不越界读。 */
 static void op_drop(const char *reason, const char *name)
 {
-    char nm[OP_NAME_MAX + 2];
-    size_t n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
-    if (n > OP_NAME_MAX) n = OP_NAME_MAX;
+    char nm[VT_NAME_BUF + 1];
+    size_t n = name ? strnlen(name, VT_NAME_BUF) : 0;
+    if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;
     if (n) { memcpy(nm, name, n); nm[n] = 0; }
     if (n) fprintf(stderr, "vtouchd: op 丢弃 %s %s\n", reason, nm);
     else   fprintf(stderr, "vtouchd: op 丢弃 %s\n", reason);
@@ -735,7 +728,7 @@ static void op_conflict_abort(void)
  * （toggle_ev 环行 + 日志）—— 锁内改值、锁外环行/日志。 */
 static void op_auto_off(void)
 {
-    char id[REGION_ID_MAX + 1];
+    char id[VT_NAME_BUF];
     int i, hit = 0;
 
     if (!R.auto_off || !R.gate[0]) return;                   /* 没开自动关 / 没门控：无事可做 */
@@ -752,7 +745,7 @@ static void op_auto_off(void)
     pthread_mutex_unlock(&g.region_lock);
     if (!hit) return;                                        /* 未找到 / 非开关型：跳过（悬空引用允许：不改值、不投递） */
     {
-        char msg[48];
+        char msg[VT_RING_LINE];                                       /* v11：名字最长 47B，48 会截行 */
         int n = snprintf(msg, sizeof msg, "toggle_ev %s %d", id, 0);   /* 环行格式与 T3.1 §4.2 逐字同款 */
         if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
         fprintf(stderr, "vtouchd: 区域 %s 开关 → 关\n", id);
@@ -1601,7 +1594,7 @@ static void op_begin_step(void)
         env.trig_vals = vals;
         env.trig_mask = R.trig.mask;
         env.fx = R.fx; env.fy = R.fy; env.res_mask = R.res_mask;
-        env.names = (const char (*)[16])R.vnames;            /* 名字快照（起跑从 op->vars 整表抄；v10） */
+        env.names = (const char (*)[VT_NAME_BUF])R.vnames;   /* 名字快照（起跑从 op->vars 整表抄；v10） */
         env.vals = R.vvals;
         env.var_mask = R.vmask;
         env.nnames = OP_VAR_IDX_N;
@@ -1700,15 +1693,15 @@ static void op_consume_trigger(void)
 {
     uint32_t seq = __atomic_load_n(&g.op_trig_seq, __ATOMIC_ACQUIRE);
     uint32_t delta, k;
-    char name[OP_NAME_MAX + 1];
+    char name[VT_NAME_BUF];
     size_t n;
     struct vt_trig_data td;
     if (seq == R.trig_seen) return;                          /* 没有新触发：热路径零成本 */
     delta = seq - R.trig_seen;
     R.trig_seen = seq;
     /* 生产者先写 name/slot/触发数据、release 才自增 seq ⇒ acquire 看到新 seq 就一定能看到它们 */
-    n = strnlen(g.op_trig_name, OP_NAME_MAX + 1);
-    if (n > OP_NAME_MAX) n = OP_NAME_MAX;
+    n = strnlen(g.op_trig_name, VT_NAME_BUF);
+    if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;
     memcpy(name, g.op_trig_name, n); name[n] = 0;
     /* 触发数据（v2）：acquire 之后一次读全 6 个字段（写序由 vt_ops_trigger_post 保证） */
     td.mask = g.op_trig_mask;
@@ -1847,14 +1840,15 @@ int vt_ops_next_deadline_ms(void)
  */
 void vt_ops_run(const char *name, const struct vt_trig_data *td)
 {
-    char nm[OP_NAME_MAX + 1];
+    char nm[VT_NAME_BUF];
     size_t n;
     int i, k, slot = -1;
 
     if (R.active) { op_drop_busy(); return; }
     if (g.frame_open) { op_drop_frame(); return; }           /* 帧事务开着：直写 g.virt 会被 end_frame 的 staged 回填抹掉（悬空触点） */
-    n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
-    if (n < 1 || n > OP_NAME_MAX) { op_drop("操作不存在", NULL); return; }
+    n = name ? strnlen(name, VT_NAME_BUF) : 0;
+    if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;   /* 未终止按上限截断（原始名随后仍逐字节查表，找不到即不存在） */
+    if (n < 1) { op_drop("操作不存在", NULL); return; }
     memcpy(nm, name, n); nm[n] = 0;
     for (i = 0; i < g.op_count; i++) if (!strcmp(g.ops[i].name, nm)) break;
     if (i >= g.op_count) { op_drop("操作不存在", nm); return; }
@@ -1993,8 +1987,8 @@ void vt_ops_abort(const char *why)
  */
 void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *td)
 {
-    size_t n = name ? strnlen(name, OP_NAME_MAX + 1) : 0;
-    if (n > OP_NAME_MAX) n = OP_NAME_MAX;
+    size_t n = name ? strnlen(name, VT_NAME_BUF) : 0;
+    if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;
     if (n) memcpy(g.op_trig_name, name, n);
     g.op_trig_name[n] = 0;
     g.op_trig_slot = slot;

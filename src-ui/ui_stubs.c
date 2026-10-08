@@ -24,9 +24,14 @@ struct vtouch_hooks {
 static struct vtouch_hooks H;
 static int H_ok;
 
+/* 名字缓冲字节数（v11 = 核心 VT_NAME_BUF；桩文件不 include 核心头，独立定义、放最前供下面结构体用）。 */
+#define VT_NAME_BUF 48
+/* 变量名表条宽（v11 = 核心 vt_expr.h 的 VT_EXPR_VAR_BUF；同上独立定义）。 */
+#define VT_EXPR_VAR_BUF 48
+
 /* ---- 内存区域表（桩的数据源）---- */
-struct stu_region { char id[16]; int type, a1, a2, a3, a4, enabled;
-                    char trig[16]; int trig_ev, kind; };   /* T3.3：触发绑定/开关型（内存表存得下、读得回） */
+struct stu_region { char id[VT_NAME_BUF]; int type, a1, a2, a3, a4, enabled;
+                    char trig[VT_NAME_BUF]; int trig_ev, kind; };   /* T3.3：触发绑定/开关型（内存表存得下、读得回） */
 static struct stu_region R[32];
 static int RN;
 
@@ -130,10 +135,11 @@ int vtouch_get_region(int i, char *id, int idn, int *type,
  * 与 ui_glue.c 逐个同签名；行为是「够画出来、够点」的桩（运行态停在「第 1 步」，点停止才归位）。 */
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；桩文件不 include 核心头，独立定义）。 */
 #define REGION_ID_MAX 15
+/* 名字缓冲字节数（v11 = 核心 VT_NAME_BUF；见文件头定义，这里只作口径提醒）。 */
 /* 计算步表达式上限（= 核心 src/vt_internal.h 的 VT_EXPR_MAX；同上独立定义）。 */
 #define VT_EXPR_MAX 63
-struct stu_op { char name[16]; char gate[16]; int autoff, nsteps, steps[8][8];
-                char refs[8][REGION_ID_MAX + 1]; char exprs[8][VT_EXPR_MAX + 1]; };
+struct stu_op { char name[VT_NAME_BUF]; char gate[VT_NAME_BUF]; int autoff, nsteps, steps[8][8];
+                char refs[8][VT_NAME_BUF]; char exprs[8][VT_EXPR_MAX + 1]; };
                 /* v3：每步 8 int（type,a1..a4,ms,j1,j2）+ ref；v5：+ expr（都存得下、读得回，编辑层往返用） */
 static struct stu_op O[32];
 static int ON;
@@ -182,7 +188,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
 }
 
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                  const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
+                  const char (*refs)[VT_NAME_BUF], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
 {
     int i, k;
     size_t rn;
@@ -205,8 +211,8 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
     memset(O[i].refs, 0, sizeof O[i].refs);            /* 每步 ref 先清（不带上一任残留） */
     if (refs) {                                        /* ref 通道镜像：NULL = 全空；每步空串 = 无 */
         for (k = 0; k < nsteps; k++) {
-            rn = strnlen(refs[k], REGION_ID_MAX + 1);
-            if (rn <= REGION_ID_MAX)                   /* 未终止（防御照款）→ 留空 */
+            rn = strnlen(refs[k], VT_NAME_BUF);
+            if (rn <= VT_NAME_BUF - 1)                 /* 未终止（防御照款）→ 留空 */
                 snprintf(O[i].refs[k], sizeof O[i].refs[k], "%s", refs[k]);
         }
     }
@@ -267,7 +273,7 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
 }
 
 /* 表达式校验（v5；v10 起带名字表）：单跑模式没有核心解析器 —— 恒放行（桩行为：面板画得出来、点得动就行）。 */
-int vtouch_expr_check(const char *s, const char (*names)[16], int nnames, char *why, int whycap)
+int vtouch_expr_check(const char *s, const char (*names)[VT_EXPR_VAR_BUF], int nnames, char *why, int whycap)
 {
     (void)s; (void)names; (void)nnames;
     if (why && whycap > 0) why[0] = 0;

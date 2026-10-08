@@ -27,8 +27,66 @@
 #include "vt_vision.h"  /* T3.2：灰度公式单一来源（vt_vis_gray_px；.tmpl 写端与引擎逐字同款）—— build_ui.sh 加 -Isrc */
 
 /* 区域 id 上限（= 核心 src/vt_internal.h 的 REGION_ID_MAX；面板不 include 核心头，独立定义）——
- * vtouch_op_put 的每步区域引用表与编辑层本地 ref 副本（g_ope_refs）按它定宽。 */
+ * v11 起语义 = **字符数上限**；一切名字缓冲宽度用 VT_NAME_BUF。 */
 #define REGION_ID_MAX 15
+/* 名字规则（契约 v11，与核心 vt_id_ok / op_var_name_ok 同口径；面板只作预检，核心为最终门）。 */
+#define VT_NAME_CHARS   15                  /* 名字字符数上限（= 核心 VT_NAME_CHARS） */
+#define VT_NAME_BUF     48                  /* 名字缓冲字节数（= 核心 VT_NAME_BUF） */
+
+/* 码点可见性（v11 面板镜像，与核心 vt_name_cp_visible 同表）。 */
+static int ui_name_cp_vis(unsigned cp)
+{
+    if (cp <= 0x7F) return 0;
+    if (cp == 0x00A0 || cp == 0x00AD || cp == 0x061C || cp == 0x1680 || cp == 0xFEFF) return 0;
+    if (cp >= 0x0080 && cp <= 0x009F) return 0;
+    if (cp >= 0x2000 && cp <= 0x200A) return 0;
+    if (cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000) return 0;
+    if (cp >= 0x200B && cp <= 0x200F) return 0;
+    if (cp >= 0x2060 && cp <= 0x2064) return 0;
+    if (cp >= 0x2066 && cp <= 0x2069) return 0;
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return 0;
+    return 1;
+}
+/* 名字合法性（v11）：可见 UTF-8 字符 1..15 个、字节 ≤ VT_NAME_BUF-1；ASCII 仅 [0-9A-Za-z_-]（裸 `-` 拒收）、
+ * 非 ASCII 须合法 UTF-8 且非空白/控制/格式字符。var_mode=1 = 变量名口径（首字符不可数字/`-`、不含 `-`）。
+ * 返回 0 ok / 1 空 / 2 超长 / 3 非法（与 id_name_ok 等旧返回码对齐）。 */
+static int ui_name_ok(const char *s, int var_mode)
+{
+    size_t n = strlen(s), i = 0;
+    int chars = 0;
+    if (n < 1) return 1;
+    if (n > VT_NAME_BUF - 1) return 2;
+    if (!var_mode && n == 1 && s[0] == '-') return 3;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || (!var_mode && c == '-'))) return 3;
+            if (var_mode && chars == 0 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'))
+                return 3;
+            i++;
+        } else {
+            unsigned b0 = c, cp = 0;
+            int len, k;
+            if ((b0 & 0xE0) == 0xC0) { len = 2; cp = b0 & 0x1Fu; }
+            else if ((b0 & 0xF0) == 0xE0) { len = 3; cp = b0 & 0x0Fu; }
+            else if ((b0 & 0xF8) == 0xF0) { len = 4; cp = b0 & 0x07u; }
+            else return 3;
+            if (i + (size_t)len > n) return 3;
+            for (k = 1; k < len; k++) {
+                unsigned char bc = (unsigned char)s[i + (size_t)k];
+                if ((bc & 0xC0) != 0x80) return 3;
+                cp = (cp << 6) | (bc & 0x3Fu);
+            }
+            if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) ||
+                (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) ||
+                (cp >= 0xD800 && cp <= 0xDFFF) || !ui_name_cp_vis(cp)) return 3;
+            i += (size_t)len;
+        }
+        if (++chars > VT_NAME_CHARS) return 2;
+    }
+    return 0;
+}
 /* 计算步表达式上限（= 核心 src/vt_internal.h 的 VT_EXPR_MAX；同上独立定义）——
  * vtouch_op_put 的每步表达式表按它定宽（3.1 的编辑层本地副本 g_ope_exprs 同款）。 */
 #define VT_EXPR_MAX 63
@@ -66,13 +124,13 @@ int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
                         int *j1, int *j2, char *expr, int exprn);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL）；expr = 计算步表达式（v5；可 NULL） */
 int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                   const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs/exprs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
+                   const char (*refs)[VT_NAME_BUF], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err);   /* steps8 = flat 8/步（t,a1..a4,ms,j1,j2）；refs/exprs 可 NULL = 全空；每步空串 = 无；out_err 可 NULL */
 int  vtouch_op_del(const char *name);
 int vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
 void vtouch_op_stop(void);
 int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
-int  vtouch_expr_check(const char *s, const char (*names)[16], int nnames, char *why, int whycap);   /* v5：计算步表达式校验（转发核心 vt_expr_check；v10 起带自定义变量名表；0 = 合法、非 0 = why 填短中文原因） */
+int  vtouch_expr_check(const char *s, const char (*names)[VT_NAME_BUF], int nnames, char *why, int whycap);   /* v5：计算步表达式校验（转发核心 vt_expr_check；v10 起带自定义变量名表；0 = 合法、非 0 = why 填短中文原因） */
 void vtouch_pick_request(void);
 void vtouch_pick_cancel(void);
 int  vtouch_pick_take(int *x, int *y);          /* 1 = 有新坐标 */
@@ -288,7 +346,7 @@ static int g_vis_pts_x[VIS_PTS_MAX], g_vis_pts_y[VIS_PTS_MAX];
 static uint32_t g_vis_pts_rgb[VIS_PTS_MAX];
 static char g_vis_cap_msg[128] = {0};    /* 采集层就地提示（上限等；2026-10-05 重编辑消息加长到 128） */
 static unsigned char *g_vis_re_img = 0;  /* 模板重编辑：合成预览缓冲（RGBA，malloc；关层/换帧释放，2026-10-05） */
-static char g_vis_reedit_name[16] = {0}; /* 模板重编辑：被编辑模板名（同名 = 覆盖保存判据） */
+static char g_vis_reedit_name[VT_NAME_BUF] = {0}; /* 模板重编辑：被编辑模板名（同名 = 覆盖保存判据） */
 static int  g_vis_re_w = 0, g_vis_re_h = 0, g_vis_re_x = 0, g_vis_re_y = 0;   /* 原区域（像素） */
 static int  g_vis_re_has_xy = 0;         /* 原区域存在（新格式 .tmpl 尾扩展） */
 static int  g_vis_re_pending = 0;        /* 等待首帧后摆框（重编辑） */
@@ -306,7 +364,7 @@ static int  g_vis_re_pts_has_xy = 0;     /* 恢复数据：基准位置存在（
 static int  g_vis_re_pts_bx = 0, g_vis_re_pts_by = 0;   /* 恢复数据：基准位置 */
 static int  g_vis_re_pts_restored = 1;   /* 1 = 无待恢复（防钩子重复） */
 static int g_vis_kb = 0;                 /* 采集层命名键盘子层：0=关 1=模板 2=点集 */
-static char g_vis_kb_buf[16] = {0}, g_vis_kb_msg[72] = {0};
+static char g_vis_kb_buf[VT_NAME_BUF] = {0}, g_vis_kb_msg[72] = {0};
 static int g_vis_kb_up = 0;
 static int g_vis_pick_se = -1;           /* 吸色回填目标步（-1 = 非吸色会话） */
 static int g_vis_ed = 0;                 /* 视觉步参数层（编辑层子层）：0=关 1=找图 2=找色（g_ope_se = 步号） */
@@ -489,7 +547,7 @@ static int g_rr_base_rot = 0, g_rr_base_w = 0, g_rr_base_h = 0;   /* 区域几�
 #define RR_MAX_SNAP 32
 static int g_rr_tgt_rot = 0, g_rr_tgt_w = 0, g_rr_tgt_h = 0;      /* 本批锁存的目标屏帧 */
 static int g_rr_retry = 0;                                        /* 本批已重跑次数（上限 2） */
-struct rr_snap { char id[16]; int type, a1, a2, a3, a4, en; };
+struct rr_snap { char id[VT_NAME_BUF]; int type, a1, a2, a3, a4, en; };
 static struct rr_snap g_rr_snap[RR_MAX_SNAP];                     /* 批首快照（id + 几何 + en） */
 static int g_rr_off = -1;
 static int g_rr_insane = 0;               /* 见过的「不自洽屏帧」次数（只用于限频日志） */
@@ -552,7 +610,7 @@ static int region_rot_map(int br, int bw, int bh, int tr, int tw, int th,
  * 空表时基准跟住当前屏（见下方分支）：第一条画进来的区域锚在当前帧，基准停旧帧会把它错算一次。 */
 static void region_rot_step(void)
 {
-    char id[16];
+    char id[VT_NAME_BUF];
     int n1, n2, n3, n4, n;      /* 2026-09-18 快照重构后 type/a1..a4/en 不再直用（-Wall 清理） */
     /* 2026-10-03 用户口径：「区域应当始终和当前方向的左上角保持同一 xy」= 跟随视口 ⇒ **默认启用**。
      * 该口径覆盖 2026-09-19 的「已设区域不因非人为操作改变」——两者不可兼得（核心零改动时，只有写回
@@ -682,12 +740,12 @@ static void on_display(int w, int h, int rot)
 }
 
 /* 瞬态视觉 */
-static char g_flash_id[16] = {0};
+static char g_flash_id[VT_NAME_BUF] = {0};
 static long g_flash_t = 0;
 struct Ring { int on, x, y; long t; };
 static Ring g_rings[8];
 static int g_ring_i = 0;
-static char g_ex_id[16] = {0};
+static char g_ex_id[VT_NAME_BUF] = {0};
 static long g_ex_t = 0;
 static int g_ex_enter = 1;
 static char g_evlog[8][96];
@@ -697,19 +755,19 @@ static double g_frame_ms = 16.0;
 /* 可视化编辑状态：框选新增 / 选中拖改 / UI 侧显隐（core 表不动，只管画不画） */
 static int g_cap_mode = 0;            /* 0 无 1 矩形框选 2 圆形框选 */
 static int g_cap_slot = -1, g_cap_x0 = 0, g_cap_y0 = 0, g_cap_x1 = 0, g_cap_y1 = 0;
-static char g_sel_id[16] = {0};
+static char g_sel_id[VT_NAME_BUF] = {0};
 static int g_edit_slot = -1, g_edit_kind = 0;  /* 0 无 1 移动 2 缩放 */
 static int g_edit_corner = 0;                 /* 缩放：矩形角 0..3（左上/右上/左下/右下） */
 static int g_edit_dx = 0, g_edit_dy = 0, g_edit_e[4];
 static long g_edit_last = 0;
-static char g_hidden[32][16];
+static char g_hidden[32][VT_NAME_BUF];
 static int g_nhide = 0;
 
 /* 区域改名：id 就是脚本监听的键。面板是 composer 图层，收不到系统输入法，
  * 所以内置一副触摸键盘（点一下一个字符）。默认 id 由框选自动给（r1/c1…）。 */
 static int  g_name_i = -1;             /* 正在改名的区域下标，-1 = 关 */
-static char g_name_old[16] = {0};      /* 原名 */
-static char g_name_buf[17] = {0};      /* 编辑缓冲 */
+static char g_name_old[VT_NAME_BUF] = {0};      /* 原名 */
+static char g_name_buf[VT_NAME_BUF] = {0};      /* 编辑缓冲 */
 static int  g_name_up = 0;             /* 大写档 */
 static char g_name_msg[72] = {0};      /* 非法/重名提示 */
 
@@ -724,13 +782,13 @@ static void hide_toggle(const char *id)
 {
     for (int i = 0; i < g_nhide; i++) {
         if (!strcmp(g_hidden[i], id)) {
-            memmove(g_hidden[i], g_hidden[i + 1], (size_t)(g_nhide - i - 1) * 16);
+            memmove(g_hidden[i], g_hidden[i + 1], (size_t)(g_nhide - i - 1) * VT_NAME_BUF);
             g_nhide--;
             save_regions();
             return;
         }
     }
-    if (g_nhide < 32) { snprintf(g_hidden[g_nhide++], 16, "%s", id); save_regions(); }
+    if (g_nhide < 32) { snprintf(g_hidden[g_nhide++], VT_NAME_BUF, "%s", id); save_regions(); }
     else { ALOGW("隐藏列表已满(32)：%s 未隐藏", id); ev_note("隐藏列表已满(32)，%s 未隐藏", id); }
 }
 /* regions.conf 格式版本：只有版本一致的才认，否则整份丢弃（防旧版本残留区域被反复加载） */
@@ -783,8 +841,8 @@ static int save_regions(void)
         fprintf(f, "#frame %d %d %d\n", br, bw, bh);
     }
     for (i = 0; i < n; i++) {
-        char id[16]; int t, a1, a2, a3, a4, en;
-        char op[16]; int ev, kd;
+        char id[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
+        char op[VT_NAME_BUF]; int ev, kd;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
         fprintf(f, "region %s %d %d %d %d %d %d\n", id, t, a1, a2, a3, a4, en);
         /* T3.3 增量（spec §2.8，**新行类型**；VER 不升 —— 旧读方静默忽略）：
@@ -812,7 +870,7 @@ static int region_exists(const char *id)
 {
     int i, n = vtouch_region_count();
     for (i = 0; i < n; i++) {
-        char cur[16]; int t, a1, a2, a3, a4, en;
+        char cur[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
         if (vtouch_get_region(i, cur, sizeof cur, &t, &a1, &a2, &a3, &a4, &en) == 0 && strcmp(cur, id) == 0)
             return 1;
     }
@@ -841,7 +899,7 @@ static void load_regions(void)
         return;
     }
     while (fgets(line, sizeof line, f)) {
-        char id[16], op[16], tms[16]; int t, a1, a2, a3, a4, en, fr, fw, fh, ev, kd;
+        char id[VT_NAME_BUF], op[VT_NAME_BUF], tms[16]; int t, a1, a2, a3, a4, en, fr, fw, fh, ev, kd;
         /* #frame：这些数字是**在哪个屏上量的**（横屏加的表不能当竖屏口径读）。读到就把它当基准帧，
          * 启动后由 region_rot_step 按当前屏换算过去（每帧一条）。 */
         if (sscanf(line, "#frame %d %d %d", &fr, &fw, &fh) == 3) {
@@ -853,7 +911,7 @@ static void load_regions(void)
             } else {
                 ALOGW("regions.conf #frame 非法（rot%d %dx%d）→ 按竖屏规范帧解释", fr, fw, fh);
             }
-        } else if (sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
+        } else if (sscanf(line, "region %47s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) == 7) {
             /* 判返回值：!= 0 有**两种**来源 —— ① 核心拒（非法 id：字符集/长度见 src/vt_region.c 的
              * vt_id_ok；或表满）；② glue_post 的 edit_applied 1s 超时（返回 -1，胶水层自己会打一条
              * 「编辑 seq=… 超时未生效」在前面）。文案两种都提，别把超时误报成「核心拒绝」。
@@ -871,9 +929,9 @@ static void load_regions(void)
             if (vtouch_region_add(id, t, a1, a2, a3, a4, en) != 0)
                 ALOGW("regions.conf 跳过 %s（核心拒绝或编辑超时，见上一行 glue 日志, type%d %d,%d,%d,%d en%d）",
                       id, t, a1, a2, a3, a4, en);
-        } else if (sscanf(line, "hide %15s", id) == 1) {
-            if (g_nhide < 32 && !is_hidden(id)) snprintf(g_hidden[g_nhide++], 16, "%s", id);
-        } else if (sscanf(line, "bind %15s %15s %15s", id, op, tms) == 3) {
+        } else if (sscanf(line, "hide %47s", id) == 1) {
+            if (g_nhide < 32 && !is_hidden(id)) snprintf(g_hidden[g_nhide++], VT_NAME_BUF, "%s", id);
+        } else if (sscanf(line, "bind %47s %47s %15s", id, op, tms) == 3) {
             /* T3.3 增量（spec §2.8，新行类型；旧文件缺 = 默认「无绑定」）。时机词只认 down/press；
              * 词不认/区域没了/核心拒收/编辑超时 = 只警告跳过 —— 与 region 行「一条坏记录不带走整张表」同口径。
              * 绑定/开关型是**面板单源**字段（脚本不会设），核心表已有区域也照样回灌：不覆盖几何，只补这两项。 */
@@ -885,7 +943,7 @@ static void load_regions(void)
             }
         } else if (strncmp(line, "bind ", 5) == 0) {
             ALOGW("regions.conf bind 行不完整（缺操作名/时机）→ 跳过");
-        } else if (sscanf(line, "kind %15s %d", id, &kd) == 2) {
+        } else if (sscanf(line, "kind %47s %d", id, &kd) == 2) {
             if (kd != 0 && kd != 1) {
                 ALOGW("regions.conf kind %s 值非法（%d，应 0/1）→ 跳过", id, kd);
             } else if (vtouch_region_kind(id, kd) != 0) {
@@ -940,7 +998,7 @@ static void load_regions(void)
 #define OP_VAR_V0  (-10)               /* 自定义变量索引 0（编码 = -10 - 索引；索引 0..15 → -10..-25） */
 #define OP_VAR_V15 (-25)
 #define OP_VAR_IDX_N 16                /* 自定义变量表条数（同核心 OP_VAR_IDX_N） */
-#define OP_VAR_NAME_MAX 15             /* 自定义变量名长度上限（[A-Za-z_][A-Za-z0-9_]*、1..15） */
+#define OP_VAR_NAME_MAX VT_NAME_CHARS  /* 自定义变量名字符数上限（v11：UTF-8 可见字符，首字符不可数字/`-`） */
 
 /* ---- 操作表落盘（ops.conf，T2.7；v2 T3.3；v3 T2.1；v4 T3.1 v5；v5 T7.5 v10）------------------------------------
  * 格式（docs/EDITOR_V2_PLAN.md §Task 7.5 + OPS_PLAN_V5.md §3，逐字）：`#vtouch-ops v5` 起头；一条操作 = op 行 + N 条 step 行 ——
@@ -971,7 +1029,7 @@ static int op_exists(const char *name)
 {
     int i, n = vtouch_op_count();
     for (i = 0; i < n; i++) {
-        char cur[16];
+        char cur[VT_NAME_BUF];
         if (vtouch_get_op(i, cur, sizeof cur, NULL, NULL, 0, NULL) == 0 && strcmp(cur, name) == 0)
             return 1;
     }
@@ -996,14 +1054,14 @@ static int save_ops(void)
     fprintf(f, "#vtouch-ops v%d\n", OPS_CONF_VER);
     n = vtouch_op_count();
     for (i = 0; i < n; i++) {
-        char name[16], gate[16];
+        char name[VT_NAME_BUF], gate[VT_NAME_BUF];
         int steps = 0, autoff = 0, s;
         if (vtouch_get_op(i, name, sizeof name, &steps, gate, sizeof gate, &autoff) != 0) continue;
         /* gate 空串 = 无门控 → 按 spec 写占位符 `-`（读回时还原空串）；悬空 id 原样写（核心允悬空） */
         fprintf(f, "op %s gate %s autooff %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0);
         for (s = 0; s < steps; s++) {
             int t, a1, a2, a3, a4, ms, j1, j2;
-            char ref[REGION_ID_MAX + 1], expr[OPS_EXPR_MAX + 1];
+            char ref[VT_NAME_BUF], expr[OPS_EXPR_MAX + 1];
             if (vtouch_get_op_step(i, s, &t, &a1, &a2, &a3, &a4, &ms, ref, sizeof ref, &j1, &j2, expr, sizeof expr) != 0) continue;
             /* ref / expr 空 = 无引用 → 写占位符 `-`（读回时还原空串，同 gate 口径）；变量（负数）照写；
              * j1/j2 = 条件步跳转目标（v3 第 8/9 字段，非条件步恒 0）；expr = 计算步表达式（v4 第 10 字段，照写） */
@@ -1032,12 +1090,12 @@ static int ope_var_ok(int type, int idx);
  *     （-6/-7 原样 = fx/fy 同值语义；-8/-9 悬空 = 结果无值）。
  *   只翻「允许变量」的字段（点按/滑动/按下/区域判断的 a1..a4 + 点按/滑动/等待的 ms）—— 找色的 a2
  *   是打包色值，可为任意 32 位负值，绝不参与翻译。 */
-static void ops_translate_old(int *flat, char (*refs)[REGION_ID_MAX + 1], int nsteps)
+static void ops_translate_old(int *flat, char (*refs)[VT_NAME_BUF], int nsteps)
 {
-    char names[OP_VAR_IDX_N][16];
+    char names[OP_VAR_IDX_N][VT_NAME_BUF];
     int nv = 0, i, k, c;
     for (i = 0; i < nsteps; i++) {                       /* 1) 计算步：定名 + 分配索引（按步序；同名复用） */
-        char vn[16];
+        char vn[VT_NAME_BUF];
         if (flat[i * 8] != OP_STEP_CALC) continue;
         if (refs[i][0]) snprintf(vn, sizeof vn, "%s", refs[i]);
         else if (flat[i * 8 + 1] >= 1 && flat[i * 8 + 1] <= 4) snprintf(vn, sizeof vn, "r%d", flat[i * 8 + 1]);
@@ -1049,7 +1107,7 @@ static void ops_translate_old(int *flat, char (*refs)[REGION_ID_MAX + 1], int ns
             nv++;
         }
         flat[i * 8 + 1] = k;                             /* a1 = 变量索引 */
-        snprintf(refs[i], REGION_ID_MAX + 1, "%s", vn);  /* ref = 变量名 */
+        snprintf(refs[i], VT_NAME_BUF, "%s", vn);        /* ref = 变量名 */
     }
     for (i = 0; i < nsteps; i++) {                       /* 2) 字段 -6..-9：有对应 r<k> 变量 → 重映射 */
         for (c = 1; c <= 5; c++) {
@@ -1067,7 +1125,7 @@ static void ops_translate_old(int *flat, char (*refs)[REGION_ID_MAX + 1], int ns
 /* 结算一条从文件读到的记录（下一条 op 行 / EOF 时调用）。返回 0=补入 / 1=跳过（核心已有）/
  * -1=坏记录（已警告）。一条坏记录不影响后面的记录。 */
 static int ops_load_put(const char *name, const char *gate, int autoff,
-                        const int *flat, const char (*refs)[REGION_ID_MAX + 1],
+                        const int *flat, const char (*refs)[VT_NAME_BUF],
                         const char (*exprs)[OPS_EXPR_MAX + 1], int nsteps, int bad)
 {
     if (bad || nsteps < 1) {
@@ -1090,11 +1148,11 @@ static void load_ops(void)
     char line[192];
     int ver = 0, nrec = 0, nok = 0, nskip = 0, nbad = 0, orphan = 0, rc = 0;
     /* 待结算的一条（op 行 + 其后 step 行）：下一条 op 行/EOF 才结算 —— 半截记录不落表 */
-    char nm[16] = {0};
-    char gt[16] = {0};
+    char nm[VT_NAME_BUF] = {0};
+    char gt[VT_NAME_BUF] = {0};
     int  ao = 0, nst = 0, bad = 0;
     int  flat[OPS_MAX_STEPS * 8];
-    char refs[OPS_MAX_STEPS][REGION_ID_MAX + 1];   /* v3 每步 ref（旧版行读入时缺省空） */
+    char refs[OPS_MAX_STEPS][VT_NAME_BUF];   /* v3 每步 ref（旧版行读入时缺省空） */
     char exprs[OPS_MAX_STEPS][OPS_EXPR_MAX + 1];   /* v4 每步表达式（v1/v2/v3 行缺省空；`-` = 空） */
     FILE *f = fopen(OPS_CONF_FILE, "r");
     if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
@@ -1108,9 +1166,9 @@ static void load_ops(void)
         return;
     }
     while (fgets(line, sizeof line, f)) {
-        char a[16], b[16];
+        char a[VT_NAME_BUF], b[VT_NAME_BUF];
         int ao2 = 0, t, a1, a2, a3, a4, ms;
-        int pn = sscanf(line, "op %15s gate %15s autooff %d", a, b, &ao2);
+        int pn = sscanf(line, "op %47s gate %47s autooff %d", a, b, &ao2);
         if (pn >= 1) {                    /* op 行（字段不全会只匹配 1/2 个）—— 先结算上一条 */
             if (nm[0]) {
                 nrec++;
@@ -1131,13 +1189,13 @@ static void load_ops(void)
                 nm[0] = 0;
             }
         } else {
-            char rf[REGION_ID_MAX + 1];
+            char rf[VT_NAME_BUF];
             int sn, j1 = 0, j2 = 0, pos = 0;
             rf[0] = 0;                     /* ref 缺省空（v1 6 字段行） */
             /* v4 行 10 字段：step <t> <a1> <a2> <a3> <a4> <ms> <ref> <j1> <j2> <expr>；v3 = 9、v2 = 7、v1 = 6 ——
              * 短行 sscanf 提前收工（sn = 实际匹配数），缺的 ref/j1/j2/expr 照上面的缺省留空 / 0。
              * %n 记 j2 之后的位置：其后还有内容 = v4 的 expr 段（v1/v2/v3 行没有；expr 可含空白 → 取行尾整段） */
-            sn = sscanf(line, "step %d %d %d %d %d %d %15s %d %d %n", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2, &pos);
+            sn = sscanf(line, "step %d %d %d %d %d %d %47s %d %d %n", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2, &pos);
             if (sn == 6 || sn == 7 || sn == 9) {   /* 6 = v1 行（a3 照读：v1 滑动步 a3=x2，不按缺省丢）；
                                                     * 7 = v2 行；9 = v3 行（含 j1/j2）/ v4 行（expr 另看行尾） */
                 if (!nm[0]) {
@@ -1200,27 +1258,19 @@ static void load_ops(void)
 #define SCHEME_CUR REGION_CONF_DIR "/current"
 #define SCHEME_LIST_MAX 64      /* scheme_list 一次最多枚举的方案数（T2.1 列表页缓冲按它定宽） */
 
-/* 方案名合法性（用户输入口；与区域 id / 操作名同一把尺子 vt_id_ok）：[A-Za-z0-9_-]、1..15、裸 `-` 除外。
+/* 方案名合法性（用户输入口；与区域 id / 操作名同一把尺子 vt_id_ok）：v11 名字规则（UTF-8 可见字符
+ * 1..15、字节 ≤47）、裸 `-` 除外。
  * 0 ok / 1 空 / 2 超长 / 3 非法字符（含裸 `-`；`.` 等一律非法，天然排除 `.`/`..` 目录名）。
  * 无「重名」位 —— 撞目录由 scheme_exists / scheme_list 单独判（T2.1 新建/改名用）。 */
 static int scheme_name_ok(const char *n)
 {
-    int i, len = (int)strlen(n);
-    if (len < 1) return 1;
-    if (len > 15) return 2;
-    if (len == 1 && n[0] == '-') return 3;    /* 裸 `-` = 解除/无门控哨兵（vt_id_ok 同款拒收） */
-    for (i = 0; i < len; i++) {
-        char ch = n[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
-    }
-    return 0;
+    return ui_name_ok(n, 0);                 /* v11：同核心 vt_id_ok 尺子（含裸 `-` 拒收） */
 }
 /* current 读取与目录枚举的「承认」规则：长度/路径安全先过，再认合法用户名或内部兜底名「默认[N]」。 */
 static int scheme_name_known(const char *n)
 {
     int len = (int)strlen(n);
-    if (len < 1 || len > 15 || strchr(n, '/')) return 0;
+    if (len < 1 || len > VT_NAME_BUF - 1 || strchr(n, '/')) return 0;
     if (!strcmp(n, ".") || !strcmp(n, "..")) return 0;    /* 目录名恰好是这两者也不认（防越界） */
     return scheme_name_ok(n) == 0 || strncmp(n, "默认", 6) == 0;
 }
@@ -1232,14 +1282,14 @@ static int scheme_exists(const char *name)
     snprintf(path, sizeof path, "%s/%s", SCHEME_DIR, name);
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
-/* qsort 比较器：方案名按字节序（strcmp）排（names 每格 16 字节）。 */
+/* qsort 比较器：方案名按字节序（strcmp）排（names 每格 VT_NAME_BUF 字节）。 */
 static int scheme_name_cmp(const void *a, const void *b)
 {
     return strcmp((const char *)a, (const char *)b);
 }
-/* 枚举 schemes/ 下的方案（readdir；只收承认名 scheme_name_known 的目录），字母序装进 names（每格 16 字节），
+/* 枚举 schemes/ 下的方案（readdir；只收承认名 scheme_name_known 的目录），字母序装进 names（每格 VT_NAME_BUF 字节），
  * 返回条数（≤ max）。目录不存在/读不了 = 0 条（面板退化为空列表，不报错）。 */
-static int scheme_list(char (*names)[16], int max)
+static int scheme_list(char (*names)[VT_NAME_BUF], int max)
 {
     DIR *d = opendir(SCHEME_DIR);
     struct dirent *e;
@@ -1248,11 +1298,11 @@ static int scheme_list(char (*names)[16], int max)
     while (n < max && (e = readdir(d)) != NULL) {
         if (!scheme_name_known(e->d_name)) continue;    /* 滤 `.`/`..`、超长、非法名、外来目录 */
         if (!scheme_exists(e->d_name)) continue;        /* 只收目录（dirent 的类型字段不可靠，用 stat） */
-        snprintf(names[n], 16, "%s", e->d_name);
+        snprintf(names[n], sizeof names[0], "%s", e->d_name);
         n++;
     }
     closedir(d);
-    qsort(names, (size_t)n, 16, scheme_name_cmp);
+    qsort(names, (size_t)n, sizeof names[0], scheme_name_cmp);
     return n;
 }
 /* 读 current（一行名；容忍首尾空白 / 尾随换行）：0 且 out = 名（16 字节）；1 = 缺失/空/不可用（调用方走迁移）。
@@ -1272,7 +1322,7 @@ static int scheme_cur_get(char *out)
     q = p + strlen(p);
     while (q > p && (q[-1] == ' ' || q[-1] == '\t')) *--q = 0; /* 去尾空白 */
     if (!scheme_name_known(p)) return 1;
-    snprintf(out, 16, "%s", p);
+    snprintf(out, VT_NAME_BUF, "%s", p);
     return 0;
 }
 /* 写 current（.tmp + rename，同 save_regions 口径：掉电不留半截）；名照写、无换行。0 / -1。
@@ -1359,8 +1409,8 @@ static int scheme_count_lines(const char *path, const char *prefix)
  * `方案 兜底迁移 → <名>（区域 N / 操作 M）`（N/M 从落定后的方案文件解析计数）。 */
 static void scheme_migrate(char *out)
 {
-    char cur[16], name[16], path[160];
-    char names[SCHEME_LIST_MAX][16];
+    char cur[VT_NAME_BUF], name[VT_NAME_BUF], path[160];
+    char names[SCHEME_LIST_MAX][VT_NAME_BUF];
     int nn, k, i, used;
     out[0] = 0;
     region_conf_dir();
@@ -1375,7 +1425,7 @@ static void scheme_migrate(char *out)
         have_r = stat(path, &st) == 0;
         snprintf(path, sizeof path, "%s/%s/ops.conf", SCHEME_DIR, cur);
         have_o = stat(path, &st) == 0;
-        if (have_r && have_o) { snprintf(out, 16, "%s", cur); return; }    /* 已是有效方案 */
+        if (have_r && have_o) { snprintf(out, VT_NAME_BUF, "%s", cur); return; }    /* 已是有效方案 */
         ALOGW("方案 current=%s 的方案目录/文件缺失 → 兜底迁移", cur);
     }
     /* 冲突自增：默认 → 默认2 → 默认3…（先枚举承认名；枚举满可能被截断，逐个 stat 兜底） */
@@ -1410,7 +1460,7 @@ static void scheme_migrate(char *out)
         no = scheme_count_lines(path, "op ");
         ALOGI("方案 兜底迁移 → %s（区域 %d / 操作 %d）", name, nr, no);
     }
-    snprintf(out, 16, "%s", name);
+    snprintf(out, VT_NAME_BUF, "%s", name);
 }
 /* 启动强制同步（spec §2-3）：schemes/<name>/ 两文件 → live 两路径。方案侧缺失的份先补空合法文件
  * （「缺失文件按写空合法文件补齐后再复制」），再逐字节复制。0 = 两文件都同步完成；-1 = 有失败
@@ -1431,7 +1481,7 @@ static int scheme_sync_live(const char *name)
  * 无 current（迁移失败/尚未接管）→ 直接返回（迁移侧已报错；下次启动兜底再试）。 */
 static void scheme_mirror(void)
 {
-    char cur[16], sp[160];
+    char cur[VT_NAME_BUF], sp[160];
     if (scheme_cur_get(cur) != 0) return;
     snprintf(sp, sizeof sp, "%s/%s/regions.conf", SCHEME_DIR, cur);
     if (scheme_copy_file(REGION_CONF_NEW, sp, 0) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
@@ -1470,22 +1520,22 @@ static int scheme_line_kw(const char *line, const char *kw)
  * 预检按坏行拒切；其余与 load 的警告 / 坏记录口径一一对应。 */
 static int scheme_bad_region_line(const char *line)
 {
-    char id[16], op[16], tms[16];
+    char id[VT_NAME_BUF], op[VT_NAME_BUF], tms[16];
     int t, a1, a2, a3, a4, en, fr, fw, fh, kd;
     if (scheme_line_kw(line, "#frame")) {
         if (sscanf(line, "#frame %d %d %d", &fr, &fw, &fh) != 3) return 1;
         return !(fr >= 0 && fr <= 3 && fw > 0 && fh > 0);
     }
     if (scheme_line_kw(line, "region"))
-        return sscanf(line, "region %15s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) != 7;
+        return sscanf(line, "region %47s %d %d %d %d %d %d", id, &t, &a1, &a2, &a3, &a4, &en) != 7;
     if (scheme_line_kw(line, "hide"))
-        return sscanf(line, "hide %15s", id) != 1;
+        return sscanf(line, "hide %47s", id) != 1;
     if (scheme_line_kw(line, "bind")) {
-        if (sscanf(line, "bind %15s %15s %15s", id, op, tms) != 3) return 1;
+        if (sscanf(line, "bind %47s %47s %15s", id, op, tms) != 3) return 1;
         return strcmp(tms, "down") != 0 && strcmp(tms, "press") != 0;
     }
     if (scheme_line_kw(line, "kind")) {
-        if (sscanf(line, "kind %15s %d", id, &kd) != 2) return 1;
+        if (sscanf(line, "kind %47s %d", id, &kd) != 2) return 1;
         return kd != 0 && kd != 1;
     }
     return 0;      /* 未识别 / 空行：放行（未来扩展增量行照 load 静默忽略口径） */
@@ -1522,10 +1572,10 @@ static int scheme_precheck(const char *name)
          * 坏行 → 6；单条 step 数超 OPS_MAX_STEPS → 7；记录无步骤行 → 6。 */
         int have = 0, nst = 0, badline = 0, ovf = 0, rc = 0;
         while (!rc && fgets(line, sizeof line, f)) {
-            char a[16], b[16];
+            char a[VT_NAME_BUF], b[VT_NAME_BUF];
             int ao2 = 0, t, a1, a2, a3, a4, ms, j1, j2, sn;
-            char rf[REGION_ID_MAX + 1];
-            int pn = sscanf(line, "op %15s gate %15s autooff %d", a, b, &ao2);
+            char rf[VT_NAME_BUF];
+            int pn = sscanf(line, "op %47s gate %47s autooff %d", a, b, &ao2);
             if (pn >= 1) {
                 if (have) {                        /* 结算上一条（坏行优先于越限报告） */
                     if (badline || nst < 1) rc = 6;
@@ -1537,7 +1587,7 @@ static int scheme_precheck(const char *name)
                     else rc = 6;                   /* op 行字段不全（load 警告口径） */
                 }
             } else {
-                sn = sscanf(line, "step %d %d %d %d %d %d %15s %d %d", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2);
+                sn = sscanf(line, "step %d %d %d %d %d %d %47s %d %d", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2);
                 if (sn == 6 || sn == 7 || sn == 9) {
                     if (!have) rc = 6;             /* 孤儿 step 行（load 警告口径） */
                     else if (nst < OPS_MAX_STEPS) nst++;
@@ -1594,7 +1644,7 @@ static void scheme_rollback_to(const char *cur)
 
 int scheme_switch(const char *name)
 {
-    char cur[16], sp[160], dp[160];
+    char cur[VT_NAME_BUF], sp[160], dp[160];
     int rc, rst = 0;
 
     if (!name || !scheme_name_known(name)) return 1;
@@ -1689,13 +1739,13 @@ static void gen_id(char *out, int circle)
         int n = vtouch_region_count(), used = 0;
         snprintf(tmp, sizeof tmp, circle ? "c%d" : "r%d", k);
         for (int i = 0; i < n; i++) {
-            char id[16]; int t, a1, a2, a3, a4, en;
+            char id[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
             if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) == 0 &&
                 !strcmp(id, tmp)) { used = 1; break; }
         }
-        if (!used) { snprintf(out, 16, "%s", tmp); return; }
+        if (!used) { snprintf(out, VT_NAME_BUF, "%s", tmp); return; }
     }
-    snprintf(out, 16, circle ? "c99" : "r99");
+    snprintf(out, VT_NAME_BUF, circle ? "c99" : "r99");
 }
 
 static long now_ms(void)
@@ -1776,7 +1826,7 @@ static void pick_ev_apply(int px, int py);
  * 纯装饰性；换来 poll 线程永不因渲染阻塞（此前 move 事件高频取锁饿死输入，整屏顿）。 */
 static void ui_ev_cb(const char *line)
 {
-    char id[16], ev[32];
+    char id[VT_NAME_BUF], ev[32];
     int slot, lx, ly;
     if (!strncmp(line, "mark_ev ", 8)) {          /* 核心改了区域的"开关样式"标记 */
         g_need = 1; g_force_frames = 2; g_ov_need = 1;   /* 立刻重画（面板按需重绘，这一步是"事件驱动那一下"）*/
@@ -1786,7 +1836,7 @@ static void ui_ev_cb(const char *line)
     }
     if (g_evlog_n < 8) snprintf(g_evlog[g_evlog_n++], 96, "%s", line);
     else { memmove(g_evlog[0], g_evlog[1], 96 * 7); snprintf(g_evlog[7], 96, "%s", line); }
-    if (sscanf(line, "region_ev %15s %31s %d %d %d", id, ev, &slot, &lx, &ly) == 5) {
+    if (sscanf(line, "region_ev %47s %31s %d %d %d", id, ev, &slot, &lx, &ly) == 5) {
         if (!strcmp(ev, "down")) {
             snprintf(g_flash_id, sizeof g_flash_id, "%s", id);
             g_flash_t = now_ms();
@@ -1831,7 +1881,7 @@ static int sel_geom(int *type, int *a1, int *a2, int *a3, int *a4)
 {
     int n = vtouch_region_count();
     for (int i = 0; i < n; i++) {
-        char id[16]; int t, b1, b2, b3, b4, en;
+        char id[VT_NAME_BUF]; int t, b1, b2, b3, b4, en;
         if (vtouch_get_region(i, id, sizeof id, &t, &b1, &b2, &b3, &b4, &en) != 0) continue;
         if (!strcmp(id, g_sel_id)) {
             *type = t; *a1 = b1; *a2 = b2; *a3 = b3; *a4 = b4;
@@ -1846,7 +1896,7 @@ static void cap_commit(void)
     int x0 = g_cap_x0, y0 = g_cap_y0, x1 = g_cap_x1, y1 = g_cap_y1;
     int xa = x0 < x1 ? x0 : x1, xb = x0 < x1 ? x1 : x0;
     int ya = y0 < y1 ? y0 : y1, yb = y0 < y1 ? y1 : y0;
-    char id[16];
+    char id[VT_NAME_BUF];
     if (g_cap_mode == 1) {
         if (xb - xa < 40 || yb - ya < 40) return;
         if (xa < 0) xa = 0; if (ya < 0) ya = 0;
@@ -1878,7 +1928,7 @@ static void cap_commit(void)
 static void edit_apply_live(int x, int y)
 {
     int t = 0, na1 = 0, na2 = 0, na3 = 0, na4 = 0;
-    char id[16];
+    char id[VT_NAME_BUF];
     int en;
     snprintf(id, sizeof id, "%s", g_sel_id);
     en = sel_geom(&t, &na1, &na2, &na3, &na4);
@@ -2109,7 +2159,7 @@ static void snapshot_touches(void)
                 g_edit_slot = -1; g_edit_kind = 0;   /* 隐藏中抬起：放弃这次拖改（不写表、不落盘） */
             } else if (up_edge && i == g_edit_slot) {
                 int t, a1, a2, a3, a4, en;
-                char id[16];
+                char id[VT_NAME_BUF];
                 snprintf(id, sizeof id, "%s", g_sel_id);
                 en = sel_geom(&t, &a1, &a2, &a3, &a4);
                 if (en >= 0) {
@@ -2198,6 +2248,7 @@ static void font_probe(void)
     unsigned char *px; int pw, ph;
     io.Fonts->GetTexDataAsRGBA32(&px, &pw, &ph);   /* 建图集后才可判字形 */
     if (f && f->FindGlyphNoFallback(0x4E2D)) {
+        g_font_have_ttf = 1;                       /* v11 字形扩集就绪（见下） */
         ALOGI("font ok %s 44%s atlas=%dx%d bake=%.0fms t=+%.0fms",
               path, g_font_meta ? "+30" : "", pw, ph,
               (double)(now_ms() - b0), (double)t_since_start());
@@ -2207,6 +2258,105 @@ static void font_probe(void)
     io.Fonts->AddFontDefault();
     g_font_meta = 0;
     ALOGE("font fallback to default (no CJK)");
+}
+
+/* ---- v11 字形按需扩集：用户名字可以是任意中文 —— 每帧扫「会显示的文本」（区域/操作/事件日志；
+ * 方案/素材名单带目录 IO、约 2s 一巡）里的码点，缺字追加进扩集区段，帧间重建图集 + 重传纹理
+ * （烘字只随集合增量发生）。防死循环：进过扩集仍缺字（TTF 里没有该字形）不再重复重建。
+ * 说明：ImWchar = 16 位 → 只覆盖 BMP（汉字在 BMP；emoji 等超出 BMP 不进图集，显示兜底字形）。 ---- */
+static ImVector<ImWchar> g_font_extra;   /* 追加码点（= 已尝试集；不重复 push） */
+static int g_font_have_ttf = 0;          /* TTF 装载成功（fallback 时不折腾） */
+static int g_font_dirty = 0;             /* 有新增码点待进图集（帧间重建） */
+static int g_glyph_tick = 0;
+static int vis_list(const char *ext, char (*names)[VT_NAME_BUF], int max);   /* 前向声明（本体在后面） */
+
+static int ui_extra_has(unsigned cp)
+{
+    for (int i = 0; i < g_font_extra.Size; i++)
+        if ((unsigned)g_font_extra[i] == cp) return 1;
+    return 0;
+}
+/* 扫一段 UTF-8：BMP 内、字体没有、扩集里也没有 → 记录（手写解码，与核心同规则）。 */
+static void ui_glyph_scan(const char *s)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (!g_font_have_ttf || !s || !*s) return;
+    while (*p) {
+        unsigned cp, len;
+        if (*p < 0x80) { p++; continue; }
+        if ((*p & 0xE0) == 0xC0)      { len = 2; cp = *p & 0x1Fu; }
+        else if ((*p & 0xF0) == 0xE0) { len = 3; cp = *p & 0x0Fu; }
+        else if ((*p & 0xF8) == 0xF0) { len = 4; cp = *p & 0x07u; }
+        else { p++; continue; }
+        for (unsigned k = 1; k < len; k++) {
+            if ((p[k] & 0xC0) != 0x80) { len = 0; break; }
+            cp = (cp << 6) | (p[k] & 0x3Fu);
+        }
+        if (len == 0 || cp > 0xFFFF || cp < 0x80) { p++; continue; }
+        p += len;
+        if (ui_extra_has(cp)) continue;                                  /* 已尝试过（含字体缺字的顽固集） */
+        if (g_font_meta && g_font_meta->FindGlyphNoFallback((ImWchar)cp)) continue;   /* 已有字形 */
+        g_font_extra.push_back((ImWchar)cp);
+        g_font_dirty = 1;
+    }
+}
+static void ui_glyph_scan_all(int heavy)
+{
+    int i, n, k;
+    if (!g_font_have_ttf) return;
+    n = vtouch_region_count();
+    for (i = 0; i < n; i++) {
+        char idb[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
+        if (vtouch_get_region(i, idb, sizeof idb, &t, &a1, &a2, &a3, &a4, &en) == 0) ui_glyph_scan(idb);
+    }
+    n = vtouch_op_count();
+    for (i = 0; i < n; i++) {
+        char nmb[VT_NAME_BUF];
+        if (vtouch_get_op(i, nmb, sizeof nmb, NULL, NULL, 0, NULL) == 0) ui_glyph_scan(nmb);
+    }
+    for (i = 0; i < g_evlog_n; i++) ui_glyph_scan(g_evlog[i]);
+    if (!heavy) return;                          /* 下面带目录 IO：约 2s 一巡 */
+    {
+        char cur[VT_NAME_BUF];
+        char names[SCHEME_LIST_MAX][VT_NAME_BUF];
+        int sn = scheme_list(names, SCHEME_LIST_MAX);
+        for (k = 0; k < sn; k++) ui_glyph_scan(names[k]);
+        if (scheme_cur_get(cur) == 0) ui_glyph_scan(cur);
+    }
+    {
+        char nm[64][VT_NAME_BUF];
+        k = vis_list(".tmpl", nm, 64);
+        for (i = 0; i < k; i++) ui_glyph_scan(nm[i]);
+        k = vis_list(".pts", nm, 64);
+        for (i = 0; i < k; i++) ui_glyph_scan(nm[i]);
+    }
+}
+/* 帧间重建：Clear → 基础盘 + 源码字 + 扩集 → 两档重加 → Build → 重传纹理。 */
+static void ui_font_rebuild(void)
+{
+    static const char *path = "/system/fonts/SysSans-Hans-Regular.ttf";
+    ImGuiIO &io = ImGui::GetIO();
+    static ImVector<ImWchar> rg2;
+    ImFontGlyphRangesBuilder b;
+    long b0 = now_ms();
+
+    b.AddRanges(io.Fonts->GetGlyphRangesDefault());
+    if (k_ui_chars[0]) b.AddText(k_ui_chars);
+    for (int i = 0; i < g_font_extra.Size; i++) b.AddChar(g_font_extra[i]);
+    rg2.clear();
+    b.BuildRanges(&rg2);
+    io.Fonts->ClearInputData();
+    io.Fonts->ClearTexData();
+    io.Fonts->ClearFonts();
+    {
+        ImFont *f = io.Fonts->AddFontFromFileTTF(path, 44.0f, 0, rg2.Data);
+        if (f) g_font_meta = io.Fonts->AddFontFromFileTTF(path, 30.0f, 0, rg2.Data);
+        else { io.Fonts->AddFontDefault(); g_font_meta = 0; g_font_have_ttf = 0; }
+    }
+    io.Fonts->Build();
+    ImGui_ImplOpenGL3_DestroyDeviceObjects();
+    ImGui_ImplOpenGL3_CreateDeviceObjects();
+    ALOGI("font rebuild +%d chars bake=%.0fms", g_font_extra.Size, (double)(now_ms() - b0));
 }
 
 /* ---- overlay（全屏无形窗口）：描边/填充闪/进出脉冲/轨迹/点/圈 ---- */
@@ -2222,7 +2372,7 @@ static void build_overlay(int sw, int sh)
         int n = vtouch_region_count();
         long t = now_ms();
         for (int i = 0; i < n; i++) {
-            char id[16]; int type, a1, a2, a3, a4, en;
+            char id[VT_NAME_BUF]; int type, a1, a2, a3, a4, en;
             if (vtouch_get_region(i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) != 0) continue;
             if (!en) continue;
             if (is_hidden(id)) continue;
@@ -2596,7 +2746,7 @@ static int any_region_enabled(void)
 {
     int n = vtouch_region_count();
     for (int i = 0; i < n; i++) {
-        char id[16]; int t, a1, a2, a3, a4, en;
+        char id[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) == 0 && en) return 1;
     }
     return 0;
@@ -2612,7 +2762,7 @@ static void del_region(const char *id)
     if (!strcmp(g_sel_id, id)) g_sel_id[0] = 0;
     for (int j = 0; j < g_nhide; j++) {
         if (!strcmp(g_hidden[j], id)) {
-            memmove(g_hidden[j], g_hidden[j + 1], (size_t)(g_nhide - j - 1) * 16);
+            memmove(g_hidden[j], g_hidden[j + 1], (size_t)(g_nhide - j - 1) * VT_NAME_BUF);
             g_nhide--;
             break;
         }
@@ -2625,16 +2775,11 @@ static void del_region(const char *id)
 /* 名字合法性：0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_id 自己不算） */
 static int id_name_ok(const char *old_id, const char *s)
 {
-    int i, n = (int)strlen(s), k = vtouch_region_count();
-    if (n < 1) return 1;
-    if (n > 15) return 2;
-    for (i = 0; i < n; i++) {
-        char ch = s[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
-    }
+    int i, k = vtouch_region_count();
+    int rc = ui_name_ok(s, 0);               /* v11：UTF-8 可见字符 1..15、字节 ≤47；裸 `-` 拒收 */
+    if (rc) return rc;
     for (i = 0; i < k; i++) {
-        char id[16]; int t, b1, b2, b3, b4, en;
+        char id[VT_NAME_BUF]; int t, b1, b2, b3, b4, en;
         if (vtouch_get_region(i, id, sizeof id, &t, &b1, &b2, &b3, &b4, &en) != 0) continue;
         if (!strcmp(id, s) && strcmp(id, old_id)) return 4;
     }
@@ -2650,7 +2795,7 @@ static void rename_region(const char *old_id, const char *new_id)
     }
     if (!strcmp(g_sel_id, old_id)) snprintf(g_sel_id, sizeof g_sel_id, "%s", new_id);
     for (int j = 0; j < g_nhide; j++)
-        if (!strcmp(g_hidden[j], old_id)) snprintf(g_hidden[j], 16, "%s", new_id);
+        if (!strcmp(g_hidden[j], old_id)) snprintf(g_hidden[j], VT_NAME_BUF, "%s", new_id);
     save_regions();
     g_force_frames = 3;
     ALOGI("rename %s -> %s n=%d", old_id, new_id, vtouch_region_count());
@@ -2793,10 +2938,10 @@ static void build_sidebar(void)
  * 循环到操作时沿用当前时机（无时机 = 默认「按下」）；一个操作都没有时只提示、不动表。 */
 static void rc_trig_cycle(const char *id, const char *cur_op, int cur_ev)
 {
-    char ops[32][16], nxt[16];
+    char ops[32][VT_NAME_BUF], nxt[VT_NAME_BUF];
     int n = 0, k, ev, cnt = vtouch_op_count();
     for (k = 0; k < cnt && n < 32; k++) {
-        char nm[16];
+        char nm[VT_NAME_BUF];
         if (vtouch_get_op(k, nm, sizeof nm, NULL, NULL, 0, NULL) == 0) {
             snprintf(ops[n], sizeof ops[n], "%s", nm);
             n++;
@@ -2899,7 +3044,7 @@ static void region_card(int i, const char *id, int type, int a1, int a2, int a3,
         /* T3.3 触发侧三行（全宽，键高 76 保手指可点）：触发 / 时机 / 开关型 —— 点击处理见 rc_*_cycle。
          * 值全部实时读核心（只读区 A）：悬空绑定照显（核心允许悬空）；开关型行带当前开关态只读回显。 */
         {
-            char op[16] = {0}; int ev = 0, kd = 0, tg = 0;
+            char op[VT_NAME_BUF] = {0}; int ev = 0, kd = 0, tg = 0;
             char lbl[72];
             float rw = ImGui::GetContentRegionAvail().x;
             vtouch_region_trig(i, op, sizeof op, &ev);   /* 读失败保默认（无绑定/按下）—— 画得出来 */
@@ -2975,7 +3120,7 @@ static void page_regions(void)
         if (n == 0) ImGui::TextDisabled("还没有区域");
         for (int i = 0; i < n; i++) {
             if (i == 0) g_card0_y = ImGui::GetCursorScreenPos().y;
-            char id[16]; int type, a1, a2, a3, a4, en;
+            char id[VT_NAME_BUF]; int type, a1, a2, a3, a4, en;
             if (vtouch_get_region(i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) != 0) continue;
             region_card(i, id, type, a1, a2, a3, a4, en);
         }
@@ -3015,15 +3160,15 @@ static void gen_op_name(char *out)
         int used = 0;
         snprintf(tmp, sizeof tmp, "op%d", k);
         for (int i = 0; i < n; i++) {
-            char nm[16];
+            char nm[VT_NAME_BUF];
             if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) == 0 && !strcmp(nm, tmp)) {
                 used = 1;
                 break;
             }
         }
-        if (!used) { snprintf(out, 16, "%s", tmp); return; }
+        if (!used) { snprintf(out, VT_NAME_BUF, "%s", tmp); return; }
     }
-    snprintf(out, 16, "op99");
+    snprintf(out, VT_NAME_BUF, "op99");
 }
 
 /* ＋新建：默认 1 步「等待 100ms」—— 安全中性、核心必过（点按/滑动要坐标，面板此刻没有可用的
@@ -3031,7 +3176,7 @@ static void gen_op_name(char *out)
 static void op_new(void)
 {
     const int wait100[8] = { OP_STEP_WAIT, 0, 0, 0, 0, 100, 0, 0 };
-    char nm[16];
+    char nm[VT_NAME_BUF];
     gen_op_name(nm);
     if (vtouch_op_put(nm, "", 0, wait100, NULL, NULL, 1, NULL) == 0) {   /* refs/exprs=NULL：等待步无区域引用/表达式（全空口径）；out_err=NULL */
         ALOGI("op new %s", nm);
@@ -3132,7 +3277,7 @@ static void page_ops(void)
     snprintf(meta, sizeof meta, "%d 条", n);
     page_header("操作", meta);
     if (run_state) {
-        char rn[16] = {0}, m[64];
+        char rn[VT_NAME_BUF] = {0}, m[64];
         int rsteps = 0, k = run_step + 1;
         if (run_i >= 0 && vtouch_get_op(run_i, rn, sizeof rn, &rsteps, NULL, 0, NULL) == 0 && rn[0]) {
             if (k < 1) k = 1;
@@ -3165,7 +3310,7 @@ static void page_ops(void)
     drag_scroll_for(SCR_LIST);
     {
         for (int i = 0; i < n; i++) {
-            char name[16], gate[16];
+            char name[VT_NAME_BUF], gate[VT_NAME_BUF];
             int steps = 0, autoff = 0;
             if (vtouch_get_op(i, name, sizeof name, &steps, gate, sizeof gate, &autoff) != 0) continue;
             op_card(i, name, steps, gate, autoff, run_i, run_step, run_state);
@@ -3179,7 +3324,7 @@ static void page_ops(void)
 /* ==== T2.6：操作编辑覆盖层 + 数字弹层 ================================================
  * 编辑对象是**打开那一刻的快照**（面板本地副本）：改名/增删排序步骤/换参数都只动副本，
  * [完成] 才由 vtouch_op_put 整条落表 —— 编辑半途核心表怎么动都不会把这轮编辑甩掉。
- * 范围口径照核心单点校验（src/vt_ops.c 的 op_valid）：名字 1..15 [A-Za-z0-9_-]（裸 `-` 除外）；步数 1..32；
+ * 范围口径照核心单点校验（src/vt_ops.c 的 op_valid）：名字 v11 规则（可见字符 1..15、字节 ≤47；裸 `-` 除外）；步数 1..32；
  * 坐标 0..竖屏逻辑宽高-1；时长 点按 0..60000 / 滑动 1..60000 / 等待 0..600000；
  * v3 增量：条件步两档位 0..3（档位 = 跳转 → 该侧目标 0..当前步数）；跳转步目标 0..当前步数（0 = 结束）。
  * 面板预检是**硬门**：非法值拒收 + 就地提示（不只提示）；最终仍以核心为准（put 回读失败
@@ -3188,13 +3333,13 @@ static void page_ops(void)
 #define OPE_MAX_STEPS 32                /* = 核心 MAX_STEPS（面板不 include 核心头，独立定义） */
 
 /* g_ope_i / g_ope_coll / g_pick_t0 的定义已上移到取点区块（文件前段的吞触摸/快照判据要读它们）。 */
-static char g_ope_orig[16] = {0};       /* 打开时的原名（改过名后 [完成] 照它删旧条目） */
-static char g_ope_name[16] = {0};       /* 编辑中的名字（名字子层改，[完成] 才落表） */
-static char g_ope_gate[16] = {0};       /* 门控区域 id（空 = 无） */
+static char g_ope_orig[VT_NAME_BUF] = {0};       /* 打开时的原名（改过名后 [完成] 照它删旧条目） */
+static char g_ope_name[VT_NAME_BUF] = {0};       /* 编辑中的名字（名字子层改，[完成] 才落表） */
+static char g_ope_gate[VT_NAME_BUF] = {0};       /* 门控区域 id（空 = 无） */
 static int  g_ope_autoff = 0;           /* 跑完自动关 */
 static int  g_ope_nsteps = 0;           /* 步骤数（本地副本 1..32） */
 static int  g_ope_steps[OPE_MAX_STEPS][8];   /* 本地副本：每步 type,a1,a2,a3,a4,ms,j1,j2（v3 模型 [8]，字段序同核心 vt_step；ref 另存 g_ope_refs） */
-static char g_ope_refs[OPE_MAX_STEPS][REGION_ID_MAX + 1];   /* 本地副本：每步区域引用（条件步 ref；空 = 无） */
+static char g_ope_refs[OPE_MAX_STEPS][VT_NAME_BUF];   /* 本地副本：每步区域引用（条件步 ref；空 = 无） */
 static char g_ope_exprs[OPE_MAX_STEPS][OPS_EXPR_MAX + 1];   /* 本地副本：每步表达式（计算步 expr；空 = 无；v5） */
 static char g_ope_msg[128] = {0};       /* [完成] 拒收/失败的就地提示（红字；放得下 v2 长文案） */
 static int  g_ope_kb = 0;               /* 名字子层（字符键盘）开 */
@@ -3220,7 +3365,7 @@ static char g_ope_expr_buf[OPS_EXPR_MAX + 1];   /* 子层编辑缓冲：进入�
 static int  g_ex_undo_armed;
 static int  g_ex_undo_nsteps;
 static int  g_ex_undo_steps[OPE_MAX_STEPS][8];
-static char g_ex_undo_refs[OPE_MAX_STEPS][REGION_ID_MAX + 1];
+static char g_ex_undo_refs[OPE_MAX_STEPS][VT_NAME_BUF];
 static char g_ex_undo_exprs[OPE_MAX_STEPS][OPS_EXPR_MAX + 1];
 static void ope_field_expr_undo_arm(void)
 {
@@ -3241,12 +3386,12 @@ static void ope_field_expr_undo_restore(void)
     memcpy(g_ope_exprs, g_ex_undo_exprs, sizeof g_ope_exprs);
     g_ex_undo_armed = 0;
 }
-static char g_ope_ex_name[16];          /* 子层变量名缓冲（[改名] 编辑；[确定] 随表达式一起写回该步 ref） */
+static char g_ope_ex_name[VT_NAME_BUF];          /* 子层变量名缓冲（[改名] 编辑；[确定] 随表达式一起写回该步 ref） */
 static int  g_ope_ex_nm = 0;            /* 子层里的小字符键盘（改变量名）开 */
 static char g_ope_ex_nmmsg[96] = {0};   /* 名字键盘拒收提示 */
 static char g_ope_ex_msg[72] = {0};     /* 子层拒收提示（红字；[确定] 不过时层不关） */
-static char g_ope_saved_as[16] = {0};   /* 本会话最近一次 put 成功的名字（[完成] 重试豁免自己刚写进表的名字）；开层/关层清空 */
-static char g_ope_del_owed[16] = {0};   /* 尚欠删除的旧名（del 超时/未送达留下的账，再点 [完成] 先补删）；开层/关层清空 */
+static char g_ope_saved_as[VT_NAME_BUF] = {0};   /* 本会话最近一次 put 成功的名字（[完成] 重试豁免自己刚写进表的名字）；开层/关层清空 */
+static char g_ope_del_owed[VT_NAME_BUF] = {0};   /* 尚欠删除的旧名（del 超时/未送达留下的账，再点 [完成] 先补删）；开层/关层清空 */
 /* 参数弹层 v3 本地缓冲（全字段一屏 / 原子落）：每格 = {值, 文本}（结构说明见 ope_num_load）。
  * 层内编辑只改缓冲；[完成] 全字段校验全过才一次写回 g_ope_steps，[取消] 全丢（含取点/变量改动）。 */
 static int  g_ne_vals[8];               /* 每格值：字面值 ≥ 0 / 负数编码引用 -25..-1（触发 -1..-5 / fx/fy -6/-7 / 退役 -8/-9 / 自定义 -10..-25；目标模式单格 = j1/j2） */
@@ -3385,21 +3530,16 @@ static int draw_char_kb(const char *title, const char *oldname, char *buf, int b
     return act;
 }
 
-/* 操作名合法性（照核心 vt_id_ok：1..15、[A-Za-z0-9_-]，裸 `-` 除外；与区域改名同一把尺子，撞的是别的操作名）：
+/* 操作名合法性（照核心 vt_id_ok：v11 UTF-8 可见字符 1..15、字节 ≤47，裸 `-` 除外；与区域改名同一把尺子，撞的是别的操作名）：
  * 0 ok / 1 空 / 2 超长 / 3 非法字符 / 4 重名（old_name 自己不算；本会话刚 put 成功的名字 saved_as
  * 也不算 —— 删旧失败的 [完成] 重试必须能过这一关，否则表里刚写进去的新名会把自己判成「被别人用了」）。 */
 static int ope_name_ok(const char *old_name, const char *s)
 {
-    int i, n = (int)strlen(s), k = vtouch_op_count();
-    if (n < 1) return 1;
-    if (n > 15) return 2;
-    for (i = 0; i < n; i++) {
-        char ch = s[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
-    }
+    int i, k = vtouch_op_count();
+    int rc = ui_name_ok(s, 0);               /* v11：UTF-8 可见字符 1..15、字节 ≤47；裸 `-` 拒收 */
+    if (rc) return rc;
     for (i = 0; i < k; i++) {
-        char nm[16];
+        char nm[VT_NAME_BUF];
         if (vtouch_get_op(i, nm, sizeof nm, NULL, NULL, 0, NULL) != 0) continue;
         if (!strcmp(nm, s) && strcmp(nm, old_name) && strcmp(nm, g_ope_saved_as)) return 4;
     }
@@ -3516,16 +3656,10 @@ static int ope_var_ok(int type, int idx)
 
 /* ---- 自定义命名变量（v10，spec EDITOR_V2 §Task 7.5）：收集 / 索引分配 / 改名 ---- */
 
-/* 自定义变量名合法性（v10）：[A-Za-z_][A-Za-z0-9_]*、1..OP_VAR_NAME_MAX（同核心 op_var_name_ok 尺子）。 */
+/* 自定义变量名合法性（v10 起；v11 UTF-8）：ui_name_ok(var 模式)，同核心 op_var_name_ok 尺子。 */
 static int ope_varname_ok(const char *s)
 {
-    int i, n = (int)strlen(s);
-    if (n < 1 || n > OP_VAR_NAME_MAX) return 0;
-    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
-    for (i = 1; i < n; i++)
-        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_')) return 0;
-    return 1;
+    return ui_name_ok(s, 1) == 0;            /* v11：UTF-8 可见字符 1..15；首字符不可数字/`-` */
 }
 /* 名字 → 变量索引（扫计算步；无 = -1）。 */
 static int ope_var_index_of(const char *name)
@@ -3571,14 +3705,14 @@ static void ope_var_auto_name(const char *prefix, char *out, int outcap)
     }
 }
 /* 从计算步动态收集自定义变量（名字按步序首次出现、索引取该步 a1；重名只收一份）。返回条数（≤max）。 */
-static int ope_vars_collect(char (*names)[16], int *idx, int max)
+static int ope_vars_collect(char (*names)[VT_NAME_BUF], int *idx, int max)
 {
     int i, k, cnt = 0;
     for (i = 0; i < g_ope_nsteps && cnt < max; i++) {
         if (g_ope_steps[i][0] != OP_STEP_CALC || !g_ope_refs[i][0]) continue;
         for (k = 0; k < cnt; k++) if (!strcmp(names[k], g_ope_refs[i])) break;
         if (k < cnt) continue;
-        snprintf(names[cnt], 16, "%s", g_ope_refs[i]);
+        snprintf(names[cnt], VT_NAME_BUF, "%s", g_ope_refs[i]);
         idx[cnt] = g_ope_steps[i][1];
         cnt++;
     }
@@ -3586,7 +3720,7 @@ static int ope_vars_collect(char (*names)[16], int *idx, int max)
 }
 /* 变量表一致性预检（[完成] 保存前）：由计算步构建 vars[索引] = 名字；冲突（同名多索引 / 同索引多名）→ -1。
  * 与核心 op_valid 的变量表校验同款（双保险，拒在出门前）。 */
-static int ope_vars_build(char (*vars)[16])
+static int ope_vars_build(char (*vars)[VT_NAME_BUF])
 {
     int i, k;
     for (i = 0; i < OP_VAR_IDX_N; i++) vars[i][0] = 0;
@@ -3596,7 +3730,7 @@ static int ope_vars_build(char (*vars)[16])
         idx = g_ope_steps[i][1];
         if (idx < 0 || idx >= OP_VAR_IDX_N) return -1;
         if (vars[idx][0] && strcmp(vars[idx], g_ope_refs[i])) return -1;      /* 同索引多名 */
-        snprintf(vars[idx], 16, "%s", g_ope_refs[i]);
+        snprintf(vars[idx], VT_NAME_BUF, "%s", g_ope_refs[i]);
         for (k = 0; k < OP_VAR_IDX_N; k++)
             if (k != idx && vars[k][0] && !strcmp(vars[k], g_ope_refs[i])) return -1;   /* 同名多索引 */
     }
@@ -3661,7 +3795,7 @@ static int ne_check(const char *label, int type, int fi, int v, char *why, int w
 /* 整步校验（[完成] 预检用；单点仍是核心 op_valid，这里只是不让明显非法的载荷出门）。
  * 条件步：两档位 a3/a4 ∈ 0..3；档位 = 跳转 → 该侧目标（不成立侧 = j2、成立侧 = j1）∈ 0..当前步数；ref 必须已选。
  * 跳转步：目标 a1 ∈ 0..当前步数（0 = 结束）。其余档位的目标忽略（照核心 op_valid 口径）。
- * 计算步（v10）：a1 ∈ 0..15（变量索引）；ref = 变量名（[A-Za-z_][A-Za-z0-9_]*、1..15）；expr 非空且过同源
+ * 计算步（v10；v11 起 UTF-8）：a1 ∈ 0..15（变量索引）；ref = 变量名（可见字符 1..15）；expr 非空且过同源
  * vtouch_expr_check（名字表 = 当前计算步收集）；其余字段必须 0。 */
 static int ope_step_check(int si, const int *s6, char *why, int whycap)
 {
@@ -3725,11 +3859,11 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
             return 0;
         }
         {
-            char names[OP_VAR_IDX_N][16];
+            char names[OP_VAR_IDX_N][VT_NAME_BUF];
             int  nidx[OP_VAR_IDX_N];
             int  nv = ope_vars_collect(names, nidx, OP_VAR_IDX_N);
             w2[0] = 0;
-            if (vtouch_expr_check(g_ope_exprs[si], (const char (*)[16])names, nv, w2, (int)sizeof w2) != 0) {
+            if (vtouch_expr_check(g_ope_exprs[si], (const char (*)[VT_NAME_BUF])names, nv, w2, (int)sizeof w2) != 0) {
                 snprintf(why, (size_t)whycap, "第 %d 步：表达式错（%s）", si + 1, w2[0] ? w2 : "非法");
                 return 0;
             }
@@ -3756,7 +3890,7 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
                 return 0;
             }
             if (vis_name_ok(g_ope_refs[si]) != 0) {
-                snprintf(why, (size_t)whycap, "第 %d 步：模板名非法（[A-Za-z0-9_-]、1..15）", si + 1);
+                snprintf(why, (size_t)whycap, "第 %d 步：模板名非法（1..15 个可见字符）", si + 1);
                 return 0;
             }
         } else {
@@ -3770,7 +3904,7 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
                     return 0;
                 }
                 if (vis_name_ok(g_ope_refs[si]) != 0) {
-                    snprintf(why, (size_t)whycap, "第 %d 步：点集名非法（[A-Za-z0-9_-]、1..15）", si + 1);
+                    snprintf(why, (size_t)whycap, "第 %d 步：点集名非法（1..15 个可见字符）", si + 1);
                     return 0;
                 }
                 if (s6[2] != 0) {
@@ -3799,7 +3933,7 @@ static int ope_step_check(int si, const int *s6, char *why, int whycap)
             return 0;
         }
         if (g_ope_exprs[si][0] && vis_name_ok(g_ope_exprs[si]) != 0) {
-            snprintf(why, (size_t)whycap, "第 %d 步：区域名非法（[A-Za-z0-9_-]、1..15）", si + 1);
+            snprintf(why, (size_t)whycap, "第 %d 步：区域名非法（1..15 个可见字符）", si + 1);
             return 0;
         }
     }
@@ -4107,7 +4241,7 @@ static void ope_add_step(int type)
     } else if (type == OP_STEP_JUMP) {
         s6[1] = 1;                                   /* 跳转目标默认 1（spec §2.1 缺省） */
     } else if (type == OP_STEP_CALC) {
-        char vn[16];
+        char vn[VT_NAME_BUF];
         ope_var_auto_name("v", vn, sizeof vn);       /* 默认名 v1/v2…（可改名；spec §7.5 点 6） */
         s6[1] = ope_var_index_alloc();               /* 变量索引（0..15；顶部已确认有空位）；其余 0、expr 空 */
         snprintf(g_ope_refs[g_ope_nsteps], sizeof g_ope_refs[0], "%s", vn);
@@ -4130,7 +4264,7 @@ static void ope_add_step(int type)
 static void ope_move(int i, int d)
 {
     int j = i + d, t6[8];
-    char tr[REGION_ID_MAX + 1], te[OPS_EXPR_MAX + 1];
+    char tr[VT_NAME_BUF], te[OPS_EXPR_MAX + 1];
     if (j < 0 || j >= g_ope_nsteps) return;
     memcpy(t6, g_ope_steps[i], sizeof t6);
     memcpy(g_ope_steps[i], g_ope_steps[j], sizeof t6);
@@ -4182,10 +4316,10 @@ static void ope_del_step(int i)
  * 不缓存；悬空值或被取消开关型的旧值，下一次点击即归「无」。 */
 static void ope_gate_cycle(void)
 {
-    char ids[32][16];
+    char ids[32][VT_NAME_BUF];
     int n = 0, i, cnt = vtouch_region_count();
     for (i = 0; i < cnt && n < 32; i++) {
-        char id[16]; int t, a1, a2, a3, a4, en;
+        char id[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
         if (vtouch_region_kind_get(i) != 1) continue;
         if (vtouch_get_region(i, id, sizeof id, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
         snprintf(ids[n], sizeof ids[n], "%s", id);
@@ -4236,7 +4370,7 @@ static void op_edit_close(void)
  * 定义在 page_ops 之后（op_card 的 [编辑] 按钮用它，先有原型声明）。 */
 static void op_edit_open(int i, const char *name)
 {
-    char nm[16], gate[16];
+    char nm[VT_NAME_BUF], gate[VT_NAME_BUF];
     int steps = 0, autoff = 0, s;
     if (!name || !name[0]) return;
     if (vtouch_get_op(i, nm, sizeof nm, &steps, gate, sizeof gate, &autoff) != 0 || strcmp(nm, name)) {
@@ -4326,7 +4460,7 @@ static void op_edit_save(void)
         }
     }
     {   /* 变量表一致性（v10）：同名多索引 / 同索引多名 → 拒（与核心 op_valid 同款，拒在出门前） */
-        char vars[OP_VAR_IDX_N][16];
+        char vars[OP_VAR_IDX_N][VT_NAME_BUF];
         if (ope_vars_build(vars) != 0) {
             snprintf(g_ope_msg, sizeof g_ope_msg, "变量表冲突（同名多索引或同索引多名）——检查计算步");
             ALOGI("op edit 拒收：变量表冲突");
@@ -4453,7 +4587,7 @@ static void ope_expr_open_field(int se, int sf)
  * 供表达式校验用（计算步改名后引用新名字不误报）；newname = NULL = 原样收集。返回条数。
  * 注（评审 M1）：字段模式（se = 被编辑的非计算步）下 newname 恒不生效 —— 「将创建的自动名 eN」
  * 不在表内，表达式里引用 eN 编辑期即按未知名字拒收（比「不误报」更严；运行期自引用亦必 结果无值）。 */
-static int ope_expr_names_for_check(int se, const char *newname, char (*names)[16])
+static int ope_expr_names_for_check(int se, const char *newname, char (*names)[VT_NAME_BUF])
 {
     int i, k, cnt = 0;
     for (i = 0; i < g_ope_nsteps; i++) {
@@ -4462,7 +4596,7 @@ static int ope_expr_names_for_check(int se, const char *newname, char (*names)[1
         nm = (i == se && newname && newname[0]) ? newname : g_ope_refs[i];
         if (!nm[0]) continue;
         for (k = 0; k < cnt; k++) if (!strcmp(names[k], nm)) break;
-        if (k == cnt && cnt < OP_VAR_IDX_N) snprintf(names[cnt++], 16, "%s", nm);
+        if (k == cnt && cnt < OP_VAR_IDX_N) snprintf(names[cnt++], VT_NAME_BUF, "%s", nm);
     }
     return cnt;
 }
@@ -4499,7 +4633,7 @@ static int ope_var_rename(int se, const char *newname)
  * 插步会右移其后所有步：1 基跳转目标 ≥ 插入位+1 的一律 +1（0 = 结束不动），既有跳转语义不变。 */
 static void ope_field_expr_commit(int se)
 {
-    char name[16];
+    char name[VT_NAME_BUF];
     int idx, i;
     if (g_ope_nsteps >= OPE_MAX_STEPS) {
         snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "最多 %d 步，插不下自动计算步", OPE_MAX_STEPS);
@@ -4979,7 +5113,7 @@ static void draw_ope_vlist(void)
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, bww, ih, list_top, list_bot, list_h;
     int type, nf, idx, v, k, ncus, nall;
-    char cnames[OP_VAR_IDX_N][16];
+    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
     int  cidx[OP_VAR_IDX_N];
     if (g_ope_se < 0 || g_ope_se >= g_ope_nsteps || g_ne_tgt) { g_ope_vl = 0; return; }
     type = g_ope_steps[g_ope_se][0];
@@ -5085,7 +5219,7 @@ static void draw_ope_ex_vlist(void)
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, bww, ih, list_top, list_bot, list_h;
     int k, ncus, nall, se = g_ope_se;
-    char cnames[OP_VAR_IDX_N][16];
+    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
     int  cidx[OP_VAR_IDX_N];
     static const char *const raw7[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
 
@@ -5171,7 +5305,7 @@ static void draw_ope_expr(void)
     float khn, bbot, avail, content, kb_max, leg_h, leg_y, fy, fw5;
     int se = g_ope_se;
     int k, r, c, nrows, ntok, ncus;
-    char cnames[OP_VAR_IDX_N][16];
+    char cnames[OP_VAR_IDX_N][VT_NAME_BUF];
     int  cidx[OP_VAR_IDX_N];
     char toks[30][24];
     static const char *const preset7[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
@@ -5261,7 +5395,7 @@ static void draw_ope_expr(void)
         }
         ImGui::PopID();
     } else {
-        char lab[64], an[16];
+        char lab[64], an[VT_NAME_BUF];
         ImVec2 p1(x0, sy), p2(x0 + cw, sy + slot_h);
         ope_var_auto_name("e", an, sizeof an);
         snprintf(lab, sizeof lab, "将创建变量 %s（确认后自动插到该步前）", an);
@@ -5415,25 +5549,25 @@ static void draw_ope_expr(void)
     }
     ImGui::SetCursorScreenPos(ImVec2(x0 + bw2 + 12, by));
     if (btn_blue("确定", ImVec2(bw2, bth))) {
-        char names[OP_VAR_IDX_N][16];
+        char names[OP_VAR_IDX_N][VT_NAME_BUF];
         char why[72];
         int nv;
         why[0] = 0;
         if (g_ope_ex_field) {                            /* 名字表 = 现存计算步（「将创建」的自动名不在表内 → 引用它编辑期拒收，见 M1 更正） */
-            char an[16];
+            char gate[VT_NAME_BUF]
             ope_var_auto_name("e", an, sizeof an);
             nv = ope_expr_names_for_check(se, an, names);
         } else {
             nv = ope_expr_names_for_check(se, g_ope_ex_name, names);   /* 含待生效改名 */
         }
-        if (vtouch_expr_check(g_ope_expr_buf, (const char (*)[16])names, nv, why, (int)sizeof why) != 0) {
+        if (vtouch_expr_check(g_ope_expr_buf, (const char (*)[VT_NAME_BUF])names, nv, why, (int)sizeof why) != 0) {
             snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "%s", why[0] ? why : "表达式错");
             ALOGI("op edit 计算拒收 第 %d 步：%s", se + 1, g_ope_ex_msg);
             g_need = 1; g_force_frames = 2;
         } else if (g_ope_ex_field) {
             ope_field_expr_commit(se);                   /* 自动插步 + 字段指向（失败在函数内提示、层不关） */
         } else if (!ope_varname_ok(g_ope_ex_name)) {     /* 名字硬门（字符键盘已预检；防御照款） */
-            snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "变量名非法（[A-Za-z_][A-Za-z0-9_]*、1..%d）", OP_VAR_NAME_MAX);
+            snprintf(g_ope_ex_msg, sizeof g_ope_ex_msg, "变量名非法（1..%d 个可见字符；首字符不可数字/`-`）", OP_VAR_NAME_MAX);
             g_need = 1; g_force_frames = 2;
         } else {
             int rn_rc;
@@ -5510,7 +5644,7 @@ static void draw_ope_rlist(void)
     }
     n = vtouch_region_count();
     for (i = 0; i < n; i++) {
-        char id[16]; int t2, a1, a2, a3, a4, en;
+        char id[VT_NAME_BUF]; int t2, a1, a2, a3, a4, en;
         if (only_tg && vtouch_region_kind_get(i) != 1) continue;
         if (vtouch_get_region(i, id, sizeof id, &t2, &a1, &a2, &a3, &a4, &en) != 0) continue;
         avail++;
@@ -6241,13 +6375,32 @@ static void draw_name_edit(void)
  * （切换的成功日志在 scheme_switch 里；本页另加失败路径 `方案 …失败 …` 诊断词，成功路径零新增）。 */
 
 static char g_scm_msg[128] = {0};       /* 页面提示槽（切换结果 / 拒收 / 操作成败；固定占位） */
-static char g_scm_sel[16] = {0};        /* 列表选中行（重命名 / 删除的作用对象；空 = 未选） */
+static char g_scm_sel[VT_NAME_BUF] = {0};        /* 列表选中行（重命名 / 删除的作用对象；空 = 未选） */
 static int  g_scm_kb = 0;               /* 名字键盘子层：0=关 1=新建 2=另存为 3=重命名 */
 static char g_scm_kbmsg[72] = {0};      /* 名字键盘子层里的拒收提示 */
 static int  g_scm_kbup = 0;             /* 名字键盘子层大小写档 */
-static char g_scm_name[16] = {0};       /* 名字键盘子层输入缓冲 */
-static char g_scm_ren_old[16] = {0};    /* 重命名子层的旧名（键盘「原名」对照） */
-static char g_scm_del[16] = {0};        /* 删除确认层：待删方案名（空 = 层关） */
+static char g_scm_name[VT_NAME_BUF] = {0};       /* 名字键盘子层输入缓冲 */
+static char g_scm_ren_old[VT_NAME_BUF] = {0};    /* 重命名子层的旧名（键盘「原名」对照） */
+static char g_scm_del[VT_NAME_BUF] = {0};        /* 删除确认层：待删方案名（空 = 层关） */
+
+/* 面板编辑中的名字（键盘输入/编辑缓冲，含正在打的中文）也要即时进图集（v11）。 */
+static void ui_glyph_scan_edits(void)
+{
+    ui_glyph_scan(g_name_old);
+    ui_glyph_scan(g_name_buf);
+    ui_glyph_scan(g_vis_reedit_name);
+    ui_glyph_scan(g_vis_kb_buf);
+    ui_glyph_scan(g_ope_orig);
+    ui_glyph_scan(g_ope_name);
+    ui_glyph_scan(g_ope_gate);
+    ui_glyph_scan(g_ope_ex_name);
+    ui_glyph_scan(g_ope_saved_as);
+    ui_glyph_scan(g_ope_del_owed);
+    ui_glyph_scan(g_scm_sel);
+    ui_glyph_scan(g_scm_name);
+    ui_glyph_scan(g_scm_ren_old);
+    ui_glyph_scan(g_scm_del);
+}
 
 /* 切换返回码 → 就地提示（码表 = scheme_switch 段首注释；9/10 写明「已回滚」防误读）。 */
 static const char *scm_switch_why(int rc)
@@ -6354,7 +6507,7 @@ static int scm_save_as(const char *name)
  * 6 旧方案不存在 / 7 目录改名失败 / 8 current 同步失败（目录名已回滚）。 */
 static int scm_rename(const char *oldn, const char *newn)
 {
-    char po[160], pn[160], cur[16];
+    char po[160], pn[160], cur[VT_NAME_BUF];
     if (scheme_name_ok(newn) != 0) return 1;
     if (!strcmp(oldn, newn)) return 0;          /* 同名 = 无操作（键盘 [确定] 直接收层） */
     if (scheme_exists(newn)) return 2;
@@ -6413,7 +6566,7 @@ static void scm_act_rename(void)
 /* 底部 [删除]：无选中 / 失效 → 提示；选中 = 当前 → 拒（spec §5：不允许删除当前）；否则开确认层。 */
 static void scm_act_delete(void)
 {
-    char cur[16];
+    char cur[VT_NAME_BUF];
     if (!g_scm_sel[0]) {
         snprintf(g_scm_msg, sizeof g_scm_msg, "先点一行名字选中要操作的方案");
         g_need = 1; g_force_frames = 2;
@@ -6477,7 +6630,7 @@ static void scm_row(const char *name, const char *cur)
 /* 「方案」页（spec §6）：页头（当前 / 选中）+ 提示槽（固定占位，同编辑层口径）+ 列表 + 底部四键。 */
 static void page_scheme(void)
 {
-    char cur[16] = {0}, names[SCHEME_LIST_MAX][16], meta[40], l[64];
+    char cur[VT_NAME_BUF] = {0}, names[SCHEME_LIST_MAX][VT_NAME_BUF], meta[40], l[64];
     int n, i;
     scheme_cur_get(cur);
     n = scheme_list(names, SCHEME_LIST_MAX);
@@ -6600,7 +6753,7 @@ static void draw_scm_del(void)
         }
         ImGui::SetCursorScreenPos(ImVec2(ca.x + 28 + bw + gap, by));
         if (btn_red("删除", ImVec2(bw, 92))) {
-            char cur[16];
+            char cur[VT_NAME_BUF];
             scheme_cur_get(cur);
             if (cur[0] && !strcmp(cur, g_scm_del)) {       /* 防御：主拒在 [删除] 键入口 */
                 snprintf(g_scm_msg, sizeof g_scm_msg, "当前方案不能删除（先切到别的方案再删）");
@@ -6635,25 +6788,16 @@ static void draw_scm_del(void)
 #define VIS_TMPL_DIR REGION_CONF_DIR "/templates"
 #define VIS_CAP_TMO_MS 3000              /* 面板侧抓帧等待上限（超时提示；真机抓帧 ≤25ms） */
 
-/* 模板 / 点集名合法性（与区域 id / 操作名同一把尺子 vt_id_ok）：[A-Za-z0-9_-]、1..15、裸 `-` 除外。
- * 0 ok / 1 空 / 2 超长 / 3 非法字符。 */
+/* 模板 / 点集名合法性（与区域 id / 操作名同一把尺子 vt_id_ok）：v11 名字规则（UTF-8 可见字符 1..15、
+ * 字节 ≤47；裸 `-` 除外）。0 ok / 1 空 / 2 超长 / 3 非法字符。 */
 static int vis_name_ok(const char *n)
 {
-    int i, len = (int)strlen(n);
-    if (len < 1) return 1;
-    if (len > 15) return 2;
-    if (len == 1 && n[0] == '-') return 3;
-    for (i = 0; i < len; i++) {
-        char ch = n[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 3;
-    }
-    return 0;
+    return ui_name_ok(n, 0);                 /* v11：同核心 vt_id_ok 尺子 */
 }
 static const char *vis_name_why(int rc)
 {
     return rc == 1 ? "名字不能为空" : rc == 2 ? "最多 15 个字符" :
-           rc == 3 ? "只能用 a-z A-Z 0-9 _ -" : "这个名字已被占用（模板/点集同名也不行）";
+           rc == 3 ? "只能用字母/数字/_/- 或中文等可见字符" : "这个名字已被占用（模板/点集同名也不行）";
 }
 /* 名字是否已被占用（.tmpl / .pts 共用一个名字空间 —— 下拉里两个列表并存，同名会歧义）。 */
 static int vis_name_taken(const char *name)
@@ -6665,13 +6809,13 @@ static int vis_name_taken(const char *name)
     snprintf(p, sizeof p, "%s/%s.pts", VIS_TMPL_DIR, name);
     return stat(p, &st) == 0;
 }
-/* qsort 比较器：名字按字节序（names 每格 16 字节）。 */
+/* qsort 比较器：名字按字节序（names 每格 VT_NAME_BUF 字节）。 */
 static int vis_name_cmp(const void *a, const void *b)
 {
     return strcmp((const char *)a, (const char *)b);
 }
-/* 枚举 VIS_TMPL_DIR 下 *.ext（名字过 vis_name_ok），字母序装进 names（每格 16 字节），返回条数（≤ max）。 */
-static int vis_list(const char *ext, char (*names)[16], int max)
+/* 枚举 VIS_TMPL_DIR 下 *.ext（名字过 vis_name_ok），字母序装进 names（每格 VT_NAME_BUF 字节），返回条数（≤ max）。 */
+static int vis_list(const char *ext, char (*names)[VT_NAME_BUF], int max)
 {
     DIR *d = opendir(VIS_TMPL_DIR);
     struct dirent *e;
@@ -6680,18 +6824,18 @@ static int vis_list(const char *ext, char (*names)[16], int max)
     if (!d) return 0;
     el = strlen(ext);
     while (n < max && (e = readdir(d)) != NULL) {
-        char nm[16];
+        char nm[VT_NAME_BUF];
         size_t l = strlen(e->d_name);
-        if (l <= el || l > el + 15) continue;
+        if (l <= el || l > el + VT_NAME_BUF - 1) continue;   /* v11：字节上限（字符数在 vis_name_ok 里判） */
         if (strcmp(e->d_name + l - el, ext) != 0) continue;
         memcpy(nm, e->d_name, l - el);
         nm[l - el] = 0;
         if (vis_name_ok(nm) != 0) continue;
-        snprintf(names[n], 16, "%s", nm);
+        snprintf(names[n], sizeof names[0], "%s", nm);
         n++;
     }
     closedir(d);
-    qsort(names, (size_t)n, 16, vis_name_cmp);
+    qsort(names, (size_t)n, sizeof names[0], vis_name_cmp);
     return n;
 }
 /* 小端写入（格式契约；设备 aarch64 本身小端，仍显式写字节防解释歧义）。 */
@@ -7885,7 +8029,7 @@ static void draw_vis_tlist(void)
     ImDrawList *dl;
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    char names[64][16];
+    char names[64][VT_NAME_BUF];
     int i, n, se = g_ope_se;
     if (se < 0 || se >= g_ope_nsteps) { g_vis_tl = 0; return; }
     dl = ImGui::GetWindowDrawList();
@@ -7946,7 +8090,7 @@ static void draw_vis_plist(void)
     ImDrawList *dl;
     ImVec2 wp, a, b;
     float ww, wh, x0, y0, cw, list_top, list_bot, list_h;
-    char names[64][16];
+    char names[64][VT_NAME_BUF];
     int i, n, se = g_ope_se;
     if (se < 0 || se >= g_ope_nsteps) { g_vis_pl = 0; return; }
     dl = ImGui::GetWindowDrawList();
@@ -8272,7 +8416,7 @@ static void draw_vis_edit(void)
  * 列表读目录实时（同区域/操作列表「每帧重读」口径）；删除立即生效（引用它的步骤运行时报「模板不存在」）。 */
 static void page_template(void)
 {
-    char tms[64][16], pss[64][16];
+    char tms[64][VT_NAME_BUF], pss[64][VT_NAME_BUF];
     char meta[40];
     int nt, np, i;
     nt = vis_list(".tmpl", tms, 64);
@@ -8561,6 +8705,10 @@ static void draw_frame(int sw, int sh)
         io.AddMouseButtonEvent(0, g_mouse_evt_down ? true : false);
         g_need_mouse_evt = 0;
     }
+    /* v11：用户中文名的字形按需扩集（扫描 → 帧间重建；TTF 兜底时不动） */
+    ui_glyph_scan_all((g_glyph_tick++ & 127) == 0);
+    ui_glyph_scan_edits();
+    if (g_font_dirty) { g_font_dirty = 0; ui_font_rebuild(); }
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     if (g_ov_show) build_overlay(sw, sh);
@@ -8600,7 +8748,7 @@ static void draw_frame(int sw, int sh)
 static int region_id_exists(const char *id)
 {
     int n = vtouch_region_count(), i;
-    char jd[16]; int t, a1, a2, a3, a4, en;
+    char jd[VT_NAME_BUF]; int t, a1, a2, a3, a4, en;
     if (!id || !*id) return 0;
     for (i = 0; i < n; i++) {
         if (vtouch_get_region(i, jd, sizeof jd, &t, &a1, &a2, &a3, &a4, &en) != 0) continue;
@@ -8613,7 +8761,7 @@ static void prune_panel_refs(void)
     int i, k = 0, changed = 0;
     for (i = 0; i < g_nhide; i++) {
         if (region_id_exists(g_hidden[i])) {
-            if (k != i) snprintf(g_hidden[k], 16, "%s", g_hidden[i]);
+            if (k != i) snprintf(g_hidden[k], VT_NAME_BUF, "%s", g_hidden[i]);
             k++;
         } else changed = 1;
     }
@@ -8976,7 +9124,7 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     if (vtouch_init(7, argv) != 0) return -2;
     {   /* v4 方案接管（spec §2）：兜底迁移 → 强制同步（保证 live == schemes/<current>）→ 照旧加载。
          * 同步失败只告警：按现有 live 文件继续（不阻塞启动、不影响注入），下次启动兜底再试。 */
-        char scm[16];
+        char scm[VT_NAME_BUF];
         scheme_migrate(scm);
         if (scm[0] && scheme_sync_live(scm) != 0)
             ALOGW("方案 同步失败 %s: %s", scm, strerror(errno));

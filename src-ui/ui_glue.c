@@ -68,7 +68,7 @@ static uint32_t              pick_last_seq;  /* take 的基线：只回报基线
                                               * 推进到当前 pick_seq（递延①的等价防护：否则面板重启
                                               * 接旧核心、pick_seq>0 时，点 [取点] 会在用户 tap 之前
                                               * 就把旧捕获吐出来 —— 凭空回填旧坐标）。 */
-static char                  snap[MAX_REGIONS][REGION_ID_MAX + 1];
+static char                  snap[MAX_REGIONS][VT_NAME_BUF];   /* v11：名字扩位（= 核心布局） */
 static int                   snap_n = -1;
 
 /* ---------- 内部工具 ---------- */
@@ -114,7 +114,7 @@ static void glue_watch_table(void)
     if (n > MAX_REGIONS) n = MAX_REGIONS;
     if (n != snap_n) changed = 1;
     else for (i = 0; i < n; i++)
-        if (strncmp(snap[i], S->regions[i].id, REGION_ID_MAX) != 0) { changed = 1; break; }
+        if (strncmp(snap[i], S->regions[i].id, VT_NAME_BUF) != 0) { changed = 1; break; }
     if (!changed) return;
     snap_n = n;
     for (i = 0; i < n; i++) snprintf(snap[i], sizeof snap[i], "%s", S->regions[i].id);
@@ -127,7 +127,7 @@ static int glue_find(const char *id)
     if (!S || !id || !*id) return -1;
     n = S->region_count;
     for (i = 0; i < n && i < MAX_REGIONS; i++)
-        if (strncmp(S->regions[i].id, id, REGION_ID_MAX) == 0) return i;
+        if (strncmp(S->regions[i].id, id, VT_NAME_BUF) == 0) return i;
     return -1;
 }
 
@@ -371,7 +371,7 @@ static int glue_op_find(const char *name)
     n = S->op_count;
     if (n > MAX_OPS) n = MAX_OPS;
     for (i = 0; i < n; i++)
-        if (strncmp(S->ops[i].name, name, OP_NAME_MAX) == 0) return i;
+        if (strncmp(S->ops[i].name, name, VT_NAME_BUF) == 0) return i;
     return -1;
 }
 
@@ -489,7 +489,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
 /**
  * (vtouch-doc: vtouch_op_put)
  * @brief 新增或覆盖一条操作（整条投编辑邮箱 → 回读校验；面板侧入口）。
- * @param   name     操作名（核心再校验：1..15、[A-Za-z0-9_-]；裸 `-` 除外）
+ * @param   name     操作名（核心再校验：v11 名字规则——可见字符 1..15、字节 ≤47；裸 `-` 除外）
  * @param   gate     门控开关区域 id；NULL 或空串 = 无
  * @param   autoff   跑完自动关门控（非 0 视为 1）
  * @param   steps8   扁平步表：每 8 个 int 一组，顺序 type,a1,a2,a3,a4,ms,j1,j2
@@ -503,7 +503,7 @@ int vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *
  *          vars 表（v10）由计算步派生：vars[a1] = ref（名字表单源）；核心的校验是单点（名字 / 步数 / 类型 1..11 / 坐标 / 时长 / 变量编码 -25..-1 / 变量名表（合法 + 不重名 + vars[a1]==ref）/ 计算步 expr 过 vt_expr_check（名字表 = vars）/ 条件步 a3+a4+跳转目标 / 跳转步 a1），被拒时回读失败、面板走现有错误提示路径。
  */
 int vtouch_op_put(const char *name, const char *gate, int autoff, const int *steps8,
-                  const char (*refs)[REGION_ID_MAX + 1], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
+                  const char (*refs)[VT_NAME_BUF], const char (*exprs)[VT_EXPR_MAX + 1], int nsteps, int *out_err)
 {
     struct vt_op op;
     size_t rn;
@@ -531,8 +531,8 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
         op.steps[i].j1   = steps8[i * 8 + 6];        /* v3：条件步跳转目标（j1=成立侧、j2=不成立侧） */
         op.steps[i].j2   = steps8[i * 8 + 7];
         if (refs) {                                  /* ref 通道（T3.1）：NULL = 全空；每步空串 = 无 */
-            rn = strnlen(refs[i], REGION_ID_MAX + 1);
-            if (rn <= REGION_ID_MAX)                 /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
+            rn = strnlen(refs[i], VT_NAME_BUF);
+            if (rn <= VT_NAME_BUF - 1)               /* 未终止（strnlen 顶到数组尾）→ 留空（防御照款） */
                 snprintf(op.steps[i].ref, sizeof op.steps[i].ref, "%s", refs[i]);
         }
         if (exprs) {                                 /* expr 通道（v5 T2.1）：NULL = 全空；每步空串 = 无 */
@@ -548,7 +548,7 @@ int vtouch_op_put(const char *name, const char *gate, int autoff, const int *ste
         if (op.steps[i].type != OP_STEP_CALC) continue;
         if (op.steps[i].a1 < 0 || op.steps[i].a1 >= OP_VAR_IDX_N) continue;
         rn = strnlen(op.steps[i].ref, sizeof op.steps[i].ref);
-        if (rn < 1 || rn > OP_VAR_NAME_MAX) continue;
+        if (rn < 1 || rn > VT_NAME_BUF - 1) continue;   /* v11：字节上限交给核心校验（字符数在核心判） */
         snprintf(op.vars[op.steps[i].a1], sizeof op.vars[0], "%s", op.steps[i].ref);
     }
     if (glue_post_op(VT_EDIT_OP_PUT, name, &op) != 0) { if (out_err) *out_err = 2; return -1; }
@@ -644,7 +644,7 @@ int vtouch_op_status(int *run_i, int *run_step, int *run_state)
  * @note    面板表达式子层的 [确定] 走它（spec V5 §4：不过 → 就地拒收、层不关）；v10 起带名字表 ——
  *          自定义命名变量只有出现在表里才算合法（名字全不中 → `未知名字`）。
  */
-int vtouch_expr_check(const char *s, const char (*names)[16], int nnames, char *why, int whycap)
+int vtouch_expr_check(const char *s, const char (*names)[VT_EXPR_VAR_BUF], int nnames, char *why, int whycap)
 {
     return vt_expr_check(s, names, nnames, why, whycap > 0 ? (size_t)whycap : 0);
 }

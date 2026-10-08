@@ -735,7 +735,7 @@ int cmd_region(char *t, char **stp, char *resp, size_t cap)
         char *sen = strtok_r(NULL, " \t", stp);
         int type, a1, a2, a3, a4, en;
         /* 这里只做「词数 + 数值范围」检查；id 去重/上限、几何合法性（超出逻辑尺寸等）交给 region_add */
-        if (!sid || !*sid || strlen(sid) > REGION_ID_MAX || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
+        if (!sid || !*sid || strlen(sid) > VT_NAME_BUF - 1 || !stype || !sa1 || !sa2 || !sa3 || !sa4 || !sen ||
             strtok_r(NULL, " \t", stp) ||
             parse_long(stype, 0, 1, &type) || parse_long(sa1, 0, 100000, &a1) || parse_long(sa2, 0, 100000, &a2) ||
             parse_long(sa3, 0, 100000, &a3) || parse_long(sa4, 0, 100000, &a4) || parse_long(sen, 0, 1, &en) ||
@@ -842,7 +842,7 @@ int cmd_sub(char *t, char **stp, char *resp, size_t cap)
                     m ? (sel ? sel : "0") : "全部", evs ? evs : "(默认)", g.sub_phys_ts, g.sub_phys_ts ? " <t>" : "");
         } else if (want == SUB_REGION) {
             if (sel && strcmp(sel, "*")) {
-                if (strlen(sel) > REGION_ID_MAX) { snprintf(resp, cap, "err sub"); return -1; }
+                if (strlen(sel) > VT_NAME_BUF - 1) { snprintf(resp, cap, "err sub"); return -1; }
                 snprintf(g.sub_region_id, sizeof g.sub_region_id, "%s", sel);
             } else g.sub_region_id[0] = 0;
             if (evs) { if (parse_ev_bits(evs, &e) != 0) { snprintf(resp, cap, "err sub"); return -1; } }

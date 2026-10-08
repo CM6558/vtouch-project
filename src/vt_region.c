@@ -68,26 +68,105 @@ void regions_clear(void)
     region_gen++;                    /* 区域线程看到代次变化会自己清私有状态 */
     pthread_mutex_unlock(&g.region_lock);
 }
-/* 名字合法性（区域 id / 操作名共用）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX，**裸 `-` 除外**；合法返回 1。
- * 与面板 id_name_ok（src-ui/vtouch_ui.cpp）的规则一致（裸 `-` 例外：面板预检未收窄、只作提示，最终以核心为准）
- * —— 核心是**单点校验**：脚本经 WS 推的 id、
- * 面板经共享内存邮箱推的 id 与操作名（vt_ops.c）都从这里过。核心放行而面板字形表里没有的字符
- * （CJK / `!` 之流）只会被画成方框，所以这道门必须守在核心侧。
+/* ---- 名字规则实现（契约 v11；口径见 docs/NAMING_V11_PLAN.md §2）----
+ * 命名 = UTF-8 可见字符、1..15 个字符（Unicode 码点计）、字节数 ≤ VT_NAME_BUF-1；ASCII 仅
+ * [0-9A-Za-z_-]（裸 `-` 拒收）、非 ASCII 须合法 UTF-8 且非空白/控制/格式字符。
+ * 这里是**唯一实现**：vt_id_ok（区域 id / 操作名 / 门控 / 步骤 ref）与 op_var_name_ok（vt_ops.c，
+ * 转发 vt_name_scan 的 var 模式）都走本文件；与面板 id_name_ok（src-ui/vtouch_ui.cpp）规则一致
+ * （面板预检只作提示，最终以核心为准）。核心放行而面板字形表里没有的字符会画成方框 —— v11 起
+ * 面板字形按需重建（NAMING_V11_PLAN §6），中文名因此合法且可显示。
  * 裸 `-` 单名拒收（T2.7-M1 / T3.3-M2 根修）：`-` 在区 B 邮箱、regions.conf 的 bind 行与 ops.conf
  * 的 gate 字段里都是「解除 / 无」哨兵 —— 落成字面名会让触发行/门控行/落盘回读出现歧义；
- * 其余含 `-` 的名字（r-1、op-2）不受影响。
+ * 其余含 `-` 的名字（r-1、op-2）不受影响。 */
+
+/** 码点可见性（v11）：拒控制/空白/格式/零宽/变体符（实务黑名单，非全量 Unicode 类别表）。 */
+static int vt_name_cp_visible(unsigned cp)
+{
+    if (cp <= 0x7F) return 0;                                  /* ASCII 不走这里（调用点已按字符集处理） */
+    if (cp == 0x00A0 || cp == 0x00AD || cp == 0x061C || cp == 0x1680 || cp == 0xFEFF) return 0;
+    if (cp >= 0x0080 && cp <= 0x009F) return 0;                /* C1 控制 */
+    if (cp >= 0x2000 && cp <= 0x200A) return 0;                /* 各类空格 */
+    if (cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000) return 0;
+    if (cp >= 0x200B && cp <= 0x200F) return 0;                /* 零宽（ZWSP..RLM） */
+    if (cp >= 0x2060 && cp <= 0x2064) return 0;                /* word joiner 族 */
+    if (cp >= 0x2066 && cp <= 0x2069) return 0;                /* bidi 隔离符 */
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return 0;                /* 变体选择符 */
+    return 1;
+}
+
+/** 严格 UTF-8 解出下一个码点（起点 *i 处；成功 0 并推进 *i/写 *cp；非法/截断 -1）。 */
+static int vt_name_utf8_next(const char *s, size_t n, size_t *i, unsigned *cp)
+{
+    unsigned char b0 = (unsigned char)s[*i];
+    unsigned c = 0;
+    int len, k;
+
+    if (b0 < 0x80) { *cp = b0; (*i)++; return 0; }
+    if ((b0 & 0xE0) == 0xC0)      { len = 2; c = b0 & 0x1Fu; }
+    else if ((b0 & 0xF0) == 0xE0) { len = 3; c = b0 & 0x0Fu; }
+    else if ((b0 & 0xF8) == 0xF0) { len = 4; c = b0 & 0x07u; }
+    else return -1;                                            /* 0x80..0xBF 无头续字节 / 0xF8.. 非法头 */
+    if (*i + (size_t)len > n) return -1;                       /* 截断 */
+    for (k = 1; k < len; k++) {
+        unsigned char bc = (unsigned char)s[*i + (size_t)k];
+        if ((bc & 0xC0) != 0x80) return -1;
+        c = (c << 6) | (bc & 0x3Fu);
+    }
+    if (len == 2 && c < 0x80) return -1;                       /* 过长编码 */
+    if (len == 3 && c < 0x800) return -1;
+    if (len == 4 && (c < 0x10000 || c > 0x10FFFF)) return -1;
+    if (c >= 0xD800 && c <= 0xDFFF) return -1;                 /* 代理区 */
+    *cp = c;
+    *i += (size_t)len;
+    return 0;
+}
+
+/**
+ * (vtouch-doc: vt_name_scan)
+ * @brief 名字通用扫描（v11 唯一实现；vt_id_ok / op_var_name_ok 共用）。
+ * @param   s        名字文本
+ * @param   n        已量出的字节数
+ * @param   var_mode 0 = 区域 id / 操作名 / 门控 / ref 口径；1 = 自定义变量名口径（首字符不可数字/`-`、不含 `-`）
+ * @return  1 合法；0 非法。
+ * @note    长度 = 字符数 1..VT_NAME_CHARS 且字节数 ≤ VT_NAME_BUF-1；ASCII 仅 [0-9A-Za-z_]（var 模式另
+ *          不含 `-`；id 模式允许 `-`）；非 ASCII 须合法 UTF-8 且过 vt_name_cp_visible。裸 `-` 由 vt_id_ok 单独拒。
+ */
+int vt_name_scan(const char *s, size_t n, int var_mode)
+{
+    size_t i = 0;
+    int chars = 0;
+
+    if (n < 1 || n > VT_NAME_BUF - 1) return 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || (!var_mode && c == '-'))) return 0;
+            if (var_mode && chars == 0 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'))
+                return 0;                                      /* 变量名首字符不可数字 */
+            i++;
+        } else {
+            unsigned cp;
+            if (vt_name_utf8_next(s, n, &i, &cp) != 0) return 0;
+            if (!vt_name_cp_visible(cp)) return 0;
+        }
+        chars++;
+    }
+    return (chars >= 1 && chars <= VT_NAME_CHARS) ? 1 : 0;
+}
+
+/**
+ * (vtouch-doc: vt_id_ok)
+ * @brief 名字合法性（区域 id / 操作名 / 门控 / 步骤 ref 共用；v11 起放开中文）。
+ * @param   s  名字文本；n = 已量出的字节数
+ * @return  1 合法；0 非法。
+ * @note    规则 = vt_name_scan(var_mode=0) + 裸 `-` 拒收。核心是**单点校验**：脚本经 WS 推的 id、
+ *          面板经共享内存邮箱推的 id 与操作名（vt_ops.c）都从这里过。
  */
 int vt_id_ok(const char *s, size_t n)
 {
-    size_t i;
-    if (n < 1 || n > REGION_ID_MAX) return 0;
     if (n == 1 && s[0] == '-') return 0;     /* 裸 "-" 拒收（见上注）：解除/无门控哨兵，不作合法名 */
-    for (i = 0; i < n; i++) {
-        char ch = s[i];
-        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')) return 0;
-    }
-    return 1;
+    return vt_name_scan(s, n, 0);
 }
 /**
  * (vtouch-doc: region_add)
@@ -109,7 +188,7 @@ int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int ena
     int i, rc = 0;
     if (!id) return -1;
     n = strlen(id);
-    /* 单点校验（见 vt_id_ok）：字符集 [A-Za-z0-9_-] + 长度 1..REGION_ID_MAX ⇒ 非法一律 -1，
+    /* 单点校验（见 vt_id_ok）：v11 名字规则（可见字符 1..REGION_ID_MAX 个、字节 ≤ VT_NAME_BUF-1）⇒ 非法一律 -1，
      * WS 侧据此自动回 err region（cmd_region 不用改）。 */
     if (!vt_id_ok(id, n)) return -1;
     if (type != 0 && type != 1) return -1;
@@ -200,7 +279,7 @@ int region_rename(const char *old_id, const char *new_id)
     int i;
     if (!old_id || !new_id) return -1;
     n = strlen(new_id);
-    /* 同一把尺子（见 vt_id_ok）：字符集/长度非法直接拒。
+    /* 同一把尺子（见 vt_id_ok）：v11 名字规则非法直接拒。
      * 「改成同名」不走重名分支 —— 先比 old/new 再查重的顺序在下面，原样保留。 */
     if (!vt_id_ok(new_id, n)) return -1;
     pthread_mutex_lock(&g.region_lock);
@@ -415,7 +494,7 @@ void phys_ev_send(const struct vt_ev *ev)
  * 指针，而解锁后区域表可能已被改名/删除/清空。事件名是静态字面量，不必拷；坐标/slot/
  * 时间戳一并攒起来。 */
 struct region_pend_ev {
-    char id[REGION_ID_MAX + 1];
+    char id[VT_NAME_BUF];
     const char *name;
     int slot, lx, ly;
     uint64_t ts;
@@ -428,8 +507,8 @@ struct region_pend_ev {
  * R_TRIG_FULL 带 ALL；开关翻转不携带数据（恒零值）。 */
 enum { R_TRIG_DOWN = 1, R_TRIG_FULL = 2, R_TRIG_TOGGLE = 3 };
 struct region_pend_trig {
-    char id[REGION_ID_MAX + 1];
-    char op[OP_NAME_MAX + 1];
+    char id[VT_NAME_BUF];
+    char op[VT_NAME_BUF];
     int slot, what, on;
     struct vt_trig_data td;
 };
@@ -590,7 +669,7 @@ void region_apply(const struct vt_ev *ev)
     /* ③' 触发/开关投递（同样解锁后）：按判定时的入账顺序 —— 开关翻转在前、完整按压触发在后。 */
     for (i = 0; i < nt; i++) {
         if (ptrig[i].what == R_TRIG_TOGGLE) {
-            char msg[48];
+            char msg[VT_RING_LINE];              /* v11：名字最长 47B，48 会截行 */
             int n = snprintf(msg, sizeof msg, "toggle_ev %s %d", ptrig[i].id, ptrig[i].on);
             if (n > 0 && (size_t)n < sizeof msg) vt_shm_ring_push(msg, (size_t)n);
             fprintf(stderr, "vtouchd: 区域 %s 开关 → %s\n", ptrig[i].id, ptrig[i].on ? "开" : "关");

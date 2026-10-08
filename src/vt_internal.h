@@ -70,10 +70,15 @@
 #define OUTQ_CAP 64
 #define OUTQ_MSG (MAX_LINE + 8)          /* region list 这种多行响应也要放得下 */
 #define MAX_REGIONS 32
-#define REGION_ID_MAX 15
+/* 名字规则（契约 v11；口径见 docs/NAMING_V11_PLAN.md）：命名 = UTF-8 可见字符、1..15 个字符
+ * （Unicode 码点计）、字节数 ≤ VT_NAME_BUF-1；ASCII 仅 [0-9A-Za-z_-]（裸 `-` 拒收）、非 ASCII 须为
+ * 合法 UTF-8 且非空白/控制/格式字符。校验唯一实现 = vt_id_ok / op_var_name_ok。 */
+#define VT_NAME_CHARS   15       /* 名字字符数上限（权威口径） */
+#define VT_NAME_BUF     48       /* 名字缓冲字节数（含 NUL）：15×3B+1=46，对齐取 48 */
+#define REGION_ID_MAX   VT_NAME_CHARS   /* 旧名保留（全库沿用）：语义 = 字符数上限，别再当字节数用 */
 #define MAX_OPS        16        /* 操作条数上限 */
 #define MAX_STEPS      32        /* 单条操作步骤数上限 */
-#define OP_NAME_MAX    15        /* 操作名长度上限（同区域 id 规则：[A-Za-z0-9_-]、1..15） */
+#define OP_NAME_MAX     VT_NAME_CHARS   /* 操作名字符数上限（同区域 id 规则） */
 #define OP_STEP_TAP    1         /* 步骤类型：点按 */
 #define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */
 #define OP_STEP_WAIT   3         /* 步骤类型：等待 */
@@ -122,7 +127,7 @@
 #define OP_VAR_V0  (-10)         /* 自定义变量表索引 0（编码 = -10 - 索引） */
 #define OP_VAR_V15 (-25)         /* 自定义变量表索引 15 */
 #define OP_VAR_IDX_N 16          /* 自定义变量表条数（op->vars[16]；编码 -10..-25 与索引 0..15 一一对应） */
-#define OP_VAR_NAME_MAX 15       /* 自定义变量名长度上限（[A-Za-z_][A-Za-z0-9_]*、1..15；char[16] 存储含 NUL） */
+#define OP_VAR_NAME_MAX VT_NAME_CHARS   /* 自定义变量名字符数上限（首字符 = 字母/_/非 ASCII 可见；1..15；存 VT_NAME_BUF 字节） */
 #define OP_VAR_N    5            /* 触发变量个数（不变；fx/fy 与自定义变量不在此列） */
 /* 触发数据可用位（struct vt_trig_data.mask / g.op_trig_mask）：哪些变量这次有值。
  * 完整按压全置；按下触发只置 TDX|TDY；面板手动运行全清（无数据）。 */
@@ -162,13 +167,13 @@ struct vtq {
 };
 
 struct region {
-    char id[REGION_ID_MAX + 1];
+    char id[VT_NAME_BUF];
     int type;              /* 0=rect 1=circle */
     int enabled;
     int a1, a2, a3, a4;    /* rect: x1 y1 x2 y2; circle: cx cy r */
     int mark;              /* 脚本侧"开关样式"标记（0=无 1=开）：核心存，面板**直接读共享内存**照着高亮。
                             * 由 WS 命令 `region mark <id> <0|1>` 设置（SDK: vt.mark / vt.toggle 自动调）。 */
-    char trig_op[OP_NAME_MAX + 1];  /* 绑定的操作名；"" = 无 */
+    char trig_op[VT_NAME_BUF];      /* 绑定的操作名；"" = 无 */
     int  trig_ev;                   /* 触发时机：0=无 1=按下 2=完整按压 */
     int  kind;                      /* 0=普通 1=开关型 */
     volatile int toggle_on;         /* 开关型状态：核心写（区域线程，持 region_lock）、面板读 */
@@ -188,8 +193,8 @@ struct vt_step {
                                     * （弹起/条件步/跳转/计算不用） */
     int j1, j2;                    /* 条件步跳转目标（仅该侧档位=OP_COND_JUMP 时有意义）：j1=成立侧、j2=不成立侧；
                                     * 0 = 结束、1..步数 = 目标步骤（spec OPS_PLAN_V3 §6.1）；视觉步同款 */
-    char ref[REGION_ID_MAX + 1];   /* 条件步的区域 id；视觉步 = 模板名（找图）/ 点集名（找色多点）；
-                                    * 计算步 = 变量名（v10，[A-Za-z_][A-Za-z0-9_]*、1..15）；"" = 不用 */
+    char ref[VT_NAME_BUF];         /* 条件步的区域 id；视觉步 = 模板名（找图）/ 点集名（找色多点）；
+                                    * 计算步 = 变量名（v10 起；v11 起 UTF-8——规则见 vt_id_ok/op_var_name_ok）；"" = 不用 */
     char expr[VT_EXPR_MAX + 1];    /* 计算步的表达式（type=9）；视觉步 = 区域名（type=10/11，空 = 全屏）；
                                     * 其余类型恒空（spec OPS_PLAN_V5 §3 / VISION §6.1） */
 };
@@ -200,17 +205,17 @@ struct vt_step {
 struct vt_trig_data { unsigned mask; int dx, dy, ux, uy, ms; };
 
 struct vt_op {
-    char name[OP_NAME_MAX + 1];
+    char name[VT_NAME_BUF];
     int  step_count;               /* 1..MAX_STEPS（校验在核心） */
-    char gate[REGION_ID_MAX + 1];  /* 门控开关的区域 id；""=无 */
+    char gate[VT_NAME_BUF];        /* 门控开关的区域 id；""=无 */
     int  auto_off;                 /* 跑完自动关掉门控开关 */
     struct vt_step steps[MAX_STEPS];
 #ifdef VT_UI
     /* 自定义变量名表（契约 v10，spec EDITOR_V2 §Task 7.5）：下标 = 计算步 a1（变量索引 0..15），
-     * 名字 [A-Za-z_][A-Za-z0-9_]*、1..15、含 NUL 存 16 字节；空名 = 空槽。执行器起跑时整表快照进
-     * R.vnames（字段负数编码 -10..-25 按它查名/查值）。**VT_UI 守卫**：默认（无面板）构建不含
-     * 这一项 —— 结构体是共享路径，加了会改默认核心 md5（守卫纪律，见 AGENTS.md）。 */
-    char vars[OP_VAR_IDX_N][16];
+     * 名字 v11 规则（UTF-8 可见字符 1..15）、含 NUL 存 VT_NAME_BUF 字节；空名 = 空槽。执行器起跑时
+     * 整表快照进 R.vnames（字段负数编码 -10..-25 按它查名/查值）。**VT_UI 守卫**：默认（无面板）
+     * 构建不含这一项 —— 结构体是共享路径，加了会改默认核心 md5（守卫纪律，见 AGENTS.md）。 */
+    char vars[OP_VAR_IDX_N][VT_NAME_BUF];
 #endif
 };
 
@@ -252,7 +257,7 @@ struct vt_state {
      * 物理行占实测 97% 的量 ⇒ 脚本侧的 onTouch 默认只订 down,up、并可按槽过滤。 */
     unsigned sub_phys_mask;                            /* 槽位掩码；0 = 全部槽 */
     unsigned sub_phys_ev;                              /* SUBEV_* 位；0 = 全部事件 */
-    char     sub_region_id[REGION_ID_MAX + 1];         /* 只看这个区域；"" = 全部区域 */
+    char     sub_region_id[VT_NAME_BUF];               /* 只看这个区域；"" = 全部区域 */
     unsigned sub_region_ev;                            /* SUBEV_* 位；0 = 全部事件 */
     int      sub_phys_ts, sub_region_ts;               /* 线路格式：事件行末是否带墙钟毫秒（裸 sub = 1，老客户端不受影响） */
     int      quiet;                                    /* 注入族（touch/down/move/up/frame）不回 ok：脚本侧不必白收白解析 */
@@ -270,7 +275,7 @@ struct vt_state {
     volatile int op_run_state;                         /* 0=空闲 1=运行 */
     int ops_wake_fd;                                   /* eventfd：区域线程触发 → 叫醒主循环（-1 = 没有） */
     volatile uint32_t op_trig_seq;                     /* 触发槽（区域线程写、主线程读；SPSC） */
-    char op_trig_name[OP_NAME_MAX + 1];                /* 触发来源操作名 */
+    char op_trig_name[VT_NAME_BUF];                    /* 触发来源操作名 */
     int  op_trig_slot;                                 /* 触发来源手指的槽号（日志用） */
     /* 触发数据槽（v5，spec §1.5）：与 op_trig_* 同款 SPSC —— 区域线程先写全字段、release 自增 seq
      * 发布，主线程 acquire 读到新 seq 后一次读全。mask = 哪些变量有值（OP_TRIGB_* 位）；
@@ -278,6 +283,18 @@ struct vt_state {
     unsigned op_trig_mask;
     int op_trig_dx, op_trig_dy, op_trig_ux, op_trig_uy, op_trig_ms;
 };
+/* v11 名字扩位防漂断言：名字字段缓冲必须 = VT_NAME_BUF；vt_expr 名字表条宽必须对拍。 */
+_Static_assert(sizeof(((struct region *)0)->id) == VT_NAME_BUF, "region.id 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct region *)0)->trig_op) == VT_NAME_BUF, "region.trig_op 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct vt_step *)0)->ref) == VT_NAME_BUF, "vt_step.ref 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct vt_op *)0)->name) == VT_NAME_BUF, "vt_op.name 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct vt_op *)0)->gate) == VT_NAME_BUF, "vt_op.gate 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct vt_state *)0)->sub_region_id) == VT_NAME_BUF, "sub_region_id 须为 VT_NAME_BUF");
+_Static_assert(sizeof(((struct vt_state *)0)->op_trig_name) == VT_NAME_BUF, "op_trig_name 须为 VT_NAME_BUF");
+_Static_assert(VT_EXPR_VAR_BUF == VT_NAME_BUF, "vt_expr 名字表条宽须 = VT_NAME_BUF");
+#ifdef VT_UI
+_Static_assert(sizeof(((struct vt_op *)0)->vars[0]) == VT_NAME_BUF, "vt_op.vars 条宽须为 VT_NAME_BUF");
+#endif
 #ifdef VT_UI
 /* VT_UI：状态本体放在共享内存（面板只读映射同一份），g 只是「指向它的引用」——
  * 全库 200+ 处 g.xxx 调用点因此一行不用改。启动早期 g_ptr 指向引导副本，
@@ -335,7 +352,9 @@ int region_q_init(void);
 void region_q_wake(void);
 /* 清空区域表，并把代次 +1（让区域线程重置它私有的状态表）。 (vtouch-doc: regions_clear) */
 void regions_clear(void);
-/* 名字合法性（原 id_ok 提取）：字符集 [A-Za-z0-9_-]、长度 1..REGION_ID_MAX；合法返回 1。 (vtouch-doc: vt_id_ok) */
+/* 名字通用扫描（v11 唯一实现；var_mode: 0=区域 id/操作名/门控/ref、1=自定义变量名）。 (vtouch-doc: vt_name_scan) */
+int  vt_name_scan(const char *s, size_t n, int var_mode);
+/* 名字合法性（区域 id / 操作名 / 门控 / ref）：v11 规则 = 可见字符 1..15、字节 ≤ VT_NAME_BUF-1；裸 `-` 拒收。 (vtouch-doc: vt_id_ok) */
 int  vt_id_ok(const char *s, size_t n);
 /* 新增或覆盖一个区域（主线程持 region_lock 写表）。 (vtouch-doc: region_add) */
 int region_add(const char *id, int type, int a1, int a2, int a3, int a4, int enabled);

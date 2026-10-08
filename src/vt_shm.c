@@ -220,9 +220,9 @@ void vt_shm_edit_apply(void)
     case VT_EDIT_OP_DEL:   vt_ops_del(e.id); break;
     case VT_EDIT_OP_CLEAR: vt_ops_clear(); break;
     case VT_EDIT_OP_RUN: {                   /* 起跑；名字按上限截断打印（邮箱载荷可能没终止符） */
-        char nm[OP_NAME_MAX + 2];
+        char nm[VT_NAME_BUF + 1];
         size_t nn = strnlen(e.id, sizeof e.id);
-        if (nn > OP_NAME_MAX) nn = OP_NAME_MAX;
+        if (nn > VT_NAME_BUF - 1) nn = VT_NAME_BUF - 1;
         memcpy(nm, e.id, nn); nm[nn] = 0;
         fprintf(stderr, "vtouchd: op 编辑 run %s\n", nm);
         vt_ops_run(e.id, NULL);                              /* 手动运行：无触发数据（全部变量无值） */

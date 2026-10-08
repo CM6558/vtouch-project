@@ -72,7 +72,7 @@ struct ex_ctx {
     unsigned trig_mask;
     double fx, fy;        /* eval：fx/fy 命中坐标（res_mask 位 0/1 指示已写） */
     unsigned res_mask;
-    const char (*names)[16]; /* eval/check：自定义变量名表（可 NULL = 无自定义） */
+    const char (*names)[VT_EXPR_VAR_BUF]; /* eval/check：自定义变量名表（可 NULL = 无自定义） */
     const double *vals;   /* eval：自定义变量值（与 names 同下标；可 NULL） */
     unsigned var_mask;    /* eval：位 0..15 = 已写 */
     int nnames;           /* names 条数（0..16） */
@@ -121,9 +121,11 @@ static void ex_tok(struct ex_ctx *c)
         c->p = p;
         c->num = v;
         c->tok = TOK_NUM;
-    } else if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_') {
+    } else if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' ||
+               (unsigned char)*p >= 0x80) {                 /* v11：非 ASCII 字节可作标识符首字符（中文变量名） */
         const char *s = p;
-        while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_') p++;
+        while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+               *p == '_' || (unsigned char)*p >= 0x80) p++;
         c->p = p;
         c->name = s;
         c->namelen = (int)(p - s);
@@ -166,8 +168,8 @@ static int ex_name_kind(const struct ex_ctx *c, const char *s, int n, int *idx)
     if (c->names) {
         int lim = c->nnames < 16 ? c->nnames : 16;
         for (i = 0; i < lim; i++) {
-            size_t l = strnlen(c->names[i], 16);
-            if (l > 0 && l < 16 && (int)l == n && !memcmp(c->names[i], s, l)) { *idx = i; return NAME_CUSTOM; }
+            size_t l = strnlen(c->names[i], VT_EXPR_VAR_BUF);
+            if (l > 0 && l < VT_EXPR_VAR_BUF && (int)l == n && !memcmp(c->names[i], s, l)) { *idx = i; return NAME_CUSTOM; }
         }
     }
     /* v4 旧名兼容（2026-10-05 上机修复）：r1/r2 = 找图/找色写的槽 1/2 → 映射 fx/fy（NAME_RES 位 0/1）；
@@ -464,7 +466,7 @@ static int ex_run(const char *s, int mode_eval, const struct vt_expr_env *env,
  * @return  0 合法；-1 非法（why 已填原因；成功时 why 为空串）。
  * @note    语法与语义逐字照 spec §2（递归下降；+ - * /；atan2/sin/cos/abs/min/max/sqrt（三角函数按度、atan2(0,0)=0）；小数；空白忽略；全小写精确匹配）。变量空间（v10，EDITOR_V2 §Task 7.5）：预置 tdx..tms / fx / fy + names 表里的自定义名；v4 旧名 r1..r4 仅解析兼容（r1/r2 = fx/fy、r3/r4 = 恒未写 → 运行期 结果无值；自定义同名时优先；不进 UI 列表）；都不中 → `未知名字`。边界：长度 ≤ 63、括号嵌套 ≤ 8、token ≤ 128（词法口径：数字/标识符/运算符/括号/逗号各 1 个；token 上限先于长度检查，三条边界都可触发、各有 why）。静态常量折叠：变量视为未知值并传播 —— 「除零 / 负数开方 / 结果非有限」只在完全由常量决定时拦下（不会误拒 `1/tdx` 这类），运行期由 vt_expr_eval 同一套判定兜底。
  */
-int vt_expr_check(const char *s, const char (*names)[16], int nnames, char *why, size_t whycap)
+int vt_expr_check(const char *s, const char (*names)[VT_EXPR_VAR_BUF], int nnames, char *why, size_t whycap)
 {
     struct vt_expr_env env;
 

@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  10u           /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  11u           /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -40,7 +40,11 @@
                                        * 8 = 视觉扩展：帧区（区 D：帧头 + 双缓冲；spec VISION §3.1）。
                                        * 9 = 编辑器 v2 试查：帧区头新增测试块（test_*；spec EDITOR_V2 §Task 7.1）。
                                        * 10 = 编辑器 v2 命名变量：struct vt_op 增 vars[16][16]（自定义变量名表；
-                                       *      fx/fy 编码 -6/-7、自定义 -10..-25；spec EDITOR_V2 §Task 7.5）。 */
+                                       *      fx/fy 编码 -6/-7、自定义 -10..-25；spec EDITOR_V2 §Task 7.5）。
+                                       * 11 = 命名扩位（docs/NAMING_V11_PLAN.md）：名字字段 16B → VT_NAME_BUF(48B)
+                                       *      （region.id/trig_op、step.ref、vt_op.name/gate/vars、sub_region_id、
+                                       *      op_trig_name、edit.id/new_id、frame_hdr.test_ref/test_region）；
+                                       *      区 B 载荷超一页 → 断言放宽为两页（8192）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -81,8 +85,8 @@ struct vt_shm_header {
 struct vt_shm_edit {
     volatile uint32_t seq;
     uint32_t op;                      /* VT_EDIT_* */
-    char     id[16];
-    char     new_id[16];
+    char     id[VT_NAME_BUF];
+    char     new_id[VT_NAME_BUF];
     int32_t  type, enabled, a1, a2, a3, a4;
     struct vt_op payload;             /* 操作载荷：VT_EDIT_OP_PUT 用；其余码不读它 */
 };
@@ -104,8 +108,9 @@ struct vt_shm_b {
     volatile int32_t  pick_x, pick_y; /* 捕获到的**竖屏逻辑坐标** */
 };
 
-/* 区 B 必须装进一页（4096）：邮箱载荷 struct vt_op 是最大头，加到装不下就在构建期炸出来。 */
-_Static_assert(sizeof(struct vt_shm_b) <= 4096, "区 B 必须装进一页");
+/* 区 B 装进两页（8192）：v11 名字扩位后邮箱载荷 struct vt_op 超一页（原「必须装进一页」纪律见
+ * git 历史）；加到装不下就在构建期炸出来。 */
+_Static_assert(sizeof(struct vt_shm_b) <= 8192, "区 B 必须装进两页");
 
 /* 区 C：事件环。核心写 tail/line（生产者），**面板对区 C 只有读权限**；
  * 消费者的读计数放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。
@@ -162,8 +167,8 @@ struct vt_shm_frame_hdr {
      * res_seq 与本地请求序号比对认领（晚到的陈旧结果自行丢弃）。 */
     volatile uint32_t test_req_seq;    /* 面板写：请求序号（release 存 / 最后写） */
     uint8_t  test_kind;                /* 0 = 找图 / 1 = 找色单点 / 2 = 找色多点 */
-    char     test_ref[16];             /* 模板名 / 点集名（找色单点不读，写空） */
-    char     test_region[16];          /* 区域名；空 = 全屏 */
+    char     test_ref[VT_NAME_BUF];    /* 模板名 / 点集名（找色单点不读，写空） */
+    char     test_region[VT_NAME_BUF]; /* 区域名；空 = 全屏 */
     int32_t  test_a1;                  /* 找图 = 阈值 0..255 / 找色 = 模式 0/1 */
     int32_t  test_a2;                  /* 找色单点 = (颜色<<8)|容差；其余 0 */
     volatile uint32_t test_res_seq;    /* 核心写：结果序号（release 存 / 最后写；= 已应答的请求序号） */
