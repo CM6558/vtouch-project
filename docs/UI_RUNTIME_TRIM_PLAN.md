@@ -1,6 +1,6 @@
 # 面板缩编方案 —— ImGui 面板 = 纯「运行悬浮窗」（v0.5）
 
-> 状态：**已落码（P1）+ 设备侧全链构建完成并已部署**（2026-10-08 21:14），待起核心 + 真机回执（2026-10-08 用户：「app 里也可以增加一个框选工具，面板部分尽量保持运行时能力就好，开始吧」）——Q1–Q6/Q8/Q9 按推荐；Q7=**双方都做**（面板保留区域调整块 + app 增加框选工具〔另立小案〕）；先提交 v11（a761d72）再叠加缩编 —— **缩编已落码**：`src-ui/vtouch_ui.cpp` 9221 → 3809 行（净删 ≈5.41k），被删符号零残留 / static 未使用 0 命中 / 括号平衡全绿 / **设备侧 clang++ -fsyntax-only 全绿（0 error / 0 warning，-Wall 同口径）**。v0.2 细化（函数级 D/W/K/G 表、任务 T1–T7、命令行判据）；v0.3 补 §3.6；v0.4 补 §3.7；
+> 状态：**已落码（P1）+ 设备侧全链构建完成并已部署**（2026-10-08 21:14）；**App 侧 [框区域] 已完成**（2026-10-08，App v12：Demo 两轮全链 ✓、测试台 54/54）——待起核心 + 真机回执（2026-10-08 用户：「app 里也可以增加一个框选工具，面板部分尽量保持运行时能力就好，开始吧」）——Q1–Q6/Q8/Q9 按推荐；Q7=**双方都做**（面板保留区域调整块 + app 增加框选工具〔另立小案〕）；先提交 v11（a761d72）再叠加缩编 —— **缩编已落码**：`src-ui/vtouch_ui.cpp` 9221 → 3809 行（净删 ≈5.41k），被删符号零残留 / static 未使用 0 命中 / 括号平衡全绿 / **设备侧 clang++ -fsyntax-only 全绿（0 error / 0 warning，-Wall 同口径）**。v0.2 细化（函数级 D/W/K/G 表、任务 T1–T7、命令行判据）；v0.3 补 §3.6；v0.4 补 §3.7；
 > **v0.5 剪裁线修订**——按用户口径「修改不许重启才生效；运行中最好当场就能调」：①「区域调整块」归运行时保留（§3.8）；②热生效（免重启-A）升入本期主范围（§3.7）；③ app 侧框选（§3.6）转可选后续。
 > 范围：P1 只动 `src-ui/vtouch_ui.cpp`；核心/胶水/Java 零改动。
 > 唯一可信源：盘上代码。行号为**现阶段工作区**（v11 未提交改动叠加后）现读值，`vtouch_ui.cpp` 共 9221 行；**动手时以函数名/唯一字符串定位，行号只用于对账**。
@@ -114,7 +114,7 @@
 - app 现状：区域只有数字表单 `RegionEdit`（id/类型/坐标/bind/kind；`RegionEdit.java:18-50`）；区域侧无看图器取点（`ImageView/frameToLogic` 只接在素材/步骤）。「区域底图可视化编辑」= app P1.5/P2 项，未做。
 - **v0.5 裁决**：按「运行中当场就能调」口径，「区域调整」归运行时保留（§3.8）⇒ **缺口不再存在**；app 侧框选（§3.6）转**可选后续**（需要「离开游戏做精细编」时再立小案，做法已存档）。
 
-### 3.6 app 侧承接「框选」的做法（**已拍板：做，另立小案** —— 能做，怎么做）
+### 3.6 app 侧承接「框选」的做法（**已拍板：做；已完成 2026-10-08**——App v12 [框区域] 悬浮快速通道落地，形态 A 先行，B 留待需要时）
 
 **结论：能做；拼件基本齐，真正的新增件只有四小块。** 证据（`~/vtouch-editor`）：
 
@@ -188,7 +188,7 @@ cd ~/vtouch-project && for f in $(grep -oE 'static [A-Za-z_].* [a-z_][a-z_0-9]*\
 |---|---|---|
 | Java 面板抓帧旁路 | `VTouchUI.java`：nativeVisPanelPoll :28 / nativeVisPanelFrame :30 / captureToPanel :338 / 调用点 :391-394、:695-725 | **保存档、不删**（零风险下线；备选=三文件同步删） |
 | 胶水/桩对应件 | `ui_glue.c`：vtouch_vis_panel_capture_req/frame_take/err_take :933-975、nativeVisPanel{Frame,Poll,Fail} 同段（912-1030 一带）；`ui_stubs.c` :327-336 | 同上 |
-| app 侧框选（§3.6） | `~/vtouch-editor` | 可选后续；需要时立小案 |
+| app 侧框选（§3.6） | `~/vtouch-editor` | **已完成（2026-10-08，App v12）**：[框区域] 悬浮快速通道（RegionDraw + ImageView MODE_CIRCLE + 建区浮层；demo 两轮全链 ✓；测试台 54/54） |
 | 文档口径同步 | AGENTS.md（结构行+「操作编辑器/执行器/触发侧」段+「说明页」段）、README、`docs/UI_INTEGRATION.md` 状态行 | 必改 |
 | 说明页文案留档指针 | 源=`OPS_PLAN_V5 §9`+`VISION_PLAN §12`+`EDITOR_V2_PLAN` 文案节 | 记档备搬 app |
 
@@ -257,3 +257,4 @@ su -c 'grep -E "面板已启动|regions.conf 共|丢弃清空|方案 切换|区�
 - v0.7（2026-10-08）：**落码完成（T1–T8）** —— `vtouch_ui.cpp` 9221 → 3809 行（毛删 5674 / 增 262 / 净删 5412）：操作编辑层·视觉段·方案 CRUD·说明页·改名链·取点/键盘·编辑层壳 全删；区域调整块（框选/拖动缩放/四键/触发行）保留；**T8 热生效-A** 落地（live 两文件 + current 的 mtime 轮询 1s → 防抖 600ms → 强制重放当前方案；面板自写经 `hr_files_note()` 豁免；方案页新增 [重载当前方案] 键）；`ope_var_ok` 上移（load 翻译链仍用）。自查：零残留 grep ✓ / static 未使用扫描 0 命中 ✓ / 括号平衡 0 ✓。待办：Windows 构建 + 真机 8 项回执。
 - v0.8（2026-10-08）：**设备侧语法自检接入 + v11 遗留修复** —— 复刻 `check_syntax.sh` 的 UI 判据在设备跑通（imgui v1.91.8 自拉 + `gen_ui_chars.py` + 本机 jni/android 头 + EGL/GLES2 桩头 + `clang++ -fsyntax-only -Wall`）：缩编版 **0 error / 0 warning**；v11 原版同跑校准 = 3 个真错且零噪声 —— ① `g_font_have_ttf` 先用后声明【已修：上移到 `g_font_meta` 旁】；② ③ 操作编辑器缺分号 + `an` 未声明【已随缩编删除】。工具落盘：`~/vtouch-ui-check.sh`（本地，可随时复跑）。
 - v0.9（2026-10-08）：**设备侧全链构建跑通并部署**（Termux 移植版 `build_ui.sh[real]` + `build.sh ui`，脚本 `~/vtouch-devbuild.sh`）—— 产物：classes.dex 20700B / libtestimgui.so 987,616B（strip 后）/ libc++_shared.so 1,423,696B / **vtouchd_ui 2,647,776B（md5 `274e691a…`，已推 /data/local/tmp，与本机逐字节一致）**。静态对账全过：核心 NEEDED = libm/libdl/libc（同 NDK 版）；面板 NEEDED 八项与 NDK 版逐项相同；内嵌三件 `_binary_*_size` 逐字节对上；Termux 注入的 RUNPATH 已净化（→ /system/lib64）。旧部署已备份：`vtouchd_ui.bak-20261008` / `vtouch-ui.bak-20261008`。待办：**起核心**（前台在阅读 app，按纪律未擅自起）+ 真机 8 项回执。
+- v0.10（2026-10-08）：**App 侧 [框区域] 落地**（App v12，形态 A 悬浮快速通道）—— `RegionDraw.java`（命名/换算/落盘纯函数层）+ `ImageView MODE_CIRCLE`（附加）+ CaptureChip 建区浮层（[矩形][圆]切换/[重框]/[建区]、自动命名 r1/c1…、预览行、直写 regions.conf + 镜像、toast 带生效口径）；坐标链=帧像素→竖屏逻辑（frameToLogic）；测试台新增 1 项 → **54 通过 / 0 警告 / 0 失败**；demo region 两轮（矩形+圆）真机全链 ✓。详见 `~/vtouch-editor/.v7-progress.md`。
