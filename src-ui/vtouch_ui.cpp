@@ -2114,6 +2114,7 @@ static int egl_init_locked(ANativeWindow *w)
  * 字形表只取源码里真正出现的字（ui_chars.h）：ChineseFull 会把 2 万+ 汉字 × 两档
  * 字号全烘一遍（真机 ~860ms），图集 4096² 还装不下、后面的字被静默丢掉。 ---- */
 static ImFont *g_font_meta = 0;
+static int g_font_have_ttf = 0;          /* TTF 装载成功（fallback 时不折腾）；font_probe 先于 v11 块使用 → 声明在家 */
 static const ImWchar *ui_glyph_ranges(void)
 {
     static ImVector<ImWchar> rg;
@@ -2155,7 +2156,6 @@ static void font_probe(void)
  * （烘字只随集合增量发生）。防死循环：进过扩集仍缺字（TTF 里没有该字形）不再重复重建。
  * 说明：ImWchar = 16 位 → 只覆盖 BMP（汉字在 BMP；emoji 等超出 BMP 不进图集，显示兜底字形）。 ---- */
 static ImVector<ImWchar> g_font_extra;   /* 追加码点（= 已尝试集；不重复 push） */
-static int g_font_have_ttf = 0;          /* TTF 装载成功（fallback 时不折腾） */
 static int g_font_dirty = 0;             /* 有新增码点待进图集（帧间重建） */
 static int g_glyph_tick = 0;
 
