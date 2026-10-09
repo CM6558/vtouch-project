@@ -77,7 +77,7 @@
 #define VT_NAME_BUF     48       /* 名字缓冲字节数（含 NUL）：15×3B+1=46，对齐取 48 */
 #define REGION_ID_MAX   VT_NAME_CHARS   /* 旧名保留（全库沿用）：语义 = 字符数上限，别再当字节数用 */
 #define MAX_OPS        16        /* 操作条数上限 */
-#define MAX_STEPS      32        /* 单条操作步骤数上限 */
+#define MAX_STEPS      64        /* 单条操作步骤数上限（v12 起 32→64，OPS_PLAN_V6 §3.5） */
 #define OP_NAME_MAX     VT_NAME_CHARS   /* 操作名字符数上限（同区域 id 规则） */
 #define OP_STEP_TAP    1         /* 步骤类型：点按 */
 #define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */
@@ -95,6 +95,17 @@
 #define OP_STEP_FINDCOLOR   11   /* 步骤类型：找色（a1=模式 0 单点/1 多点；ref=点集名（多点必填/单点必空）；
                                   * expr=区域名；单点 a2=(颜色<<8)|容差、多点 a2=0；a3=不成立档、a4=成立档；
                                   * ms=0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）；j1/j2=该侧跳转目标） */
+/* 控制流结构块（v12；设计 OPS_PLAN_V6，字段映射见其 §3.2 表；配对/深度/跨块规则见 §3.4）：
+ * 12/13 = 循环体、14/15/16 = 条件块、17/18 = 跳出/继续。结构行由校验层保证配对完整。 */
+#define OP_STEP_LOOP        12   /* 循环开始：a1=模式（0 次数 / 1 时长 / 2 无限 / 3 到条件）；模式 0：a2=次数 1..99999；
+                                  * 模式 1：a2=时长 ms 1000..86400000；模式 3：a2=判定类型（0 区域/1 开关/2 找图/3 找色）
+                                  * 且 a3/a4/ms/ref/expr/j1 按判定参数表；其余模式余字段 0/空 */
+#define OP_STEP_ENDLOOP     13   /* 循环结束：字段全 0（回跳检查点在 12 执行） */
+#define OP_STEP_IF          14   /* 条件块开始：a1=判定类型（同上四类）、参数从 a2 起按判定参数表 */
+#define OP_STEP_ELSE        15   /* 否则：字段全 0（到达即跳到 16 之后） */
+#define OP_STEP_ENDIF       16   /* 条件块结束：字段全 0 */
+#define OP_STEP_BREAK       17   /* 跳出循环：字段全 0（丢最内层循环 → 13 之后） */
+#define OP_STEP_CONT        18   /* 继续循环：字段全 0（跳到最内层 13 处，触发回跳检查） */
 #define VT_VIS_CAPTURE_TIMEOUT_MS 1000  /* 抓帧请求总超时（spec VISION §2.2；超时 → 中止 `无画面`） */
 #define VT_VIS_REUSE_MS     50   /* 一帧多步复用窗口（spec §9：同一帧 ≤50ms 内复用不重抓） */
 #define VT_VIS_PANEL_STALL_MS 3000  /* 「面板不在」判据：ui_hb 冻结 ≥3s（同 vt_panel.c 看门狗口径） */
@@ -107,8 +118,11 @@
 #define OP_COND_SKIP        1
 #define OP_COND_CONT        2
 #define OP_COND_JUMP        3
-/* 单次运行跳转计数上限（条件跳转 + 跳转步共用一枚，起跑清零）：超限中止 `跳转超限`，防死循环。 */
+/* 单次运行跳转计数上限（条件跳转 + 跳转步共用一枚，起跑清零）：超限中止 `跳转超限`，防死循环。
+ * 注意：控制流结构块（12..18）的回跳不走此计数（自带次数/时长预算，OPS_PLAN_V6 §3.3）。 */
 #define VT_OPS_JUMP_MAX 200
+/* 控制流块最大嵌套深度（OPS_PLAN_V6 §3.4）：超限加载拒收 `嵌套超深`。 */
+#define VT_CTRL_MAX_DEPTH 8
 /* 变量编码（v10 契约，spec EDITOR_V2 §Task 7.5；v2 起 -1..-5 不变）：字段取负数 = 引用变量；字面值恒 ≥0。
  *   -1..-5 = 触发数据 tdx/tdy/tux/tuy/tms（不变）；
  *   -6/-7 = fx/fy：最近一次找图/找色命中坐标（视觉步改写；起跑清零）；
@@ -181,7 +195,8 @@ struct region {
 
 struct vt_step {
     int type;                      /* 1=点按 2=滑动 3=等待 4=按下 5=弹起 6=区域判断 7=开关判断 8=跳转 9=计算
-                                    * 10=找图 11=找色（OP_STEP_*） */
+                                    * 10=找图 11=找色（OP_STEP_*）；（v12）12..18=控制流结构块
+                                    * （循环/条件块/跳出/继续 —— 字段映射见 OPS_PLAN_V6 §3.2） */
     int a1, a2, a3, a4;            /* 点按: x,y；滑动: 起点 x1,y1 → 终点 x2,y2；等待: 不用；按下: x,y；
                                     * 区域判断: 判定点 x,y + a3=不成立档位、a4=成立档位；开关判断: a3/a4=两侧档位；
                                     * 跳转: a1 = 目标步骤（0 = 结束、1..步数 = 目标）；

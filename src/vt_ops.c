@@ -52,8 +52,7 @@ static int op_num_ok(int v, int lo, int hi)
 
 /**
  * (vtouch-doc: op_var_name_ok)
- * @brief 自定义变量名合法性（v11 放开中文）：首字符 = 字母 / `_` / 非 ASCII 可见码点；其余 = 字母数字 /
- *        `_` / 非 ASCII 可见码点；1..OP_VAR_NAME_MAX 个字符、字节 ≤ VT_NAME_BUF-1；不含 `-`。
+ * @brief 自定义变量名合法性（v11 放开中文）：首字符 = 字母 / `_` / 非 ASCII 可见码点；其余 = 字母数字 / `_` / 非 ASCII 可见码点；1..OP_VAR_NAME_MAX 个字符、字节 ≤ VT_NAME_BUF-1；不含 `-`。
  * @param   s        名字文本
  * @param   n        已量出的字节数
  * @return  1 合法；0 非法。
@@ -67,12 +66,133 @@ static int op_var_name_ok(const char *s, size_t n)
     return vt_name_scan(s, n, 1);
 }
 
+/**
+ * (vtouch-doc: op_ctrl_cond_bad)
+ * @brief 控制流「判定参数」字段校验（v12；循环·到条件 与 条件块 共用）：判定类型 + 各参数域逐项过门。
+ * @param   jtype    判定类型：0=区域判断 / 1=开关判断 / 2=找图 / 3=找色
+ * @param   px, py   区域判断 = 判定点 x/y（可变量编码）；找图 = 阈值 0..255 / 色校 0|1；找色 = 模式 0|1 / 保留须 0；开关 = 0/0
+ * @param   kms      找图/找色 = 持续查找 ms（0..60000）；其余类型须 0
+ * @param   kref     区域名（区域/开关必填）/ 模板名（找图必填）/ 点集名（找色多点必填、单点必空）
+ * @param   kexpr    区域限定（找图/找色；空或 vt_id_ok 尺子）；其余类型须空
+ * @param   kpack    找色单点打包 (颜色<<8)|容差（域 = 全部 32 位）；其余情况须 0
+ * @param   extra0   该判定的保留字段（必须 0；防御邮箱裸字节）
+ * @param   stepno   步号（1 基；写进 why）
+ * @return  0 通过；非 0 = 已把原因写进 why。
+ * @note    字段位置由调用方投影（循环头自 a2 起 / 条件块头自 a1 起，OPS_PLAN_V6 §3.2）；校验实现单点，两处共用以防口径漂移。
+ */
+static int op_ctrl_cond_bad(int jtype, int px, int py, int kms,
+                            const char *kref, const char *kexpr, int kpack, int extra0,
+                            int stepno, char *why, size_t whycap)
+{
+    size_t rl, el;
+    if (jtype < 0 || jtype > 3) {
+        snprintf(why, whycap, "第 %d 步判定类型非法（0..3）", stepno);
+        return 1;
+    }
+    if (extra0 != 0) {
+        snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+        return 1;
+    }
+    rl = strnlen(kref, VT_NAME_BUF);
+    el = strnlen(kexpr, VT_EXPR_MAX + 1);
+    if (el >= VT_EXPR_MAX + 1) {             /* 未终止（防御，载荷来自邮箱字节） */
+        snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", stepno);
+        return 1;
+    }
+    switch (jtype) {
+    case 0:                                  /* 区域判断：判定点（可变量）+ 区域名必填 */
+        if (!op_num_ok(px, 0, g.logical_width - 1) || !op_num_ok(py, 0, g.logical_height - 1)) {
+            snprintf(why, whycap, "第 %d 步坐标越界", stepno);
+            return 1;
+        }
+        if (kms != 0 || kpack != 0 || el != 0) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+            return 1;
+        }
+        if (rl < 1 || !vt_id_ok(kref, rl)) {
+            snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", stepno);
+            return 1;
+        }
+        break;
+    case 1:                                  /* 开关判断：无参数；区域名必填 */
+        if (px != 0 || py != 0 || kms != 0 || kpack != 0 || el != 0) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+            return 1;
+        }
+        if (rl < 1 || !vt_id_ok(kref, rl)) {
+            snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", stepno);
+            return 1;
+        }
+        break;
+    case 2:                                  /* 找图：阈值/色校/持续ms/模板名必填/区域限定可空 */
+        if (px < 0 || px > 255) {
+            snprintf(why, whycap, "第 %d 步阈值越界（0..255）", stepno);
+            return 1;
+        }
+        if (py != 0 && py != 1) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0/1", stepno);
+            return 1;
+        }
+        if (kms < 0 || kms > 60000) {
+            snprintf(why, whycap, "第 %d 步超时越界（0..60000）", stepno);
+            return 1;
+        }
+        if (kpack != 0) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+            return 1;
+        }
+        if (rl < 1 || !vt_id_ok(kref, rl)) {
+            snprintf(why, whycap, "第 %d 步模板引用非法（1..15 个可见字符）", stepno);
+            return 1;
+        }
+        if (el > 0 && !vt_id_ok(kexpr, el)) {
+            snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", stepno);
+            return 1;
+        }
+        break;
+    case 3:                                  /* 找色：模式/持续ms/点集名(多点必填、单点必空)/打包(单点全 32 位、多点 0) */
+        if (px != 0 && px != 1) {
+            snprintf(why, whycap, "第 %d 步模式非法（0/1）", stepno);
+            return 1;
+        }
+        if (py != 0) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+            return 1;
+        }
+        if (kms < 0 || kms > 60000) {
+            snprintf(why, whycap, "第 %d 步超时越界（0..60000）", stepno);
+            return 1;
+        }
+        if (px == 1) {
+            if (rl < 1 || !vt_id_ok(kref, rl)) {
+                snprintf(why, whycap, "第 %d 步点集引用非法（多点必填；1..15 个可见字符）", stepno);
+                return 1;
+            }
+            if (kpack != 0) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+                return 1;
+            }
+        } else if (rl != 0) {
+            snprintf(why, whycap, "第 %d 步点集引用必须为空（单点）", stepno);
+            return 1;
+        }
+        if (el > 0 && !vt_id_ok(kexpr, el)) {
+            snprintf(why, whycap, "第 %d 步区域引用非法（1..15 个可见字符）", stepno);
+            return 1;
+        }
+        break;
+    default:
+        break;                               /* 不可达（上方已拦 0..3） */
+    }
+    return 0;
+}
+
 /* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
  * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
  *
- * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1；v11 名字口径见 docs/NAMING_V11_PLAN.md）：名字与区域 id 同一把尺子
- * （vt_id_ok：UTF-8 可见字符 1..15 个、字节 ≤47；裸 `-` 除外）；步数 1..MAX_STEPS；类型 ∈ 1..11
- * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色）。
+ * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1；v11 名字口径见 docs/NAMING_V11_PLAN.md；v12 控制流见 docs/OPS_PLAN_V6.md §3.2/§3.4）：名字与区域 id 同一把尺子
+ * （vt_id_ok：UTF-8 可见字符 1..15 个、字节 ≤47；裸 `-` 除外）；步数 1..MAX_STEPS（v12 起 64）；类型 ∈ 1..18
+ * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色 + 控制流结构行 12..18，见下）。
  * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
  * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
  * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -25..-1（-1..-5 = 触发变量、
@@ -92,14 +212,22 @@ static int op_var_name_ok(const char *s, size_t n)
  * 找图 a1=阈值 0..255、找色 a1=模式 0/1 且单点 a2=(颜色<<8)|容差（按无符号解读：打包域 = 全部 32 位，
  * 颜色高位使 int 为负 —— **不拒负值**，拒了会误杀纯红 0xFF0000 等）、多点 a2=0、a3/a4=不成立/成立档位（0..3）、
  * ms=0..60000（0 = 单次；>0 = 持续查找超时毫秒，T7.4）、j1/j2=该侧跳转目标（域同条件步）。
- * **其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——表达式只属于计算步、区域名只属于视觉步，
- * 别让它们静默挂在别的步上（spec V5 §4 / VISION §6.1）。
+ * **其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——表达式只属于计算步、区域名只属于视觉步与
+ * 控制流判定（12 模式 3 / 14），别让它们静默挂在别的步上（spec V5 §4 / VISION §6.1）。
+ * 控制流（v12，spec OPS_PLAN_V6 §3.2/§3.4）：结构行 = 12 循环开始 / 13 循环结束 / 14 条件块开始 / 15 否则 /
+ * 16 条件块结束 / 17 跳出 / 18 继续 —— 配对（12-13、14-16、15 归属 14 且每块至多一次）、嵌套 ≤ VT_CTRL_MAX_DEPTH(8)、
+ * 17/18 必须位于某循环内（任意层嵌套的 12 均算），循环/条件块头字段域见 §3.2（12：模式 0..3；模式 3 与 14 的
+ * 判定参数共用 op_ctrl_cond_bad）；结构行（13/15/16/17/18）字段全 0/空。含结构行时：8/6/7/10/11 的跳转目标不得
+ * 跨越块边界（起点与目标的直接父块必须相同）且不得落在结构行上；档位 = 跳过下一步时被跳过行同样受限 ——
+ * 均拒 `跳转跨越块边界`。
  * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
  */
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
 {
     int i, k;
     size_t n;
+    int parent[MAX_STEPS];               /* v12：每步的直接父块头索引（-1 = 顶层；跨块跳校验用） */
+    int has_blocks = 0;                  /* v12：载荷含控制流结构行（12..18）标记 */
 
     /* 名字来自邮箱载荷，先按数组长度找终止符：未终止（strnlen 顶到 name[] 尾）按非法拒 ——
      * 不让后面的 vt_id_ok / strcmp / 日志去读越界。 */
@@ -134,11 +262,78 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
     }
+    /* ---- 控制流结构扫描（v12；OPS_PLAN_V6 §3.4）：配对/深度/17-18 归属；同时记录每步的直接父块
+     *      （跨块跳校验用）。失败即拒（带步号）。 */
+    {
+        int cstk_i[VT_CTRL_MAX_DEPTH];       /* 块头步索引栈（12/14 混栈） */
+        int cstk_isif[VT_CTRL_MAX_DEPTH];    /* 1 = 条件块头（14） */
+        int cstk_else[VT_CTRL_MAX_DEPTH];    /* 条件块是否已出现 15 */
+        int ctop = 0;
+        for (i = 0; i < op->step_count; i++) {
+            const struct vt_step *st = &op->steps[i];
+            if (st->type >= OP_STEP_LOOP && st->type <= OP_STEP_CONT) has_blocks = 1;
+            parent[i] = ctop > 0 ? cstk_i[ctop - 1] : -1;
+            switch (st->type) {
+            case OP_STEP_LOOP:
+            case OP_STEP_IF:
+                if (ctop >= VT_CTRL_MAX_DEPTH) {
+                    snprintf(why, whycap, "第 %d 步嵌套超深（>%d 层）", i + 1, VT_CTRL_MAX_DEPTH);
+                    return 0;
+                }
+                cstk_i[ctop] = i;
+                cstk_isif[ctop] = (st->type == OP_STEP_IF);
+                cstk_else[ctop] = 0;
+                ctop++;
+                break;
+            case OP_STEP_ELSE:
+                if (ctop < 1 || !cstk_isif[ctop - 1] || cstk_else[ctop - 1]) {
+                    snprintf(why, whycap, "第 %d 步块配对错误（否则 无对应条件块）", i + 1);
+                    return 0;
+                }
+                cstk_else[ctop - 1] = 1;
+                break;
+            case OP_STEP_ENDIF:
+                if (ctop < 1 || !cstk_isif[ctop - 1]) {
+                    snprintf(why, whycap, "第 %d 步块配对错误（条件块结束 无对应开始）", i + 1);
+                    return 0;
+                }
+                ctop--;
+                break;
+            case OP_STEP_ENDLOOP:
+                if (ctop < 1 || cstk_isif[ctop - 1]) {
+                    snprintf(why, whycap, "第 %d 步块配对错误（循环结束 无对应开始）", i + 1);
+                    return 0;
+                }
+                ctop--;
+                break;
+            case OP_STEP_BREAK:
+            case OP_STEP_CONT: {
+                int has_loop = 0, kk;
+                for (kk = 0; kk < ctop; kk++) if (!cstk_isif[kk]) { has_loop = 1; break; }
+                if (!has_loop) {
+                    snprintf(why, whycap, "第 %d 步跳出不在循环内", i + 1);
+                    return 0;
+                }
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        if (ctop > 0) {                      /* 未闭合：报最内层未闭合块 */
+            if (cstk_isif[ctop - 1])
+                snprintf(why, whycap, "第 %d 步块配对错误（条件块未闭合）", cstk_i[ctop - 1] + 1);
+            else
+                snprintf(why, whycap, "第 %d 步循环未闭合", cstk_i[ctop - 1] + 1);
+            return 0;
+        }
+    }
     for (i = 0; i < op->step_count; i++) {
         const struct vt_step *st = &op->steps[i];
-        /* v5/v8 防御：表达式只属于计算步、区域名只属于视觉步 —— 其余类型带 expr 一律拒收 `表达式错`。 */
+        /* v5/v8 防御：表达式只属于计算步、区域名只属于视觉步/控制流判定 —— 其余类型带 expr 一律拒收 `表达式错`。 */
         if (st->type != OP_STEP_CALC && st->type != OP_STEP_FINDIMAGE &&
-            st->type != OP_STEP_FINDCOLOR && st->expr[0] != 0) {
+            st->type != OP_STEP_FINDCOLOR && st->type != OP_STEP_LOOP && st->type != OP_STEP_IF &&
+            st->expr[0] != 0) {
             snprintf(why, whycap, "表达式错");
             return 0;
         }
@@ -366,9 +561,96 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
             }
             break;
         }
+        case OP_STEP_LOOP: {                     /* 循环开始（v12；OPS_PLAN_V6 §3.2）：a1=模式（0 次数/1 时长/2 无限/3 到条件） */
+            if (st->a1 < 0 || st->a1 > 3) {
+                snprintf(why, whycap, "第 %d 步循环模式非法（0..3）", i + 1);
+                return 0;
+            }
+            if (st->a1 == 0) {                   /* 次数 1..99999；余字段 0/空 */
+                if (st->a2 < 1 || st->a2 > 99999) {
+                    snprintf(why, whycap, "第 %d 步循环次数越界（1..99999）", i + 1);
+                    return 0;
+                }
+                if (st->a3 || st->a4 || st->ms || st->j1 || st->j2 || st->ref[0] || st->expr[0]) {
+                    snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                    return 0;
+                }
+            } else if (st->a1 == 1) {            /* 时长 ms 1000..86400000；余字段 0/空 */
+                if (st->a2 < 1000 || st->a2 > 86400000) {
+                    snprintf(why, whycap, "第 %d 步循环时长越界（1000..86400000 ms）", i + 1);
+                    return 0;
+                }
+                if (st->a3 || st->a4 || st->ms || st->j1 || st->j2 || st->ref[0] || st->expr[0]) {
+                    snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                    return 0;
+                }
+            } else if (st->a1 == 2) {            /* 无限：全 0/空 */
+                if (st->a2 || st->a3 || st->a4 || st->ms || st->j1 || st->j2 || st->ref[0] || st->expr[0]) {
+                    snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                    return 0;
+                }
+            } else {                             /* 到条件：判定参数（类型在 a2、参数自 a3 起；§3.2） */
+                if (op_ctrl_cond_bad(st->a2, st->a3, st->a4, st->ms, st->ref, st->expr,
+                                     st->j1, st->j2, i + 1, why, whycap))
+                    return 0;
+            }
+            break;
+        }
+        case OP_STEP_ENDLOOP:
+        case OP_STEP_ELSE:
+        case OP_STEP_ENDIF:
+        case OP_STEP_BREAK:
+        case OP_STEP_CONT:                       /* 结构行（13/15/16/17/18）：字段全 0 / 名字空 */
+            if (st->a1 || st->a2 || st->a3 || st->a4 || st->ms || st->j1 || st->j2 ||
+                st->ref[0] != 0) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            break;
+        case OP_STEP_IF:                         /* 条件块开始（v12）：a1=判定类型、参数自 a2 起；a4 恒 0（§3.2） */
+            if (op_ctrl_cond_bad(st->a1, st->a2, st->a3, st->ms, st->ref, st->expr,
+                                 st->j1, st->a4, i + 1, why, whycap))
+                return 0;
+            break;
         default:
             snprintf(why, whycap, "第 %d 步类型非法", i + 1);
             return 0;
+        }
+    }
+    /* ---- 跨块跳校验（v12；OPS_PLAN_V6 §3.4）：含结构行时——跳转/跳过不得跨越块边界、不得落在结构行上。
+     *       目标 0 = 结束不受限；范围校验已在各类型分支完成。 */
+    if (has_blocks) {
+        for (i = 0; i < op->step_count; i++) {
+            const struct vt_step *st = &op->steps[i];
+            int tgt[2], m = 0, q;
+            if (st->type == OP_STEP_JUMP) {
+                if (st->a1 != 0) tgt[m++] = st->a1 - 1;
+            } else if (st->type == OP_STEP_COND_REGION || st->type == OP_STEP_COND_TOGGLE ||
+                       st->type == OP_STEP_FINDIMAGE || st->type == OP_STEP_FINDCOLOR) {
+                if (st->a4 == OP_COND_JUMP && st->j1 != 0) tgt[m++] = st->j1 - 1;
+                if (st->a3 == OP_COND_JUMP && st->j2 != 0) tgt[m++] = st->j2 - 1;
+                if (i + 1 < op->step_count &&
+                    (st->a3 == OP_COND_SKIP || st->a4 == OP_COND_SKIP)) {
+                    const struct vt_step *nxt = &op->steps[i + 1];
+                    if (nxt->type >= OP_STEP_LOOP && nxt->type <= OP_STEP_CONT) {
+                        snprintf(why, whycap, "第 %d 步跳转跨越块边界（跳过结构行）", i + 1);
+                        return 0;
+                    }
+                }
+            } else {
+                continue;
+            }
+            for (q = 0; q < m; q++) {
+                const struct vt_step *dst = &op->steps[tgt[q]];
+                if (dst->type >= OP_STEP_LOOP && dst->type <= OP_STEP_CONT) {
+                    snprintf(why, whycap, "第 %d 步跳转跨越块边界（目标是结构行）", i + 1);
+                    return 0;
+                }
+                if (parent[tgt[q]] != parent[i]) {
+                    snprintf(why, whycap, "第 %d 步跳转跨越块边界", i + 1);
+                    return 0;
+                }
+            }
         }
     }
     return 1;
@@ -394,7 +676,7 @@ static void op_reject_log(const char *name, const char *why)
  * @brief 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。
  * @param   op       整条操作载荷（名字 + 步数 + 步表）
  * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
- * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（v11 名字规则；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）、滑动 j1/j2 = 按下后停 / 弹起前停（0..60000；0 = 不停；v2.1）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 vt_id_ok 规则；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 过 vt_id_ok（v11 规则；存在性不校验，允许悬空）。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
+ * @note    校验全在核心这一处（与区域 id 同一把尺子）：名字 vt_id_ok（v11 名字规则；裸 `-` 除外）、步数 1..MAX_STEPS、类型 ∈ {点按,滑动,等待,按下,弹起,区域判断,开关判断,跳转,计算,找图,找色}、坐标字段（点按/滑动/按下/区域判断）0..逻辑尺寸-1 或负数编码引用（-25..-1：-1..-5 = 触发变量、-6/-7 = fx/fy 命中坐标、-8/-9 = 退役槽编码（悬空 → 结果无值）、-10..-25 = 自定义变量索引 0..15）、时长字段（点按/滑动/等待）按类型分档（点按 0..60000 / 滑动 1..60000 / 等待 0..600000）、滑动 j1/j2 = 按下后停 / 弹起前停（0..60000；0 = 不停；v2.1）或负数编码引用（同上）、变量表（v10）：op->vars[16] 每项空或合法名（op_var_name_ok）且不许重名、计算步 a1 ∈ 0..15（变量索引）且 ref = 变量名（必须等于 vars[a1]）、expr 非空、过 vt_expr_check（名字表 = vars；其余字段必须空；不过拒 `表达式错: <原因>`）、其余类型的 expr 必须为空（防御：非空拒 `表达式错`；计算步与视觉步除外）、条件步两档位 a3/a4 ∈ 0..3（不成立侧/成立侧），档位 = 跳转时该侧目标（不成立侧 j2 / 成立侧 j1）∈ 0..步数（0 = 结束）、视觉步（找图/找色，v8）：ref = 模板名（找图，必填）/ 点集名（找色多点必填、单点必空）、expr = 区域名（空或 vt_id_ok 规则；存在性不校验，运行时按 `区域不存在` 收场）、找图 a1 = 阈值 0..255、a2 = 颜色校验 0/1（v2.1，2026-10-05e）、找色 a1 = 模式 0/1 且单点 a2 = (颜色<<8)|容差（按无符号解读、域 = 全部 32 位）/ 多点 a2 = 0、a3/a4 = 档位 0..3、ms = 0..60000（0 = 单次、>0 = 持续查找超时毫秒，T7.4）、跳转目标域同条件步、跳转步 a1 ∈ 0..步数、ref 过 vt_id_ok（v11 规则；存在性不校验，允许悬空）、控制流（v12，OPS_PLAN_V6 §3.2/§3.4）：类型 12..18（循环开始/结束、条件块开始/否则/结束、跳出、继续）——结构行（13/15/16/17/18）字段全 0/空、循环头（模式 0..3、次数 1..99999、时长 1000..86400000、到条件 = 判定参数 op_ctrl_cond_bad）与条件块头（判定参数、a4 恒 0）字段域逐项、配对（循环/条件块闭合、否则归属、跳出/继续须在循环内 `跳出不在循环内`）、嵌套 ≤ VT_CTRL_MAX_DEPTH(8) `嵌套超深`、含结构行时跳转/跳过不得跨越块边界或落在结构行上 `跳转跨越块边界`。拒绝打 `op 被拒 <名>: <原因>`、成功打 `op 编辑 put <名> 步数=N`；重名覆盖就地写（表位不变），要么整条生效、要么一点都不动。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   先整条校验、通过才落表：要么全收、要么一点都不动 —— 半条脏操作比拒绝更糟（面板回读只认

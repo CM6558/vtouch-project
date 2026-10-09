@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION  11u           /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION  12u           /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -44,7 +44,9 @@
                                        * 11 = 命名扩位（docs/NAMING_V11_PLAN.md）：名字字段 16B → VT_NAME_BUF(48B)
                                        *      （region.id/trig_op、step.ref、vt_op.name/gate/vars、sub_region_id、
                                        *      op_trig_name、edit.id/new_id、frame_hdr.test_ref/test_region）；
-                                       *      区 B 载荷超一页 → 断言放宽为两页（8192）。 */
+                                       *      区 B 载荷超一页 → 断言放宽为两页（8192）。
+                                      * 12 = 控制流（docs/OPS_PLAN_V6.md）：step 类型扩 12..18（循环/条件块/跳出/继续）；
+                                      *      MAX_STEPS 32→64 → vt_op 增大，区 B 断言放宽为三页（12288）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -108,9 +110,9 @@ struct vt_shm_b {
     volatile int32_t  pick_x, pick_y; /* 捕获到的**竖屏逻辑坐标** */
 };
 
-/* 区 B 装进两页（8192）：v11 名字扩位后邮箱载荷 struct vt_op 超一页（原「必须装进一页」纪律见
- * git 历史）；加到装不下就在构建期炸出来。 */
-_Static_assert(sizeof(struct vt_shm_b) <= 8192, "区 B 必须装进两页");
+/* 区 B 装进三页（12288）：v11 名字扩位后超一页（原「必须装进一页」纪律见 git 历史）；v12 控制流
+ * steps 32→64 再超两页 → 放宽为三页；加到装不下就在构建期炸出来。 */
+_Static_assert(sizeof(struct vt_shm_b) <= 12288, "区 B 必须装进三页");
 
 /* 区 C：事件环。核心写 tail/line（生产者），**面板对区 C 只有读权限**；
  * 消费者的读计数放在区 B（ring_read）—— 这样"只读"才是真的：面板写不了环里的任何字节。
