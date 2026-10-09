@@ -77,7 +77,7 @@
 #define VT_NAME_BUF     48       /* 名字缓冲字节数（含 NUL）：15×3B+1=46，对齐取 48 */
 #define REGION_ID_MAX   VT_NAME_CHARS   /* 旧名保留（全库沿用）：语义 = 字符数上限，别再当字节数用 */
 #define MAX_OPS        16        /* 操作条数上限 */
-#define MAX_STEPS      64        /* 单条操作步骤数上限（v12 起 32→64，OPS_PLAN_V6 §3.5） */
+#define MAX_STEPS      512       /* 单条操作步骤数上限（v13 起 64→512；区 B 同步放宽二十页） */
 #define OP_NAME_MAX     VT_NAME_CHARS   /* 操作名字符数上限（同区域 id 规则） */
 #define OP_STEP_TAP    1         /* 步骤类型：点按 */
 #define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */

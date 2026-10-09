@@ -105,11 +105,11 @@
 - Consumes: spec §3.2 字段映射（与核心同尺，逐字段镜像）。
 - Produces: `Ops.T_LOOP=12 … T_CONT=18` 常量、扩展的 `Ops.validate`、测试台新检查「控制流模型」—— Task 4 复用。
 
-- [ ] **Step 1: 备份** `app/src → src.bak-v15`。
-- [ ] **Step 2: Ops.java 模型层。** `MAX_STEPS 64`；常量 `T_LOOP..T_CONT`；`typeName()` 加 7 个名字（循环/循环结束/条件块/否则/条件块结束/跳出循环/继续循环）；`Step.summary()` 新分支（如 `循环 · 持续 30 分钟` / `如果 · 找图 t1` / `结束循环` / `跳出循环`）；`parseStep` 的 raw 边界 `>11 → >18`；`serialize` 核对（type 数字照写，无分支改动）；`validate` 加结构校验（镜像 Task 1 Step 4：配对/深度/17-18/跨块跳/字段域，文案同词表）。
-- [ ] **Step 3: TestBench 新检查「控制流模型」。** 断言组：a) 往返（含块 conf：parse → serialize → 再 parse，字段逐项一致）；b) validate 正例过；c) 未闭合 / 交叉嵌套 / 跳出悬空 / 跨块跳 各拒；d) 深度 9 拒；e) 字段域（次数 0 拒；时长 86400001 拒）。
-- [ ] **Step 4: 构建装测。** `bash ~/vtouch-editor/build.sh` → `su -c 'pm install -r …'` → force-stop → 测试台全绿（63 → +1 项）。
-- [ ] **Step 5: 存档。** out/vtouch-editor.apk 照录；进度记账。
+- [x] **Step 1: 备份** `app/src → src.bak-v15`。
+- [x] **Step 2: Ops.java 模型层。** `MAX_STEPS 64`；常量 `T_LOOP..T_CONT`；`typeName()` 加 7 个名字（循环/循环结束/条件块/否则/条件块结束/跳出循环/继续循环）；`Step.summary()` 新分支（如 `循环 · 持续 30 分钟` / `如果 · 找图 t1` / `结束循环` / `跳出循环`）；`parseStep` 的 raw 边界 `>11 → >18`；`serialize` 核对（type 数字照写，无分支改动）；`validate` 加结构校验（镜像 Task 1 Step 4：配对/深度/17-18/跨块跳/字段域，文案同词表）。
+- [x] **Step 3: TestBench 新检查「控制流模型」。** 断言组：a) 往返（含块 conf：parse → serialize → 再 parse，字段逐项一致）；b) validate 正例过；c) 未闭合 / 交叉嵌套 / 跳出悬空 / 跨块跳 各拒；d) 深度 9 拒；e) 字段域（次数 0 拒；时长 86400001 拒）。
+- [x] **Step 4: 构建装测。** `bash ~/vtouch-editor/build.sh` → `su -c 'pm install -r …'` → force-stop → 测试台全绿（63 → +1 项）。
+- [x] **Step 5: 存档。** out/vtouch-editor.apk 照录；进度记账。
 
 ## Task 4：app 编辑器 · 形态 C（P3）
 
@@ -120,14 +120,14 @@
 - Consumes: Task 3 的 `Ops.T_*` 与 validate。
 - Produces: 块编辑 UI 全部入口（用户可见面）。
 
-- [ ] **Step 1: Ui 色带件。** 循环块 = 琥珀 6% 叠色底 + 左 3dp 色条；条件块 = slate 4% 底 + 左条；嵌套叠深。块头/尾行文本件。
-- [ ] **Step 2: StepEdit 块渲染 + 属性编辑。** 块头行（类型 + 参数摘要，琥珀粗体）；点击块头 → 属性编辑器：循环（模式 Seg [次数/时长/无限/到条件] + 值数字步进；时长按分钟输入、存 ms）；到条件/条件块 = 判定编辑（复用四类判定组件）。
-- [ ] **Step 3: OpsPage 交互。** 块头 [＋] = 块尾插步；块尾 [✕] = 删整块（确认）；[↕ 移动] 支持"移出块"；bottomBar 语境（未选中→操作末尾；选中块→进该块）。
-- [ ] **Step 4: StepFlow 块树。** 缩进 + 色条，与编辑页一致。
-- [ ] **Step 5: TestBench。** 渲染件 `edit_ops_flow.png`（普通+嵌套）/ `edit_ops_nested.png`（选中态）；关键文本断言；双档溢出核（竖/横）；块编辑流断言（加块/改模式/进块加步/删块，API 直驱）。
-- [ ] **Step 6: impeccable 流程。** `impeccable context` → 按 `reference/layout.md + craft-floor.md + android.md` 设计审查 → 实现 → `impeccable detect --json <改动文件>` 期望净。
-- [ ] **Step 7: 构建装测 + 渲染目检。**（拉渲染件人工/vision 检查）→ 预留用户上机手测点。
-- [ ] **Step 8: 存档。** 备份 `src.bak-v15` 保持；APK 存档。
+- [x] **Step 1: Ui 色带件。** 循环块 = 琥珀 6% 叠色底 + 左 3dp 色条；条件块 = slate 4% 底 + 左条；嵌套叠深。块头/尾行文本件。
+- [x] **Step 2: StepEdit 块渲染 + 属性编辑。** 块头行（类型 + 参数摘要，琥珀粗体）；点击块头 → 属性编辑器：循环（模式 Seg [次数/时长/无限/到条件] + 值数字步进；时长按分钟输入、存 ms）；到条件/条件块 = 判定编辑（复用四类判定组件）。
+- [x] **Step 3: OpsPage 交互。** 块头 [＋] = 块尾插步；块尾 [✕] = 删整块（确认）；[↕ 移动] 支持"移出块"；bottomBar 语境（未选中→操作末尾；选中块→进该块）。
+- [x] **Step 4: StepFlow 块树。** 缩进 + 色条，与编辑页一致。
+- [x] **Step 5: TestBench。** 渲染件 `edit_ops_flow.png`（普通+嵌套）/ `edit_ops_nested.png`（选中态）；关键文本断言；双档溢出核（竖/横）；块编辑流断言（加块/改模式/进块加步/删块，API 直驱）。
+- [x] **Step 6: impeccable 流程。** `impeccable context` → 按 `reference/layout.md + craft-floor.md + android.md` 设计审查 → 实现 → `impeccable detect --json <改动文件>` 期望净。
+- [x] **Step 7: 构建装测 + 渲染目检。**（拉渲染件人工/vision 检查）→ 预留用户上机手测点。
+- [x] **Step 8: 存档。** 备份 `src.bak-v15` 保持；APK 存档。
 
 ## Task 5：端到端 + 回归 + 文档（P4）
 

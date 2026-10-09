@@ -906,7 +906,7 @@ static void load_regions(void)
  * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
 #define OPS_CONF_VER  5
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
-#define OPS_MAX_STEPS 64        /* 同核心 MAX_STEPS（v12 起 64；面板不 include 核心头，独立定义） */
+#define OPS_MAX_STEPS 512       /* 同核心 MAX_STEPS（v13 起 512；面板不 include 核心头，独立定义） */
 #define OPS_EXPR_MAX  63        /* 计算步表达式上限（同核心 VT_EXPR_MAX；conf 第 10 字段按它定宽） */
 static_assert(OPS_EXPR_MAX == VT_EXPR_MAX, "同核心 VT_EXPR_MAX");
 
