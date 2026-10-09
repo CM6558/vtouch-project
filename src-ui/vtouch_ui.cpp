@@ -126,6 +126,8 @@ int  vtouch_op_count(void);
 /* v6D 提示通道（契约 v14）：取序号 / 认领一条新提示（文本 + 时长 ms）。 */
 unsigned vtouch_toast_seq(void);
 int  vtouch_toast_take(char *buf, int cap, int *ms);
+unsigned vtouch_hl_seq(void);
+int  vtouch_hl_take(char *id, int cap, int *ms);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
                         int *j1, int *j2, char *expr, int exprn);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL）；expr = 计算步表达式（v5；可 NULL） */
@@ -3318,6 +3320,70 @@ static void draw_toast(float sw, float sh)
     dl->AddText(ImVec2(x, y), IM_COL32(244, 246, 248, alpha), t_text);
 }
 
+/* v6E：框区域高亮（核心 → 状态块 hl 通道，契约 v15）：琥珀描边 + 12% 填充 + 呼吸脉冲 + 左上 id 小标签；
+ * 末 300ms 淡出；**不经「显隐」闸**（隐=只看到高亮框，显=叠在常规描边上）。含停用区域（要看的就是它）。 */
+static void draw_region_hl(float sw, float sh)
+{
+    static char h_id[VT_NAME_BUF];
+    static long h_until = 0;
+    char buf[VT_NAME_BUF];
+    int  ms = 0;
+    if (vtouch_hl_take(buf, (int)sizeof buf, &ms)) {
+        snprintf(h_id, sizeof h_id, "%s", buf);
+        h_until = now_ms() + (long)((ms > 0) ? ms : 3000);
+        ui_glyph_scan(h_id);
+    }
+    (void)sw; (void)sh;
+    if (!h_id[0]) return;
+    long now = now_ms();
+    if (now >= h_until) { h_id[0] = 0; return; }
+    long rem = h_until - now;
+    int alpha = 255;
+    if (rem < 300) alpha = (int)(255 * rem / 300);
+    float ph = (float)(now % 1100) / 1100.0f;                    /* 呼吸脉冲：0.6..1.0（约 1.1s 周期） */
+    float pulse = 0.6f + 0.4f * (0.5f - 0.5f * cosf(ph * 6.2831853f));
+    int n = vtouch_region_count();
+    for (int i = 0; i < n; i++) {
+        char id[VT_NAME_BUF]; int type, a1, a2, a3, a4, en;
+        if (vtouch_get_region(i, id, sizeof id, &type, &a1, &a2, &a3, &a4, &en) != 0) continue;
+        if (strcmp(id, h_id) != 0) continue;
+        /* 换算同 build_overlay：区域存竖屏坐标；rot 90/270 矩形两角取 min/max，圆只换算圆心 */
+        {
+            int ux1, uy1, ux2, uy2;
+            p2c(a1, a2, &ux1, &uy1);
+            if (type == 1) { a1 = ux1; a2 = uy1; }
+            else {
+                p2c(a3, a4, &ux2, &uy2);
+                a1 = ux1 < ux2 ? ux1 : ux2; a2 = uy1 < uy2 ? uy1 : uy2;
+                a3 = ux1 < ux2 ? ux2 : ux1; a4 = uy1 < uy2 ? uy2 : uy1;
+            }
+        }
+        ImVec2 p0 = (type == 1 ? ImVec2((float)(a1 - a3), (float)(a2 - a3))
+                               : ImVec2((float)a1, (float)a2));
+        ImVec2 p1 = (type == 1 ? ImVec2((float)(a1 + a3), (float)(a2 + a3))
+                               : ImVec2((float)a3, (float)a4));
+        ImU32 col = IM_COL32(232, 177, 79, (int)(alpha * (0.55f + 0.45f * pulse)));          /* 琥珀 E8B14F */
+        ImU32 fil = IM_COL32(232, 177, 79, (int)(alpha * 0.12f * (0.6f + 0.4f * pulse)));    /* 12% 底 */
+        int lw = (int)(5.0f + 2.0f * pulse + 0.5f);                                          /* 5..7 描边（脉冲） */
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        if (type == 1) {
+            dl->AddCircleFilled(ImVec2((float)a1, (float)a2), (float)(a3 + 2), fil);
+            dl->AddCircle(ImVec2((float)a1, (float)a2), (float)a3, col, 64, (float)lw);
+        } else {
+            dl->AddRectFilled(p0, p1, fil, 4.0f);
+            dl->AddRect(p0, p1, col, 4.0f, 0, (float)lw);
+        }
+        /* 左上 id 小标签（深底白字；默认贴框左上外侧，顶到屏幕上沿则改贴内侧） */
+        ImVec2 ts2 = ImGui::CalcTextSize(id);
+        float lx = p0.x, ly = p0.y - ts2.y - 8.0f;
+        if (ly < 4.0f) ly = p0.y + 4.0f;
+        dl->AddRectFilled(ImVec2(lx - 6, ly - 3), ImVec2(lx + ts2.x + 6, ly + ts2.y + 3),
+                          IM_COL32(16, 18, 20, (int)(0.74f * alpha)), 6.0f);
+        dl->AddText(ImVec2(lx, ly), IM_COL32(244, 246, 248, alpha), id);
+        break;
+    }
+}
+
 /* 单帧：事件 API 喂输入 → 单 NewFrame → 双内容 → 提交 */
 static void draw_frame(int sw, int sh)
 {
@@ -3350,6 +3416,7 @@ static void draw_frame(int sw, int sh)
     if (g_ov_show) build_overlay(sw, sh);
     build_panel();                         /* 缩编 v0.5：采集覆盖层/编辑层已删，只剩叠加层 + 面板 */
     draw_toast((float)sw, (float)sh);      /* v6D：提示浮层（核心 toast 通道） */
+    draw_region_hl((float)sw, (float)sh);  /* v6E：框区域高亮（核心 hl 通道；不经显隐闸） */
     ImGui::Render();
     if (g_mdown && g_mup_pend) { g_mdown = 0; g_mup_pend = 0; g_mslot = -1; }
     glViewport(0, 0, sw, sh);

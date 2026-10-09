@@ -160,6 +160,8 @@ int vtouch_op_count(void) { seed_ops(); return ON; }
 
 unsigned vtouch_toast_seq(void) { return 0; }
 int vtouch_toast_take(char *buf, int cap, int *ms) { (void)buf; (void)cap; (void)ms; return 0; }
+unsigned vtouch_hl_seq(void) { return 0; }
+int vtouch_hl_take(char *id, int cap, int *ms) { (void)id; (void)cap; (void)ms; return 0; }
 
 int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff)
 {

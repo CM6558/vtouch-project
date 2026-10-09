@@ -448,6 +448,48 @@ int vtouch_toast_take(char *buf, int cap, int *ms)
 }
 
 /**
+ * (vtouch-doc: vtouch_hl_seq)
+ * @brief  框区域高亮序号（v6E 契约 v15；acquire 读；不含区域名）。
+ * @return 当前 hl_seq（0 = 从未有高亮）。
+ */
+unsigned vtouch_hl_seq(void)
+{
+    if (!S) return 0;
+    return __atomic_load_n(&S->hl_seq, __ATOMIC_ACQUIRE);
+}
+
+/**
+ * (vtouch-doc: vtouch_hl_take)
+ * @brief  认领一条新框区域高亮（v6E；seq 变化才认领：拷区域名 + 时长 ms；读期再变则重读最新）。
+ * @param   id       输出区域 id 缓冲
+ * @param   cap      缓冲容量
+ * @param   ms       输出显示时长 ms（0 = 面板用默认 3000）
+ * @return 1 = 有新高亮（已拷）；0 = 无新 / 未接共享内存。
+ */
+int vtouch_hl_take(char *id, int cap, int *ms)
+{
+    static uint32_t seen = 0;
+    uint32_t s1, s2;
+    int n, tries;
+    if (!S || !id || cap <= 0) return 0;
+    s1 = __atomic_load_n(&S->hl_seq, __ATOMIC_ACQUIRE);
+    if (s1 == 0 || s1 == seen) return 0;
+    n = 0;
+    for (tries = 0; tries < 3; tries++) {           /* 读期若又来新高亮 → 重读（最新覆盖） */
+        s2 = __atomic_load_n(&S->hl_seq, __ATOMIC_ACQUIRE);
+        n = (int)strnlen(S->hl_name, sizeof S->hl_name);
+        if (s2 == s1) break;
+        s1 = s2;
+    }
+    seen = s1;
+    if (n > cap - 1) n = cap - 1;
+    memcpy(id, S->hl_name, (size_t)n);
+    id[n] = 0;
+    if (ms) *ms = (int)S->hl_ms;
+    return 1;
+}
+
+/**
  * (vtouch-doc: vtouch_get_op)
  * @brief 取一条操作的元信息（名字 / 步数 / 门控 / 自动关；只读区 A）。
  * @param   i        操作下标（0..count-1）
