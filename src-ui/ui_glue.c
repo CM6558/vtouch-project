@@ -460,13 +460,18 @@ unsigned vtouch_hl_seq(void)
 
 /**
  * (vtouch-doc: vtouch_hl_take)
- * @brief  认领一条新框区域高亮（v6E；seq 变化才认领：拷区域名 + 时长 ms；读期再变则重读最新）。
- * @param   id       输出区域 id 缓冲
+ * @brief  认领一条新高亮（v6E/v6F；seq 变化才认领：kind〔0 区域名 / 1 矩形〕+ 区域名或四角 + 时长 ms；读期再变则重读最新）。
+ * @param   id       输出区域 id 缓冲（kind=0 用；kind=1 置空）
  * @param   cap      缓冲容量
+ * @param   kind     输出类型（0 = 区域名 / 1 = 矩形）
+ * @param   x1       输出矩形左上 x（kind=1；竖屏逻辑）
+ * @param   y1       输出矩形左上 y（kind=1）
+ * @param   x2       输出矩形右下 x（kind=1）
+ * @param   y2       输出矩形右下 y（kind=1）
  * @param   ms       输出显示时长 ms（0 = 面板用默认 3000）
  * @return 1 = 有新高亮（已拷）；0 = 无新 / 未接共享内存。
  */
-int vtouch_hl_take(char *id, int cap, int *ms)
+int vtouch_hl_take(char *id, int cap, int *kind, int *x1, int *y1, int *x2, int *y2, int *ms)
 {
     static uint32_t seen = 0;
     uint32_t s1, s2;
@@ -485,6 +490,11 @@ int vtouch_hl_take(char *id, int cap, int *ms)
     if (n > cap - 1) n = cap - 1;
     memcpy(id, S->hl_name, (size_t)n);
     id[n] = 0;
+    if (kind) *kind = (int)S->hl_kind;
+    if (x1) *x1 = (int)S->hl_x1;
+    if (y1) *y1 = (int)S->hl_y1;
+    if (x2) *x2 = (int)S->hl_x2;
+    if (y2) *y2 = (int)S->hl_y2;
     if (ms) *ms = (int)S->hl_ms;
     return 1;
 }

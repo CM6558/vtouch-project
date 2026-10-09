@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION 15u           /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION 16u           /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -53,7 +53,9 @@
                                       *      （核心写、面板读；渲染文本先写、release 存 seq）。
                                       * 15 = 框区域高亮通道（docs/OPS_PLAN_V6E.md）：状态块加 hl_seq/hl_name/hl_ms
                                       *      （核心写面板读；区域名先写、release 存 seq）。注：v14 提示通道当时注释
-                                      *      写了、define 漏 bump —— v15 一并生效。 */
+                                      *      写了、define 漏 bump —— v15 一并生效。
+                                      * 16 = 框矩形（docs/OPS_PLAN_V6F.md）：hl 通道泛化 —— 加 hl_kind
+                                      *      （0 区域名 / 1 矩形）+ hl_x1/hl_y1/hl_x2/hl_y2。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0

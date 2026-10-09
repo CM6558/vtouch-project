@@ -161,7 +161,8 @@ int vtouch_op_count(void) { seed_ops(); return ON; }
 unsigned vtouch_toast_seq(void) { return 0; }
 int vtouch_toast_take(char *buf, int cap, int *ms) { (void)buf; (void)cap; (void)ms; return 0; }
 unsigned vtouch_hl_seq(void) { return 0; }
-int vtouch_hl_take(char *id, int cap, int *ms) { (void)id; (void)cap; (void)ms; return 0; }
+int vtouch_hl_take(char *id, int cap, int *kind, int *x1, int *y1, int *x2, int *y2, int *ms)
+{ (void)id; (void)cap; (void)kind; (void)x1; (void)y1; (void)x2; (void)y2; (void)ms; return 0; }
 
 int vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff)
 {
