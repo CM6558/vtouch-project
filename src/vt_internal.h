@@ -112,6 +112,9 @@
                                   * 每块头合计（含头子句）≤ VT_CTRL_CLAUSE_MAX（v6B 拍板①） */
 #define OP_STEP_STOP        20   /* 终止（v6B §3.2）：a1=模式（0 完成收工〔op_finish：收尾释放+自动关照走〕/
                                   * 1 中止退出〔vt_ops_abort 原因词 `终止`〕）；其余字段 0/空 */
+#define OP_STEP_TOAST       21   /* 提示（v6D §3.1）：expr=模板（字面 + `{名}` 占位、`{{`/`}}` 转义、字节 ≤63）；
+                                  * ms=显示时长 0..60000（0 = 默认 2000）；其余字段 0/空。
+                                  * 运行时渲染 → 状态块 toast 通道（契约 v14）→ 面板顶部浮层；非阻塞单拍。 */
 #define VT_VIS_CAPTURE_TIMEOUT_MS 1000  /* 抓帧请求总超时（spec VISION §2.2；超时 → 中止 `无画面`） */
 #define VT_VIS_REUSE_MS     50   /* 一帧多步复用窗口（spec §9：同一帧 ≤50ms 内复用不重抓） */
 #define VT_VIS_PANEL_STALL_MS 3000  /* 「面板不在」判据：ui_hb 冻结 ≥3s（同 vt_panel.c 看门狗口径） */
@@ -305,6 +308,10 @@ struct vt_state {
      * dx/dy/ux/uy/ms = 触发按压的按下点 / 抬起点 / 时长（竖屏逻辑坐标与毫秒）。 */
     unsigned op_trig_mask;
     int op_trig_dx, op_trig_dy, op_trig_ux, op_trig_uy, op_trig_ms;
+    /* 提示通道（v6D；契约 v14）：核心写、面板读 —— 渲染文本先写、release 存 seq（面板 acquire 认领）。 */
+    volatile uint32_t toast_seq;                       /* 递增序号（0 = 从未有提示） */
+    char toast[256];                                   /* 渲染后文本（UTF-8、NUL 结尾；核心侧超长截断防御） */
+    int32_t toast_ms;                                  /* 显示时长 ms（0 = 面板用默认 2000；v6D 契约 v14） */
 };
 /* v11 名字扩位防漂断言：名字字段缓冲必须 = VT_NAME_BUF；vt_expr 名字表条宽必须对拍。 */
 _Static_assert(sizeof(((struct region *)0)->id) == VT_NAME_BUF, "region.id 须为 VT_NAME_BUF");

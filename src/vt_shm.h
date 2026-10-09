@@ -48,7 +48,9 @@
                                       * 12 = 控制流（docs/OPS_PLAN_V6.md）：step 类型扩 12..18（循环/条件块/跳出/继续）；
                                       *      MAX_STEPS 32→64 → vt_op 增大 → 三页（12288）；v13 步数
                                       *      64→512 → 二十页（81920）；v6B（docs/OPS_PLAN_V6B.md）同版扩
-                                      *      19 子条件 / 20 终止（行格式不变、无结构体变化）。 */
+                                      *      19 子条件 / 20 终止（行格式不变、无结构体变化）。
+                                      * 14 = 提示通道（docs/OPS_PLAN_V6D.md）：状态块加 toast_seq/toast[256]
+                                      *      （核心写、面板读；渲染文本先写、release 存 seq）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0

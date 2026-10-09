@@ -201,44 +201,54 @@ static int op_ctrl_cond_bad(int jtype, int px, int py, int kms,
     return 0;
 }
 
-/* 操作载荷校验（核心单点）：名字 / 步数 / 每步的类型、字段与引用逐条过门；
- * 不过就把一句人话写进 why（调用方拼成 `op 被拒 <名>: <原因>` 日志）。
- *
- * 规则出处（spec OPS_PLAN_V3 §6.3 / OPS_PLAN_V2 §1.4 / §2.1 / §3 / OPS_PLAN_V5 §4 / VISION §6.1；v11 名字口径见 docs/NAMING_V11_PLAN.md；v12 控制流见 docs/OPS_PLAN_V6.md §3.2/§3.4；v6B 补充见 docs/OPS_PLAN_V6B.md §3.1/§3.3）：名字与区域 id 同一把尺子
- * （vt_id_ok：UTF-8 可见字符 1..15 个、字节 ≤47；裸 `-` 除外）；步数 1..MAX_STEPS（v13 起 512）；类型 ∈ 1..20
- * （点按/滑动/等待/按下/弹起/区域判断/开关判断/跳转/计算/找图/找色 + 控制流结构行 12..19 + 终止 20，见下）。
- * 【允许变量的字段】坐标（点按 a1,a2；滑动 a1..a4；按下 a1,a2；区域判断 a1,a2）与时长
- * （点按/滑动/等待的 ms）：字面值（坐标 0..logical-1；时长——点按 0..60000（0 = 按下即抬）、
- * 滑动 1..60000（0 的滑动没有采样点）、等待 0..600000），或负数编码引用 -25..-1（-1..-5 = 触发变量、
- * -6/-7 = fx/fy、-8/-9 = 退役槽（悬空）、-10..-25 = 自定义变量索引 0..15；spec EDITOR_V2 §Task 7.5）
- * ——操作的手指是**注入**的，屏外的点没有意义：收下来也只是
- * 静默不命中，不如当场拒掉让面板报错。
- * 条件步（6/7）：两档位 a3/a4 ∈ 0..3（不成立侧/成立侧）；档位 = 跳转时该侧目标 ∈ 0..step_count
- * （0 = 结束、1..step_count = 目标步骤；j1 = 成立侧、j2 = 不成立侧），其余档位目标**忽略**（不校验、不拒收）；
- * ref 过 vt_id_ok（v11 名字规则）—— 存在性不校验（允许悬空，运行时按 `区域不存在` 收场，安全侧）。
- * 跳转步（8）：a1 ∈ 0..step_count（0 = 结束）；其余字段忽略。弹起（5）字段全忽略；其余步照 v2 不变。
- * 计算步（9，v10）：a1 ∈ 0..15（变量索引）；ref = 变量名（v11 起 UTF-8、1..15 字符，且必须等于
- * op->vars[a1] —— 名字表单源）；expr 非空、≤63、且过 vt_expr_check（名字表 = op->vars；不过 → 拒收
- * `表达式错: <why>`）；防御：a2..a4/ms/j1/j2 必须 0。
- * 变量名表（v10，op->vars[16]）：每项空（空槽）或合法名字；非空名字两两不同（同名 = 同一变量，表里只许一份）。
- * 视觉步（10/11，v8；T7.4 扩 ms）：字段映射照 spec VISION §6.1 定稿 —— 找图 ref=模板名（必填）、找色 ref=点集名
- * （多点必填、单点必空）、expr=区域名（空或 vt_id_ok 尺子；存在性不校验，运行时按 `区域不存在` 收场）、
- * 找图 a1=阈值 0..255、找色 a1=模式 0/1 且单点 a2=(颜色<<8)|容差（按无符号解读：打包域 = 全部 32 位，
- * 颜色高位使 int 为负 —— **不拒负值**，拒了会误杀纯红 0xFF0000 等）、多点 a2=0、a3/a4=不成立/成立档位（0..3）、
- * ms=0..60000（0 = 单次；>0 = 持续查找超时毫秒，T7.4）、j1/j2=该侧跳转目标（域同条件步）。
- * **其余所有类型**的 expr 必须为空（防御：非空 → 拒收 `表达式错`）——表达式只属于计算步、区域名只属于视觉步与
- * 控制流判定（12 模式 3 / 14 / 19），别让它们静默挂在别的步上（spec V5 §4 / VISION §6.1）。
- * 控制流（v12 + v6B，spec OPS_PLAN_V6 §3.2/§3.4 + OPS_PLAN_V6B §3.1/§3.3）：结构行 = 12 循环开始 / 13 循环结束 /
- * 14 条件块开始 / 15 否则 / 16 条件块结束 / 17 跳出 / 18 继续 / 19 子条件 —— 配对（12-13、14-16、15 归属 14 且每块
- * 至多一次）、嵌套 ≤ VT_CTRL_MAX_DEPTH(8)、17/18 必须位于某循环内（任意层嵌套的 12 均算）且 a1=层数 ≤ 当前循环
- * 嵌套深度（0 = 兼容旧数据视作 1；越界拒 `跳出层数非法`），循环/条件块头字段域见 §3.2（12：模式 0..3；模式 3 与
- * 14 的判定参数共用 op_ctrl_cond_bad；14.a4 / 12mode3.j2 / 19.j2 = 取反 0|1）；结构行（13/15/16）字段全 0/空。
- * 子条件链（v6B）：19 须紧跟 14 / 12 模式3 / 另一 19（链连续），每块头合计 ≤ VT_CTRL_CLAUSE_MAX(4) ——
- * 违者拒 `子条件位置错误` / `子条件超限`。含结构行时：8/6/7/10/11 的跳转目标不得跨越块边界（起点与目标的直接父块
- * 必须相同）且不得落在结构行（12..19）上；档位 = 跳过下一步时被跳过行同样受限 —— 均拒 `跳转跨越块边界`。
- * 终止（20）：a1=模式 0/1（完成收工 / 中止退出）；其余字段 0/空 —— 校验到此为止，执行语义见 op_finish / vt_ops_abort。
- * gate 只做终止符/长度防御（超长/未终止即拒）；存在性不校验 —— 允许悬空，起跑时解析不到就丢弃 + 日志（安全侧，见 spec §4.3）。
+/**
+ * (vtouch-doc: op_toast_tpl_bad)
+ * @brief 提示模板校验（v6D §3.1）：字面文本 + `{名}` 占位（`{{`/`}}` 转义；占位 ≤16；名 ∈ 预置 7 + vars 表）。
+ * @param   tpl      模板文本（NUL 结尾）
+ * @param   names    自定义变量名表（op->vars，OP_VAR_IDX_N 行 × VT_NAME_BUF）
+ * @param   why      拒收原因输出
+ * @param   whycap   输出上限
+ * @return  0 通过；1 = 已把完整原因（含 `模板错: ` 前缀）写进 why。
+ * @note    预置名 = tdx/tdy/tux/tuy/tms/fx/fy（全小写精确匹配）；单个 `}` = 字面；字节 ≤ VT_EXPR_MAX(63)。
  */
+static int op_toast_tpl_bad(const char *tpl, const char (*names)[VT_NAME_BUF], char *why, size_t whycap)
+{
+    static const char *const pre[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
+    size_t len = strnlen(tpl, VT_EXPR_MAX + 1);
+    int nph = 0;
+    size_t i = 0;
+    if (len == 0) { snprintf(why, whycap, "模板错: 模板为空"); return 1; }
+    if (len > VT_EXPR_MAX) { snprintf(why, whycap, "模板错: 超长（≤ %d 字节）", VT_EXPR_MAX); return 1; }
+    while (i < len) {
+        char ch = tpl[i];
+        if (ch == '{') {
+            size_t j;
+            if (i + 1 < len && tpl[i + 1] == '{') { i += 2; continue; }      /* `{{` 转义 → 字面 `{` */
+            j = i + 1;
+            while (j < len && tpl[j] != '}') j++;
+            if (j >= len) { snprintf(why, whycap, "模板错: 未闭合的 {"); return 1; }
+            {
+                size_t nl = j - (i + 1);
+                char nm[VT_NAME_BUF];
+                int k, hit = 0;
+                if (nl == 0 || nl >= sizeof nm) { snprintf(why, whycap, "模板错: 占位名为空或过长"); return 1; }
+                memcpy(nm, tpl + i + 1, nl); nm[nl] = 0;
+                for (k = 0; k < 7; k++) if (strcmp(nm, pre[k]) == 0) { hit = 1; break; }
+                if (!hit) for (k = 0; k < OP_VAR_IDX_N; k++)
+                    if (names[k][0] && strcmp(nm, names[k]) == 0) { hit = 1; break; }
+                if (!hit) { snprintf(why, whycap, "模板错: 未知变量 %s", nm); return 1; }
+                if (++nph > 16) { snprintf(why, whycap, "模板错: 占位超限（≤ 16）"); return 1; }
+            }
+            i = j + 1;
+        } else if (ch == '}' && i + 1 < len && tpl[i + 1] == '}') {
+            i += 2;                                                          /* `}}` 转义 → 字面 `}` */
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
 static int op_valid(const struct vt_op *op, char *why, size_t whycap)
 {
     int i, k;
@@ -369,10 +379,11 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     }
     for (i = 0; i < op->step_count; i++) {
         const struct vt_step *st = &op->steps[i];
-        /* v5/v8 防御：表达式只属于计算步、区域名只属于视觉步/控制流判定 —— 其余类型带 expr 一律拒收 `表达式错`。 */
+        /* v5/v8/v6D 防御：表达式只属于计算步、区域名只属于视觉步/控制流判定、提示模板只属于提示步 ——
+         * 其余类型带 expr 一律拒收 `表达式错`。 */
         if (st->type != OP_STEP_CALC && st->type != OP_STEP_FINDIMAGE &&
             st->type != OP_STEP_FINDCOLOR && st->type != OP_STEP_LOOP && st->type != OP_STEP_IF &&
-            st->type != OP_STEP_CLAUSE &&
+            st->type != OP_STEP_CLAUSE && st->type != OP_STEP_TOAST &&
             st->expr[0] != 0) {
             snprintf(why, whycap, "表达式错");
             return 0;
@@ -691,6 +702,22 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
                 return 0;
             }
             break;
+        case OP_STEP_TOAST: {                    /* 提示（v6D §3.1）：expr=模板；ms=显示时长 0..60000；余字段 0/空 */
+            char tw[96];
+            if (st->a1 || st->a2 || st->a3 || st->a4 || st->j1 || st->j2 || st->ref[0] != 0) {
+                snprintf(why, whycap, "第 %d 步字段必须为 0", i + 1);
+                return 0;
+            }
+            if (st->ms < 0 || st->ms > 60000) {
+                snprintf(why, whycap, "第 %d 步时长越界", i + 1);
+                return 0;
+            }
+            if (op_toast_tpl_bad(st->expr, (const char (*)[VT_NAME_BUF])op->vars, tw, sizeof tw)) {
+                snprintf(why, whycap, "第 %d 步%s", i + 1, tw);
+                return 0;
+            }
+            break;
+        }
         default:
             snprintf(why, whycap, "第 %d 步类型非法", i + 1);
             return 0;
@@ -2022,10 +2049,76 @@ void vt_ops_test_poll(void)
     __atomic_store_n(&h->test_res_seq, req, __ATOMIC_RELEASE);   /* 结果先写、seq 最后 release（契约） */
 }
 
-/* 起一步：按住期门禁（持有中只允许 等待 / 弹起（及条件步 / 跳转 / 计算 / 视觉步）；点按 / 滑动 / 按下 →
- * 中止 `槽占用`）+ 解析本步数值字段（字面值 / 负数编码引用；变量无值 → 中止 `变量无值`、
- * 变量未写 → 中止 `结果无值`）+ 打步日志 + 发这一步的起始动作（点按 / 滑动 / 按下先 down；
- * 弹起 up；等待 / 条件步 / 跳转 / 计算 / 视觉步不动手）。 */
+/**
+ * (vtouch-doc: op_toast_render)
+ * @brief 提示文本渲染（v6D §3.2）：模板 → out（NUL 结尾；超长截断防御、按 UTF-8 整字符拷贝）。
+ * @param   tpl      模板文本（已过 op_toast_tpl_bad）
+ * @param   out      输出缓冲
+ * @param   cap      缓冲大小（建议 ≥256）
+ * @return  0 渲染完成；-1 = 引用变量无值（已 vt_ops_abort：触发数据 `变量无值` / fx·fy·自定义 `结果无值`）。
+ * @note    值口径：预置按 R.trig.mask / R.res_mask、自定义按 R.vmask（名字快照 R.vnames）；值 = llround + int 夹取（同计算步口径）。
+ */
+static int op_toast_render(const char *tpl, char *out, size_t cap)
+{
+    static const char *const pre[7] = { "tdx", "tdy", "tux", "tuy", "tms", "fx", "fy" };
+    size_t len = strnlen(tpl, VT_EXPR_MAX + 1), i = 0, o = 0;
+    while (i < len) {
+        char ch = tpl[i];
+        if (ch == '{' && i + 1 < len && tpl[i + 1] == '{') {        /* `{{` → 字面 `{` */
+            if (o + 1 < cap) out[o++] = '{';
+            i += 2; continue;
+        }
+        if (ch == '}' && i + 1 < len && tpl[i + 1] == '}') {        /* `}}` → 字面 `}` */
+            if (o + 1 < cap) out[o++] = '}';
+            i += 2; continue;
+        }
+        if (ch == '{') {                                            /* `{名}` 占位取值 */
+            size_t j = i + 1;
+            char nm[VT_NAME_BUF];
+            double dv = 0;
+            int k, idx;
+            while (j < len && tpl[j] != '}') j++;
+            { size_t nl = j - (i + 1); memcpy(nm, tpl + i + 1, nl); nm[nl] = 0; }
+            for (k = 0; k < 7; k++) if (strcmp(nm, pre[k]) == 0) break;
+            if (k < 7) {                                            /* 预置：-1..-5 触发数据 / fx·fy 视觉结果 */
+                if (k < 5) {
+                    if (!(R.trig.mask & (1u << k))) { vt_ops_abort("变量无值"); return -1; }
+                    dv = (k == 0) ? (double)R.trig.dx : (k == 1) ? (double)R.trig.dy :
+                         (k == 2) ? (double)R.trig.ux : (k == 3) ? (double)R.trig.uy : (double)R.trig.ms;
+                } else {
+                    if (!R.res_mask) { vt_ops_abort("结果无值"); return -1; }
+                    dv = (k == 5) ? R.fx : R.fy;
+                }
+            } else {                                                /* 自定义变量（名字快照） */
+                for (idx = 0; idx < OP_VAR_IDX_N; idx++)
+                    if (R.vnames[idx][0] && strcmp(nm, R.vnames[idx]) == 0) break;
+                if (idx >= OP_VAR_IDX_N || !(R.vmask & (1u << idx))) { vt_ops_abort("结果无值"); return -1; }
+                dv = R.vvals[idx];
+            }
+            {
+                int v;
+                char numbuf[16];
+                int nl;
+                if (dv < (double)INT_MIN) dv = INT_MIN;             /* 先夹 int 域再取整（同计算步口径） */
+                else if (dv > (double)INT_MAX) dv = INT_MAX;
+                v = (int)llround(dv);
+                nl = snprintf(numbuf, sizeof numbuf, "%d", v);
+                for (k = 0; k < nl; k++) if (o + 1 < cap) out[o++] = numbuf[k];
+            }
+            i = j + 1;
+        } else {                                                    /* 字面：整字符拷贝（防截断劈开 UTF-8） */
+            int cl = 1;
+            unsigned char u = (unsigned char)ch;
+            if (u >= 0xF0) cl = 4; else if (u >= 0xE0) cl = 3; else if (u >= 0xC0) cl = 2;
+            if (i + (size_t)cl > len) cl = 1;                       /* 防御非法尾（已过校验，正常不会） */
+            if (o + (size_t)cl < cap) { memcpy(out + o, tpl + i, (size_t)cl); o += (size_t)cl; }
+            i += (size_t)cl;
+        }
+    }
+    out[o] = 0;
+    return 0;
+}
+
 static void op_begin_step(void)
 {
     const struct vt_step *st;
@@ -2341,6 +2434,19 @@ static void op_begin_step(void)
             fprintf(stderr, "vtouchd: op 终止 %s 第 %d 步 → %s\n", R.name, R.step + 1, st->a1 == 0 ? "完成" : "中止");
         if (st->a1 == 0) op_finish();
         else vt_ops_abort("终止");
+        break;
+    }
+    case OP_STEP_TOAST: {                                    /* 提示（v6D §3.2）：渲染 → 状态块（文本先写、seq release 后写）→ 面板浮层；单拍不阻塞 */
+        char tbuf[256];
+        if (op_toast_render(st->expr, tbuf, sizeof tbuf) != 0)
+            return;                                          /* 缺值已中止（口径见 op_toast_render） */
+        memcpy(g.toast, tbuf, sizeof g.toast);
+        g.toast[sizeof g.toast - 1] = 0;
+        g.toast_ms = st->ms;
+        __atomic_store_n(&g.toast_seq, (uint32_t)g.toast_seq + 1u, __ATOMIC_RELEASE);
+        fprintf(stderr, "vtouchd: op 提示 %s\n", tbuf);
+        R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
+        R.deadline = R.t0;
         break;
     }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
