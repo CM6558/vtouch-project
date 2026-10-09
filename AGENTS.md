@@ -63,7 +63,7 @@ su -c 'cd /data/local/tmp && nohup ./vtouchd_ui >/data/local/tmp/vt_ui_core.log 
 - 面板目录：`/data/local/tmp/vtouch-ui/`（核心每次启动**无条件**覆盖解包，日志 `面板自解包 <名> <字节> fnv=`）。
 - 区域表落盘：`/data/local/vtouch-runtime/regions.conf`（重启保留；含触发绑定 `bind` / 开关型 `kind` 增量行）。
 - 操作表落盘：`/data/local/vtouch-runtime/ops.conf`（`#vtouch-ops v5`：step 行固定 10 字段（末位 `expr`）、ref/expr 空写 `-`；读端兼容 v1/v2/v3/v4（v4 缺 `expr` → 视为 `-`）并按类型感知翻译；面板编辑后存，启动只补缺）。
-- 控制流类型口径（v12+ / v6B / v6C）：12/13 循环、14/15/16 条件块、17 跳出 / 18 继续（可 N 层）、19 子条件、20 终止；判定类型 0 区域 / 1 开关 / 2 找图 / 3 找色 / 4 变量比较（v6C：变量 vs 参照值，比较符 `j1` = 0..5 → `> < ≥ ≤ = ≠`）；21 提示（v6D：模板 `{名}` 引用变量 → 面板顶部浮层显示，ms=显示时长）。细节以 `docs/OPS_PLAN_V6B.md` / `OPS_V6B_ACCEPTANCE.md` 与 V6C 口径为准。
+- 控制流类型口径（v12+ / v6B / v6C）：12/13 循环、14/15/16 条件块、17 跳出 / 18 继续（可 N 层）、19 子条件、20 终止；判定类型 0 区域 / 1 开关 / 2 找图 / 3 找色 / 4 变量比较（v6C：变量 vs 参照值，比较符 `j1` = 0..5 → `> < ≥ ≤ = ≠`）；21 提示（v6D：模板 `{名}` 引用变量 → 面板顶部浮层显示，ms=显示时长）；22 框区域（v6E：ref=区域 id → 面板琥珀高亮框 + 区域名，ms=显示时长；不经「区域显隐」闸）。细节以 `docs/OPS_PLAN_V6B.md` / `OPS_V6B_ACCEPTANCE.md` 与 V6C 口径为准。
 - 方案落盘：`/data/local/vtouch-runtime/schemes/<名>/{regions.conf,ops.conf}` + `current`（一行方案名）；live 两文件与 `schemes/<current>/` 内容恒等（`live == schemes/<current>` 不变量 —— 启动强制同步 + 编辑保存镜像 + 切换直写共同保证）；首启把既有 live 收进「默认」（名字冲突自增 `默认2 / 默认3 …`）。
 - WebSocket：`ws://127.0.0.1:27183`（loopback，单客户端，新连接踢旧连接；通用接口，仓库无内置客户端）。
 - **没有开机自启**（按用户口径不做）；手机重启后需要重新起核心。
