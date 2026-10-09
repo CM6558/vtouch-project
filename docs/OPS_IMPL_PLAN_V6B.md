@@ -1,5 +1,7 @@
 # OPS_V6B 实施计划 —— 控制流补齐（核心 → 面板零改 → app）
 
+> **状态：Task 1–5 全部完成，真机验收全过（2026-10-09 晚）**——验收记录 `OPS_V6B_ACCEPTANCE.md`（P0 9/9 + P1 逐项过）；核心 97880366 / 编辑器 v23 已部署；编辑器侧上机手测挂账。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:executing-plans（已拍板 **Native 逐任务**，2026-10-09 用户「开始」按 §6 推荐默认全通过）。任务按序执行；每步 checkbox 跟踪，任务完成 = 末步验收全过。
 > 账本：`~/vtouch-editor/.v6b-progress.md`（每任务一行 + Ruling 行）。
 
