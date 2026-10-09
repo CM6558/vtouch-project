@@ -44,18 +44,18 @@
 **Interfaces:**
 - Produces: `OP_STEP_LOOP=12 / OP_STEP_ENDLOOP=13 / OP_STEP_IF=14 / OP_STEP_ELSE=15 / OP_STEP_ENDIF=16 / OP_STEP_BREAK=17 / OP_STEP_CONT=18`、`VT_CTRL_MAX_DEPTH 8`、`MAX_STEPS 64`、`VT_SHM_VERSION 12` —— 后续所有任务引用这些名字。
 
-- [ ] **Step 1: vt_internal.h 常量。** MAX_STEPS 32→64；`OP_STEP_FINDCOLOR 11` 后追加 7 个类型常量（每行注释指向 `OPS_PLAN_V6 §3.2`，字段摘要一行）；`VT_OPS_JUMP_MAX` 旁加 `#define VT_CTRL_MAX_DEPTH 8 /* 控制流块最大嵌套深度（OPS_PLAN_V6 §3.4） */`；vt_step 类型枚举注释补"12..18 = 控制流（OPS_PLAN_V6 §3.2）"。
-- [ ] **Step 2: vt_shm.h。** `VT_SHM_VERSION 11u → 12u`（注释链补"12 = 控制流块（steps 64）"）；区 B `_Static_assert` 8192→12288、上方注释同步（"装进三页"）。
-- [ ] **Step 3: 面板常量。** `src-ui/vtouch_ui.cpp:909` `OPS_MAX_STEPS 32→64`（含注释）。
-- [ ] **Step 4: op_valid 结构校验。** 按 spec §3.4 在 `op_valid` 里实现（单次预扫描 + 局部栈）：
+- [x] **Step 1: vt_internal.h 常量。** MAX_STEPS 32→64；`OP_STEP_FINDCOLOR 11` 后追加 7 个类型常量（每行注释指向 `OPS_PLAN_V6 §3.2`，字段摘要一行）；`VT_OPS_JUMP_MAX` 旁加 `#define VT_CTRL_MAX_DEPTH 8 /* 控制流块最大嵌套深度（OPS_PLAN_V6 §3.4） */`；vt_step 类型枚举注释补"12..18 = 控制流（OPS_PLAN_V6 §3.2）"。
+- [x] **Step 2: vt_shm.h。** `VT_SHM_VERSION 11u → 12u`（注释链补"12 = 控制流块（steps 64）"）；区 B `_Static_assert` 8192→12288、上方注释同步（"装进三页"）。
+- [x] **Step 3: 面板常量。** `src-ui/vtouch_ui.cpp:909` `OPS_MAX_STEPS 32→64`（含注释）。
+- [x] **Step 4: op_valid 结构校验。** 按 spec §3.4 在 `op_valid` 里实现（单次预扫描 + 局部栈）：
   - 预扫：`depth`、块头栈 `[VT_CTRL_MAX_DEPTH]`、每步 `parent[i]`（直接父块头索引，-1=顶层）、`hasBlocks` 标记。12/14 push（depth>8 → 拒 `嵌套超深`）；13 pop（顶非 12 → `块配对错误`）；15（顶非 14、或重复 else → `块配对错误`）；16 pop（顶非 14 → `块配对错误`）；17/18（栈内无 12 → `跳出不在循环内`）；扫毕栈非空 → `循环未闭合`。文案带步号（`第 N 步 …`）。
   - `hasBlocks` 时：跳转步（8）目标、条件步（6/7）档位=跳转时 j1/j2、以及档位=跳过下一步（1）的被跳过行（`i+1<n` 时）——目标/被跳过行是结构行（12..18）或 `parent` 与起点不同 → 拒 `跳转跨越块边界`。（目标 0=结束不受限。）
   - 字段域（spec §3.2 表）：12（模式 0..3；模式 0：a2∈1..99999 且余字段空；模式 1：a2∈1000..86400000；模式 2：全 0；模式 3：判定类型/参数按表域）、13/17/18（全 0/空）、14（类型 0..3 + 参数域）、15/16（全 0/空）。
-- [ ] **Step 5: funcdoc。** 更新 `scripts/funcdoc_data.py` 中 `op_valid` 文案（类型清单 1..18）；`python3 scripts/apply_funcdoc.py` → 复跑 `--check` 期望"共调整 0 处"。
-- [ ] **Step 6: 构建门。** a) `sh ~/vtouch-devbuild.sh` 绿；b) 默认核心命令（见 Global Constraints）构建绿，md5 与改动前基线对比并**记录差异原因**（共享头 MAX_STEPS 所致，预期）。
-- [ ] **Step 7: 部署。** 查前台 → `pack_su.py` → `su cp` 到 `/sdcard/vtouch.sh` → `sh /sdcard/vtouch.sh stop` → `status` → `start`；核对新面板自解包日志与 `engine=on`。
-- [ ] **Step 8: P0 验收（备份-测试-还原）。** a) 备份 `ops.conf → ops.conf.bak-planv6`；b) 追加 5 条测试操作：`zt1`（正例：循环×2 含等待）、`zt2`（未闭合）、`zt3`（交叉嵌套）、`zt4`（跳出悬空）、`zt5`（跨块跳）；c) `su -c 'touch ops.conf'` 热载；d) 日志核：zt1 `op 编辑 put`、zt2..5 各一条 `op 被拒`（原因词：循环未闭合/块配对错误/跳出不在循环内/跳转跨越块边界）；e) **还原备份** + touch 热载 + 确认全量恢复（回归：无拒收）。
-- [ ] **Step 9: 提交。** `git add -A && git commit -m "feat(core): 契约 v12 + 控制流校验层（类型 12..18）"`。
+- [x] **Step 5: funcdoc。** 更新 `scripts/funcdoc_data.py` 中 `op_valid` 文案（类型清单 1..18）；`python3 scripts/apply_funcdoc.py` → 复跑 `--check` 期望"共调整 0 处"。
+- [x] **Step 6: 构建门。** a) `sh ~/vtouch-devbuild.sh` 绿；b) 默认核心命令（见 Global Constraints）构建绿，md5 与改动前基线对比并**记录差异原因**（共享头 MAX_STEPS 所致，预期）。
+- [x] **Step 7: 部署。** 查前台 → `pack_su.py` → `su cp` 到 `/sdcard/vtouch.sh` → `sh /sdcard/vtouch.sh stop` → `status` → `start`；核对新面板自解包日志与 `engine=on`。
+- [x] **Step 8: P0 验收（备份-测试-还原）。** a) 备份 `ops.conf → ops.conf.bak-planv6`；b) 追加 5 条测试操作：`zt1`（正例：循环×2 含等待）、`zt2`（未闭合）、`zt3`（交叉嵌套）、`zt4`（跳出悬空）、`zt5`（跨块跳）；c) `su -c 'touch ops.conf'` 热载；d) 日志核：zt1 `op 编辑 put`、zt2..5 各一条 `op 被拒`（原因词：循环未闭合/块配对错误/跳出不在循环内/跳转跨越块边界）；e) **还原备份** + touch 热载 + 确认全量恢复（回归：无拒收）。
+- [x] **Step 9: 提交。** `git add -A && git commit -m "feat(core): 契约 v12 + 控制流校验层（类型 12..18）"`。
 
 ## Task 2：核心执行器（块栈 + 12..18）（P1）
 
@@ -68,18 +68,18 @@
 - Consumes: Task 1 全部常量。
 - Produces: R 内 `blk[]/blk_n/pair[]`（文件内静态，无跨文件接口）。
 
-- [ ] **Step 1: R 结构扩展**（:514 区）：`struct { int head, mode, remain; uint64_t start_ms; } blk[VT_CTRL_MAX_DEPTH]; int blk_n; int pair[MAX_STEPS];`（注释指向 spec §3.3）。
-- [ ] **Step 2: `op_pair_build()`**（新静态，funcdoc 体例）：扫描 steps 填 `R.pair`（12↔13、14↔[15]↔16，合法输入由校验层保证）；`vt_ops_run`（:1841）清零 `blk_n` 后调用。
-- [ ] **Step 3: `op_begin_step` 分支（12..18）**，按 spec §3.3：
+- [x] **Step 1: R 结构扩展**（:514 区）：`struct { int head, mode, remain; uint64_t start_ms; } blk[VT_CTRL_MAX_DEPTH]; int blk_n; int pair[MAX_STEPS];`（注释指向 spec §3.3）。
+- [x] **Step 2: `op_pair_build()`**（新静态，funcdoc 体例）：扫描 steps 填 `R.pair`（12↔13、14↔[15]↔16，合法输入由校验层保证）；`vt_ops_run`（:1841）清零 `blk_n` 后调用。
+- [x] **Step 3: `op_begin_step` 分支（12..18）**，按 spec §3.3：
   - 12：回跳到达（`blk_n>0 && blk[top].head==i`）→ 模式 0：`remain--`，`>0` 进体否则弹栈+跳 `pair(i) 之后`；模式 1：`now-start<V` 进体否则同；模式 2：进体；模式 3：求值判定——成立→弹栈+跳 13 之后；不成立→进体。首次到达→压栈初始化（remain/start）。
   - 13：跳到栈顶 `head` 处（`R.step = head-2; PH_WAIT`，同 `op_jump_apply` 落位法，**不加 `R.jumps`**）。
   - 14：求值 → 成立进体；不成立跳 `15+1`（有 else）或 `16 之后`。15：跳 `16 之后`。16：无动作。
   - 17：弹栈至最近循环 → 跳其 `pair(13) 之后`；18：跳其 `13` 处。
   - 判定求值：区域判断/开关判断复用既有判定代码路径；找图/找色走 `vis_exec_find`（命中照写 fx/fy）；**异常口径与既有条件步一致（中止）**。
-- [ ] **Step 4: 日志**（spec §3.8）：TRACE 五类（轮/退出原因/条件块/跳出/继续）；循环回跳默认静默。
-- [ ] **Step 5: funcdoc + 构建门**：`op_pair_build` 等新函数文案入 `funcdoc_data.py` → apply → `--check` 幂等；`sh ~/vtouch-devbuild.sh` 绿。
-- [ ] **Step 6: 部署**（同 Task 1 Step 7）。
-- [ ] **Step 7: P1 真机判据（zt 集，全部日志核）**：
+- [x] **Step 4: 日志**（spec §3.8）：TRACE 五类（轮/退出原因/条件块/跳出/继续）；循环回跳默认静默。
+- [x] **Step 5: funcdoc + 构建门**：`op_pair_build` 等新函数文案入 `funcdoc_data.py` → apply → `--check` 幂等；`sh ~/vtouch-devbuild.sh` 绿。
+- [x] **Step 6: 部署**（同 Task 1 Step 7）。
+- [x] **Step 7: P1 真机判据（zt 集，全部日志核）**：
   - zt1：次数×3 + 等待 100ms → `op 完成` 用时 ≈300ms；**另造 300 轮版**（次数 300 + 等待 0）→ 完成且**无 `跳转超限`**（守卫不受新语义影响）；
   - zt2：时长 3s → 用时 ≈3s；
   - zt3：无限空循环 → 起跑后 [停止] ≤1s 停（`op 完成/中止` 日志）；
@@ -90,7 +90,7 @@
   - zt8：到条件·找图（不存在的模板）→ 中止 `模板不存在`（口径与条件步一致）；
   - zt9（回归）：旧 zt0（含跳转步旧操作）照跑。
   - 驱动方式：起核（查前台）→ 面板 [运行]（一次点按：注入或请用户点）→ 日志核。测试用 zt 区域/操作照旧"备份-还原"。
-- [ ] **Step 8: 提交。** `feat(core): 控制流执行器（块栈 + 类型 12..18）`。
+- [x] **Step 8: 提交。** `feat(core): 控制流执行器（块栈 + 类型 12..18）`。
 
 ---
 

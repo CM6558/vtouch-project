@@ -829,6 +829,18 @@ static struct {
     uint64_t frozen_since;                                   /* 冻结起点（单调毫秒；仅 frozen 时有意义） */
     int      stop_pending;                                   /* 帧窗内被推迟的中止（R2a 封口）：帧关后补执行；三处清零 */
     char     stop_why[32];                                   /* 推迟中止的原因快照（短缓冲、安全截断；不存裸指针） */
+    /* 控制流块栈（v12；OPS_PLAN_V6 §3.3）：仅循环层进栈（条件块 14/15/16 走配对表、不进栈）；
+     * 全部只有主线程碰（同 R 其余字段）。 */
+    struct {
+        int      head;                                       /* 本层循环头（12）的步下标（0 基） */
+        int      mode;                                       /* 12 的模式：0 次数 / 1 时长 / 2 无限 / 3 到条件 */
+        int      remain;                                     /* 模式 0：剩余轮数（回跳到达时 --，≤0 退出） */
+        uint64_t start_ms;                                   /* 模式 1：首入时刻（时长起算点） */
+        int      iter;                                       /* 已进入轮数（日志 `第 N 轮`；首入 = 1） */
+    } blk[VT_CTRL_MAX_DEPTH];
+    int      blk_n;                                          /* 块栈深度（0 = 不在任何循环内） */
+    int      pair[MAX_STEPS];                                /* 结构行配对表（起跑预计算；非结构行 = -1）：
+                                                              * 12→13、14→15（无否则时 16）、15→16；跳位目标 0 基 */
 } R;
 
 /* 步内阶段：BEGIN=本步的起始动作还没发；TAP_UP=等 hold 到点抬指；SWIPE_MOVE=等下一个采样点；
@@ -1049,6 +1061,7 @@ static void op_finish(void)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：收尾已释放（上面），绝不泄漏到下一次运行 */
+    R.blk_n = 0;                                             /* 块栈清零（v12；绝不泄漏到下一次运行） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
@@ -1150,6 +1163,50 @@ static void op_cond_apply(const struct vt_step *st, int hit, const char *word,
     default:                                                 /* OP_COND_ABORT：不成立行已先记；中止走既有机制（spec §3.3） */
         vt_ops_abort(hit ? "条件中止" : no_word);             /* 成立侧新词 `条件中止`；不成立侧按调用方给词（条件步 `条件不成立` / 视觉步 `未命中`） */
         break;
+    }
+}
+
+/* ===================== 控制流（v12；OPS_PLAN_V6 §3.3） ===================== */
+
+/**
+ * (vtouch-doc: op_ctrl_goto)
+ * @brief 控制流跳位收口（v12）：执行位置挪到下一起拍的目标步（下一拍 op_next_step 推进 +1 精确落位）。
+ * @param   j        目标步下标（0 基；可 = nsteps 表示越过末步 → 下一拍按正常完成收场）
+ * @note    **静态**，只在执行器内用；与 op_jump_apply 同款预置法（R.step = j-1 + PH_WAIT），但**不过**旧跳转守卫 / 不占 R.jumps —— 结构行回跳与块内跳位不受 200 跳上限约束（OPS_PLAN_V6 §3.3：守卫只服务旧式跳转数据）。
+ */
+static void op_ctrl_goto(int j)
+{
+    R.step = j - 1;                                          /* 下一拍 op_next_step 推进 +1 精确落位 j（同 op_jump_apply 预置法） */
+    R.phase = PH_WAIT;
+    R.deadline = R.t0;
+}
+
+/**
+ * (vtouch-doc: op_pair_build)
+ * @brief 结构行配对表起跑预计算（v12）：单遍栈扫描填 R.pair（12↔13、14→15 或 16、15→16），其余 -1。
+ * @param   steps    步表（R.steps 快照）
+ * @param   n        步数
+ * @note    **静态**，只在 vt_ops_run 起跑时调用；输入由校验层（op_valid §3.4）保证合法，非法输入下仅保证不越界（防御）——执行分支对 pair<0 一律『纯前进』兜底（绝不卡死）。12/14 混栈扫描，与校验层同款；条件块不进运行时块栈（栈仅循环层）。
+ */
+static void op_pair_build(const struct vt_step *steps, int n)
+{
+    int stk[VT_CTRL_MAX_DEPTH], top = 0, i;
+    for (i = 0; i < MAX_STEPS; i++) R.pair[i] = -1;
+    for (i = 0; i < n; i++) {
+        int t = steps[i].type;
+        if (t == OP_STEP_LOOP || t == OP_STEP_IF) {
+            if (top < VT_CTRL_MAX_DEPTH) stk[top++] = i;
+        } else if (t == OP_STEP_ENDLOOP) {
+            if (top > 0) R.pair[stk[--top]] = i;             /* 12→13 */
+        } else if (t == OP_STEP_ELSE) {
+            if (top > 0 && R.pair[stk[top - 1]] < 0) R.pair[stk[top - 1]] = i;          /* 14→15 */
+        } else if (t == OP_STEP_ENDIF) {
+            if (top > 0) {
+                int h = stk[--top];
+                if (R.pair[h] < 0) R.pair[h] = i;            /* 无否则：14→16 */
+                else if (steps[R.pair[h]].type == OP_STEP_ELSE) R.pair[R.pair[h]] = i;  /* 15→16 */
+            }
+        }
     }
 }
 
@@ -1595,59 +1652,133 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
 }
 
 /**
- * (vtouch-doc: op_vis_run)
- * @brief 视觉步骤执行（找图 / 找色）：转调 vis_exec_find → fx/fy + 四档分支。
- * @param   st       当前视觉步（type = OP_STEP_FINDIMAGE / OP_STEP_FINDCOLOR）
- * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。链路（spec §6.1）：失败 → 按 vis_exec_find 的原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → fx/fy = 命中点**竖屏逻辑坐标**（res_mask 置位；v10 起替代 v5 的 r1/r2）+ 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。ms > 0 = 持续查找（T7.4）：vis_exec_find 循环抓帧查到命中或超时（超时 = 未命中）；日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`；持续增量：`vis 找图 <模板> 持续 <ms> 命中 x,y（尝试 N 次 / 耗时 M ms）` / `… 未命中（超时 <ms>，尝试 N 次）`（找色同款去模板名）。按住期允许（纯读屏不碰手指，spec §6.2）。
+ * (vtouch-doc: op_vis_eval)
+ * @brief 视觉判定求值（v12 自 op_vis_run 拆出）：vis_exec_find → 日志 + fx/fy；返回 hit 供四档（op_vis_run）与控制流判定（op_ctrl_eval）共用。
+ * @param   is_image 1 = 找图 / 0 = 找色
+ * @param   ref      模板名（找图）/ 点集名（找色）
+ * @param   region   区域限定（空 = 全屏）
+ * @param   a1       找图 = 阈值；找色 = 模式 0/1
+ * @param   a2       找图 = 色校；找色 = 单点打包 (颜色<<8)|容差
+ * @param   timeout_ms 持续查找 ms（0 = 单次）
+ * @param   hit      输出：1 命中 / 0 未命中
+ * @return  0 = 得值（*hit 有效）；-1 = 已中止（停止或按码失败，R.active 已清 —— 调用方直接 return）。
+ * @note    **静态**，只在执行器内用；行为与 v12 前 op_vis_run 内联段逐字一致（日志 / 中止词 / fx/fy 口径不变）——拆出的唯一目的 = 让控制流判定（12 模式 3 / 14）复用同一次求值（命中照写 fx/fy；OPS_PLAN_V6 §3.3）。
  */
-static void op_vis_run(const struct vt_step *st)
+static int op_vis_eval(int is_image, const char *ref, const char *region, int a1, int a2, int timeout_ms, int *hit)
 {
-    int kind, ox = 0, oy = 0, rc, hit, n = 0;
+    int kind, ox = 0, oy = 0, rc, n = 0;
     uint64_t dt = 0;
     const char *err = NULL;
 
+    *hit = 0;
     /* kind：找图 = 0；找色按模式（a1 == 1 = 多点）。字段映射照 spec §6.1（a1 = 阈值 / 模式；a2 = 单点打包色容差）。
      * ms（T7.4）：0 = 单次（现状）；>0 = 持续查找超时 —— vis_exec_find 循环抓帧查到命中或超时。 */
-    kind = (st->type == OP_STEP_FINDIMAGE) ? 0 : (st->a1 == 1 ? 2 : 1);
-    rc = vis_exec_find(kind, st->ref, st->expr, st->a1, st->a2, st->ms, &ox, &oy, &dt, &n, &err);
-    if (!R.active) return;                                   /* 运行已被停止（停止按钮在搜索循环内经编辑邮箱生效）：
+    kind = is_image ? 0 : (a1 == 1 ? 2 : 1);
+    rc = vis_exec_find(kind, ref, region, a1, a2, timeout_ms, &ox, &oy, &dt, &n, &err);
+    if (!R.active) return -1;                                /* 运行已被停止（停止按钮在搜索循环内经编辑邮箱生效）：
                                                               * 不再补中止 / 补日志 / 走四档（评审修复 2026-10-05） */
-    if (rc == -2) { vt_ops_abort(err); return; }             /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
-    hit = (rc == 0);
-    if (hit) {
+    if (rc == -2) { vt_ops_abort(err); return -1; }          /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
+    *hit = (rc == 0);
+    if (*hit) {
         R.fx = ox; R.fy = oy; R.res_mask |= 3u;              /* fx/fy = 命中点竖屏逻辑坐标（v10 替代 v5 的 r1/r2；spec §6.2） */
-        if (st->type == OP_STEP_FINDIMAGE) {
-            if (st->ms > 0)                                  /* 持续（T7.4）：尝试计数 + 全程耗时 */
+        if (is_image) {
+            if (timeout_ms > 0)                              /* 持续（T7.4）：尝试计数 + 全程耗时 */
                 fprintf(stderr, "vtouchd: vis 找图 %s 持续 %d 命中 %d,%d（尝试 %d 次 / 耗时 %llu ms）\n",
-                        st->ref, st->ms, ox, oy, n, (unsigned long long)dt);
+                        ref, timeout_ms, ox, oy, n, (unsigned long long)dt);
             else
                 fprintf(stderr, "vtouchd: vis 找图 %s 命中 %d,%d (耗时 %llums)\n",
-                        st->ref, ox, oy, (unsigned long long)dt);
+                        ref, ox, oy, (unsigned long long)dt);
         } else {
-            if (st->ms > 0)
+            if (timeout_ms > 0)
                 fprintf(stderr, "vtouchd: vis 找色 持续 %d 命中 %d,%d（尝试 %d 次 / 耗时 %llu ms）\n",
-                        st->ms, ox, oy, n, (unsigned long long)dt);
+                        timeout_ms, ox, oy, n, (unsigned long long)dt);
             else
                 fprintf(stderr, "vtouchd: vis 找色 命中 %d,%d\n", ox, oy);
         }
     } else {
-        if (st->type == OP_STEP_FINDIMAGE) {
-            if (st->ms > 0)                                  /* 持续超时：不成立档（未命中） */
+        if (is_image) {
+            if (timeout_ms > 0)                              /* 持续超时：不成立档（未命中） */
                 fprintf(stderr, "vtouchd: vis 找图 %s 持续 %d 未命中（超时 %d，尝试 %d 次）\n",
-                        st->ref, st->ms, st->ms, n);
+                        ref, timeout_ms, timeout_ms, n);
             else
                 fprintf(stderr, "vtouchd: vis 找图 %s 未命中 (耗时 %llums)\n",
-                        st->ref, (unsigned long long)dt);
+                        ref, (unsigned long long)dt);
         } else {
-            if (st->ms > 0)
+            if (timeout_ms > 0)
                 fprintf(stderr, "vtouchd: vis 找色 持续 %d 未命中（超时 %d，尝试 %d 次）\n",
-                        st->ms, st->ms, n);
+                        timeout_ms, timeout_ms, n);
             else
                 fprintf(stderr, "vtouchd: vis 找色 未命中\n");
         }
     }
+    return 0;
+}
+
+/**
+ * (vtouch-doc: op_vis_run)
+ * @brief 视觉步骤执行（找图 / 找色）：转调 op_vis_eval → fx/fy + 四档分支。
+ * @param   st       当前视觉步（type = OP_STEP_FINDIMAGE / OP_STEP_FINDCOLOR）
+ * @note    **静态**，只在执行器内用；单拍完成（返回时 phase/deadline 已落，或已中止）。求值全在 op_vis_eval（v12 拆出、控制流判定共用）：失败 → 按原因词中止（`无画面` / `视觉错` / `区域不存在` / `模板不存在`）；命中 → fx/fy = 命中点**竖屏逻辑坐标**（res_mask 置位；v10 起替代 v5 的 r1/r2）+ 成立侧四档；未命中 → 不成立侧四档（中止词 `未命中`）。ms > 0 = 持续查找（T7.4）：vis_exec_find 循环抓帧查到命中或超时（超时 = 未命中）；日志（spec §8）：`vis 找图 <模板> 命中 x,y (耗时 <ms>)` / `未命中 (耗时 <ms>)`；`vis 找色 命中 x,y` / `未命中`；持续增量：`vis 找图 <模板> 持续 <ms> 命中 x,y（尝试 N 次 / 耗时 M ms）` / `… 未命中（超时 <ms>，尝试 N 次）`（找色同款去模板名）。按住期允许（纯读屏不碰手指，spec §6.2）。
+ */
+static void op_vis_run(const struct vt_step *st)
+{
+    int hit;
+    if (op_vis_eval(st->type == OP_STEP_FINDIMAGE, st->ref, st->expr, st->a1, st->a2, st->ms, &hit) != 0)
+        return;
     op_cond_apply(st, hit, st->type == OP_STEP_FINDIMAGE ? "找图" : "找色",
                   st->type == OP_STEP_FINDIMAGE ? st->ref : NULL, "未命中");   /* 四档：成立/不成立（spec §6.2） */
+}
+
+/**
+ * (vtouch-doc: op_ctrl_eval)
+ * @brief 控制流判定求值（v12；循环·到条件 与 条件块共用）：四类判定 → hit；异常口径与既有条件步一致（中止）。
+ * @param   jt       判定类型：0 区域判断 / 1 开关判断 / 2 找图 / 3 找色
+ * @param   p1, p2   区域判断 = 判定点（可变量编码，op_resolve 解析）；找图 = 阈值/色校；找色 = 模式/保留
+ * @param   kms      找图/找色持续查找 ms
+ * @param   ref      区域名（区域/开关）/ 模板名（找图）/ 点集名（找色）
+ * @param   region   区域限定（找图/找色；空 = 全屏）
+ * @param   pack     找色单点打包 (颜色<<8)|容差
+ * @param   hit      输出：1 成立 / 0 不成立
+ * @return  0 = 得值（*hit 有效）；-1 = 已中止（R.active 已清 —— 调用方直接 return）。
+ * @note    **静态**，只在执行器内用；区域判断/开关判断复用条件步同款锁纪律（持锁判定、解锁后收场），找图/找色转 op_vis_eval（命中照写 fx/fy）。
+ */
+static int op_ctrl_eval(int jt, int p1, int p2, int kms, const char *ref, const char *region, int pack, int *hit)
+{
+    *hit = 0;
+    if (jt == 0) {                                           /* 区域判断：判定点可变量编码 → op_resolve（同条件步） */
+        int x, y, k, found = 0;
+        if (op_resolve(p1, 0, g.logical_width - 1, &x) != 0 ||
+            op_resolve(p2, 0, g.logical_height - 1, &y) != 0)
+            return -1;                                       /* 失败已中止（变量无值 / 结果无值） */
+        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律同条件步：持锁判定、解锁后收场（锁内不 I/O） */
+        for (k = 0; k < g.region_count; k++) {
+            if (strcmp(g.regions[k].id, ref) != 0) continue;
+            found = 1;
+            *hit = region_hit(&g.regions[k], x, y);          /* 平坦函数复用：停用 = 不命中（spec §3.1） */
+            break;
+        }
+        pthread_mutex_unlock(&g.region_lock);
+        if (!found) { vt_ops_abort("区域不存在"); return -1; }
+        return 0;
+    }
+    if (jt == 1) {                                           /* 开关判断（同条件步口径） */
+        int k, found = 0, is_toggle = 0, on = 0;
+        pthread_mutex_lock(&g.region_lock);
+        for (k = 0; k < g.region_count; k++) {
+            if (strcmp(g.regions[k].id, ref) != 0) continue;
+            found = 1;
+            is_toggle = (g.regions[k].kind == 1);
+            on = (g.regions[k].toggle_on == 1);
+            break;
+        }
+        pthread_mutex_unlock(&g.region_lock);
+        if (!found) { vt_ops_abort("区域不存在"); return -1; }
+        if (!is_toggle) { vt_ops_abort("非开关型"); return -1; }
+        *hit = on;
+        return 0;
+    }
+    /* 找图（jt=2：a1=阈值 p1 / a2=色校 p2）/ 找色（jt=3：a1=模式 p1 / a2=打包 pack）→ op_vis_eval（命中照写 fx/fy） */
+    return op_vis_eval(jt == 2, ref, region, p1, (jt == 2) ? p2 : pack, kms, hit);
 }
 
 /* ===================== 试查（契约 v9；Task 7.1「试一下」） ===================== */
@@ -1903,6 +2034,116 @@ static void op_begin_step(void)
     case OP_STEP_FINDCOLOR:                                  /* 找色（同款） */
         op_vis_run(st);                                      /* 命中/未命中 → 槽 + 四档；失败已按码中止 */
         break;
+    case OP_STEP_LOOP: {                                     /* 循环开始（v12；OPS_PLAN_V6 §3.3）：首入压栈；回跳到达判轮 */
+        if (R.blk_n > 0 && R.blk[R.blk_n - 1].head == R.step) {   /* 回跳到达（第 2+ 轮） */
+            int done = 0;
+            const char *why = NULL;
+            int mode = R.blk[R.blk_n - 1].mode;
+            if (mode == 0) {                                     /* 次数：剩余--，≤0 退出 */
+                if (--R.blk[R.blk_n - 1].remain <= 0) { done = 1; why = "次数用完"; }
+            } else if (mode == 1) {                              /* 时长：now-起点 ≥ 时长 → 退出 */
+                if (op_now_ms() - R.blk[R.blk_n - 1].start_ms >= (uint64_t)st->a2) { done = 1; why = "到点"; }
+            } else if (mode == 3) {                              /* 到条件：成立 → 退出；不成立 → 进体 */
+                int hit = 0;
+                if (op_ctrl_eval(st->a2, st->a3, st->a4, st->ms, st->ref, st->expr, st->j1, &hit) != 0)
+                    return;                                      /* 已中止（判定异常与既有条件步同口径） */
+                if (hit) { done = 1; why = "条件成立"; }
+            }
+            /* mode == 2（无限）：恒进体 */
+            if (done) {
+                R.blk_n--;                                       /* 弹栈 */
+                if (op_trace_on())
+                    fprintf(stderr, "vtouchd: op 循环 %s 退出（%s）\n", R.name, why);
+                {
+                    int e = R.pair[R.step];                      /* 12→13 */
+                    op_ctrl_goto(e < 0 ? R.step + 1 : e + 1);    /* 跳 13 之后（防御：配对缺失 → 下一步） */
+                }
+            } else {
+                R.blk[R.blk_n - 1].iter++;
+                if (op_trace_on())
+                    fprintf(stderr, "vtouchd: op 循环 %s 第 %d 轮\n", R.name, R.blk[R.blk_n - 1].iter);
+                R.phase = PH_WAIT;                               /* 进体：单拍结束，下一拍 +1 = 12 的下一步 */
+                R.deadline = R.t0;
+            }
+        } else {                                                 /* 首次到达：压栈初始化 */
+            if (R.blk_n >= VT_CTRL_MAX_DEPTH) {                  /* 防御：超深（校验层已拦）→ 纯前进不卡死 */
+                R.phase = PH_WAIT;
+                R.deadline = R.t0;
+                break;
+            }
+            R.blk[R.blk_n].head = R.step;
+            R.blk[R.blk_n].mode = st->a1;
+            R.blk[R.blk_n].remain = st->a2;
+            R.blk[R.blk_n].start_ms = op_now_ms();
+            R.blk[R.blk_n].iter = 1;
+            R.blk_n++;
+            if (op_trace_on())
+                fprintf(stderr, "vtouchd: op 循环 %s 第 1 轮\n", R.name);
+            R.phase = PH_WAIT;
+            R.deadline = R.t0;
+        }
+        break;
+    }
+    case OP_STEP_ENDLOOP: {                                  /* 循环结束：回跳栈顶循环的 12（触发下一轮检查；不占旧跳转计数） */
+        if (R.blk_n > 0 && R.blk[R.blk_n - 1].head >= 0)
+            op_ctrl_goto(R.blk[R.blk_n - 1].head);           /* 落位 12：下一拍进回跳到达逻辑 */
+        else {                                               /* 防御：无栈（校验层已拦）→ 纯前进不卡死 */
+            R.phase = PH_WAIT;
+            R.deadline = R.t0;
+        }
+        break;
+    }
+    case OP_STEP_IF: {                                       /* 条件块开始（v12）：判定；不成立 → 否则体首行 / 16 之后 */
+        int hit = 0;
+        if (op_ctrl_eval(st->a1, st->a2, st->a3, st->ms, st->ref, st->expr, st->j1, &hit) != 0)
+            return;                                          /* 已中止（判定异常与既有条件步同口径） */
+        if (op_trace_on())
+            fprintf(stderr, "vtouchd: op 条件块 %s %s\n", R.name, hit ? "成立" : "不成立");
+        if (hit) {
+            R.phase = PH_WAIT;                               /* 进体：单拍结束，下一拍 +1 = 14 的下一步 */
+            R.deadline = R.t0;
+        } else {
+            int p = R.pair[R.step];                          /* 14→15（有否则）/ 16（无否则） */
+            op_ctrl_goto(p < 0 ? R.step + 1 : p + 1);        /* 跳 15+1（否则体首行）/ 16+1（块后） */
+        }
+        break;
+    }
+    case OP_STEP_ELSE: {                                     /* 否则：成立体末尾路过 → 跳过否则体（跳 16 之后） */
+        int p = R.pair[R.step];                              /* 15→16 */
+        op_ctrl_goto(p < 0 ? R.step + 1 : p + 1);
+        break;
+    }
+    case OP_STEP_ENDIF:                                      /* 条件块结束：无运行时动作（路过顺延） */
+        R.phase = PH_WAIT;
+        R.deadline = R.t0;
+        break;
+    case OP_STEP_BREAK: {                                    /* 跳出（v12）：弹栈至最近循环，跳其 13 之后 */
+        if (R.blk_n > 0) {
+            int head = R.blk[R.blk_n - 1].head;
+            int e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 该循环的 13 */
+            R.blk_n--;                                       /* 弹栈（栈仅循环层；「最近循环」= 栈顶） */
+            if (op_trace_on())
+                fprintf(stderr, "vtouchd: op 跳出 %s 第 %d 步 → 循环后\n", R.name, R.step + 1);
+            op_ctrl_goto(e < 0 ? R.step + 1 : e + 1);
+        } else {                                             /* 防御：校验层已拦（跳出不在循环内） */
+            R.phase = PH_WAIT;
+            R.deadline = R.t0;
+        }
+        break;
+    }
+    case OP_STEP_CONT: {                                     /* 继续（v12）：跳最近循环的 13 处（下一拍 13 → 回跳） */
+        if (R.blk_n > 0) {
+            int head = R.blk[R.blk_n - 1].head;
+            int e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 该循环的 13 */
+            if (op_trace_on())
+                fprintf(stderr, "vtouchd: op 继续 %s\n", R.name);
+            op_ctrl_goto(e < 0 ? R.step + 1 : e);
+        } else {                                             /* 防御：校验层已拦 */
+            R.phase = PH_WAIT;
+            R.deadline = R.t0;
+        }
+        break;
+    }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
         R.phase = PH_WAIT;
         R.deadline = R.t0;
@@ -2178,6 +2419,8 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
+    R.blk_n = 0;                                             /* 块栈清零（v12；绝不泄漏进新一次运行） */
+    op_pair_build(R.steps, R.nsteps);                        /* 配对表起跑预计算（v12；OPS_PLAN_V6 §3.3） */
     memcpy(R.vnames, g.ops[i].vars, sizeof R.vnames);        /* 自定义变量名快照（v10）：整表从操作抄（名字表 = 单源） */
     memset(R.vvals, 0, sizeof R.vvals);                      /* 自定义变量起跑清零（值 + 未写标记；spec §7.5 沿用 v5 口径） */
     R.vmask = 0;
@@ -2249,6 +2492,9 @@ void vt_ops_abort(const char *why)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：收尾已释放（上面），绝不泄漏到下一次运行 */
+    if (R.blk_n > 0 && op_trace_on())                        /* TRACE：循环内被中止 → 记退出（停止；§3.8） */
+        fprintf(stderr, "vtouchd: op 循环 %s 退出（停止）\n", R.name);
+    R.blk_n = 0;                                             /* 块栈清零（v12；绝不泄漏到下一次运行） */
     g.op_run = -1;
     g.op_run_step = 0;
     g.op_run_state = 0;
