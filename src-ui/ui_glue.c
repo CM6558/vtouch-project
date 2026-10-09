@@ -406,6 +406,48 @@ static int glue_post_op(uint32_t op, const char *name, const struct vt_op *paylo
 int vtouch_op_count(void) { return S ? S->op_count : 0; }
 
 /**
+ * (vtouch-doc: vtouch_toast_seq)
+ * @brief  提示序号（v6D 契约 v14；acquire 读；不含文本）。
+ * @return 当前 toast_seq（0 = 从未有提示）。
+ */
+unsigned vtouch_toast_seq(void)
+{
+    if (!S) return 0;
+    return __atomic_load_n(&S->toast_seq, __ATOMIC_ACQUIRE);
+}
+
+/**
+ * (vtouch-doc: vtouch_toast_take)
+ * @brief  认领一条新提示（v6D；seq 变化才认领：拷文本 + 时长 ms；读期再变则重读最新）。
+ * @param   buf      输出文本缓冲
+ * @param   cap      缓冲容量
+ * @param   ms       输出显示时长 ms（0 = 面板用默认 2000）
+ * @return 1 = 有新提示（已拷）；0 = 无新 / 未接共享内存。
+ */
+int vtouch_toast_take(char *buf, int cap, int *ms)
+{
+    static uint32_t seen = 0;
+    uint32_t s1, s2;
+    int n, tries;
+    if (!S || !buf || cap <= 0) return 0;
+    s1 = __atomic_load_n(&S->toast_seq, __ATOMIC_ACQUIRE);
+    if (s1 == 0 || s1 == seen) return 0;
+    n = 0;
+    for (tries = 0; tries < 3; tries++) {           /* 读期若又来新提示 → 重读（最新覆盖） */
+        s2 = __atomic_load_n(&S->toast_seq, __ATOMIC_ACQUIRE);
+        n = (int)strnlen(S->toast, sizeof S->toast);
+        if (s2 == s1) break;
+        s1 = s2;
+    }
+    seen = s1;
+    if (n > cap - 1) n = cap - 1;
+    memcpy(buf, S->toast, (size_t)n);
+    buf[n] = 0;
+    if (ms) *ms = (int)S->toast_ms;
+    return 1;
+}
+
+/**
  * (vtouch-doc: vtouch_get_op)
  * @brief 取一条操作的元信息（名字 / 步数 / 门控 / 自动关；只读区 A）。
  * @param   i        操作下标（0..count-1）

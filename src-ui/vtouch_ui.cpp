@@ -123,6 +123,9 @@ void vtouch_ui_publish_rect(int visible, int rot, int scr_w, int scr_h, int x1, 
  * 面板运行时用「操作」那一组（计数/读/运行/停止/状态）；绑定读/写（trig/bind/kind）供区域卡片与
  * 触发行；v5 表达式校验（expr_check）。取点 / 视觉旁路已随缩编 v0.5 删除。 */
 int  vtouch_op_count(void);
+/* v6D 提示通道（契约 v14）：取序号 / 认领一条新提示（文本 + 时长 ms）。 */
+unsigned vtouch_toast_seq(void);
+int  vtouch_toast_take(char *buf, int cap, int *ms);
 int  vtouch_get_op(int i, char *name, int n, int *steps, char *gate, int gn, int *autoff);
 int  vtouch_get_op_step(int i, int s, int *type, int *a1, int *a2, int *a3, int *a4, int *ms, char *ref, int refn,
                         int *j1, int *j2, char *expr, int exprn);   /* j1/j2 = 条件步跳转目标（成立/不成立侧；可 NULL）；expr = 计算步表达式（v5；可 NULL） */
@@ -3287,6 +3290,34 @@ static void build_panel(void)
     if (min_bg) ImGui::PopStyleColor(2);
 }
 
+/* v6D：提示浮层（核心 → 状态块 toast 通道，契约 v14）：顶部居中、深底白字、末 300ms 淡出。
+ * 认领新提示时扩字形（动态文本 → 下一帧字体重建，首帧可能缺字形、随即恢复）。 */
+static void draw_toast(float sw, float sh)
+{
+    static char t_text[256];
+    static long t_until = 0;
+    char buf[256];
+    int  ms = 0;
+    if (vtouch_toast_take(buf, (int)sizeof buf, &ms)) {
+        snprintf(t_text, sizeof t_text, "%s", buf);
+        t_until = now_ms() + (long)((ms > 0) ? ms : 2000);
+        ui_glyph_scan(t_text);
+    }
+    if (!t_text[0]) return;
+    long now = now_ms();
+    if (now >= t_until) { t_text[0] = 0; return; }
+    long rem = t_until - now;
+    int alpha = 255;
+    if (rem < 300) alpha = (int)(255 * rem / 300);
+    ImVec2 ts = ImGui::CalcTextSize(t_text);
+    float x = (sw - ts.x) * 0.5f;
+    float y = sh * 0.12f;
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    dl->AddRectFilled(ImVec2(x - 18, y - 10), ImVec2(x + ts.x + 18, y + ts.y + 10),
+                      IM_COL32(16, 18, 20, (int)(0.74f * alpha)), 10.0f);
+    dl->AddText(ImVec2(x, y), IM_COL32(244, 246, 248, alpha), t_text);
+}
+
 /* 单帧：事件 API 喂输入 → 单 NewFrame → 双内容 → 提交 */
 static void draw_frame(int sw, int sh)
 {
@@ -3318,6 +3349,7 @@ static void draw_frame(int sw, int sh)
     ImGui::NewFrame();
     if (g_ov_show) build_overlay(sw, sh);
     build_panel();                         /* 缩编 v0.5：采集覆盖层/编辑层已删，只剩叠加层 + 面板 */
+    draw_toast((float)sw, (float)sh);      /* v6D：提示浮层（核心 toast 通道） */
     ImGui::Render();
     if (g_mdown && g_mup_pend) { g_mdown = 0; g_mup_pend = 0; g_mslot = -1; }
     glViewport(0, 0, sw, sh);
