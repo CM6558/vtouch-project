@@ -1846,6 +1846,74 @@ static int op_ctrl_eval(int jt, int p1, int p2, int kms, const char *ref, const 
     return op_vis_eval(jt == 2, ref, region, p1, (jt == 2) ? p2 : pack, kms, hit);
 }
 
+/**
+ * (vtouch-doc: op_ctrl_eval_list)
+ * @brief 控制流组合判定求值（v6B §3.1；循环·到条件 与 条件块共用）：头 + 19 子条件链 → 短路求值（且优先；左假右跳、已真停）。
+ * @param   head     块头步下标（0 基；R.steps 快照内）
+ * @param   hit      输出：1 成立 / 0 不成立
+ * @return  0 = 得值（*hit 有效）；-1 = 已中止（R.active 已清 —— 调用方直接 return）。
+ * @note    **静态**，只在执行器内用；逐条求值走 op_ctrl_eval（被短路的子条件不求值：不写 fx/fy、不触发异常）；取反在每题值后应用（短路按取反后的值）；TRACE 打每条求值行 `op 子条件 <名> 第 K 条 [且|或] 成立|不成立（取反）`。
+ */
+static int op_ctrl_eval_list(int head, int *hit)
+{
+    const struct vt_step *c;
+    int acc = 0;                                         /* 已完成「或组」的汇总（且 > 或 的代码优先级） */
+    int group = 0;                                       /* 当前「且组」的累计值 */
+    int idx = head;
+    int first = 1;                                       /* 1 = 头子句（12 模式3 / 14 自身） */
+    int k = 0;                                           /* 子条件序号（1 基；含头子句） */
+
+    for (;;) {
+        int jt, p1, p2, kms, pack, invert, join = 0, h = 0, evaluated = 1;
+
+        if (idx >= R.nsteps) break;                      /* 防御：链断裂（校验层已拦） */
+        c = &R.steps[idx];
+        if (first) {                                     /* 头子句：字段位置按头类型投影（V6B §3.1） */
+            if (c->type == OP_STEP_LOOP) {               /* 12 模式3：a2=类型、a3/a4 参数、j1=打包、j2=取反 */
+                jt = c->a2; p1 = c->a3; p2 = c->a4; kms = c->ms; pack = c->j1; invert = c->j2;
+            } else {                                     /* 14：a1=类型、a2/a3 参数、j1=打包、a4=取反 */
+                jt = c->a1; p1 = c->a2; p2 = c->a3; kms = c->ms; pack = c->j1; invert = c->a4;
+            }
+        } else {
+            if (c->type != OP_STEP_CLAUSE) break;        /* 链尾：求值结束 */
+            join = c->a1;                                /* 19：a1=连接（0 且 / 1 或）、a2=类型、a3/a4 参数、j1=打包、j2=取反 */
+            jt = c->a2; p1 = c->a3; p2 = c->a4; kms = c->ms; pack = c->j1; invert = c->j2;
+        }
+        k++;
+
+        /* 短路（V6B §3.1：且优先；左假右跳、已真停 —— 与代码 && / || 逐字等价）。 */
+        if (!first) {
+            if (join == 0) {                             /* 且：组内 */
+                if (!group) evaluated = 0;               /* 组已假 → 本子条件不求值 */
+            } else {                                     /* 或：收组开新 */
+                acc = acc || group;
+                if (acc) break;                          /* 整式已真 → 其后全部不求值（group 不再更新） */
+            }
+        }
+
+        if (evaluated) {
+            if (op_ctrl_eval(jt, p1, p2, kms, c->ref, c->expr, pack, &h) != 0)
+                return -1;                               /* 已中止（判定异常与既有条件步同口径） */
+            if (invert) h = !h;                          /* 取反：短路按取反后的值（V6B §3.1） */
+            if (op_trace_on()) {
+                if (k == 1)
+                    fprintf(stderr, "vtouchd: op 子条件 %s 第 1 条 %s%s\n",
+                            R.name, h ? "成立" : "不成立", invert ? "（取反）" : "");
+                else
+                    fprintf(stderr, "vtouchd: op 子条件 %s 第 %d 条 %s %s%s\n",
+                            R.name, k, join ? "或" : "且", h ? "成立" : "不成立", invert ? "（取反）" : "");
+            }
+            group = h;                                   /* 且组内（group 恒 1）→ h；或开新组 → h；头子句 → h */
+        }
+
+        first = 0;
+        idx++;
+    }
+
+    *hit = acc || group;
+    return 0;
+}
+
 /* ===================== 试查（契约 v9；Task 7.1「试一下」） ===================== */
 
 /* 面板写请求 / 核心写结果，单请求在途（区 D 头 test_* 块；内存序照区 D 口径：
@@ -2099,7 +2167,7 @@ static void op_begin_step(void)
     case OP_STEP_FINDCOLOR:                                  /* 找色（同款） */
         op_vis_run(st);                                      /* 命中/未命中 → 槽 + 四档；失败已按码中止 */
         break;
-    case OP_STEP_LOOP: {                                     /* 循环开始（v12；OPS_PLAN_V6 §3.3）：首入压栈；回跳到达判轮 */
+    case OP_STEP_LOOP: {                                     /* 循环开始（v12/v6B；OPS_PLAN_V6 §3.3 + V6B §3.1）：首入压栈；回跳到达判轮 */
         if (R.blk_n > 0 && R.blk[R.blk_n - 1].head == R.step) {   /* 回跳到达（第 2+ 轮） */
             int done = 0;
             const char *why = NULL;
@@ -2108,9 +2176,9 @@ static void op_begin_step(void)
                 if (--R.blk[R.blk_n - 1].remain <= 0) { done = 1; why = "次数用完"; }
             } else if (mode == 1) {                              /* 时长：now-起点 ≥ 时长 → 退出 */
                 if (op_now_ms() - R.blk[R.blk_n - 1].start_ms >= (uint64_t)st->a2) { done = 1; why = "到点"; }
-            } else if (mode == 3) {                              /* 到条件：成立 → 退出；不成立 → 进体 */
+            } else if (mode == 3) {                              /* 到条件（v6B：组合判定 = 头 + 19 链）：成立 → 退出；不成立 → 进体 */
                 int hit = 0;
-                if (op_ctrl_eval(st->a2, st->a3, st->a4, st->ms, st->ref, st->expr, st->j1, &hit) != 0)
+                if (op_ctrl_eval_list(R.step, &hit) != 0)
                     return;                                      /* 已中止（判定异常与既有条件步同口径） */
                 if (hit) { done = 1; why = "条件成立"; }
             }
@@ -2130,7 +2198,19 @@ static void op_begin_step(void)
                 R.phase = PH_WAIT;                               /* 进体：单拍结束，下一拍 +1 = 12 的下一步 */
                 R.deadline = R.t0;
             }
-        } else {                                                 /* 首次到达：压栈初始化 */
+        } else {                                                 /* 首次到达 */
+            if (st->a1 == 3) {                                   /* 到条件·首判（while 口径，spec §3.3：成立 → 不跑体直接退出） */
+                int hit = 0;
+                if (op_ctrl_eval_list(R.step, &hit) != 0)
+                    return;                                      /* 已中止（同上） */
+                if (hit) {
+                    int e = R.pair[R.step];                      /* 12→13 */
+                    if (op_trace_on())
+                        fprintf(stderr, "vtouchd: op 循环 %s 退出（条件成立）\n", R.name);
+                    op_ctrl_goto(e < 0 ? R.step + 1 : e + 1);    /* 不压栈：跳 13 之后 */
+                    break;
+                }
+            }
             if (R.blk_n >= VT_CTRL_MAX_DEPTH) {                  /* 防御：超深（校验层已拦）→ 纯前进不卡死 */
                 R.phase = PH_WAIT;
                 R.deadline = R.t0;
@@ -2158,9 +2238,9 @@ static void op_begin_step(void)
         }
         break;
     }
-    case OP_STEP_IF: {                                       /* 条件块开始（v12）：判定；不成立 → 否则体首行 / 16 之后 */
+    case OP_STEP_IF: {                                       /* 条件块开始（v12/v6B）：组合判定（头 + 19 链）；不成立 → 否则体首行 / 16 之后 */
         int hit = 0;
-        if (op_ctrl_eval(st->a1, st->a2, st->a3, st->ms, st->ref, st->expr, st->j1, &hit) != 0)
+        if (op_ctrl_eval_list(R.step, &hit) != 0)
             return;                                          /* 已中止（判定异常与既有条件步同口径） */
         if (op_trace_on())
             fprintf(stderr, "vtouchd: op 条件块 %s %s\n", R.name, hit ? "成立" : "不成立");
@@ -2182,13 +2262,20 @@ static void op_begin_step(void)
         R.phase = PH_WAIT;
         R.deadline = R.t0;
         break;
-    case OP_STEP_BREAK: {                                    /* 跳出（v12）：弹栈至最近循环，跳其 13 之后 */
+    case OP_STEP_BREAK: {                                    /* 跳出（v12/v6B §3.3）：弹 a1 层栈 → 跳目标循环 13 之后 */
         if (R.blk_n > 0) {
-            int head = R.blk[R.blk_n - 1].head;
-            int e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 该循环的 13 */
-            R.blk_n--;                                       /* 弹栈（栈仅循环层；「最近循环」= 栈顶） */
-            if (op_trace_on())
-                fprintf(stderr, "vtouchd: op 跳出 %s 第 %d 步 → 循环后\n", R.name, R.step + 1);
+            int depth = st->a1 > 0 ? st->a1 : 1;             /* 层数（0 = 兼容旧数据视作 1）；防御：超深按最外 */
+            int head, e;
+            if (depth > R.blk_n) depth = R.blk_n;
+            head = R.blk[R.blk_n - depth].head;              /* 第 depth 层循环（从内往外数） */
+            e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 该循环的 13 */
+            R.blk_n -= depth;                                /* 弹 depth 层（跳出后其余内层全部作废） */
+            if (op_trace_on()) {
+                if (depth > 1)
+                    fprintf(stderr, "vtouchd: op 跳出 %s 第 %d 步 → 循环后（%d 层）\n", R.name, R.step + 1, depth);
+                else
+                    fprintf(stderr, "vtouchd: op 跳出 %s 第 %d 步 → 循环后\n", R.name, R.step + 1);
+            }
             op_ctrl_goto(e < 0 ? R.step + 1 : e + 1);
         } else {                                             /* 防御：校验层已拦（跳出不在循环内） */
             R.phase = PH_WAIT;
@@ -2196,17 +2283,36 @@ static void op_begin_step(void)
         }
         break;
     }
-    case OP_STEP_CONT: {                                     /* 继续（v12）：跳最近循环的 13 处（下一拍 13 → 回跳） */
+    case OP_STEP_CONT: {                                     /* 继续（v12/v6B §3.3）：跳到第 a1 层循环的 13 处（下一拍 13 → 回跳） */
         if (R.blk_n > 0) {
-            int head = R.blk[R.blk_n - 1].head;
-            int e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 该循环的 13 */
-            if (op_trace_on())
-                fprintf(stderr, "vtouchd: op 继续 %s\n", R.name);
+            int depth = st->a1 > 0 ? st->a1 : 1;             /* 层数（0 = 兼容旧数据视作 1）；防御：超深按最外 */
+            int head, e;
+            if (depth > R.blk_n) depth = R.blk_n;
+            R.blk_n -= (depth - 1);                          /* 弹掉内层（depth-1）：13 回跳依赖栈顶 = 目标循环 */
+            head = R.blk[R.blk_n - 1].head;
+            e = (head >= 0 && head < MAX_STEPS) ? R.pair[head] : -1;   /* 目标循环的 13 */
+            if (op_trace_on()) {
+                if (depth > 1)
+                    fprintf(stderr, "vtouchd: op 继续 %s（%d 层）\n", R.name, depth);
+                else
+                    fprintf(stderr, "vtouchd: op 继续 %s\n", R.name);
+            }
             op_ctrl_goto(e < 0 ? R.step + 1 : e);
         } else {                                             /* 防御：校验层已拦 */
             R.phase = PH_WAIT;
             R.deadline = R.t0;
         }
+        break;
+    }
+    case OP_STEP_CLAUSE:                                     /* 子条件行（v6B §3.1）：头行求值已含（路过纯前进，防御） */
+        R.phase = PH_WAIT;
+        R.deadline = R.t0;
+        break;
+    case OP_STEP_STOP: {                                     /* 终止（v6B §3.2）：a1=0 完成收工（op_finish）/ 1 中止退出（原因词 `终止`） */
+        if (op_trace_on())
+            fprintf(stderr, "vtouchd: op 终止 %s 第 %d 步 → %s\n", R.name, R.step + 1, st->a1 == 0 ? "完成" : "中止");
+        if (st->a1 == 0) op_finish();
+        else vt_ops_abort("终止");
         break;
     }
     default:                                                 /* op_valid 已挡住；真漏进来就跳过，绝不卡死 */
