@@ -68,25 +68,25 @@ static int op_var_name_ok(const char *s, size_t n)
 
 /**
  * (vtouch-doc: op_ctrl_cond_bad)
- * @brief 控制流「判定参数」字段校验（v12；循环·到条件 与 条件块 共用）：判定类型 + 各参数域逐项过门。
- * @param   jtype    判定类型：0=区域判断 / 1=开关判断 / 2=找图 / 3=找色
- * @param   px, py   区域判断 = 判定点 x/y（可变量编码）；找图 = 阈值 0..255 / 色校 0|1；找色 = 模式 0|1 / 保留须 0；开关 = 0/0
+ * @brief 控制流「判定参数」字段校验（v12/v6C；循环·到条件 与 条件块 共用）：判定类型 + 各参数域逐项过门。
+ * @param   jtype    判定类型：0=区域判断 / 1=开关判断 / 2=找图 / 3=找色 / 4=变量比较（v6C）
+ * @param   px, py   区域判断 = 判定点 x/y（可变量编码）；找图 = 阈值 0..255 / 色校 0|1；找色 = 模式 0|1 / 保留须 0；开关 = 0/0；变量比较 = 变量编码 -25..-1 / 参照值（字面整数）
  * @param   kms      找图/找色 = 持续查找 ms（0..60000）；其余类型须 0
  * @param   kref     区域名（区域/开关必填）/ 模板名（找图必填）/ 点集名（找色多点必填、单点必空）
  * @param   kexpr    区域限定（找图/找色；空或 vt_id_ok 尺子）；其余类型须空
- * @param   kpack    找色单点打包 (颜色<<8)|容差（域 = 全部 32 位）；其余情况须 0
- * @param   extra0   该判定的保留字段（必须 0；防御邮箱裸字节）
+ * @param   kpack    找色单点打包 (颜色<<8)|容差（域 = 全部 32 位）；变量比较 = 比较符 0..5（> < ≥ ≤ = ≠）；其余情况须 0
+ * @param   extra0   保留字段（v6B 起三处调用恒 0 —— 取反位已移至 a4/j2；保留作裸字节邮箱防御）
  * @param   stepno   步号（1 基；写进 why）
  * @return  0 通过；非 0 = 已把原因写进 why。
- * @note    字段位置由调用方投影（循环头自 a2 起 / 条件块头自 a1 起，OPS_PLAN_V6 §3.2）；校验实现单点，两处共用以防口径漂移。
+ * @note    字段位置由调用方投影（循环头自 a2 起 / 条件块头自 a1 起，OPS_PLAN_V6 §3.2）；校验实现单点，两处共用以防口径漂移。v6C 变量比较：变量值 op_resolve 解析（无值 → 运行期中止），参照值仅字面整数（变量对变量留口）。
  */
 static int op_ctrl_cond_bad(int jtype, int px, int py, int kms,
                             const char *kref, const char *kexpr, int kpack, int extra0,
                             int stepno, char *why, size_t whycap)
 {
     size_t rl, el;
-    if (jtype < 0 || jtype > 3) {
-        snprintf(why, whycap, "第 %d 步判定类型非法（0..3）", stepno);
+    if (jtype < 0 || jtype > 4) {
+        snprintf(why, whycap, "第 %d 步判定类型非法（0..4）", stepno);
         return 1;
     }
     if (extra0 != 0) {
@@ -181,8 +181,22 @@ static int op_ctrl_cond_bad(int jtype, int px, int py, int kms,
             return 1;
         }
         break;
+    case 4:                                  /* 变量比较（v6C）：p1=变量编码（-25..-1）、py=参照值（字面整数）、kpack=比较符 0..5 */
+        if (px > OP_VAR_TDX || px < OP_VAR_V15) {
+            snprintf(why, whycap, "第 %d 步变量编码非法（-25..-1）", stepno);
+            return 1;
+        }
+        if (kpack < 0 || kpack > 5) {
+            snprintf(why, whycap, "第 %d 步比较符非法（0..5）", stepno);
+            return 1;
+        }
+        if (kms != 0 || rl != 0 || el != 0) {
+            snprintf(why, whycap, "第 %d 步字段必须为 0", stepno);
+            return 1;
+        }
+        break;
     default:
-        break;                               /* 不可达（上方已拦 0..3） */
+        break;                               /* 不可达（上方已拦 0..4） */
     }
     return 0;
 }
@@ -1796,16 +1810,16 @@ static void op_vis_run(const struct vt_step *st)
 
 /**
  * (vtouch-doc: op_ctrl_eval)
- * @brief 控制流判定求值（v12；循环·到条件 与 条件块共用）：四类判定 → hit；异常口径与既有条件步一致（中止）。
- * @param   jt       判定类型：0 区域判断 / 1 开关判断 / 2 找图 / 3 找色
- * @param   p1, p2   区域判断 = 判定点（可变量编码，op_resolve 解析）；找图 = 阈值/色校；找色 = 模式/保留
+ * @brief 控制流判定求值（v12/v6C；循环·到条件 与 条件块共用）：五类判定 → hit；异常口径与既有条件步一致（中止）。
+ * @param   jt       判定类型：0 区域判断 / 1 开关判断 / 2 找图 / 3 找色 / 4 变量比较
+ * @param   p1, p2   区域判断 = 判定点（可变量编码，op_resolve 解析）；找图 = 阈值/色校；找色 = 模式/保留；变量比较 = 变量编码 / 参照值
  * @param   kms      找图/找色持续查找 ms
  * @param   ref      区域名（区域/开关）/ 模板名（找图）/ 点集名（找色）
  * @param   region   区域限定（找图/找色；空 = 全屏）
- * @param   pack     找色单点打包 (颜色<<8)|容差
+ * @param   pack     找色单点打包 (颜色<<8)|容差；变量比较 = 比较符 0..5（> < ≥ ≤ = ≠）
  * @param   hit      输出：1 成立 / 0 不成立
  * @return  0 = 得值（*hit 有效）；-1 = 已中止（R.active 已清 —— 调用方直接 return）。
- * @note    **静态**，只在执行器内用；区域判断/开关判断复用条件步同款锁纪律（持锁判定、解锁后收场），找图/找色转 op_vis_eval（命中照写 fx/fy）。
+ * @note    **静态**，只在执行器内用；区域判断/开关判断复用条件步同款锁纪律（持锁判定、解锁后收场），找图/找色转 op_vis_eval（命中照写 fx/fy）；变量比较（v6C）= 变量值 vs 参照值（比较符 pack 0..5），变量无值/结果无值 → 中止（口径同前）。
  */
 static int op_ctrl_eval(int jt, int p1, int p2, int kms, const char *ref, const char *region, int pack, int *hit)
 {
@@ -1840,6 +1854,20 @@ static int op_ctrl_eval(int jt, int p1, int p2, int kms, const char *ref, const 
         if (!found) { vt_ops_abort("区域不存在"); return -1; }
         if (!is_toggle) { vt_ops_abort("非开关型"); return -1; }
         *hit = on;
+        return 0;
+    }
+    if (jt == 4) {                                           /* 变量比较（v6C）：p1=变量编码 → 值 vs p2；pack=比较符 0..5 */
+        int v = 0;
+        if (op_resolve(p1, INT_MIN, INT_MAX, &v) != 0)
+            return -1;                                       /* 失败已中止（变量无值 / 结果无值） */
+        switch (pack) {
+        case 0:  *hit = (v >  p2); break;                    /* >  */
+        case 1:  *hit = (v <  p2); break;                    /* <  */
+        case 2:  *hit = (v >= p2); break;                    /* ≥  */
+        case 3:  *hit = (v <= p2); break;                    /* ≤  */
+        case 4:  *hit = (v == p2); break;                    /* =  */
+        default: *hit = (v != p2); break;                    /* ≠（5；校验已拦域外） */
+        }
         return 0;
     }
     /* 找图（jt=2：a1=阈值 p1 / a2=色校 p2）/ 找色（jt=3：a1=模式 p1 / a2=打包 pack）→ op_vis_eval（命中照写 fx/fy） */
