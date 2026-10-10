@@ -1124,6 +1124,7 @@ static int ops_load_prog(const char *name, const char *gate, int autoff, const c
     static unsigned char buf[OPS_PROG_MAX];
     char hh[16] = {0};
     char path[240];
+    const char *g = (gate && gate[0] == '-' && gate[1] == 0) ? "" : (gate ? gate : "");
     long sz = 0, n;
     unsigned int want = 0, have;
     int i, k, plen = 0;
@@ -1159,7 +1160,7 @@ static int ops_load_prog(const char *name, const char *gate, int autoff, const c
         ALOGW("ops.conf 程序 %s 哈希不符（元数据 %s / 实际 %08x）→ 跳过", name, hh, have);
         return -1;
     }
-    if (vtouch_prog_put(name, gate, autoff, buf, (int)n) != 0) {   /* 不透明搬运：原样字节 → 邮箱 */
+    if (vtouch_prog_put(name, g, autoff, buf, (int)n) != 0) {   /* 不透明搬运：原样字节 → 邮箱；gate `-` → 空串 */
         ALOGW("ops.conf 程序 %s 投递失败（超时/核心被占）", name);
         return -1;
     }
