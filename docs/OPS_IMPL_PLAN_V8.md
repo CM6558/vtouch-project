@@ -1,6 +1,6 @@
 # OPS_IMPL_PLAN_V8 —— 操作语言化（真脚本+可视化）任务级实施计划
 
-> 状态：T0..T5.2 完成（2026-10-10 晚；T4 记录 `docs/OPS_V8_T4_ACCEPTANCE.md`、T5.2 记录 `docs/OPS_V8_T52_ACCEPTANCE.md`），**下一批 = T5.3（迁移报告 + 降级说明）**。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
+> 状态：T0..T5.3 完成（2026-10-10 晚；T4 记录 `docs/OPS_V8_T4_ACCEPTANCE.md`、T5.2 记录 `docs/OPS_V8_T52_ACCEPTANCE.md`、T5.3 归档 `docs/OPS_V8_T53_MIGRATION_REPORT.md` + `docs/OPS_V8_DOWNGRADE.md`），**下一批 = T6（双视图编辑器）**。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
 > 上位：`OPS_PLAN_V8.md`（方案）+ `VT_SCRIPT_V1_SPEC.md`（语言规范，语言唯一真相）。
 > 执行方式：**Native 逐任务**（单设备串行；子代理会互抢设备，不用子代理制）。
 > 纪律：每任务 = 实现 → 构建/离机验证 → 装机 → 测试台/真机验收 → 证据归档；每期结束跑既有 84+ 测试台与 zt 家族回归。
@@ -80,6 +80,11 @@
 - 全方案迁移应用（R3）：5 方案 + live 逐字节审计 ✓、重启验净（op1/保命装 程序行上表、零跳过）、编辑器往返保真 ✓；回滚资产 6× `ops.conf.bak-v8`（原 v5 逐字节）+ 核副本存档。
 - 开口两笔处置：①「未写先读」报告不译（真实语料 8/8 无一例，不造幽灵声明）；② 找色持续键缺口保持报告口径（零用例，未来再定 r8）。
 
+**T5.3 结论（2026-10-10 晚；T5 收口，记录 `docs/OPS_V8_T53_MIGRATION_REPORT.md`）**：
+- **全量 `.bak-v8` 核验 ✓**：6× ops + 6× regions（含 live；此前记「5× regions」系笔误），逐字节对上 T5.2 基线/现态；只读核验脚本 `~/vtouch-shots/v8t5/t53-verify.py`（可复跑）；核三件套（在跑核/载荷/本机副本）同一 md5 `3a6e723c`。
+- **迁移报告**：6 位置 8 操作全部迁移、0 拒译（逐操作明细 + r2/r3 自动命名 ×3 + zt 语料 47 译 / 11 保留〔8 故意拒收 + 3「未写先读」〕+ 双跑矩阵 + 素材索引）。
+- **降级说明** `docs/OPS_V8_DOWNGRADE.md`：一屏说明 + 照抄命令块（停核 → 还原 6 处 + 清 progs → md5 核对表 → 起核）+ 边界（无备份方案护栏 / 软件回退连 `vtouch.sh` / v5 存盘保持 v5〔`Ops.java:414-420`〕/ 再升回 v8 路径）；**还原序列已在副本上演练**（`t53-dryrun.txt`：md5 全对、progs 清扫、备份保留）。
+
 ## T6 双视图编辑器
 
 | 任务 | 内容 | 判据 |
@@ -116,3 +121,4 @@
 - [x] T4.3 T8 热载换轨（改脚本 → 重载 2055ms；新行为 851ms 生效；零重启）—— **T4 完成**（记录 `docs/OPS_V8_T4_ACCEPTANCE.md`）
 - [x] T5.1 steps→script 翻译器（`VtFromSteps` + 38 例离机核〔run.sh 四连核〕+ `VtMigSmoke` 真实 8/8 全译；zt 家族 47 译 + 8 故意拒收 + 3 待口径）
 - [x] T5.2 迁移执行 + 设备双跑对拍（`VtMigrate`/`VtMigrateRun`/`VtMigrateCheck`〔五连核〕；**修复核心 NULL 缝（VM 视觉可选串）→ 新核 `3a6e723c`**；R1/R2 矩阵 9 场景逐毫秒、门③ find 2ms=2ms；R3 全方案迁移落位 + 逐字节审计；记录 `OPS_V8_T52_ACCEPTANCE.md`）
+- [x] T5.3 全量 `.bak-v8` 核验 + 迁移报告 + 降级说明（`OPS_V8_T53_MIGRATION_REPORT.md` + `OPS_V8_DOWNGRADE.md`；证据 `t53-verify.txt` / `t53-dryrun.txt`；核验脚本 `t53-verify.py`）—— **T5 全部完成；下一批 = T6 双视图编辑器**
