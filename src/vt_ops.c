@@ -28,6 +28,7 @@
 #include <sys/eventfd.h>     /* 执行器的触发唤醒 fd（eventfd：写一下就叫醒主循环） */
 #include <math.h>            /* llround：变量引用取整（v5 起；spec §5.3） */
 #include "vt_vision.h"       /* 视觉匹配引擎（找图/找色 + 坐标映射；spec VISION §4/§6.1） */
+#include "vt_vm.h"           /* V8 VTBC 虚拟机宿主接口（T3.2：抽取原语 + 文件尾钩子表） */
 
 /**
  * (vtouch-doc: op_num_ok)
@@ -1869,6 +1870,44 @@ static void op_vis_run(const struct vt_step *st)
                   st->type == OP_STEP_FINDIMAGE ? st->ref : NULL, "未命中");   /* 四档：成立/不成立（spec §6.2） */
 }
 
+/* ---------- VM 宿主抽取原语（T3.2） ---------- */
+/* 区域点判定（T3.2 自区域判断 case / op_ctrl_eval 抽出；执行器与 VM 宿主共用）：
+ * 持锁查 + region_hit（停用 = 不命中，enabled 守卫在它里面，spec §3.1）；锁内不 I/O。
+ * 返回 0 找到（*hit 有效）/ -1 未找到。 */
+static int op_region_pt_hit(const char *ref, int x, int y, int *hit)
+{
+    int k, found = 0;
+    *hit = 0;
+    pthread_mutex_lock(&g.region_lock);
+    for (k = 0; k < g.region_count; k++) {
+        if (strcmp(g.regions[k].id, ref) != 0) continue;
+        found = 1;
+        *hit = region_hit(&g.regions[k], x, y);
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return found ? 0 : -1;
+}
+
+/* 开关型查询（T3.2 自开关判断 case / op_ctrl_eval 抽出）：持锁查 kind/toggle_on。
+ * 返回 0 找到（*is_toggle / *on 有效）/ -1 未找到。 */
+static int op_toggle_state(const char *ref, int *is_toggle, int *on)
+{
+    int k, found = 0;
+    *is_toggle = 0;
+    *on = 0;
+    pthread_mutex_lock(&g.region_lock);
+    for (k = 0; k < g.region_count; k++) {
+        if (strcmp(g.regions[k].id, ref) != 0) continue;
+        found = 1;
+        *is_toggle = (g.regions[k].kind == 1);
+        *on = (g.regions[k].toggle_on == 1);
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    return found ? 0 : -1;
+}
+
 /**
  * (vtouch-doc: op_ctrl_eval)
  * @brief 控制流判定求值（v12/v6C；循环·到条件 与 条件块共用）：五类判定 → hit；异常口径与既有条件步一致（中止）。
@@ -1886,33 +1925,16 @@ static int op_ctrl_eval(int jt, int p1, int p2, int kms, const char *ref, const 
 {
     *hit = 0;
     if (jt == 0) {                                           /* 区域判断：判定点可变量编码 → op_resolve（同条件步） */
-        int x, y, k, found = 0;
+        int x, y;
         if (op_resolve(p1, 0, g.logical_width - 1, &x) != 0 ||
             op_resolve(p2, 0, g.logical_height - 1, &y) != 0)
             return -1;                                       /* 失败已中止（变量无值 / 结果无值） */
-        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律同条件步：持锁判定、解锁后收场（锁内不 I/O） */
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, ref) != 0) continue;
-            found = 1;
-            *hit = region_hit(&g.regions[k], x, y);          /* 平坦函数复用：停用 = 不命中（spec §3.1） */
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!found) { vt_ops_abort("区域不存在"); return -1; }
+        if (op_region_pt_hit(ref, x, y, hit) != 0) { vt_ops_abort("区域不存在"); return -1; }  /* 持锁判定在内（锁内不 I/O） */
         return 0;
     }
     if (jt == 1) {                                           /* 开关判断（同条件步口径） */
-        int k, found = 0, is_toggle = 0, on = 0;
-        pthread_mutex_lock(&g.region_lock);
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, ref) != 0) continue;
-            found = 1;
-            is_toggle = (g.regions[k].kind == 1);
-            on = (g.regions[k].toggle_on == 1);
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!found) { vt_ops_abort("区域不存在"); return -1; }
+        int is_toggle = 0, on = 0;
+        if (op_toggle_state(ref, &is_toggle, &on) != 0) { vt_ops_abort("区域不存在"); return -1; }
         if (!is_toggle) { vt_ops_abort("非开关型"); return -1; }
         *hit = on;
         return 0;
@@ -2153,6 +2175,53 @@ static int op_toast_render(const char *tpl, char *out, size_t cap)
     return 0;
 }
 
+/* ---------- VM 宿主抽取原语·展示（T3.2） ---------- */
+/* 提示通道写入（v6D 契约 v14；文本先写、seq release 后写）+ 日志。T3.2 自提示步骤 case 抽出，
+ * 执行器与 VM 宿主共用（文本均已渲染）。 */
+static void op_toast_show(const char *text, int ms)
+{
+    size_t n = strnlen(text, sizeof g.toast - 1);
+    memcpy(g.toast, text, n);
+    g.toast[n] = 0;
+    g.toast_ms = ms;
+    __atomic_store_n(&g.toast_seq, (uint32_t)g.toast_seq + 1u, __ATOMIC_RELEASE);
+    fprintf(stderr, "vtouchd: op 提示 %s\n", text);
+}
+
+/* 框区域高亮（v6E 契约 v15）：查区域（锁纪律同区域判断）→ 名称先写、seq release 后写 + 日志。
+ * 返回 0 已显示 / -1 区域不存在（已按词中止）。T3.2 自框区域 case 抽出，执行器与 VM 宿主共用。 */
+static int op_hl_region(const char *ref, int ms)
+{
+    int k, found = 0, hms = ms > 0 ? ms : 3000;
+    pthread_mutex_lock(&g.region_lock);
+    for (k = 0; k < g.region_count; k++) {
+        if (strcmp(g.regions[k].id, ref) != 0) continue;
+        found = 1;
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    if (!found) { vt_ops_abort("区域不存在"); return -1; }
+    g.hl_kind = 0;                                       /* v6F 契约 v16：区域名模式 */
+    snprintf(g.hl_name, sizeof g.hl_name, "%s", ref);
+    g.hl_ms = hms;
+    __atomic_store_n(&g.hl_seq, (uint32_t)g.hl_seq + 1u, __ATOMIC_RELEASE);
+    fprintf(stderr, "vtouchd: op 框区域 %s（%dms）\n", ref, hms);
+    return 0;
+}
+
+/* 框矩形高亮（v6F §2.2）：归一（画出来永远正）→ 高亮通道（kind=1）+ 日志。T3.2 自框矩形 case 抽出。 */
+static void op_hl_rect(int x1, int y1, int x2, int y2, int ms)
+{
+    int t, bms = ms > 0 ? ms : 3000;
+    if (x1 > x2) { t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
+    g.hl_kind = 1;
+    g.hl_x1 = x1; g.hl_y1 = y1; g.hl_x2 = x2; g.hl_y2 = y2;
+    g.hl_ms = bms;
+    __atomic_store_n(&g.hl_seq, (uint32_t)g.hl_seq + 1u, __ATOMIC_RELEASE);
+    fprintf(stderr, "vtouchd: op 框矩形 %d,%d–%d,%d（%dms）\n", x1, y1, x2, y2, bms);
+}
+
 static void op_begin_step(void)
 {
     const struct vt_step *st;
@@ -2242,37 +2311,20 @@ static void op_begin_step(void)
         break;
     }
     case OP_STEP_COND_REGION: {                              /* 区域判断：a1,a2 的点 ∈ ref 区域？（spec §3.1） */
-        int x, y, k, found = 0, hit = 0;
+        int x, y, hit = 0;
         if (op_resolve(st->a1, 0, g.logical_width - 1, &x) != 0 ||
             op_resolve(st->a2, 0, g.logical_height - 1, &y) != 0)
             return;                                          /* 失败已中止（变量无值 / 结果无值；不静默当 0，spec §1.3/D6） */
         fprintf(stderr, "vtouchd: op 步 %d/%d 区域判断 %s %d,%d\n",
                 R.step + 1, R.nsteps, st->ref, x, y);
-        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律（spec §3.2）：持锁判定、解锁后记日志（锁内不 I/O） */
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, st->ref) != 0) continue;
-            found = 1;
-            hit = region_hit(&g.regions[k], x, y);           /* 平坦函数复用：停用 = 不命中（enabled 守卫在它里面，spec §3.1） */
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
+        if (op_region_pt_hit(st->ref, x, y, &hit) != 0) { vt_ops_abort("区域不存在"); return; }  /* 持锁判定在内（锁内不 I/O） */
         op_cond_apply(st, hit, "区域判断", st->ref, "条件不成立");   /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
         break;
     }
     case OP_STEP_COND_TOGGLE: {                              /* 开关判断：ref 区域须开关型且开着（spec §3.2） */
-        int k, found = 0, is_toggle = 0, on = 0;
+        int is_toggle = 0, on = 0;
         fprintf(stderr, "vtouchd: op 步 %d/%d 开关判断 %s\n", R.step + 1, R.nsteps, st->ref);
-        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律同门控检查：持锁判定、解锁后记日志（锁内不 I/O） */
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, st->ref) != 0) continue;
-            found = 1;
-            is_toggle = (g.regions[k].kind == 1);
-            on = (g.regions[k].toggle_on == 1);
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!found) { vt_ops_abort("区域不存在"); return; }   /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
+        if (op_toggle_state(st->ref, &is_toggle, &on) != 0) { vt_ops_abort("区域不存在"); return; }  /* 锁纪律同上 */
         if (!is_toggle) { vt_ops_abort("非开关型"); return; } /* 运行时校验（编辑期不查 kind，spec §3.2） */
         op_cond_apply(st, on, "开关判断", st->ref, "条件不成立");    /* 两侧四档统一收口（spec §1.2；锁外记日志 / 收场） */
         break;
@@ -2474,48 +2526,25 @@ static void op_begin_step(void)
         char tbuf[256];
         if (op_toast_render(st->expr, tbuf, sizeof tbuf) != 0)
             return;                                          /* 缺值已中止（口径见 op_toast_render） */
-        memcpy(g.toast, tbuf, sizeof g.toast);
-        g.toast[sizeof g.toast - 1] = 0;
-        g.toast_ms = st->ms;
-        __atomic_store_n(&g.toast_seq, (uint32_t)g.toast_seq + 1u, __ATOMIC_RELEASE);
-        fprintf(stderr, "vtouchd: op 提示 %s\n", tbuf);
+        op_toast_show(tbuf, st->ms);                         /* 通道 + 日志（T3.2 抽出的共用函数） */
         R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
         R.deadline = R.t0;
         break;
     }
-    case OP_STEP_HL: {                                       /* 框区域（v6E §3.2）：查区域 → 高亮通道（名称先写、seq release 后写）→ 面板高亮；单拍不阻塞 */
-        int k, found = 0, hms = st->ms > 0 ? st->ms : 3000;
-        pthread_mutex_lock(&g.region_lock);                  /* 锁纪律同区域判断：持锁查、解锁后写通道 */
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, st->ref) != 0) continue;
-            found = 1;
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!found) { vt_ops_abort("区域不存在"); return; }    /* 悬空引用：运行时报（编辑期允许，spec §3.1） */
-        g.hl_kind = 0;                                       /* v6F 契约 v16：区域名模式 */
-        snprintf(g.hl_name, sizeof g.hl_name, "%s", st->ref);
-        g.hl_ms = hms;
-        __atomic_store_n(&g.hl_seq, (uint32_t)g.hl_seq + 1u, __ATOMIC_RELEASE);
-        fprintf(stderr, "vtouchd: op 框区域 %s（%dms）\n", st->ref, hms);
+    case OP_STEP_HL: {                                       /* 框区域（v6E §3.2）：查区域 → 高亮通道 → 面板高亮；单拍不阻塞 */
+        if (op_hl_region(st->ref, st->ms) != 0) return;      /* 区域不存在已中止（锁纪律在查里） */
         R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
         R.deadline = R.t0;
         break;
     }
     case OP_STEP_BOX: {                                      /* 框矩形（v6F §2.2）：解析四坐标 → 归一 → 高亮通道（kind=1）；单拍不阻塞 */
-        int x1, y1, x2, y2, t, bms = st->ms > 0 ? st->ms : 3000;
+        int x1, y1, x2, y2;
         if (op_resolve(st->a1, 0, g.logical_width - 1, &x1) != 0 ||
             op_resolve(st->a2, 0, g.logical_height - 1, &y1) != 0 ||
             op_resolve(st->a3, 0, g.logical_width - 1, &x2) != 0 ||
             op_resolve(st->a4, 0, g.logical_height - 1, &y2) != 0)
             return;                                          /* 失败已中止（变量无值 / 结果无值；同点按口径） */
-        if (x1 > x2) { t = x1; x1 = x2; x2 = t; }            /* 自动归一（画出来永远正） */
-        if (y1 > y2) { t = y1; y1 = y2; y2 = t; }
-        g.hl_kind = 1;
-        g.hl_x1 = x1; g.hl_y1 = y1; g.hl_x2 = x2; g.hl_y2 = y2;
-        g.hl_ms = bms;
-        __atomic_store_n(&g.hl_seq, (uint32_t)g.hl_seq + 1u, __ATOMIC_RELEASE);
-        fprintf(stderr, "vtouchd: op 框矩形 %d,%d–%d,%d（%dms）\n", x1, y1, x2, y2, bms);
+        op_hl_rect(x1, y1, x2, y2, st->ms);                  /* 归一 + 通道 + 日志（T3.2 抽出的共用函数） */
         R.phase = PH_WAIT;                                   /* 单拍动作：本步到此为止，下一拍进下一步 */
         R.deadline = R.t0;
         break;
@@ -2911,5 +2940,111 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
         (void)r;                     /* 非阻塞：写满（几乎到不了）只丢这次唤醒，seq 还在、兜底会捡 */
     }
 }
+
+/* =====================================================================
+ * V8 VM 宿主钩子表（T3.2）：vt_vm_host 适配层 —— 全部复用本文件抽取的原语
+ * （op_finger_* / op_toast_show / op_hl_region / op_hl_rect / op_region_pt_hit /
+ *  op_toggle_state / op_vis_eval）。失败已按老执行器口径收场
+ * （op_conflict_abort / vt_ops_abort），返回 -1 让 VM 以 `动作中止` 终止。
+ * 接线（起跑 / 收尾 / 编辑邮箱）在 T3.5；本表只定义行为面。
+ * ===================================================================== */
+static int vmg_touch_down(void *c, int x, int y)
+{
+    (void)c;
+    if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return -1; }
+    return 0;
+}
+static int vmg_touch_move(void *c, int x, int y)
+{
+    (void)c;
+    if (op_finger_ll("move", x, y) != 0) { op_conflict_abort(); return -1; }
+    return 0;
+}
+static int vmg_touch_up(void *c)
+{
+    (void)c;
+    if (op_finger_raw("up", R.rx, R.ry) != 0) { op_conflict_abort(); return -1; }
+    return 0;
+}
+static int vmg_hold_down(void *c, int x, int y)
+{
+    (void)c;
+    if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return -1; }
+    R.held = 1;                                          /* 持有态：弹起 / 收尾释放负责清（spec §2.2） */
+    return 0;
+}
+static int vmg_hold_up(void *c)
+{
+    (void)c;
+    if (!R.held) { vt_ops_abort("未按下"); return -1; }  /* 没有按住的手指：安全侧中止（spec §2.2） */
+    if (op_finger_raw("up", R.rx, R.ry) != 0) { op_conflict_abort(); return -1; }
+    R.held = 0;
+    return 0;
+}
+static int vmg_toast(void *c, const char *text, int ms)
+{
+    (void)c;
+    op_toast_show(text, ms);
+    return 0;
+}
+static int vmg_hl_region(void *c, const char *ref, int ms)
+{
+    (void)c;
+    return op_hl_region(ref, ms);
+}
+static int vmg_hl_rect(void *c, int x1, int y1, int x2, int y2, int ms)
+{
+    (void)c;
+    op_hl_rect(x1, y1, x2, y2, ms);
+    return 0;
+}
+static int vmg_find_img(void *c, vt_vm *vm, const char *tpl, const char *region,
+                        int thresh, int colorchk, int persist, int *hit)
+{
+    (void)c;
+    if (op_vis_eval(1, tpl, region, thresh, colorchk, persist, hit) != 0) return -1;
+    if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
+    return 0;
+}
+static int vmg_find_color(void *c, vt_vm *vm, const char *set, const char *region, int *hit)
+{
+    (void)c;
+    if (op_vis_eval(0, set, region, 1, 0, 0, hit) != 0) return -1;   /* a1=1：多点（.pts 点集） */
+    if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
+    return 0;
+}
+static int vmg_find_dot(void *c, vt_vm *vm, int color, int tol, const char *region, int *hit)
+{
+    (void)c;
+    if (op_vis_eval(0, NULL, region, 0, (int)(((uint32_t)color << 8) | ((uint32_t)tol & 0xFFu)), 0, hit) != 0)
+        return -1;                                       /* a1=0 单点；a2 = (颜色<<8)|容差（spec §6.1） */
+    if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
+    return 0;
+}
+static int vmg_in_region(void *c, int x, int y, const char *region, int *hit)
+{
+    (void)c;
+    if (op_region_pt_hit(region, x, y, hit) != 0) { vt_ops_abort("区域不存在"); return -1; }
+    return 0;
+}
+static int vmg_sw_on(void *c, const char *name, int *hit)
+{
+    int is_toggle = 0, on = 0;
+    (void)c;
+    if (op_toggle_state(name, &is_toggle, &on) != 0) { vt_ops_abort("区域不存在"); return -1; }
+    if (!is_toggle) { vt_ops_abort("非开关型"); return -1; }
+    *hit = on;
+    return 0;
+}
+
+static const struct vt_vm_host vt_ops_host = {
+    NULL,
+    vmg_touch_down, vmg_touch_move, vmg_touch_up,
+    vmg_hold_down, vmg_hold_up,
+    vmg_toast, vmg_hl_region, vmg_hl_rect,
+    vmg_find_img, vmg_find_color, vmg_find_dot, vmg_in_region, vmg_sw_on
+};
+
+const struct vt_vm_host *vt_ops_vm_host(void) { return &vt_ops_host; }
 
 #endif /* VT_UI */

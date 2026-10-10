@@ -1,7 +1,8 @@
-/* vt_vm.c —— VTBC v1 虚拟机骨架（T3.1）。见 vt_vm.h 与 docs/VTBC_V1.md。
+/* vt_vm.c —— VTBC v1 虚拟机（T3.1 骨架 + T3.2 宿主钩子）。见 vt_vm.h 与 docs/VTBC_V1.md。
  * 语义对齐：除零 → 错；atan2(a,b) 返回度、(-180,180]（-180 规范为 180）、(0,0)=0；
  * sin/cos 按度；数字转串 ≤6 位小数去尾零（与编辑器编译/迷你解释器同口径）。
- * 动作/视觉指令此处为占位（按栈效应消费、视觉推 0）；T3.2/T3.3 接真实实现。 */
+ * 动作/展示/视觉经宿主钩子落地（核心侧 = vt_ops.c 抽取的现执行器函数；未挂宿主 = 占位：
+ * 按栈效应消费、视觉推 0）。多拍动作（点按/滑动）由 VM 排序、跨 tick 续跑（见 vm_act_step）。 */
 #include "vt_vm.h"
 
 #include <math.h>
@@ -231,6 +232,11 @@ void vt_vm_reset(vt_vm *vm) {
     vm->err_pc = 0;
     vm->err_line = 0;
     vm->term_mode = 0;
+    vm->act_op = 0;
+    vm->act_phase = 0;
+    vm->act_k = 0;
+    vm->act_n = 0;
+    vm->act_pc = 0;
 }
 
 /* ---------- 栈 / 槽 ---------- */
@@ -337,10 +343,100 @@ static int vm_atan2_deg(vt_vm *vm, double a, double b, double *out) {
     return 0;
 }
 
+/* ---------- 宿主钩子小件（T3.2） ---------- */
+/* 常量串取 C 串（拷贝进 buf 补 NUL）。ci == -1（无）：must=0 → *out=NULL；must=1 → 程序非法。 */
+static int vm_cstr(vt_vm *vm, uint32_t ci, char *buf, size_t cap, int must, const char **out)
+{
+    const vt_val *c;
+    if (ci == 0xFFFFFFFFu) {
+        if (must) { vt_vm_fail(vm, "程序非法", vm->pc); return -1; }
+        *out = NULL;
+        return 0;
+    }
+    if (ci >= vm->nconsts || vm->cpool[ci].t != 2 || vm->cpool[ci].sl >= cap) {
+        vt_vm_fail(vm, "程序非法", vm->pc);
+        return -1;
+    }
+    c = &vm->cpool[ci];
+    memcpy(buf, c->sp, c->sl);
+    buf[c->sl] = '\0';
+    *out = buf;
+    return 0;
+}
+
+/* 弹一个数并按 int 取（超界 → 程序非法）。 */
+static int vm_pop_int(vt_vm *vm, int *out)
+{
+    double d;
+    if (num_of(vm, popv(vm), &d) < 0) return -1;
+    if (!(d >= -2147483000.0 && d <= 2147483000.0)) { vt_vm_fail(vm, "程序非法", vm->pc); return -1; }
+    *out = (int)d;
+    return 0;
+}
+
+/* 线性插值（与 vt_ops.c op_lerp 同式）。 */
+static int vm_lerp(int a, int b, uint32_t k, uint32_t n) { return a + (b - a) * (int)k / (int)n; }
+
+/* 续跑挂起动作（点按/滑动）。返回 0 = 完成（调用方清 act 并继续）；1 = 已产出等待（*wait_ms）；2 = 已置错。 */
+static int vm_act_step(vt_vm *vm, uint32_t *wait_ms)
+{
+    const struct vt_vm_host *h = vm->host;
+    if (vm->act_op == VT_OP_TAP) {
+        if (vm->act_phase == 1) {
+            vm->act_phase = 2;
+            *wait_ms = (vm->act_ms > 0) ? (uint32_t)vm->act_ms : 0u;   /* ms=0 也隔一拍（对齐老执行器 up 落下一拍） */
+            return 1;
+        }
+        if (h->touch_up(h->ctx) != 0) { vt_vm_fail(vm, "动作中止", vm->act_pc); return 2; }
+        return 0;
+    }
+    /* 滑动：状态机 1=头部停 → 2=排采样 → 3=移动 → 4=尾部停 → 5=抬指 */
+    for (;;) {
+        switch (vm->act_phase) {
+            case 1:                    /* 头部停（停1） */
+                vm->act_phase = 2;
+                *wait_ms = (uint32_t)vm->act_h1;
+                return 1;
+            case 2: {                  /* 排下一采样：k·ms/N −(k−1)·ms/N */
+                uint32_t k1, dt, dur = (uint32_t)vm->act_ms;
+                if (vm->act_k >= vm->act_n) { vm->act_phase = 4; break; }
+                k1 = vm->act_k + 1;
+                dt = k1 * dur / vm->act_n - vm->act_k * dur / vm->act_n;
+                vm->act_k = k1;
+                vm->act_phase = 3;
+                if (dt > 0) { *wait_ms = dt; return 1; }
+                break;
+            }
+            case 3: {                  /* 移动第 k 点 */
+                int lx = vm_lerp(vm->act_x1, vm->act_x2, vm->act_k, vm->act_n);
+                int ly = vm_lerp(vm->act_y1, vm->act_y2, vm->act_k, vm->act_n);
+                if (h->touch_move(h->ctx, lx, ly) != 0) { vt_vm_fail(vm, "动作中止", vm->act_pc); return 2; }
+                vm->act_phase = 2;
+                break;
+            }
+            case 4:                    /* 尾部停（停2） */
+                vm->act_phase = 5;
+                if (vm->act_h2 > 0) { *wait_ms = (uint32_t)vm->act_h2; return 1; }
+                break;
+            default:                   /* 5：抬指 */
+                if (h->touch_up(h->ctx) != 0) { vt_vm_fail(vm, "动作中止", vm->act_pc); return 2; }
+                return 0;
+        }
+    }
+}
+
 /* ---------- 执行 ---------- */
 vt_vm_status vt_vm_tick(vt_vm *vm, uint32_t *wait_ms) {
+    const struct vt_vm_host *host = vm->host;
     uint32_t pc = vm->pc;
     if (wait_ms) *wait_ms = 0;
+    if (vm->act_op) {                        /* 挂起动作续跑（点按/滑动，跨 tick） */
+        int r = vm_act_step(vm, wait_ms);
+        if (r == 2) return VT_VM_ERR;
+        if (r == 1) return VT_VM_WAIT;
+        vm->act_op = 0;
+        pc = vm->pc;
+    }
     for (;;) {
         uint8_t op;
         if (pc >= vm->code_len) {
@@ -614,62 +710,179 @@ vt_vm_status vt_vm_tick(vt_vm *vm, uint32_t *wait_ms) {
                 break;
             }
             case VT_OP_RAND: {
-                double x, y;
-                vt_val b = popv(vm), a = popv(vm);
-                if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return VT_VM_ERR;
-                (void)y;
-                if (push(vm, vnum(x)) < 0) VMFAIL("程序非法");   /* 占位：取 a（T3.2 接真 rand） */
+                double a, b, r;
+                if (num_of(vm, popv(vm), &b) < 0 || num_of(vm, popv(vm), &a) < 0) return VT_VM_ERR;
+                if (!(a >= -1e15 && a <= 1e15) || !(b >= -1e15 && b <= 1e15)) VMFAIL("程序非法");
+                {
+                    double lo = (a < b) ? a : b, hi = (a < b) ? b : a;
+                    long l = (long)ceil(lo), hh = (long)floor(hi);
+                    if (hh < l) r = (double)l;
+                    else r = (double)(l + (long)(rand() % (unsigned long)(hh - l + 1)));
+                }
+                if (push(vm, vnum(r)) < 0) VMFAIL("程序非法");
                 break;
             }
-            /* ---- 动作/展示/视觉：占位（按栈效应消费；视觉推 0） ---- */
-            case VT_OP_TAP:
-                (void)popv(vm); (void)popv(vm); (void)popv(vm);
+            /* ---- 动作/展示/视觉：宿主钩子（无宿主 = 占位按栈效应消费） ---- */
+            case VT_OP_TAP: {
+                int x, y, ms;
+                if (vm_pop_int(vm, &ms) < 0 || vm_pop_int(vm, &y) < 0 || vm_pop_int(vm, &x) < 0)
+                    return VT_VM_ERR;
+                if (!host || !host->touch_down) break;
+                if (host->touch_down(host->ctx, x, y) != 0) VMFAIL("动作中止");
+                vm->act_op = VT_OP_TAP;
+                vm->act_phase = 1;
+                vm->act_ms = ms;
+                vm->act_pc = vm->pc;
+                vm->pc = pc;
+                {
+                    int r = vm_act_step(vm, wait_ms);
+                    if (r == 2) return VT_VM_ERR;
+                    if (r == 1) return VT_VM_WAIT;
+                    vm->act_op = 0;
+                }
                 break;
+            }
             case VT_OP_SWIPE: {
-                int i;
-                for (i = 0; i < 7; i++) (void)popv(vm);
+                int ms, h1, h2, y1, x1, y2, x2;
+                if (vm_pop_int(vm, &h2) < 0 || vm_pop_int(vm, &h1) < 0 || vm_pop_int(vm, &ms) < 0 ||
+                    vm_pop_int(vm, &y2) < 0 || vm_pop_int(vm, &x2) < 0 ||
+                    vm_pop_int(vm, &y1) < 0 || vm_pop_int(vm, &x1) < 0)
+                    return VT_VM_ERR;
+                if (!host || !host->touch_down) break;
+                if (ms < 0) VMFAIL("程序非法");
+                if (host->touch_down(host->ctx, x1, y1) != 0) VMFAIL("动作中止");
+                vm->act_op = VT_OP_SWIPE;
+                vm->act_x1 = x1; vm->act_y1 = y1; vm->act_x2 = x2; vm->act_y2 = y2;
+                vm->act_ms = ms; vm->act_h1 = h1; vm->act_h2 = h2;
+                vm->act_n = (uint32_t)ms / 10u;              /* 老执行器：N = max(2, ms/10) */
+                if (vm->act_n < 2) vm->act_n = 2;
+                vm->act_k = 0;
+                vm->act_phase = (h1 > 0) ? 1 : 2;
+                vm->act_pc = vm->pc;
+                vm->pc = pc;
+                {
+                    int r = vm_act_step(vm, wait_ms);
+                    if (r == 2) return VT_VM_ERR;
+                    if (r == 1) return VT_VM_WAIT;
+                    vm->act_op = 0;
+                }
                 break;
             }
-            case VT_OP_DOWN:
-                (void)popv(vm); (void)popv(vm);
+            case VT_OP_DOWN: {
+                int x, y;
+                if (vm_pop_int(vm, &y) < 0 || vm_pop_int(vm, &x) < 0) return VT_VM_ERR;
+                if (host && host->hold_down && host->hold_down(host->ctx, x, y) != 0) VMFAIL("动作中止");
                 break;
+            }
             case VT_OP_UP:
+                if (host && host->hold_up && host->hold_up(host->ctx) != 0) VMFAIL("动作中止");
                 break;
-            case VT_OP_TOAST:
-                (void)popv(vm); (void)popv(vm);
-                break;
-            case VT_OP_HL:
-                pc += 4;
-                (void)popv(vm);
-                break;
-            case VT_OP_BOX: {
-                int i;
-                for (i = 0; i < 5; i++) (void)popv(vm);
+            case VT_OP_TOAST: {
+                int ms;
+                char buf[256];
+                {
+                    char tmp[64];
+                    const char *p;
+                    uint32_t l;
+                    vt_val v;
+                    if (vm_pop_int(vm, &ms) < 0) return VT_VM_ERR;   /* 栈顶 = ms（编译器先压文本后压时长） */
+                    v = popv(vm);
+                    if (str_of(vm, v, tmp, sizeof tmp, &p, &l) < 0) return VT_VM_ERR;
+                    if (l >= sizeof buf) l = (uint32_t)sizeof buf - 1;
+                    memcpy(buf, p, l);
+                    buf[l] = '\0';
+                }
+                if (host && host->toast && host->toast(host->ctx, buf, ms) != 0) VMFAIL("动作中止");
                 break;
             }
-            case VT_OP_FINDIMG:
+            case VT_OP_HL: {
+                uint32_t ci = rd32(vm->code + pc);
+                int ms;
+                char rb[64];
+                const char *ref;
+                pc += 4;
+                if (vm_pop_int(vm, &ms) < 0) return VT_VM_ERR;
+                if (vm_cstr(vm, ci, rb, sizeof rb, 1, &ref) < 0) return VT_VM_ERR;
+                if (host && host->hl_region && host->hl_region(host->ctx, ref, ms) != 0) VMFAIL("动作中止");
+                break;
+            }
+            case VT_OP_BOX: {
+                int ms, y2, x2, y1, x1;
+                if (vm_pop_int(vm, &ms) < 0 || vm_pop_int(vm, &y2) < 0 || vm_pop_int(vm, &x2) < 0 ||
+                    vm_pop_int(vm, &y1) < 0 || vm_pop_int(vm, &x1) < 0)
+                    return VT_VM_ERR;
+                if (host && host->hl_rect && host->hl_rect(host->ctx, x1, y1, x2, y2, ms) != 0) VMFAIL("动作中止");
+                break;
+            }
+            case VT_OP_FINDIMG: {
+                uint32_t ci = rd32(vm->code + pc), ri = rd32(vm->code + pc + 4);
+                int persist, cc, th, hit = 0;
+                char tb[64], rb[64];
+                const char *tpl, *reg;
                 pc += 8;
-                (void)popv(vm); (void)popv(vm); (void)popv(vm);
-                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                if (vm_pop_int(vm, &persist) < 0 || vm_pop_int(vm, &cc) < 0 || vm_pop_int(vm, &th) < 0)
+                    return VT_VM_ERR;
+                if (vm_cstr(vm, ci, tb, sizeof tb, 1, &tpl) < 0) return VT_VM_ERR;
+                if (vm_cstr(vm, ri, rb, sizeof rb, 0, &reg) < 0) return VT_VM_ERR;
+                if (host && host->find_img &&
+                    host->find_img(host->ctx, vm, tpl, reg, th, cc, persist, &hit) != 0)
+                    VMFAIL("动作中止");
+                if (push(vm, vnum(hit ? 1 : 0)) < 0) VMFAIL("程序非法");
                 break;
-            case VT_OP_FINDCOLOR:
+            }
+            case VT_OP_FINDCOLOR: {
+                uint32_t ci = rd32(vm->code + pc), ri = rd32(vm->code + pc + 4);
+                char sb[64], rb[64];
+                const char *set, *reg;
+                int hit = 0;
                 pc += 8;
-                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                if (vm_cstr(vm, ci, sb, sizeof sb, 1, &set) < 0) return VT_VM_ERR;
+                if (vm_cstr(vm, ri, rb, sizeof rb, 0, &reg) < 0) return VT_VM_ERR;
+                if (host && host->find_color &&
+                    host->find_color(host->ctx, vm, set, reg, &hit) != 0)
+                    VMFAIL("动作中止");
+                if (push(vm, vnum(hit ? 1 : 0)) < 0) VMFAIL("程序非法");
                 break;
-            case VT_OP_FINDDOT:
+            }
+            case VT_OP_FINDDOT: {
+                uint32_t ri = rd32(vm->code + pc);
+                char rb[64];
+                const char *reg;
+                int color, tol, hit = 0;
                 pc += 4;
-                (void)popv(vm); (void)popv(vm);
-                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                if (vm_pop_int(vm, &tol) < 0 || vm_pop_int(vm, &color) < 0) return VT_VM_ERR;
+                if (vm_cstr(vm, ri, rb, sizeof rb, 0, &reg) < 0) return VT_VM_ERR;
+                if (host && host->find_dot &&
+                    host->find_dot(host->ctx, vm, color, tol, reg, &hit) != 0)
+                    VMFAIL("动作中止");
+                if (push(vm, vnum(hit ? 1 : 0)) < 0) VMFAIL("程序非法");
                 break;
-            case VT_OP_INREGION:
+            }
+            case VT_OP_INREGION: {
+                uint32_t ri = rd32(vm->code + pc);
+                char rb[64];
+                const char *reg;
+                int x, y, hit = 0;
                 pc += 4;
-                (void)popv(vm); (void)popv(vm);
-                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                if (vm_pop_int(vm, &y) < 0 || vm_pop_int(vm, &x) < 0) return VT_VM_ERR;
+                if (vm_cstr(vm, ri, rb, sizeof rb, 1, &reg) < 0) return VT_VM_ERR;
+                if (host && host->in_region &&
+                    host->in_region(host->ctx, x, y, reg, &hit) != 0)
+                    VMFAIL("动作中止");
+                if (push(vm, vnum(hit ? 1 : 0)) < 0) VMFAIL("程序非法");
                 break;
-            case VT_OP_SWON:
+            }
+            case VT_OP_SWON: {
+                uint32_t ci = rd32(vm->code + pc);
+                char nb[64];
+                const char *nm;
+                int hit = 0;
                 pc += 4;
-                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                if (vm_cstr(vm, ci, nb, sizeof nb, 1, &nm) < 0) return VT_VM_ERR;
+                if (host && host->sw_on && host->sw_on(host->ctx, nm, &hit) != 0) VMFAIL("动作中止");
+                if (push(vm, vnum(hit ? 1 : 0)) < 0) VMFAIL("程序非法");
                 break;
+            }
             default:
                 VMFAIL("程序非法");
         }
@@ -685,6 +898,20 @@ vt_vm_status vt_vm_run(vt_vm *vm) {
 }
 
 /* ---------- 查询 ---------- */
+void vt_vm_set_host(vt_vm *vm, const struct vt_vm_host *host) {
+    vm->host = host;
+}
+
+void vt_vm_store_num(vt_vm *vm, uint32_t slot, double v) {
+    if (slot < vm->slot_count) vm->g[slot] = vnum(v);
+}
+
+int vt_vm_slot_num(const vt_vm *vm, uint32_t slot, double *out) {
+    if (slot >= vm->slot_count || vm->g[slot].t != 1) return 0;
+    if (out) *out = vm->g[slot].n;
+    return 1;
+}
+
 int vt_vm_global(const vt_vm *vm, const char *name, vt_val *out) {
     uint32_t i, nlen = (uint32_t)strlen(name);
     for (i = 0; i < vm->n_names; i++) {

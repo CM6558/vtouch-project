@@ -439,6 +439,9 @@ int  vt_ops_next_deadline_ms(void);
 void vt_ops_run(const char *name, const struct vt_trig_data *td);
 /* 中止运行中的操作（抬指 + 状态归位 + 日志原因）。 (vtouch-doc: vt_ops_abort) */
 void vt_ops_abort(const char *why);
+/* V8 VM 宿主钩子表（vt_ops.c 的抽取原语适配层；T3.5 接线起用，VT_UI 构建内有效）。 */
+struct vt_vm_host;
+const struct vt_vm_host *vt_ops_vm_host(void);
 /* 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。 (vtouch-doc: vt_ops_put) */
 int  vt_ops_put(const struct vt_op *op);
 /* 删除一条操作。 (vtouch-doc: vt_ops_del) */

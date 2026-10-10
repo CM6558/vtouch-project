@@ -1,8 +1,8 @@
-/* vt_vm.h —— VTBC v1 虚拟机（T3.1 骨架）。
+/* vt_vm.h —— VTBC v1 虚拟机（T3.1 骨架 + T3.2 宿主钩子）。
  * 格式：docs/VTBC_V1.md；语义：docs/VT_SCRIPT_V1_SPEC.md。
  * 纯 C、零 Android 依赖（宿主单测：build/test_vt_vm.c，跑 ~/vtouch-vm-test.sh）。
  * 让出式 tick：vt_vm_tick() 跑到「需等待 / 结束 / 错误」就交还；等待毫秒走出参
- * （WAIT 指令；T3.2/T3.5 起动作/视觉也经挂钩返回等待）。主循环集成在 T3.5。 */
+ * （WAIT 指令与多拍动作的空隙；动作经宿主钩子落地，核心侧 = vt_ops.c 抽取函数）。 */
 #ifndef VT_VM_H
 #define VT_VM_H
 
@@ -61,6 +61,39 @@ typedef struct {
 
 typedef struct vt_vm vt_vm;
 
+/* 预定义槽号（与编辑器 VtCompiler 一致）：tdx tdy tux tuy tms fx fy = 0..6 */
+enum {
+    VT_VM_SLOT_TDX = 0, VT_VM_SLOT_TDY = 1, VT_VM_SLOT_TUX = 2, VT_VM_SLOT_TUY = 3,
+    VT_VM_SLOT_TMS = 4, VT_VM_SLOT_FX = 5, VT_VM_SLOT_FY = 6
+};
+
+/* 宿主钩子（T3.2）：动作/展示/视觉的低层实现由宿主提供（核心 = vt_ops.c 抽取的现执行器函数；
+ * 宿主单测 = 记录桩）。返回约定：动作/展示 0 = 完成 / -1 = 硬失败（宿主已按因由收场，VM 以
+ * `动作中止` 终止）；视觉 0 = 得值（*hit 有效）/ -1 = 硬失败；命中坐标由宿主用
+ * vt_vm_store_num 写 fx/fy（槽 5/6）。多拍动作由 VM 排序、跨 tick 驱动（与老执行器同时间表）：
+ *   点按：touch_down → [等 ms，ms=0 也隔一拍] → touch_up
+ *   滑动：touch_down → [等 停1] → N=max(2,ms/10) 次（等 k·ms/N−(k−1)·ms/N → touch_move(lerp)）
+ *         → [等 停2] → touch_up
+ * 未挂宿主（NULL）= 纯逻辑模式：动作/视觉占位（消费操作数，视觉推 0）。
+ * 注意：vt_vm_load 会清空宿主编排——载入后须重新 vt_vm_set_host。 */
+struct vt_vm_host {
+    void *ctx;
+    int (*touch_down)(void *ctx, int x, int y);   /* 点按/滑动起手（≡ op_finger_ll("down")） */
+    int (*touch_move)(void *ctx, int x, int y);   /* 滑动采样点 */
+    int (*touch_up)(void *ctx);                   /* 点按/滑动收尾（≡ op_finger_raw("up", R.rx, R.ry)） */
+    int (*hold_down)(void *ctx, int x, int y);    /* 按下（持有态） */
+    int (*hold_up)(void *ctx);                    /* 弹起（未按住 → 宿主已按 `未按下` 收场） */
+    int (*toast)(void *ctx, const char *text, int ms);        /* 文本已渲染（插值/拼接在脚本内完成） */
+    int (*hl_region)(void *ctx, const char *ref, int ms);     /* 失败（区域不存在）宿主已收场 */
+    int (*hl_rect)(void *ctx, int x1, int y1, int x2, int y2, int ms);
+    int (*find_img)(void *ctx, vt_vm *vm, const char *tpl, const char *region,
+                    int thresh, int colorchk, int persist, int *hit);
+    int (*find_color)(void *ctx, vt_vm *vm, const char *set, const char *region, int *hit);
+    int (*find_dot)(void *ctx, vt_vm *vm, int color, int tol, const char *region, int *hit);
+    int (*in_region)(void *ctx, int x, int y, const char *region, int *hit);
+    int (*sw_on)(void *ctx, const char *name, int *hit);
+};
+
 struct vt_vm {
     /* 载入的 blob（不拷贝；调用方保证生命周期） */
     const uint8_t *bc;
@@ -94,6 +127,13 @@ struct vt_vm {
     char     err[VT_VM_ERR_CAP];
     uint32_t err_pc, err_line;
     uint8_t  term_mode;               /* 0 完成 / 1 中止 */
+
+    /* 宿主编排（可空）+ 挂起中的多拍动作（跨 tick 续跑，pc 未前进） */
+    const struct vt_vm_host *host;
+    uint8_t  act_op, act_phase;
+    uint32_t act_k, act_n, act_pc;
+    int32_t  act_x1, act_y1, act_x2, act_y2;
+    int32_t  act_ms, act_h1, act_h2;
 };
 
 /* 载入 + 结构校验（失败返回 -1，vm->err 说明原因）。成功即做好跑前准备。 */
@@ -104,6 +144,12 @@ void vt_vm_reset(vt_vm *vm);
 vt_vm_status vt_vm_tick(vt_vm *vm, uint32_t *wait_ms);
 /* 批模式：WAIT 不等直接续跑（测试/编译期望值用）。 */
 vt_vm_status vt_vm_run(vt_vm *vm);
+/* 挂载/卸载宿主钩子（NULL = 纯逻辑模式）。 */
+void vt_vm_set_host(vt_vm *vm, const struct vt_vm_host *host);
+/* 写/读全局槽数值（槽 0..6 = 预定义 tdx tdy tux tuy tms fx fy；宿主同步触发数据/回填命中点用）。
+ * store 越界静默忽略；slot_num 返回 1 = 该槽是数值（*out 有效）。 */
+void vt_vm_store_num(vt_vm *vm, uint32_t slot, double v);
+int  vt_vm_slot_num(const vt_vm *vm, uint32_t slot, double *out);
 /* 按名字表查全局槽（测试/调试）。1 = 找到。 */
 int  vt_vm_global(const vt_vm *vm, const char *name, vt_val *out);
 /* pc → 行号（取 ≤pc 的最后一条）。 */
