@@ -1593,7 +1593,7 @@ static int op_vis_region(const char *name, const struct op_vis_frame *fr,
     int i, found = 0;
 
     *rx = 0; *ry = 0; *rw = fr->w; *rh = fr->h;              /* 空 = 全屏（帧坐标） */
-    if (!name[0]) return 0;
+    if (!name || !name[0]) return 0;                         /* NULL 容错（T5.2：VM 缝的「无」）；空 = 全屏 */
     pthread_mutex_lock(&g.region_lock);                      /* 锁纪律同条件步：持锁取几何、解锁后再换算 */
     for (i = 0; i < g.region_count; i++) {
         const struct region *rg = &g.regions[i];
@@ -1914,6 +1914,10 @@ static int op_vis_eval(int is_image, const char *ref, const char *region, int a1
     const char *err = NULL;
 
     *hit = 0;
+    /* VM 缝归一（T5.2 血泪）：vm_cstr 对「无」哨兵（-1）返回 NULL，而老执行器路径字符串恒非 NULL（无 = 空串指针）——
+     * 本函数是两条路径的公共入口：NULL 一律按空串走（region 空 = 全屏；ref 空由上层报 模板不存在/点集不存在，杜绝空指针）。 */
+    if (!ref) ref = "";
+    if (!region) region = "";
     /* kind：找图 = 0；找色按模式（a1 == 1 = 多点）。字段映射照 spec §6.1（a1 = 阈值 / 模式；a2 = 单点打包色容差）。
      * ms（T7.4）：0 = 单次（现状）；>0 = 持续查找超时 —— vis_exec_find 循环抓帧查到命中或超时。 */
     kind = is_image ? 0 : (a1 == 1 ? 2 : 1);
