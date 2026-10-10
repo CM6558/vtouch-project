@@ -735,6 +735,71 @@ int vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_
 }
 
 /**
+ * @brief 程序表当前条数（面板列表用；只读区 A）。 (vtouch-doc: 无)
+ * @return  程序条数；没接共享内存时 0。
+ */
+int vtouch_prog_count(void) { return S ? S->prog_count : 0; }
+
+/**
+ * @brief 取一条程序操作的元信息/字节码（名字/门控/自动关/长度/产物字节；只读区 A）。 (vtouch-doc: 无)
+ * @param   i        程序下标（0..prog_count-1）
+ * @param   name     输出名字缓冲（可 NULL）
+ * @param   n        名字缓冲容量
+ * @param   gate     输出门控区域 id 缓冲（可 NULL）
+ * @param   gn       门控缓冲容量
+ * @param   autoff   输出跑完自动关（可 NULL）
+ * @param   buf      输出产物字节缓冲（可 NULL = 只要元信息）
+ * @param   cap      buf 容量（>0）
+ * @param   plen     输出产物实际长度（可 NULL）
+ * @return  0 成功；-1 没接共享内存或下标越界。
+ * @note    任一出参可为 NULL；字符串 snprintf 截断保 NUL；buf 只拷 min(cap, prog_len) 字节，
+ *          长度以 plen 为准（save_ops 从核心原样写回用）。
+ */
+int vtouch_get_prog(int i, char *name, int n, char *gate, int gn, int *autoff,
+                    uint8_t *buf, int cap, int *plen)
+{
+    const struct vt_prog *p;
+    if (!S || i < 0 || i >= S->prog_count || i >= MAX_OPS) return -1;
+    p = &S->progs[i];
+    if (name && n > 0) snprintf(name, (size_t)n, "%s", p->name);
+    if (gate && gn > 0) snprintf(gate, (size_t)gn, "%s", p->gate);
+    if (autoff) *autoff = p->auto_off;
+    if (plen) *plen = p->prog_len;
+    if (buf && cap > 0) {
+        int c = p->prog_len < cap ? p->prog_len : cap;
+        if (c > 0) memcpy(buf, p->prog, (size_t)c);
+    }
+    return 0;
+}
+
+/**
+ * @brief 清空程序表（面板侧入口；T4.2 重放链）。 (vtouch-doc: 无)
+ * @return  0 已清空；-1 投递失败或未清干净（回读 prog_count!=0，口径同 vtouch_op_clear）。
+ * @note    邮箱单槽：等 edit_applied 到位再返回；核心侧整表归零（vt_prog_clear）。
+ */
+int vtouch_prog_clear(void)
+{
+    struct vt_shm_edit e;
+    int spins = 0;
+    if (!B) return -1;
+    memset(&e, 0, sizeof e);
+    e.op = VT_EDIT_PROG_CLEAR;
+    e.seq = ++glue_seq;
+    if (vt_shm_post_edit(&e) != 0) return -1;
+    glue_wake();
+    while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);
+    if (B->edit_applied != e.seq) {
+        fprintf(stderr, "vtouch-ui: 程序表清空 seq=%u 超时未生效\n", e.seq);
+        return -1;
+    }
+    if (S && S->prog_count != 0) {                   /* 回读校验：没清干净就报一行，别静默 */
+        fprintf(stderr, "vtouch-ui: 程序表清空未生效（prog_count=%d）\n", S->prog_count);
+        return -1;
+    }
+    return 0;
+}
+
+/**
  * (vtouch-doc: vtouch_op_stop)
  * @brief 中止运行中的操作（投编辑邮箱；没在跑时是空操作）。
  * @note    与 run 同口径：投递成功即返回；核心侧幂等、收尾也走它。

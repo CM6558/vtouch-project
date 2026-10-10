@@ -137,6 +137,9 @@ int  vtouch_op_del(const char *name);
 int vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
 int  vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_t *bytes, int len);   /* v17：程序操作投递（T3.5 试点通道用） */
+int  vtouch_prog_count(void);   /* v17：程序表条数（T4.2） */
+int  vtouch_get_prog(int i, char *name, int n, char *gate, int gn, int *autoff, uint8_t *buf, int cap, int *plen);   /* v17：读一条程序操作（只读区 A；出参可 NULL） */
+int  vtouch_prog_clear(void);   /* v17：清空程序表（T4.2 重放链） */
 void vtouch_op_stop(void);
 int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
 int  vtouch_expr_check(const char *s, const char (*names)[VT_NAME_BUF], int nnames, char *why, int whycap);   /* v5：计算步表达式校验（转发核心 vt_expr_check；v10 起带自定义变量名表；0 = 合法、非 0 = why 填短中文原因） */
@@ -908,10 +911,19 @@ static void load_regions(void)
  *     （-6/-7 原样 = fx/fy 同值语义；-8/-9 悬空 = 结果无值）。
  * 保存：.tmp + rename（同 save_regions，掉电不会留半截文件）；失败挂 g_ops_save_pending、
  * 1s 后退避重试（节奏同 save_failed）；成功一行「ops.conf 已存 N 条」。
- * 加载：版本门（v1/v2/v3/v4 兼容读入 + 翻译 / v5 本格式；其余 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；
- * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。 */
-#define OPS_CONF_VER  5
+ * 加载：版本门（v1/v2/v3/v4 兼容读入 + 翻译 / v5 / v8；其余 = 整份跳过 + 改写当前表，同 load_regions 的丢弃清空口径）；
+ * 只补缺（核心表已有同名 → 跳过，不覆盖现役定义）；一条坏记录只警告并继续，不带走全表。
+ *
+ * v8（T4.2；格式唯一规范 = docs/VTSTORE_V8.md）：op 行尾可带 ` prog <哈希8hex> <大小>` 元数据段 —— 程序操作。
+ * 载入 = 读 `progs/<名>.vtbc`（**不透明搬运**，不解析字节）→ 完整性校验（大小 + FNV-1a 32 与元数据
+ * 对拍；不符/缺文件 → 跳过 + 告警）→ `VT_EDIT_PUT_PROG`（核心验证器兜底）。
+ * 保存 = 从核心两表忠实序列化（步骤操作 → 步骤行；程序操作 → 元数据行 + progs 字节原样写回）。
+ * 过渡期：v8 文件允许同时含步骤行（T5 迁移完成前）；读端长期接受两类记录（备份还原鲁棒性）。 */
+#define OPS_CONF_VER  8         /* 当前写端版本（v8 T4.2：元数据行 [+ 过渡期步骤行]；读端兼容 v1..v5） */
+#define OPS_CONF_VER_STEP 5     /* 步骤格式最高版本（v1..v4 兼容读 + 翻译矩阵；v5 原样照读） */
 #define OPS_CONF_FILE REGION_CONF_DIR "/ops.conf"
+#define OPS_PROG_DIR  REGION_CONF_DIR "/progs"    /* 程序产物旁路目录（v8：<操作名>.vtbc；T4.2） */
+#define OPS_PROG_MAX  32768     /* = 核心 VT_OP_PROG_MAX（面板自带镜像常量，口径同 VT_NAME_BUF） */
 #define OPS_MAX_STEPS 512       /* 同核心 MAX_STEPS（v13 起 512；面板不 include 核心头，独立定义） */
 #define OPS_EXPR_MAX  63        /* 计算步表达式上限（同核心 VT_EXPR_MAX；conf 第 10 字段按它定宽） */
 static_assert(OPS_EXPR_MAX == VT_EXPR_MAX, "同核心 VT_EXPR_MAX");
@@ -934,10 +946,13 @@ static int ops_save_failed(void)
     g_ops_save_retry_t = now_ms() + 1000;
     return -1;
 }
+static unsigned int fnv1a32(const unsigned char *b, size_t n);   /* 定义见「程序记录 / progs 旁路」段（save 方向共用） */
+static int ops_write_prog_file(const char *name, const unsigned char *buf, int n);   /* 同上 */
 static int save_ops(void)
 {
     char tmppath[128];
-    int i, n;
+    static unsigned char pbuf[OPS_PROG_MAX];      /* 程序产物读回缓冲（32KB，勿上栈） */
+    int i, n, np, nprog = 0;
     region_conf_dir();     /* 与 regions.conf 同目录（/data/local/vtouch-runtime，持久分区） */
     snprintf(tmppath, sizeof tmppath, "%s.tmp", OPS_CONF_FILE);
     /* 先写 .tmp 再 rename：掉电/被杀不会留下半截文件（半截文件会被版本门整份丢弃 = 操作全丢） */
@@ -961,6 +976,22 @@ static int save_ops(void)
                     expr[0] ? expr : "-");
         }
     }
+    /* v8（T4.2）：程序表 → 元数据行 + progs/<名>.vtbc（从核心字节**原样写回**，不透明搬运——
+     * load 方向的反向保真；哈希/大小按实际字节算，与载入侧校验同式）。 */
+    np = vtouch_prog_count();
+    for (i = 0; i < np; i++) {
+        char name[VT_NAME_BUF], gate[VT_NAME_BUF];
+        int autoff = 0, plen = 0;
+        if (vtouch_get_prog(i, name, sizeof name, gate, sizeof gate, &autoff, pbuf, sizeof pbuf, &plen) != 0) continue;
+        if (plen < 1 || plen > (int)sizeof pbuf) continue;
+        if (ops_write_prog_file(name, pbuf, plen) != 0) {
+            ALOGW("progs/%s.vtbc 写回失败: %s", name, strerror(errno));
+            continue;                                 /* 产物写不成 → 不写元数据行（保持成对） */
+        }
+        fprintf(f, "op %s gate %s autooff %d prog %08x %d\n", name, gate[0] ? gate : "-", autoff ? 1 : 0,
+                fnv1a32(pbuf, (size_t)plen), plen);
+        nprog++;
+    }
     if (fclose(f) != 0) { ALOGE("ops.conf 落盘失败: %s", strerror(errno)); return ops_save_failed(); }
     if (rename(tmppath, OPS_CONF_FILE) != 0) {
         ALOGE("ops.conf rename 失败: %s", strerror(errno));
@@ -969,7 +1000,7 @@ static int save_ops(void)
     g_ops_save_pending = 0;      /* 只有真落盘成功才清请求（唯一写者=渲染线程 / 启动期主线程） */
     g_ops_save_retry_t = 0;
     scheme_mirror();             /* v4：镜像 live → schemes/<current>（失败告警不阻塞，见「方案文件层」） */
-    ALOGI("ops.conf 已存 %d 条", n);
+    ALOGI("ops.conf 已存 %d 条（程序 %d）", n + nprog, nprog);
     hr_files_note();             /* T8 自写豁免：刷新热生效轮询基线 */
     return 0;
 }
@@ -1045,87 +1076,124 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
     }
     return 0;
 }
-/* v17 试点通道（T3.5/T3.6 影子期验收用；T4 由 ops.conf v8 的 progs/ 正式链路取代）：
- * 每次 load_ops 收尾：① 扫描 ops-prog*.vtbc 全量上表（`ops-prog.vtbc` → ztp1；
- * `ops-prog-<名>.vtbc` → <名>，一族脚本一次注册）；② 读 ops-prog.run（存在 = 投一次起跑；
- * 文件内容非空 = 起跑那个名字（可指向步骤操作，用于并存双跑对拍），空文件 = ztp1）。
- * 文件不存在 = 零行为、零开销。 */
-#define PILOT_PROG_DIR      "/data/local/vtouch-runtime"
-#define PILOT_PROG_FILE     PILOT_PROG_DIR "/ops-prog.vtbc"
-#define PILOT_PROG_RUN      PILOT_PROG_DIR "/ops-prog.run"
-#define PILOT_PROG_NAME     "ztp1"
-#define PILOT_PROG_MAX      32768           /* = 核心 VT_OP_PROG_MAX（面板自带镜像常量，口径同 VT_NAME_BUF） */
-static int pilot_put_file(const char *path, const char *opname)
+/* ---- 程序记录 / progs 旁路（v8 T4.2；格式唯一规范 = docs/VTSTORE_V8.md）-------------------------------
+ * 元数据记录的结算：`op <名> gate <门控|-> autooff <d> prog <哈希8hex> <大小>` → 读 `progs/<名>.vtbc`
+ * （**不透明搬运**，不解析字节）→ 完整性校验（大小 + FNV-1a 32）→ `VT_EDIT_PUT_PROG`（核心验证器兜底）。
+ * T3.5 试点通道的「扫描 ops-prog*.vtbc 注册」已退役 —— 正式链路 = 本段 + load_ops 的 v8 分支；
+ * 起跑旗标保留（见下 op_run_flag_check）。 */
+
+/* FNV-1a 32（与编辑器 OpsV8.fnv32 / VtBc.hash 同式）：progs 产物的元数据哈希校验（load/save 双向共用）。 */
+static unsigned int fnv1a32(const unsigned char *b, size_t n)
 {
-    static char buf[PILOT_PROG_MAX];
-    FILE *f = fopen(path, "rb");
-    long n;
-    if (!f) return 0;
-    n = (long)fread(buf, 1, sizeof buf, f);
-    fclose(f);
-    if (n < 1) return 0;
-    if (vtouch_prog_put(opname, "", 0, (const uint8_t *)buf, (int)n) != 0) {
-        ALOGW("ops-prog 投递失败 %s（核心拒收或超时，见核心日志）", opname);
-        return -1;
+    unsigned int h = 0x811C9DC5u;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 0x01000193u; }
+    return h;
+}
+/* 核心程序表里找同名（只读区 A）→ 下标；没有 -1（「只补缺」跳过 + 投递回读共用）。 */
+static int prog_find(const char *name)
+{
+    int i, n = vtouch_prog_count();
+    for (i = 0; i < n; i++) {
+        char cur[VT_NAME_BUF];
+        if (vtouch_get_prog(i, cur, sizeof cur, NULL, 0, NULL, NULL, 0, NULL) == 0 && strcmp(cur, name) == 0)
+            return i;
     }
-    ALOGI("ops-prog 已投核心 %s（%ld 字节）", opname, n);
+    return -1;
+}
+/* 写 progs/<名>.vtbc（.tmp + rename；目录不存在则建）。0 / -1（errno 保留）。 */
+static int ops_write_prog_file(const char *name, const unsigned char *buf, int n)
+{
+    char path[240], tmppath[256];
+    FILE *f;
+    if (mkdir(OPS_PROG_DIR, 0775) < 0 && errno != EEXIST) return -1;
+    snprintf(path, sizeof path, "%s/%s.vtbc", OPS_PROG_DIR, name);
+    snprintf(tmppath, sizeof tmppath, "%s.tmp", path);
+    f = fopen(tmppath, "wb");
+    if (!f) return -1;
+    if (fwrite(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); remove(tmppath); return -1; }
+    if (fclose(f) != 0 || rename(tmppath, path) != 0) { remove(tmppath); return -1; }
     return 0;
 }
-static void pilot_prog_check(void)
+/* 结算一条 v8 元数据记录（下一条 op 行 / EOF 时调用；tail = "prog" 之后整段，可带未来尾段）。
+ * 校验：哈希 8 位小写 hex / 大小 1..32768 → 读产物 → 大小 + FNV 对拍（不符 = 坏记录，跳过不投）→
+ * vtouch_prog_put → 回读（同名 + 长度一致才算上表；核心拒收可见）。
+ * 0=上表 / 1=跳过（核心已有同名或与步骤操作重名）/ -1=坏记录（已警告，不带走全表）。 */
+static int ops_load_prog(const char *name, const char *gate, int autoff, const char *tail)
+{
+    static unsigned char buf[OPS_PROG_MAX];
+    char hh[16] = {0};
+    char path[240];
+    long sz = 0, n;
+    unsigned int want = 0, have;
+    int i, k, plen = 0;
+    if (sscanf(tail, "%15s %ld", hh, &sz) != 2 || strlen(hh) != 8 || sz < 1 || sz > OPS_PROG_MAX) {
+        ALOGW("ops.conf 跳过一条坏记录（%s：prog 元数据非法）", name[0] ? name : "无名记录");
+        return -1;
+    }
+    for (k = 0; k < 8; k++) {                       /* 哈希：仅小写 hex（写端口径；大写/异体一律拒） */
+        char c = hh[k];
+        unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+        else { ALOGW("ops.conf 跳过一条坏记录（%s：prog 哈希非小写 hex）", name); return -1; }
+        want = (want << 4) | d;
+    }
+    if (op_exists(name) || prog_find(name) >= 0) {
+        ALOGI("ops.conf 程序 %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
+        return 1;
+    }
+    snprintf(path, sizeof path, "%s/%s.vtbc", OPS_PROG_DIR, name);
+    {
+        FILE *f = fopen(path, "rb");
+        if (!f) { ALOGW("ops.conf 程序 %s 缺产物（%s）→ 跳过", name, path); return -1; }
+        n = (long)fread(buf, 1, sizeof buf, f);
+        fclose(f);
+    }
+    if (n != sz) {
+        ALOGW("ops.conf 程序 %s 大小不符（元数据 %ld / 实际 %ld）→ 跳过", name, sz, n);
+        return -1;
+    }
+    have = fnv1a32(buf, (size_t)n);
+    if (have != want) {
+        ALOGW("ops.conf 程序 %s 哈希不符（元数据 %s / 实际 %08x）→ 跳过", name, hh, have);
+        return -1;
+    }
+    if (vtouch_prog_put(name, gate, autoff, buf, (int)n) != 0) {   /* 不透明搬运：原样字节 → 邮箱 */
+        ALOGW("ops.conf 程序 %s 投递失败（超时/核心被占）", name);
+        return -1;
+    }
+    i = prog_find(name);                             /* 回读校验：找到同名且长度一致才算真上表 */
+    if (i < 0 || vtouch_get_prog(i, NULL, 0, NULL, 0, NULL, NULL, 0, &plen) != 0 || plen != (int)n) {
+        ALOGW("ops.conf 程序 %s 核心拒收（见核心日志）", name);
+        return -1;
+    }
+    ALOGI("ops.conf 程序 %s 上表（%ldB fnv=%s）", name, n, hh);
+    return 0;
+}
+/* 起跑旗标（验收/工具通道；「扫描 ops-prog*.vtbc」已退役，旗标保留）：每次 load_ops 收尾读一次
+ * ops-prog.run —— 存在 = 投一次起跑；内容非空 = 起跑该名（可指步骤操作，T5 双跑对拍复用）；空 = ztp1。
+ * 文件不存在 = 零行为、零开销。 */
+#define OPS_RUN_FLAG  REGION_CONF_DIR "/ops-prog.run"
+#define OPS_RUN_NAME  "ztp1"
+static void op_run_flag_check(void)
 {
     char run_name[VT_NAME_BUF];
-    char path[256];
-    DIR *d = opendir(PILOT_PROG_DIR);
-    struct dirent *it;
-    if (d) {                                             /* ① 扫描注册：ops-prog.vtbc + ops-prog-<名>.vtbc */
-        while ((it = readdir(d)) != NULL) {
-            const char *nm = it->d_name;
-            size_t ln = strlen(nm);
-            if (strncmp(nm, "ops-prog", 8) != 0 || ln < 13) continue;
-            if (strcmp(nm + ln - 5, ".vtbc") != 0) continue;
-            if (strcmp(nm, "ops-prog.vtbc") == 0) {      /* 裸名 → ztp1 */
-                snprintf(path, sizeof path, "%s/%s", PILOT_PROG_DIR, nm);
-                pilot_put_file(path, PILOT_PROG_NAME);
-                continue;
-            }
-            if (nm[8] == '-' && ln > 14) {               /* ops-prog-<名>.vtbc → <名>（≤15 字符名） */
-                char opname[VT_NAME_BUF];
-                size_t kl = ln - 5 - 9;
-                int k;
-                if (kl < 1 || kl > 15) continue;
-                memcpy(opname, nm + 9, kl);
-                opname[kl] = 0;
-                if (opname[0] == '.') continue;
-                for (k = 0; k < (int)kl; k++) {          /* 保守过滤：仅 [0-9A-Za-z_-]（核心再严格校验） */
-                    char c = opname[k];
-                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-                          (c >= 'A' && c <= 'Z') || c == '_' || c == '-')) { opname[0] = 0; break; }
-                }
-                if (opname[0] == 0) continue;
-                snprintf(path, sizeof path, "%s/%s", PILOT_PROG_DIR, nm);
-                pilot_put_file(path, opname);
-            }
-        }
-        closedir(d);
+    FILE *f = fopen(OPS_RUN_FLAG, "rb");
+    if (!f) return;
+    memset(run_name, 0, sizeof run_name);
+    if (fgets(run_name, sizeof run_name, f)) {
+        int k = 0;
+        while (run_name[k] == ' ' || run_name[k] == '\t') k++;
+        memmove(run_name, run_name + k, strlen(run_name + k) + 1);
+        k = (int)strlen(run_name);
+        while (k > 0 && (run_name[k-1] == '\n' || run_name[k-1] == '\r' || run_name[k-1] == ' ')) run_name[--k] = 0;
     }
-    /* ② 起跑旗标：内容非空 = 起跑指定名；空 = ztp1；文件不存在 = 不跑 */
-    {
-        FILE *f = fopen(PILOT_PROG_RUN, "rb");
-        if (!f) return;
-        memset(run_name, 0, sizeof run_name);
-        if (fgets(run_name, sizeof run_name, f)) {
-            int k = 0;
-            while (run_name[k] == ' ' || run_name[k] == '\t') k++;
-            memmove(run_name, run_name + k, strlen(run_name + k) + 1);
-            k = (int)strlen(run_name);
-            while (k > 0 && (run_name[k-1] == '\n' || run_name[k-1] == '\r' || run_name[k-1] == ' ')) run_name[--k] = 0;
-        }
-        fclose(f);
-        if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", PILOT_PROG_NAME);
-        ALOGI("ops-prog 旗标起跑名=[%s]", run_name);
-        if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
-        else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
-    }
+    fclose(f);
+    if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", OPS_RUN_NAME);
+    ALOGI("ops-prog 旗标起跑名=[%s]", run_name);
+    if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
+    else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
 }
 
 static void load_ops(void)
@@ -1141,10 +1209,11 @@ static void load_ops(void)
     char exprs[OPS_MAX_STEPS][OPS_EXPR_MAX + 1];   /* v4 每步表达式（v1/v2/v3 行缺省空；`-` = 空） */
     FILE *f = fopen(OPS_CONF_FILE, "r");
     if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
-    /* 版本门：v1 / v2 / v3 / v4（兼容读入 + v5 翻译，spec §7 / EDITOR_V2 §Task 7.5）与 v5（本格式）都认；
+    /* 版本门：v1 / v2 / v3 / v4（兼容读入 + v5 翻译，spec §7 / EDITOR_V2 §Task 7.5）、v5（步骤本格式）
+     * 与 v8（v8 T4.2：元数据行 [+ 过渡期步骤行]）都认；
      * 无版本行 / 其他版本 = 旧版本残留 → 整份丢弃；照 regions.conf 口径改写当前表 */
     if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 ||
-        (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != OPS_CONF_VER)) {
+        (ver < 1 || (ver > OPS_CONF_VER_STEP && ver != OPS_CONF_VER))) {
         fclose(f);
         ALOGI("ops.conf 旧格式/版本不符 → 丢弃清空");
         save_ops();
@@ -1152,17 +1221,28 @@ static void load_ops(void)
     }
     while (fgets(line, sizeof line, f)) {
         char a[VT_NAME_BUF], b[VT_NAME_BUF];
-        int ao2 = 0, t, a1, a2, a3, a4, ms;
-        int pn = sscanf(line, "op %47s gate %47s autooff %d", a, b, &ao2);
+        int ao2 = 0, t, a1, a2, a3, a4, ms, used = 0;
+        int pn = sscanf(line, "op %47s gate %47s autooff %d %n", a, b, &ao2, &used);
         if (pn >= 1) {                    /* op 行（字段不全会只匹配 1/2 个）—— 先结算上一条 */
             if (nm[0]) {
                 nrec++;
-                if (ver < OPS_CONF_VER) ops_translate_old(flat, refs, nst);   /* v1..v4 翻译（矩阵见上） */
+                if (ver >= 1 && ver <= 4) ops_translate_old(flat, refs, nst);   /* v1..v4 翻译（矩阵见上） */
                 rc = ops_load_put(nm, gt, ao, flat, refs, exprs, nst, bad);
                 if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
                 nm[0] = 0;
             }
             if (pn == 3) {
+                /* v8 元数据行（T4.2）：行尾 ` prog <哈希8hex> <大小>` → progs/<名>.vtbc 不透明搬运投核 */
+                const char *tail = used > 0 ? line + used : NULL;
+                if (ver == OPS_CONF_VER && tail) {
+                    while (*tail == ' ' || *tail == '\t') tail++;
+                    if (strncmp(tail, "prog ", 5) == 0) {
+                        nrec++;
+                        rc = ops_load_prog(a, b, ao2, tail + 5);
+                        if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
+                        continue;                 /* 元数据记录：不开步骤记录（nm 已在上方结算清空） */
+                    }
+                }
                 snprintf(nm, sizeof nm, "%s", a);
                 /* gate `-` = 无门控（保存侧占位符）→ 还原空串；悬空 id 原样带（核心允许悬空） */
                 snprintf(gt, sizeof gt, "%s", (b[0] == '-' && b[1] == 0) ? "" : b);
@@ -1221,7 +1301,7 @@ static void load_ops(void)
     }
     if (nm[0]) {                          /* 结算最后一条 */
         nrec++;
-        if (ver < OPS_CONF_VER) ops_translate_old(flat, refs, nst);   /* v1..v4 翻译（矩阵见上） */
+        if (ver >= 1 && ver <= 4) ops_translate_old(flat, refs, nst);   /* v1..v4 翻译（矩阵见上） */
         rc = ops_load_put(nm, gt, ao, flat, refs, exprs, nst, bad);
         if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
     }
@@ -1229,7 +1309,7 @@ static void load_ops(void)
     if (nrec > 0 && (nskip || nbad))
         ALOGI("ops.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 %d、坏记录 %d）",
               nrec, nok, nskip + nbad, nskip, nbad);
-    pilot_prog_check();                   /* v17 试点通道（T3.5 影子期验收用；T4 由 progs/ 正式链路取代） */
+    op_run_flag_check();                  /* 起跑旗标（验收/工具通道；扫描已随 T4.2 退役） */
 }
 
 /* ---- 方案文件层（v4 T1.1：schemes/<名>/ + current / 迁移 / 镜像）------------------------------------
@@ -1379,6 +1459,62 @@ static int scheme_copy_file(const char *src, const char *dst, int kind)
     hr_files_note();             /* T8 自写豁免：本文件被写（live/方案侧）后刷新轮询基线 */
     return 0;
 }
+/* ---- progs 目录同步（T4.2；live ↔ 方案）--------------------------------------------------------
+ * 精确同步（src → dst）：拷源全量（字节原样）+ 删目标多余常规文件；源目录缺失 = 视空
+ * （对齐「缺失份写空合法文件」口径）。跳过 dot 文件与 *.tmp（残骸清掉）。任一步失败 → -1（已告警）。 */
+static int scheme_restore_file(const char *src, const char *dst, int kind);   /* 回滚复制（定义见下「方案切换」段前） */
+static int scheme_sync_progs(const char *srcBase, const char *dstBase)
+{
+    char src[160], dst[160], sp[256], dp[256], names[64][64];
+    DIR *d;
+    struct dirent *e;
+    struct stat st;
+    int n = 0, j, cp = 0, del = 0, fail = 0;
+
+    snprintf(src, sizeof src, "%s/progs", srcBase);
+    snprintf(dst, sizeof dst, "%s/progs", dstBase);
+    if (mkdir(dst, 0775) < 0 && errno != EEXIST) {
+        ALOGW("方案 progs 同步：建 %s 失败: %s", dst, strerror(errno));
+        return -1;
+    }
+    if ((d = opendir(src)) != NULL) {                    /* 源缺失 = 视空（不豁免下面删除） */
+        while ((e = readdir(d)) != NULL) {
+            const char *nm = e->d_name;
+            size_t ln = strlen(nm);
+            if (nm[0] == '.') continue;
+            if (ln < 1 || ln >= sizeof names[0]) continue;
+            if (ln > 4 && strcmp(nm + ln - 4, ".tmp") == 0) continue;
+            if (n >= (int)(sizeof names / sizeof names[0])) { fail = 1; break; }   /* 名单满：放弃（防误删） */
+            snprintf(sp, sizeof sp, "%s/%s", src, nm);
+            if (stat(sp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            snprintf(dp, sizeof dp, "%s/%s", dst, nm);
+            if (scheme_restore_file(sp, dp, 0) != 0) { fail = 1; continue; }       /* 源缺失/写失败 = 失败 */
+            snprintf(names[n], sizeof names[n], "%s", nm);
+            n++;
+            cp++;
+        }
+        closedir(d);
+    }
+    if (!fail && (d = opendir(dst)) != NULL) {           /* 删目标多余（不在源名单里 = 多余；fail 时跳过防误删） */
+        while ((e = readdir(d)) != NULL) {
+            const char *nm = e->d_name;
+            size_t ln = strlen(nm);
+            if (nm[0] == '.') continue;
+            snprintf(dp, sizeof dp, "%s/%s", dst, nm);
+            if (ln > 4 && strcmp(nm + ln - 4, ".tmp") == 0) { remove(dp); continue; }   /* 清残骸 */
+            for (j = 0; j < n; j++) if (strcmp(names[j], nm) == 0) break;
+            if (j < n) continue;
+            if (stat(dp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            if (remove(dp) != 0) { fail = 1; continue; }
+            del++;
+        }
+        closedir(d);
+    }
+    if (cp || del) ALOGI("方案 progs 同步 %s → %s：拷 %d 删 %d", src, dst, cp, del);
+    if (fail) { ALOGW("方案 progs 同步 %s → %s：有文件未同步成功（拷 %d 删 %d）", src, dst, cp, del); return -1; }
+    hr_files_note();                                     /* 自写豁免：目录内容变过就刷新轮询基线 */
+    return 0;
+}
 /* 计数文件里按 `prefix` 开头的行数（迁移日志「区域 N / 操作 M」口径：从文件解析，空/缺 = 0）。 */
 static int scheme_count_lines(const char *path, const char *prefix)
 {
@@ -1461,6 +1597,8 @@ static int scheme_sync_live(const char *name)
     if (scheme_ensure_empty(sp, 0) != 0 || scheme_copy_file(sp, REGION_CONF_NEW, 0) != 0) rc = -1;
     snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, name);
     if (scheme_ensure_empty(sp, 1) != 0 || scheme_copy_file(sp, OPS_CONF_FILE, 1) != 0) rc = -1;
+    snprintf(sp, sizeof sp, "%s/%s", SCHEME_DIR, name);
+    if (scheme_sync_progs(sp, REGION_CONF_DIR) != 0) rc = -1;   /* T4.2：progs 目录（方案 → live） */
     return rc;
 }
 /* 存盘镜像（spec §3）：live 两文件 → schemes/<current>/ 同名复制。save_regions / save_ops 落盘成功后
@@ -1475,6 +1613,8 @@ static void scheme_mirror(void)
     if (scheme_copy_file(REGION_CONF_NEW, sp, 0) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
     snprintf(sp, sizeof sp, "%s/%s/ops.conf", SCHEME_DIR, cur);
     if (scheme_copy_file(OPS_CONF_FILE, sp, 1) != 0) ALOGE("方案 镜像失败 %s: %s", cur, strerror(errno));
+    snprintf(sp, sizeof sp, "%s/%s", SCHEME_DIR, cur);
+    if (scheme_sync_progs(REGION_CONF_DIR, sp) != 0) ALOGW("方案 镜像 progs 失败 %s", cur);   /* T4.2 */
 }
 
 /* ---- 方案切换执行器（v4 T1.2：预检 / 静默边界 / flush+写 live / clear+重放 / current+日志+刷新）------------
@@ -1550,29 +1690,37 @@ static int scheme_precheck(const char *name)
     f = fopen(sp, "r");
     if (!f) return 2;
     if (!fgets(line, sizeof line, f) || sscanf(line, "#vtouch-ops v%d", &ver) != 1 ||
-        (ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != OPS_CONF_VER)) {
+        (ver < 1 || (ver > OPS_CONF_VER_STEP && ver != OPS_CONF_VER))) {
         fclose(f);
         return 5;
     }
     {
         /* ops 段逐行扫（只读）：与 load_ops 同结构 —— 记录边界 = op 行；记录内 step 行 6/7/9 字段
          * （v4 第 10 字段 expr 不参与预检：坏 expr 走 load 的「坏记录单条跳过」口径，不算切换失败）。
-         * 坏行 → 6；单条 step 数超 OPS_MAX_STEPS → 7；记录无步骤行 → 6。 */
-        int have = 0, nst = 0, badline = 0, ovf = 0, rc = 0;
+         * 坏行 → 6；单条 step 数超 OPS_MAX_STEPS → 7；记录无步骤行 → 6（v8 元数据记录除外：不要求步骤行）。
+         * T4.2：v8 的 `prog` 尾段此处只做形态识别（深层校验 = load 的坏记录单条跳过口径）。 */
+        int have = 0, nst = 0, badline = 0, ovf = 0, isprog = 0, rc = 0, used = 0;
         while (!rc && fgets(line, sizeof line, f)) {
             char a[VT_NAME_BUF], b[VT_NAME_BUF];
             int ao2 = 0, t, a1, a2, a3, a4, ms, j1, j2, sn;
             char rf[VT_NAME_BUF];
-            int pn = sscanf(line, "op %47s gate %47s autooff %d", a, b, &ao2);
+            used = 0;
+            int pn = sscanf(line, "op %47s gate %47s autooff %d %n", a, b, &ao2, &used);
             if (pn >= 1) {
                 if (have) {                        /* 结算上一条（坏行优先于越限报告） */
-                    if (badline || nst < 1) rc = 6;
+                    if (badline || (!isprog && nst < 1)) rc = 6;
                     else if (ovf) rc = 7;
                     have = 0;
                 }
                 if (!rc) {
-                    if (pn == 3) { have = 1; nst = 0; badline = 0; ovf = 0; }
-                    else rc = 6;                   /* op 行字段不全（load 警告口径） */
+                    if (pn == 3) {
+                        have = 1; nst = 0; badline = 0; ovf = 0; isprog = 0;
+                        if (ver == OPS_CONF_VER && used > 0) {
+                            const char *tail = line + used;
+                            while (*tail == ' ' || *tail == '\t') tail++;
+                            if (strncmp(tail, "prog ", 5) == 0) isprog = 1;
+                        }
+                    } else rc = 6;                 /* op 行字段不全（load 警告口径） */
                 }
             } else {
                 sn = sscanf(line, "step %d %d %d %d %d %d %47s %d %d", &t, &a1, &a2, &a3, &a4, &ms, rf, &j1, &j2);
@@ -1588,7 +1736,7 @@ static int scheme_precheck(const char *name)
         }
         fclose(f);
         if (!rc && have) {
-            if (badline || nst < 1) rc = 6;
+            if (badline || (!isprog && nst < 1)) rc = 6;
             else if (ovf) rc = 7;
         }
         return rc;
@@ -1618,9 +1766,13 @@ static void scheme_rollback_to(const char *cur)
     snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
     if (scheme_restore_file(dp, OPS_CONF_FILE, 1) != 0)
         ALOGW("方案 切换：回滚 live ops 失败: %s", strerror(errno));
+    snprintf(dp, sizeof dp, "%s/%s", SCHEME_DIR, cur);
+    if (scheme_sync_progs(dp, REGION_CONF_DIR) != 0)               /* T4.2：progs 目录一并回滚（方案 → live） */
+        ALOGW("方案 切换：回滚 live progs 失败 %s", cur);
     vtouch_region_clear();
     load_regions();
     vtouch_op_clear();
+    vtouch_prog_clear();                                           /* T4.2：程序表一并回滚 */
     load_ops();
 }
 
@@ -1647,6 +1799,9 @@ int scheme_switch(const char *name)
         snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
         if (scheme_copy_file(OPS_CONF_FILE, dp, 1) != 0)
             ALOGW("方案 切换：flush %s/ops.conf 失败: %s", cur, strerror(errno));
+        snprintf(dp, sizeof dp, "%s/%s", SCHEME_DIR, cur);
+        if (scheme_sync_progs(REGION_CONF_DIR, dp) != 0)           /* T4.2：progs 目录（live → 旧方案） */
+            ALOGW("方案 切换：flush %s/progs 失败", cur);
     }
     /* ④ 写 live（schemes/<new>/ 两文件 → live；复用 1.1 复制 helper）。写失败 → 核心未触：8 时两文件
      * 都还是原状（复制自身 .tmp + rename，失败不留半改）；9 时 regions 已换 → 用 ③ 刚写好的
@@ -1663,6 +1818,18 @@ int scheme_switch(const char *name)
         }
         return 9;
     }
+    snprintf(sp, sizeof sp, "%s/%s", SCHEME_DIR, name);
+    if (scheme_sync_progs(sp, REGION_CONF_DIR) != 0) {     /* T4.2：progs 目录（新方案 → live） */
+        if (cur[0]) {                                      /* 同 9 号口径：两文件一起回滚（核心未触） */
+            snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
+            if (scheme_restore_file(dp, REGION_CONF_NEW, 0) != 0)
+                ALOGW("方案 切换：回滚 live regions 失败: %s", strerror(errno));
+            snprintf(dp, sizeof dp, "%s/%s/ops.conf", SCHEME_DIR, cur);
+            if (scheme_restore_file(dp, OPS_CONF_FILE, 1) != 0)
+                ALOGW("方案 切换：回滚 live ops 失败: %s", strerror(errno));
+        }
+        return 9;
+    }
 
     /* ⑤ 核心替换（spec §4-5）：**先区域后操作**；清空后重放 ⇒ load 的「只补缺 / 重复跳过」均不触发
      * （全量补入）；单条被核心拒 = 既有「坏记录单条跳过 + 警告」口径（不算切换失败）。load 可重入
@@ -1670,10 +1837,16 @@ int scheme_switch(const char *name)
      * 2026-10-05 评审修复：换表前先**弃转屏重算批**（旧快照不许写回新表）；清空必须真落地
      * （两个 clear 原来丢返回值 —— 核心被占时会静默跳过、load 的「只补缺」再放大成混合表）。 */
     g_rr_active = 0; g_rr_i = 0; g_rr_n = 0; g_rr_fail = 0; g_rr_retry = 0;
-    if (vtouch_region_clear() != 0 || vtouch_op_clear() != 0) {
-        ALOGW("方案 切换 %s：核心清空未生效（编辑超时/核心被占）→ 回滚 %s", name, cur[0] ? cur : "-");
-        scheme_rollback_to(cur);
-        return 11;
+    {
+        /* T4.2：三个 clear 都投（不短路——核心被占时全失败，少一个失败面就少一种「混合表」） */
+        int c1 = vtouch_region_clear();
+        int c2 = vtouch_op_clear();
+        int c3 = vtouch_prog_clear();
+        if (c1 != 0 || c2 != 0 || c3 != 0) {
+            ALOGW("方案 切换 %s：核心清空未生效（编辑超时/核心被占）→ 回滚 %s", name, cur[0] ? cur : "-");
+            scheme_rollback_to(cur);
+            return 11;
+        }
     }
     load_regions();
     load_ops();
@@ -1719,14 +1892,18 @@ static int scheme_reload(void)
     return rc;
 }
 
-/* ---- T8 热生效-A（缩编 v0.5）：live 两文件 + current 的 mtime/size 轮询 → 防抖 → 强制重放当前方案。
- * 让「app 侧修改」无需重启核心即生效（~1–2s）；面板自身写盘经 hr_files_note() 刷新基线（自写豁免）。 ---- */
+/* ---- T8 热生效-A（缩编 v0.5；T4.3 扩展监视集）：live 三文件 + live/scheme 两侧 progs 目录签名 +
+ * schemes/<current>/ops.conf 的 mtime/size 轮询 → 防抖 → 强制重放当前方案。
+ * 让「app 侧修改」无需重启核心即生效（~1–2s）；面板自身写盘经 hr_files_note() 刷新基线（自写豁免）。
+ * T4.3：观察对象扩为 ops.conf + progs/（v8 正式链路）——「改脚本 ~2s 生效」的判据载体。 ---- */
 #define HR_POLL_MS     1000           /* 轮询节律 */
 #define HR_DEBOUNCE_MS 600            /* 变化稳定窗口（写入可能还在进行；原子 rename 通常瞬时） */
 static long hr_next_t = 0;            /* 下次轮询时刻（now_ms） */
 static long hr_chg_t = 0;             /* 首次发现变化的时刻（0 = 无）；防抖用 */
 static long hr_mtime[3] = {-2, -2, -2};   /* 基线：regions/ops/current 的 mtime（ms 精度） */
 static long hr_size[3] = {-1, -1, -1};    /* 基线：size */
+static unsigned hr_psig[2] = {0, 0};      /* 基线：[0] = live progs / [1] = schemes/<current>/progs 目录签名 */
+static long hr_sops_mt = -2, hr_sops_sz = -1;   /* 基线：schemes/<current>/ops.conf 的 mtime/size */
 
 static void hr_stat3(long *mt, long *sz)
 {
@@ -1738,25 +1915,80 @@ static void hr_stat3(long *mt, long *sz)
         sz[i] = (long)st.st_size;
     }
 }
+/* progs 目录签名（T4.3）：常规文件（跳过 dot / *.tmp）的「名字|大小|mtime(ms)」逐项 FNV，
+ * 项值排序后链式合并（readdir 顺序无关）。目录不存在 = 固定哨兵（与「空目录」区分）。 */
+static unsigned hr_progs_sig_of(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    struct stat st;
+    unsigned items[64], h;
+    int n = 0, i, j;
+    if (!d) return 0xFFFF0001u;
+    while (n < 64 && (e = readdir(d)) != NULL) {
+        const char *nm = e->d_name;
+        char path[256];
+        size_t k, ln = strlen(nm);
+        if (nm[0] == '.') continue;
+        if (ln > 4 && strcmp(nm + ln - 4, ".tmp") == 0) continue;
+        snprintf(path, sizeof path, "%s/%s", dir, nm);
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        h = 0x811C9DC5u;
+        for (k = 0; nm[k]; k++) { h ^= (unsigned char)nm[k]; h *= 0x01000193u; }
+        h ^= (unsigned)st.st_size; h *= 0x01000193u;
+        h ^= (unsigned)((long)st.st_mtime * 1000L + (long)(st.st_mtim.tv_nsec / 1000000L));
+        h *= 0x01000193u;
+        items[n++] = h;
+    }
+    closedir(d);
+    for (i = 1; i < n; i++) { unsigned v = items[i]; for (j = i; j > 0 && items[j-1] > v; j--) items[j] = items[j-1]; items[j] = v; }
+    h = 0x811C9DC5u;
+    h ^= (unsigned)n; h *= 0x01000193u;
+    for (i = 0; i < n; i++) { h ^= items[i]; h *= 0x01000193u; }
+    return h ? h : 1u;                            /* 0 是「初值哨兵」：真值 0 抖成 1 */
+}
+/* 采集整个监视集：3 文件 + live progs 签名 + 方案侧 ops.conf + 方案侧 progs 签名。 */
+static void hr_sample(long *mt, long *sz, unsigned *psig, long *smt, long *ssz)
+{
+    char cur[VT_NAME_BUF], p[200];
+    struct stat st;
+    hr_stat3(mt, sz);
+    psig[0] = hr_progs_sig_of(REGION_CONF_DIR "/progs");
+    psig[1] = 0xFFFF0002u;                        /* 无 current 的哨兵（与「目录缺失」再区分） */
+    *smt = -1; *ssz = -1;
+    if (scheme_cur_get(cur) == 0 && cur[0]) {
+        snprintf(p, sizeof p, "%s/%s/ops.conf", SCHEME_DIR, cur);
+        if (stat(p, &st) == 0) {
+            *smt = (long)st.st_mtime * 1000L + (long)(st.st_mtim.tv_nsec / 1000000L);
+            *ssz = (long)st.st_size;
+        }
+        snprintf(p, sizeof p, "%s/%s/progs", SCHEME_DIR, cur);
+        psig[1] = hr_progs_sig_of(p);
+    }
+}
 /* 面板自写后调：把基线刷成「刚写完」的状态 ⇒ 自写不会触发重放（自写豁免）。 */
 static void hr_files_note(void)
 {
-    hr_stat3(hr_mtime, hr_size);
+    hr_sample(hr_mtime, hr_size, hr_psig, &hr_sops_mt, &hr_sops_sz);
     hr_chg_t = 0;
 }
 /* 渲染线程每拍调（内部自节流）：外部变化稳定后 → 强制重放当前方案。 */
 static void hr_poll(void)
 {
-    long now = now_ms(), mt[3], sz[3];
+    long now = now_ms(), mt[3], sz[3], smt, ssz;
+    unsigned psig[2];
     if (now < hr_next_t) return;
     hr_next_t = now + HR_POLL_MS;
-    hr_stat3(mt, sz);
+    hr_sample(mt, sz, psig, &smt, &ssz);
     if (hr_mtime[0] == -2) {                       /* 首巡：只记基线 */
         for (int i = 0; i < 3; i++) { hr_mtime[i] = mt[i]; hr_size[i] = sz[i]; }
+        hr_psig[0] = psig[0]; hr_psig[1] = psig[1];
+        hr_sops_mt = smt; hr_sops_sz = ssz;
         return;
     }
     int diff = 0;
     for (int i = 0; i < 3; i++) if (mt[i] != hr_mtime[i] || sz[i] != hr_size[i]) diff = 1;
+    if (psig[0] != hr_psig[0] || psig[1] != hr_psig[1] || smt != hr_sops_mt || ssz != hr_sops_sz) diff = 1;
     if (!diff) { hr_chg_t = 0; return; }
     if (hr_chg_t == 0) { hr_chg_t = now; return; } /* 首次发现：进防抖窗 */
     if (now - hr_chg_t < HR_DEBOUNCE_MS) return;   /* 未稳 */
@@ -3098,13 +3330,67 @@ static void op_card(int i, const char *name, int steps, const char *gate, int au
     ImGui::PopID();
 }
 
+/* 一张程序操作卡片（v8 T4.2）：名字 + 「程序 N B · 门控 · 自动关」+ [运行]/[停止]。
+ * 运行态口径：程序运行时核心 op_run = -1（不在步骤表内）——`run_state && run_i < 0` 即程序在跑；
+ * 此时每张程序卡都出 [停止]（同时至多一条在跑，点哪张停的都是它；运行名待契约扩展再显示）。 */
+static void op_card_prog(int i, const char *name, int plen, const char *gate, int autoff,
+                         int run_i, int run_state)
+{
+    int vm_run = run_state && run_i < 0;
+    ImGui::PushID(2000 + i);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, vm_run ? ImVec4(0.937f, 0.965f, 1.00f, 1.00f) : WHITE);
+    ImGui::PushStyleColor(ImGuiCol_Border, vm_run ? BLUE500 : ZINC200);
+    ImGui::BeginChild("card", ImVec2(0, 0), ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NoScrollbar);
+    {
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        dl->AddCircleFilled(ImVec2(p.x + 11, p.y + 22), 11,
+                            vm_run ? IM_COL32(34, 197, 94, 255) : IM_COL32(161, 161, 170, 255));
+        ImGui::Dummy(ImVec2(28, 44));
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(name);
+        {
+            char m[96];
+            snprintf(m, sizeof m, "程序 %d B · 门控 %s · 跑完自动关 %s",
+                     plen, gate[0] ? gate : "无", autoff ? "开" : "关");
+            text_meta_s(m);
+        }
+        /* 单键全宽（键高 76 保手指可点）：运行 / 停止 */
+        float bw = ImGui::GetContentRegionAvail().x;
+        if (vm_run) {
+            if (btn_dark("停止", ImVec2(bw, 76))) {
+                ALOGI("op stop %s", name);
+                vtouch_op_stop();
+                g_force_frames = 3;
+            }
+        } else {
+            if (btn_blue("运行", ImVec2(bw, 76))) {
+                if (vtouch_op_run(name) != 0) {   /* 非 0 = 没送达（超时/没接共享内存）→ 可见反馈 */
+                    ALOGW("op run 请求未送达 %s", name);
+                    ev_note("运行请求未送达：%s", name);
+                } else ALOGI("op run %s", name);
+                g_force_frames = 3;
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 12));
+    ImGui::Dummy(ImVec2(0, 0));   /* bento 卡片间隙 gap-4 */
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+}
+
 static void page_ops(void)
 {
     int n = vtouch_op_count();
+    int np = vtouch_prog_count();                      /* v8 程序操作（T4.2）：并列入表 */
     int run_i = -1, run_step = 0, run_state = 0;
     char meta[40];
     vtouch_op_status(&run_i, &run_step, &run_state);   /* 本帧读数：页头与卡片共用同一份 */
-    snprintf(meta, sizeof meta, "%d 条", n);
+    snprintf(meta, sizeof meta, "%d 条%s", n + np, np > 0 ? "（含程序）" : "");
     page_header("操作", meta);
     if (run_state) {
         char rn[VT_NAME_BUF] = {0}, m[64];
@@ -3115,14 +3401,14 @@ static void page_ops(void)
             if (k > rsteps) k = rsteps;            /* 上夹界：与卡片「第 k/n 步」同口径 */
             snprintf(m, sizeof m, "运行中：%s · 第 %d/%d 步", rn, k, rsteps);
         } else {
-            snprintf(m, sizeof m, "运行中");     /* 运行中删表等竞态：名字读不到就只报状态 */
+            snprintf(m, sizeof m, run_i < 0 ? "运行中 · 脚本" : "运行中");   /* op_run<0 = 程序在跑（T4.2）；其余=删表竞态 */
         }
         text_meta_s(m);
     } else {
         text_meta_s("空闲");
     }
     ImGui::Dummy(ImVec2(0, 8));
-    if (n == 0) {
+    if (n == 0 && np == 0) {
         text_meta_w("还没有操作（在编辑器 app 里新建）；这里可以看运行状态、手动运行/停止。");
         return;
     }
@@ -3139,6 +3425,12 @@ static void page_ops(void)
             int steps = 0, autoff = 0;
             if (vtouch_get_op(i, name, sizeof name, &steps, gate, sizeof gate, &autoff) != 0) continue;
             op_card(i, name, steps, gate, autoff, run_i, run_step, run_state);
+        }
+        for (int i = 0; i < np; i++) {                 /* v8 程序操作（T4.2）：紧随其后 */
+            char name[VT_NAME_BUF], gate[VT_NAME_BUF];
+            int autoff = 0, plen = 0;
+            if (vtouch_get_prog(i, name, sizeof name, gate, sizeof gate, &autoff, NULL, 0, &plen) != 0) continue;
+            op_card_prog(i, name, plen, gate, autoff, run_i, run_state);
         }
     }
     ImGui::EndChild();
@@ -3919,6 +4211,12 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     }
     load_regions();   /* 上次落盘的表（regions.conf），没有则空表 */
     load_ops();       /* 上次落盘的操作表（ops.conf）：只补缺（核心已有同名不动）；坏记录单条跳过 */
+    /* T4.2 验收钩（env 门控，默认零行为）：启动导入完成后做一次 save 往返 —— 供「同一操作 vtbc
+     * md5 经面板往返不变」字节对拍（VTOUCH_UI_OPS_SAVE_TEST=1 时开；T5 验收后评估退役）。 */
+    if (getenv("VTOUCH_UI_OPS_SAVE_TEST")) {
+        int trc = save_ops();
+        ALOGI("ops-test 启动写回往返 rc=%d", trc);
+    }
     ALOGI("panel init %dx%d regions=%d t=+%.0fms", w, h, vtouch_region_count(),
           (double)t_since_start());
     g_poll_on = 1;

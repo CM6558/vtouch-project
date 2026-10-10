@@ -271,6 +271,17 @@ int vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_
     return -1;                               /* 桩：离屏测试台无共享内存（v17 试点通道不适用） */
 }
 
+int vtouch_prog_count(void) { return 0; }    /* 桩：无程序表（T4.2） */
+
+int vtouch_get_prog(int i, char *name, int n, char *gate, int gn, int *autoff,
+                    uint8_t *buf, int cap, int *plen)
+{
+    (void)i; (void)name; (void)n; (void)gate; (void)gn; (void)autoff; (void)buf; (void)cap; (void)plen;
+    return -1;                               /* 桩：无共享内存 */
+}
+
+int vtouch_prog_clear(void) { return 0; }    /* 桩：无程序表（T4.2） */
+
 void vtouch_op_stop(void)
 {
     ORUN = -1; ORSTEP = 0; ORSTATE = 0;
