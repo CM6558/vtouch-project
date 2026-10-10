@@ -1,6 +1,6 @@
 # OPS_IMPL_PLAN_V8 —— 操作语言化（真脚本+可视化）任务级实施计划
 
-> 状态：T0..T5.3 完成（2026-10-10 晚；T4 记录 `docs/OPS_V8_T4_ACCEPTANCE.md`、T5.2 记录 `docs/OPS_V8_T52_ACCEPTANCE.md`、T5.3 归档 `docs/OPS_V8_T53_MIGRATION_REPORT.md` + `docs/OPS_V8_DOWNGRADE.md`），**下一批 = T6（双视图编辑器）**。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
+> 状态：**T0..T6 全部完成（2026-10-10 晚，V8 收口）**；记录 = `docs/OPS_V8_T4_ACCEPTANCE.md` / `OPS_V8_T52_ACCEPTANCE.md` / `OPS_V8_T53_MIGRATION_REPORT.md` + `OPS_V8_DOWNGRADE.md` / **`docs/OPS_V8_T6_ACCEPTANCE.md`**。剩 = 收尾评估项（v5 读路径退役 / 面板侧旗标退役——走 Windows 构建批次）+ 用户上机手测回执。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
 > 上位：`OPS_PLAN_V8.md`（方案）+ `VT_SCRIPT_V1_SPEC.md`（语言规范，语言唯一真相）。
 > 执行方式：**Native 逐任务**（单设备串行；子代理会互抢设备，不用子代理制）。
 > 纪律：每任务 = 实现 → 构建/离机验证 → 装机 → 测试台/真机验收 → 证据归档；每期结束跑既有 84+ 测试台与 zt 家族回归。
@@ -94,6 +94,12 @@
 | T6.3 | 模式锁 + 转换（块→脚本恒可；脚本→块 = §8 判据） | 直驱核 |
 | T6.4 | 测试台核 + 渲染件 + 手测 | 全绿 |
 
+- **T6.1/T6.2 实现**：投影器 `VtToSteps`（固定点自检：再翻译逐字一致才放行；覆盖 = 步骤域全量〔SPEC §8 r8 覆盖清单〕；拒绝词含「仅脚本」类）/ 文本编辑器 `ScriptEdit`（高亮 = 轻扫扫描器〔保留字琥珀 / 字符串绿 / 注释灰〕；行号槽按实际 Layout 基线自绘；错误行 = 防抖 `VtCheck` → 行底标红 + 槽内红号 + 错误条〔点击跳行〕；辅助条 = 底部横滚文字键〔成对符号光标居中〕；滚动 = 外层 ScrollView 拖拽 + 光标跟随）；模式侧线 `#模式 块|脚本`（保存归一；缺省按可投影性推导）。
+- **T6.3 存盘管线**：`OpsPage.commitEdit` 双路归一（脚本 = 文本原样 + 侧线；块 = 步骤 `VtFromSteps` 规范重生成）→ `VtCheck` + `VtCompiler` → `.vts` + `.vtbc` + `ops.conf` 元数据行 + 备份 + `Schemes.mirror`；删除连产物清扫；列表卡「脚本 N 行」。
+- **T6 连带**：`CrossCopy` v8 补链（`Vts` 脚源口 / 脚本级依赖扫描 / 改名改写 + 重编译 + 记录哈希更新 / `Artifact` 产物清单〔原样复制‖重编译〕/ 执行期产物先落）。
+- **验收（`docs/OPS_V8_T6_ACCEPTANCE.md`）**：离机 **六连核**（+`VtToStepsCheck` **66 例**；真实产物 out-mig 8 + out-mig-zt 42 件逐字往返全绿、负例 5 件仍拒）；设备测试台 **87/0/0**（APK `5ff29f71` 装机逐字节；轮1 85/0/2 = 测试代码自伤两处已修）；渲染件 `edit_script*.png` + 全量回归件；live 只读 2/2 件可投影；核心未动。
+- **血泪**：`VtPrint` 打字符串优先 `raw`（AST 改写须同步 `raw`+`segs`）；EditText 拖拽 = 选字不滚动 → 外层 ScrollView + 触摸重允许 + `ensureCursorVisible`；`assertOverflow` 须豁免横滚容器子级；`raw()` 里 op 未初始化 NPE（投影器首跑即逮）。
+
 ## 里程碑与回归
 
 - 期门映射 V8 §9（T1..T6 判据即验收门）；每期收尾 = 测试台全绿 + zt 家族回归 + 证据归档（`docs/OPS_V8_ACCEPTANCE.md` 逐期追加）。
@@ -121,4 +127,7 @@
 - [x] T4.3 T8 热载换轨（改脚本 → 重载 2055ms；新行为 851ms 生效；零重启）—— **T4 完成**（记录 `docs/OPS_V8_T4_ACCEPTANCE.md`）
 - [x] T5.1 steps→script 翻译器（`VtFromSteps` + 38 例离机核〔run.sh 四连核〕+ `VtMigSmoke` 真实 8/8 全译；zt 家族 47 译 + 8 故意拒收 + 3 待口径）
 - [x] T5.2 迁移执行 + 设备双跑对拍（`VtMigrate`/`VtMigrateRun`/`VtMigrateCheck`〔五连核〕；**修复核心 NULL 缝（VM 视觉可选串）→ 新核 `3a6e723c`**；R1/R2 矩阵 9 场景逐毫秒、门③ find 2ms=2ms；R3 全方案迁移落位 + 逐字节审计；记录 `OPS_V8_T52_ACCEPTANCE.md`）
-- [x] T5.3 全量 `.bak-v8` 核验 + 迁移报告 + 降级说明（`OPS_V8_T53_MIGRATION_REPORT.md` + `OPS_V8_DOWNGRADE.md`；证据 `t53-verify.txt` / `t53-dryrun.txt`；核验脚本 `t53-verify.py`）—— **T5 全部完成；下一批 = T6 双视图编辑器**
+- [x] T5.3 全量 `.bak-v8` 核验 + 迁移报告 + 降级说明（`OPS_V8_T53_MIGRATION_REPORT.md` + `OPS_V8_DOWNGRADE.md`；证据 `t53-verify.txt` / `t53-dryrun.txt`；核验脚本 `t53-verify.py`）
+- [x] T6.1/T6.2 双视图落地（`VtToSteps` 投影器〔固定点自检 + 拒绝词表〕/ `ScriptEdit` 编辑器〔高亮/行号槽/错误行/辅助条/ScrollView 拖拽〕/ `ScriptStore` 侧线 + 管线；DEV 批次文档 `~/vtouch-editor/docs/UX_BATCH_v35.md`）
+- [x] T6.3 模式锁 + 双路存盘（`#模式` 侧线；[转脚本] 恒可 / [转块] 子集内；打开路由 / 列表卡 / 删除清扫；CrossCopy v8 补链）
+- [x] T6.4 测试台 + 渲染件 + 收口 —— 离机 **六连核**（`VtToStepsCheck` 66 例；真实产物 50 件往返全绿）；设备测试台 **87/0/0**（APK v35 `5ff29f71` 装机逐字节一致；渲染件 `edit_script*.png` 三件 + 全量回归件；live 只读 2/2 件可投影；证据 `~/vtouch-shots/v8t6/`）—— **T6 完成；V8 全部收口**。剩 = 收尾评估项（v5 读路径/旗标退役）+ 用户上机手测回执。
