@@ -1,0 +1,703 @@
+/* vt_vm.c —— VTBC v1 虚拟机骨架（T3.1）。见 vt_vm.h 与 docs/VTBC_V1.md。
+ * 语义对齐：除零 → 错；atan2(a,b) 返回度、(-180,180]（-180 规范为 180）、(0,0)=0；
+ * sin/cos 按度；数字转串 ≤6 位小数去尾零（与编辑器编译/迷你解释器同口径）。
+ * 动作/视觉指令此处为占位（按栈效应消费、视觉推 0）；T3.2/T3.3 接真实实现。 */
+#include "vt_vm.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define VT_EXPR_PI 3.14159265358979323846
+
+/* ---------- 小端读 ---------- */
+static uint16_t rd16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8));
+}
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static double rd64(const uint8_t *p) {
+    uint64_t v = 0;
+    int i;
+    double d;
+    for (i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    memcpy(&d, &v, 8);
+    return d;
+}
+
+/* ---------- 值 ---------- */
+static vt_val vnum(double d) { vt_val v; v.t = 1; v.n = d; v.sp = NULL; v.sl = 0; return v; }
+static vt_val vempty(void) { vt_val v; v.t = 0; v.n = 0; v.sp = NULL; v.sl = 0; return v; }
+static vt_val vstr(const char *p, uint32_t l) { vt_val v; v.t = 2; v.n = 0; v.sp = p; v.sl = l; return v; }
+
+const char *vt_val_str(const vt_val *v, uint32_t *len) {
+    if (v->t != 2) { if (len) *len = 0; return NULL; }
+    if (len) *len = v->sl;
+    return v->sp;
+}
+
+/* 数字 → 串（≤6 位小数、去尾零） */
+static void fmt_num(double d, char *buf, size_t cap) {
+    size_t n;
+    if (d == rint(d) && fabs(d) < 1e15) {
+        snprintf(buf, cap, "%lld", (long long)d);
+        return;
+    }
+    snprintf(buf, cap, "%.6f", d);
+    n = strlen(buf);
+    while (n > 0 && buf[n - 1] == '0') buf[--n] = '\0';
+    if (n > 0 && buf[n - 1] == '.') buf[--n] = '\0';
+}
+
+/* ---------- 行号 / 失败 ---------- */
+uint32_t vt_vm_line(const vt_vm *vm, uint32_t pc) {
+    uint32_t i, line = 0;
+    for (i = 0; i < vm->n_lines; i++) {
+        uint32_t off = rd32(vm->lines + (size_t)i * 8);
+        if (off > pc) break;
+        line = rd32(vm->lines + (size_t)i * 8 + 4);
+    }
+    return line;
+}
+
+static void vt_vm_fail(vt_vm *vm, const char *msg, uint32_t pc) {
+    snprintf(vm->err, sizeof vm->err, "%s", msg);
+    vm->err_pc = pc;
+    vm->err_line = vt_vm_line(vm, pc);
+}
+
+#define VMFAIL(m) do { vt_vm_fail(vm, (m), vm->pc); return VT_VM_ERR; } while (0)
+
+/* ---------- 指令长度（载入期可解码性走查） ---------- */
+static uint32_t vm_op_len(uint8_t op) {
+    switch (op) {
+        case VT_OP_KN: case VT_OP_KS: case VT_OP_LV: case VT_OP_SV:
+        case VT_OP_LT: case VT_OP_ST:
+        case VT_OP_JMP: case VT_OP_JF: case VT_OP_JT: case VT_OP_CJMP:
+        case VT_OP_HL: case VT_OP_SWON: case VT_OP_INREGION: case VT_OP_FINDDOT:
+            return 5;
+        case VT_OP_FINDIMG: case VT_OP_FINDCOLOR:
+            return 9;
+        case VT_OP_CALL:
+            return 6;
+        case VT_OP_CMP: case VT_OP_TERM:
+            return 2;
+        case VT_OP_ADD: case VT_OP_SUB: case VT_OP_MUL: case VT_OP_DIV:
+        case VT_OP_MOD: case VT_OP_NEG: case VT_OP_NOT: case VT_OP_POP:
+        case VT_OP_RET: case VT_OP_RETE:
+        case VT_OP_TAP: case VT_OP_SWIPE: case VT_OP_WAIT: case VT_OP_DOWN: case VT_OP_UP:
+        case VT_OP_TOAST: case VT_OP_BOX: case VT_OP_NOW:
+        case VT_OP_LEN: case VT_OP_STRN: case VT_OP_NUM: case VT_OP_RAND:
+        case VT_OP_FLOOR: case VT_OP_CEIL: case VT_OP_ROUND: case VT_OP_ABS:
+        case VT_OP_MIN: case VT_OP_MAX: case VT_OP_SQRT: case VT_OP_SIN:
+        case VT_OP_COS: case VT_OP_ATAN2:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* ---------- 载入 ---------- */
+static int load_fail(vt_vm *vm, const char *m) {
+    snprintf(vm->err, sizeof vm->err, "VTBC: %s", m);
+    return -1;
+}
+
+int vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len) {
+    uint32_t p, i, cells;
+    memset(vm, 0, sizeof *vm);
+    vm->bc = bc;
+    vm->bc_len = len;
+    if (!bc || len < 16) return load_fail(vm, "过短");
+    if (memcmp(bc, "VTBC", 4) != 0) return load_fail(vm, "魔数不符");
+    if (rd16(bc + 4) != 1) return load_fail(vm, "版本不符");
+    if (rd16(bc + 6) != 0) return load_fail(vm, "flags 非 0");
+    if (rd32(bc + 12) != len) return load_fail(vm, "长度不符");
+
+    p = 16;
+    if (p + 4 > len) return load_fail(vm, "代码节越界");
+    vm->code_len = rd32(bc + p); p += 4;
+    if (vm->code_len > len - p) return load_fail(vm, "代码节越界");
+    vm->code = bc + p; p += vm->code_len;
+
+    /* 指令流可解码走查（未知指令 / 截断在载入期拦下） */
+    for (i = 0; i < vm->code_len; ) {
+        uint32_t l = vm_op_len(vm->code[i]);
+        if (l == 0) return load_fail(vm, "指令非法");
+        if (l > vm->code_len - i) return load_fail(vm, "指令截断");
+        i += l;
+    }
+
+    if (p + 4 > len) return load_fail(vm, "常量节越界");
+    vm->nconsts = rd32(bc + p); p += 4;
+    if (vm->nconsts > VT_VM_MAX_CONSTS) return load_fail(vm, "常量过多");
+    for (i = 0; i < vm->nconsts; i++) {
+        uint8_t kind;
+        if (p + 1 > len) return load_fail(vm, "常量节越界");
+        kind = bc[p++];
+        if (kind == 0) {
+            if (p + 8 > len) return load_fail(vm, "常量节越界");
+            vm->cpool[i] = vnum(rd64(bc + p)); p += 8;
+        } else if (kind == 1) {
+            uint32_t l;
+            if (p + 4 > len) return load_fail(vm, "常量节越界");
+            l = rd32(bc + p); p += 4;
+            if (l > len - p) return load_fail(vm, "常量串越界");
+            vm->cpool[i] = vstr((const char *)(bc + p), l); p += l;
+        } else {
+            return load_fail(vm, "常量 kind 非法");
+        }
+    }
+
+    if (p + 8 > len) return load_fail(vm, "槽节越界");
+    vm->slot_count = rd32(bc + p); p += 4;
+    if (vm->slot_count < 7 || vm->slot_count > VT_VM_MAX_GLOBALS) return load_fail(vm, "槽数非法");
+    vm->main_locals = rd32(bc + p); p += 4;
+    if (vm->main_locals > VT_VM_MAX_LOCALS) return load_fail(vm, "主局部过多");
+
+    if (p + 4 > len) return load_fail(vm, "表节越界");
+    vm->n_tables = rd32(bc + p); p += 4;
+    if (vm->n_tables > VT_VM_MAX_TABLES) return load_fail(vm, "表过多");
+    cells = 0;
+    for (i = 0; i < vm->n_tables; i++) {
+        uint32_t l;
+        if (p + 4 > len) return load_fail(vm, "表节越界");
+        l = rd32(bc + p); p += 4;
+        if (l < 1 || l > 4096) return load_fail(vm, "表长度非法");
+        cells += l;
+        if (cells > VT_VM_MAX_TABLE_CELLS) return load_fail(vm, "表超限");
+        vm->table_len[i] = l;
+    }
+
+    if (p + 4 > len) return load_fail(vm, "函数节越界");
+    vm->n_fns = rd32(bc + p); p += 4;
+    if (vm->n_fns > VT_VM_MAX_FNS) return load_fail(vm, "函数过多");
+    for (i = 0; i < vm->n_fns; i++) {
+        if (p + 9 > len) return load_fail(vm, "函数节越界");
+        vm->fns[i].entry = rd32(bc + p); p += 4;
+        vm->fns[i].locals = rd32(bc + p); p += 4;
+        vm->fns[i].nargs = bc[p++];
+        if (vm->fns[i].entry > vm->code_len) return load_fail(vm, "函数入口越界");
+        if (vm->fns[i].locals < vm->fns[i].nargs || vm->fns[i].locals > VT_VM_MAX_LOCALS)
+            return load_fail(vm, "函数局部非法");
+    }
+
+    if (p + 4 > len) return load_fail(vm, "行号节越界");
+    vm->n_lines = rd32(bc + p); p += 4;
+    if ((uint64_t)vm->n_lines * 8 > (uint64_t)(len - p)) return load_fail(vm, "行号节越界");
+    vm->lines = bc + p; p += vm->n_lines * 8;
+    for (i = 0; i < vm->n_lines; i++) {
+        if (rd32(vm->lines + (size_t)i * 8) > vm->code_len) return load_fail(vm, "行号偏移越界");
+    }
+
+    if (p + 4 > len) return load_fail(vm, "名字节越界");
+    vm->n_names = rd32(bc + p); p += 4;
+    if ((uint64_t)vm->n_names * 9 > (uint64_t)(len - p)) return load_fail(vm, "名字节越界");
+    vm->names = bc + p; p += vm->n_names * 9;
+    for (i = 0; i < vm->n_names; i++) {
+        const uint8_t *e = vm->names + (size_t)i * 9;
+        uint32_t nc = rd32(e + 5);
+        if (e[0] > 2 || nc >= vm->nconsts || vm->cpool[nc].t != 2)
+            return load_fail(vm, "名字项非法");
+    }
+
+    if (p != len) return load_fail(vm, "尾部多余字节");
+    vt_vm_reset(vm);
+    return 0;
+}
+
+/* ---------- 复位 ---------- */
+void vt_vm_reset(vt_vm *vm) {
+    uint32_t i, off = 0;
+    memset(vm->g, 0, sizeof vm->g);
+    for (i = 0; i < vm->n_tables; i++) {
+        uint32_t j, l = vm->table_len[i];
+        vm->tables[i] = vm->tab_store + off;
+        for (j = 0; j < l; j++) vm->tab_store[off + j] = vnum(0);
+        off += l;
+    }
+    vm->sp = 0;
+    vm->fdepth = 0;
+    vm->pc = 0;
+    vm->lbase = 0;
+    vm->cur_nlocals = vm->main_locals;
+    vm->cjmp_count = 0;
+    vm->now_ms = 0;
+    vm->now_incr = 1;   /* 批模式假时钟；T3.5 接真实时钟后置 0 */
+    vm->sheap_used = 0;
+    vm->err[0] = '\0';
+    vm->err_pc = 0;
+    vm->err_line = 0;
+    vm->term_mode = 0;
+}
+
+/* ---------- 栈 / 槽 ---------- */
+static int push(vt_vm *vm, vt_val v) {
+    if (vm->sp >= VT_VM_MAX_STACK) return -1;
+    vm->stack[vm->sp++] = v;
+    return 0;
+}
+static vt_val popv(vt_vm *vm) {
+    if (vm->sp <= 0) return vempty();
+    return vm->stack[--vm->sp];
+}
+static vt_val *slot_ref(vt_vm *vm, uint32_t a) {
+    if (a < vm->slot_count) return &vm->g[a];
+    a -= vm->slot_count;
+    if (a >= vm->cur_nlocals || vm->lbase + a >= VT_VM_MAX_LOCALS) return NULL;
+    return &vm->locals[vm->lbase + a];
+}
+
+/* ---------- 值运算 ---------- */
+static int num_of(vt_vm *vm, vt_val v, double *out) {
+    if (v.t == 1) { *out = v.n; return 0; }
+    vt_vm_fail(vm, v.t == 2 ? "类型错" : "结果无值", vm->pc);
+    return -1;
+}
+static int truth_of(vt_vm *vm, vt_val v) {
+    double d;
+    if (num_of(vm, v, &d) < 0) return -1;
+    return d != 0;
+}
+static int str_of(vt_vm *vm, vt_val v, char *tmp, size_t cap, const char **p, uint32_t *len) {
+    if (v.t == 2) { *p = v.sp; *len = v.sl; return 0; }
+    if (v.t == 1) {
+        fmt_num(v.n, tmp, cap);
+        *p = tmp; *len = (uint32_t)strlen(tmp);
+        return 0;
+    }
+    vt_vm_fail(vm, "结果无值", vm->pc);
+    return -1;
+}
+
+static int vm_add(vt_vm *vm, vt_val a, vt_val b, vt_val *out) {
+    if (a.t == 2 || b.t == 2) {
+        char ta[64], tb[64], *dst;
+        const char *pa, *pb;
+        uint32_t la, lb;
+        if (str_of(vm, a, ta, sizeof ta, &pa, &la) < 0) return -1;
+        if (str_of(vm, b, tb, sizeof tb, &pb, &lb) < 0) return -1;
+        if ((uint64_t)vm->sheap_used + la + lb > VT_VM_SHEAP_CAP) {
+            vt_vm_fail(vm, "字符串池满", vm->pc);
+            return -1;
+        }
+        dst = vm->sheap + vm->sheap_used;
+        memcpy(dst, pa, la);
+        memcpy(dst + la, pb, lb);
+        vm->sheap_used += la + lb;
+        *out = vstr(dst, la + lb);
+        return 0;
+    }
+    {
+        double x, y;
+        if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return -1;
+        *out = vnum(x + y);
+        return 0;
+    }
+}
+
+static int vm_cmp(vt_vm *vm, uint8_t sub, vt_val a, vt_val b, vt_val *out) {
+    if (sub == VT_C_EQ || sub == VT_C_NE) {
+        int eq;
+        if (a.t == 2 || b.t == 2) {
+            char ta[64], tb[64];
+            const char *pa, *pb;
+            uint32_t la, lb;
+            if (str_of(vm, a, ta, sizeof ta, &pa, &la) < 0) return -1;
+            if (str_of(vm, b, tb, sizeof tb, &pb, &lb) < 0) return -1;
+            eq = (la == lb) && (memcmp(pa, pb, la) == 0);
+        } else {
+            double x, y;
+            if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return -1;
+            eq = (x == y);
+        }
+        *out = vnum((sub == VT_C_EQ) ? (eq ? 1 : 0) : (eq ? 0 : 1));
+        return 0;
+    }
+    {
+        double x, y;
+        if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return -1;
+        switch (sub) {
+            case VT_C_LT: *out = vnum(x < y); break;
+            case VT_C_GT: *out = vnum(x > y); break;
+            case VT_C_LE: *out = vnum(x <= y); break;
+            default:      *out = vnum(x >= y); break;
+        }
+        return 0;
+    }
+}
+
+static int vm_atan2_deg(vt_vm *vm, double a, double b, double *out) {
+    double d = atan2(a, b) / VT_EXPR_PI * 180.0;
+    if (d == -180.0) d = 180.0;   /* ±180 同向（spec (-180,180]） */
+    (void)vm;
+    *out = d;
+    return 0;
+}
+
+/* ---------- 执行 ---------- */
+vt_vm_status vt_vm_tick(vt_vm *vm, uint32_t *wait_ms) {
+    uint32_t pc = vm->pc;
+    if (wait_ms) *wait_ms = 0;
+    for (;;) {
+        uint8_t op;
+        if (pc >= vm->code_len) {
+            vm->pc = pc;
+            vm->term_mode = 0;
+            return VT_VM_DONE;
+        }
+        op = vm->code[pc];
+        vm->pc = pc;
+        pc++;
+
+        switch (op) {
+            case VT_OP_KN: {
+                uint32_t n = rd32(vm->code + pc);
+                pc += 4;
+                if (n >= vm->nconsts || vm->cpool[n].t != 1) VMFAIL("程序非法");
+                if (push(vm, vm->cpool[n]) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_KS: {
+                uint32_t n = rd32(vm->code + pc);
+                pc += 4;
+                if (n >= vm->nconsts || vm->cpool[n].t != 2) VMFAIL("程序非法");
+                if (push(vm, vm->cpool[n]) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_LV: {
+                uint32_t a = rd32(vm->code + pc);
+                vt_val *s;
+                pc += 4;
+                s = slot_ref(vm, a);
+                if (!s) VMFAIL("程序非法");
+                if (s->t == 0) VMFAIL("变量无值");
+                if (push(vm, *s) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_SV: {
+                uint32_t a = rd32(vm->code + pc);
+                vt_val v, *s;
+                pc += 4;
+                v = popv(vm);
+                s = slot_ref(vm, a);
+                if (!s) VMFAIL("程序非法");
+                *s = v;
+                break;
+            }
+            case VT_OP_LT: {
+                uint32_t ti = rd32(vm->code + pc);
+                double ix;
+                pc += 4;
+                if (ti >= vm->n_tables) VMFAIL("程序非法");
+                if (num_of(vm, popv(vm), &ix) < 0) return VT_VM_ERR;
+                if (ix < 0 || ix >= (double)vm->table_len[ti]) VMFAIL("下标越界");
+                if (push(vm, vm->tables[ti][(uint32_t)ix]) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_ST: {
+                uint32_t ti = rd32(vm->code + pc);
+                double ix;
+                vt_val v;
+                pc += 4;
+                if (ti >= vm->n_tables) VMFAIL("程序非法");
+                v = popv(vm);
+                if (num_of(vm, popv(vm), &ix) < 0) return VT_VM_ERR;
+                if (ix < 0 || ix >= (double)vm->table_len[ti]) VMFAIL("下标越界");
+                vm->tables[ti][(uint32_t)ix] = v;
+                break;
+            }
+            case VT_OP_ADD: {
+                vt_val b = popv(vm), a = popv(vm), r;
+                if (vm_add(vm, a, b, &r) < 0) return VT_VM_ERR;
+                if (push(vm, r) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_SUB:
+            case VT_OP_MUL:
+            case VT_OP_DIV:
+            case VT_OP_MOD: {
+                double x, y, r;
+                vt_val b = popv(vm), a = popv(vm);
+                if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return VT_VM_ERR;
+                if ((op == VT_OP_DIV || op == VT_OP_MOD) && y == 0.0) VMFAIL("除零");
+                if (op == VT_OP_SUB) r = x - y;
+                else if (op == VT_OP_MUL) r = x * y;
+                else if (op == VT_OP_DIV) r = x / y;
+                else r = fmod(x, y);
+                if (push(vm, vnum(r)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_NEG: {
+                double x;
+                if (num_of(vm, popv(vm), &x) < 0) return VT_VM_ERR;
+                if (push(vm, vnum(-x)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_NOT: {
+                int b = truth_of(vm, popv(vm));
+                if (b < 0) return VT_VM_ERR;
+                if (push(vm, vnum(b ? 0 : 1)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_CMP: {
+                uint8_t sub = vm->code[pc++];
+                vt_val b, a, r;
+                if (sub > VT_C_GE) VMFAIL("程序非法");
+                b = popv(vm);
+                a = popv(vm);
+                if (vm_cmp(vm, sub, a, b, &r) < 0) return VT_VM_ERR;
+                if (push(vm, r) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_POP:
+                (void)popv(vm);
+                break;
+            case VT_OP_JMP:
+                pc = rd32(vm->code + pc);
+                break;
+            case VT_OP_JF: {
+                uint32_t t = rd32(vm->code + pc);
+                int b;
+                pc += 4;
+                b = truth_of(vm, popv(vm));
+                if (b < 0) return VT_VM_ERR;
+                if (!b) pc = t;
+                break;
+            }
+            case VT_OP_JT: {
+                uint32_t t = rd32(vm->code + pc);
+                int b;
+                pc += 4;
+                b = truth_of(vm, popv(vm));
+                if (b < 0) return VT_VM_ERR;
+                if (b) pc = t;
+                break;
+            }
+            case VT_OP_CJMP: {
+                uint32_t t = rd32(vm->code + pc);
+                if (++vm->cjmp_count > 200) VMFAIL("跳转超限");
+                pc = t;
+                break;
+            }
+            case VT_OP_CALL: {
+                uint32_t fi = rd32(vm->code + pc);
+                uint8_t na = vm->code[pc + 4];
+                uint32_t newbase, i;
+                pc += 5;
+                if (fi >= vm->n_fns) VMFAIL("程序非法");
+                if (na != vm->fns[fi].nargs) VMFAIL("程序非法");
+                if (vm->fdepth >= VT_VM_MAX_FRAMES) VMFAIL("调用超深");
+                newbase = vm->lbase + vm->cur_nlocals;
+                if (newbase + vm->fns[fi].locals > VT_VM_MAX_LOCALS) VMFAIL("调用超深");
+                vm->frames[vm->fdepth].ret_pc = pc;
+                vm->frames[vm->fdepth].base = vm->lbase;
+                vm->frames[vm->fdepth].nlocals = vm->cur_nlocals;
+                vm->fdepth++;
+                for (i = 0; i < vm->fns[fi].locals; i++) vm->locals[newbase + i] = vempty();
+                for (i = na; i > 0; i--) vm->locals[newbase + (i - 1)] = popv(vm);
+                vm->lbase = newbase;
+                vm->cur_nlocals = vm->fns[fi].locals;
+                pc = vm->fns[fi].entry;
+                break;
+            }
+            case VT_OP_RET:
+            case VT_OP_RETE: {
+                vt_val rv = (op == VT_OP_RET) ? popv(vm) : vempty();
+                if (vm->fdepth <= 0) VMFAIL("程序非法");
+                vm->fdepth--;
+                vm->lbase = vm->frames[vm->fdepth].base;
+                vm->cur_nlocals = vm->frames[vm->fdepth].nlocals;
+                pc = vm->frames[vm->fdepth].ret_pc;
+                if (push(vm, rv) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_TERM: {
+                uint8_t m = vm->code[pc++];
+                vm->term_mode = m;
+                vm->pc = pc;
+                return VT_VM_DONE;
+            }
+            case VT_OP_WAIT: {
+                double ms;
+                if (num_of(vm, popv(vm), &ms) < 0) return VT_VM_ERR;
+                vm->pc = pc;
+                if (wait_ms) *wait_ms = (ms < 0) ? 0 : (uint32_t)ms;
+                return VT_VM_WAIT;
+            }
+            case VT_OP_NOW: {
+                double d = vm->now_ms;
+                vm->now_ms += vm->now_incr;
+                if (push(vm, vnum(d)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_LEN: {
+                char tmp[64];
+                const char *p;
+                uint32_t l;
+                if (str_of(vm, popv(vm), tmp, sizeof tmp, &p, &l) < 0) return VT_VM_ERR;
+                if (push(vm, vnum((double)l)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_STRN: {
+                vt_val v = popv(vm);
+                if (v.t == 2) {
+                    if (push(vm, v) < 0) VMFAIL("程序非法");
+                    break;
+                }
+                if (v.t != 1) VMFAIL("结果无值");
+                {
+                    char tmp[64];
+                    uint32_t l;
+                    vt_val r;
+                    fmt_num(v.n, tmp, sizeof tmp);
+                    l = (uint32_t)strlen(tmp);
+                    if ((uint64_t)vm->sheap_used + l > VT_VM_SHEAP_CAP) VMFAIL("字符串池满");
+                    memcpy(vm->sheap + vm->sheap_used, tmp, l);
+                    r = vstr(vm->sheap + vm->sheap_used, l);
+                    vm->sheap_used += l;
+                    if (push(vm, r) < 0) VMFAIL("程序非法");
+                }
+                break;
+            }
+            case VT_OP_NUM: {
+                vt_val v = popv(vm);
+                if (v.t == 1) {
+                    if (push(vm, v) < 0) VMFAIL("程序非法");
+                    break;
+                }
+                if (v.t != 2) VMFAIL("结果无值");
+                {
+                    char tmp[80];
+                    char *end;
+                    double d;
+                    if (v.sl >= sizeof tmp) VMFAIL("类型错");
+                    memcpy(tmp, v.sp, v.sl);
+                    tmp[v.sl] = '\0';
+                    d = strtod(tmp, &end);
+                    if (end == tmp || *end != '\0') VMFAIL("类型错");
+                    if (push(vm, vnum(d)) < 0) VMFAIL("程序非法");
+                }
+                break;
+            }
+            case VT_OP_FLOOR:
+            case VT_OP_CEIL:
+            case VT_OP_ROUND:
+            case VT_OP_ABS:
+            case VT_OP_SQRT:
+            case VT_OP_SIN:
+            case VT_OP_COS: {
+                double x, r;
+                if (num_of(vm, popv(vm), &x) < 0) return VT_VM_ERR;
+                if (op == VT_OP_FLOOR) r = floor(x);
+                else if (op == VT_OP_CEIL) r = ceil(x);
+                else if (op == VT_OP_ROUND) r = floor(x + 0.5);
+                else if (op == VT_OP_ABS) r = fabs(x);
+                else if (op == VT_OP_SQRT) r = sqrt(x);
+                else if (op == VT_OP_SIN) r = sin(x * (VT_EXPR_PI / 180.0));
+                else r = cos(x * (VT_EXPR_PI / 180.0));
+                if (push(vm, vnum(r)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_MIN:
+            case VT_OP_MAX:
+            case VT_OP_ATAN2: {
+                double x, y, r;
+                vt_val b = popv(vm), a = popv(vm);
+                if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return VT_VM_ERR;
+                if (op == VT_OP_MIN) r = (x < y) ? x : y;
+                else if (op == VT_OP_MAX) r = (x > y) ? x : y;
+                else (void)vm_atan2_deg(vm, x, y, &r);
+                if (push(vm, vnum(r)) < 0) VMFAIL("程序非法");
+                break;
+            }
+            case VT_OP_RAND: {
+                double x, y;
+                vt_val b = popv(vm), a = popv(vm);
+                if (num_of(vm, a, &x) < 0 || num_of(vm, b, &y) < 0) return VT_VM_ERR;
+                (void)y;
+                if (push(vm, vnum(x)) < 0) VMFAIL("程序非法");   /* 占位：取 a（T3.2 接真 rand） */
+                break;
+            }
+            /* ---- 动作/展示/视觉：占位（按栈效应消费；视觉推 0） ---- */
+            case VT_OP_TAP:
+                (void)popv(vm); (void)popv(vm); (void)popv(vm);
+                break;
+            case VT_OP_SWIPE: {
+                int i;
+                for (i = 0; i < 7; i++) (void)popv(vm);
+                break;
+            }
+            case VT_OP_DOWN:
+                (void)popv(vm); (void)popv(vm);
+                break;
+            case VT_OP_UP:
+                break;
+            case VT_OP_TOAST:
+                (void)popv(vm); (void)popv(vm);
+                break;
+            case VT_OP_HL:
+                pc += 4;
+                (void)popv(vm);
+                break;
+            case VT_OP_BOX: {
+                int i;
+                for (i = 0; i < 5; i++) (void)popv(vm);
+                break;
+            }
+            case VT_OP_FINDIMG:
+                pc += 8;
+                (void)popv(vm); (void)popv(vm); (void)popv(vm);
+                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                break;
+            case VT_OP_FINDCOLOR:
+                pc += 8;
+                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                break;
+            case VT_OP_FINDDOT:
+                pc += 4;
+                (void)popv(vm); (void)popv(vm);
+                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                break;
+            case VT_OP_INREGION:
+                pc += 4;
+                (void)popv(vm); (void)popv(vm);
+                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                break;
+            case VT_OP_SWON:
+                pc += 4;
+                if (push(vm, vnum(0)) < 0) VMFAIL("程序非法");
+                break;
+            default:
+                VMFAIL("程序非法");
+        }
+    }
+}
+
+vt_vm_status vt_vm_run(vt_vm *vm) {
+    for (;;) {
+        uint32_t w = 0;
+        vt_vm_status st = vt_vm_tick(vm, &w);
+        if (st != VT_VM_WAIT) return st;
+    }
+}
+
+/* ---------- 查询 ---------- */
+int vt_vm_global(const vt_vm *vm, const char *name, vt_val *out) {
+    uint32_t i, nlen = (uint32_t)strlen(name);
+    for (i = 0; i < vm->n_names; i++) {
+        const uint8_t *e = vm->names + (size_t)i * 9;
+        uint32_t idx, nc;
+        if (e[0] != 0) continue;
+        idx = rd32(e + 1);
+        nc = rd32(e + 5);
+        if (nc < vm->nconsts && vm->cpool[nc].t == 2 && vm->cpool[nc].sl == nlen &&
+            memcmp(vm->cpool[nc].sp, name, nlen) == 0 && idx < vm->slot_count) {
+            *out = vm->g[idx];
+            return 1;
+        }
+    }
+    return 0;
+}
