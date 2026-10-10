@@ -100,6 +100,301 @@ static uint32_t vm_op_len(uint8_t op) {
     }
 }
 
+/* ---------- 验证器（T3.4） ----------
+ * 载入尾部调用：全量静态校验——指令流可解码到底 + 指令数 ≤ VT_VM_MAX_INSTS + 代码 ≤ 32KB；
+ * 跳转/函数入口落指令边界（目标 == code_len 视为终止点，合法）；栈深数据流（种子 = 主程序
+ * pc0 与全部函数入口，深度 0；逐指令推进、合并点深度必须一致；下溢 / 超限拒绝）；引用界
+ * （常量种类/表/函数索引/实参数/槽绝对址——全局 < slotCount、局部按所属帧）；RET/RETE 仅允许
+ * 在函数体内。任一不过 → err = `程序非法: <由>`。 */
+
+static int ver_fail(vt_vm *vm, const char *why) {
+    snprintf(vm->err, sizeof vm->err, "程序非法: %s", why);
+    return -1;
+}
+
+/* pc 所属帧的局部槽数（主程序 / 入口递增划分出的函数体）。 */
+static uint32_t ver_frame_locals(const vt_vm *vm, uint32_t pc) {
+    uint32_t k;
+    if (vm->n_fns == 0 || pc < vm->fns[0].entry) return vm->main_locals;
+    for (k = vm->n_fns - 1; k > 0; k--) {
+        if (pc >= vm->fns[k].entry) return vm->fns[k].locals;
+    }
+    return vm->fns[0].locals;
+}
+
+static int ver_in_fn(const vt_vm *vm, uint32_t pc) {
+    return vm->n_fns > 0 && pc >= vm->fns[0].entry;
+}
+
+/* （pop, push）栈效应；0 = 已填。CALL/RET/RETE/TERM 由调用点特判。 */
+static int vm_op_stack(uint8_t op, int *pops, int *pushes) {
+    *pops = 0;
+    *pushes = 0;
+    switch (op) {
+        case VT_OP_KN: case VT_OP_KS: case VT_OP_LV: case VT_OP_NOW:
+            *pushes = 1;
+            return 0;
+        case VT_OP_SV: case VT_OP_POP: case VT_OP_WAIT: case VT_OP_JF: case VT_OP_JT: case VT_OP_HL:
+            *pops = 1;
+            return 0;
+        case VT_OP_LT: case VT_OP_LEN: case VT_OP_STRN: case VT_OP_NUM:
+        case VT_OP_FLOOR: case VT_OP_CEIL: case VT_OP_ROUND: case VT_OP_ABS:
+        case VT_OP_SQRT: case VT_OP_SIN: case VT_OP_COS: case VT_OP_NEG: case VT_OP_NOT:
+            *pops = 1;
+            *pushes = 1;
+            return 0;
+        case VT_OP_ST: case VT_OP_DOWN: case VT_OP_TOAST:
+            *pops = 2;
+            return 0;
+        case VT_OP_ADD: case VT_OP_SUB: case VT_OP_MUL: case VT_OP_DIV: case VT_OP_MOD:
+        case VT_OP_CMP: case VT_OP_MIN: case VT_OP_MAX: case VT_OP_ATAN2: case VT_OP_RAND:
+        case VT_OP_FINDDOT: case VT_OP_INREGION:
+            *pops = 2;
+            *pushes = 1;
+            return 0;
+        case VT_OP_TAP:
+            *pops = 3;
+            return 0;
+        case VT_OP_FINDIMG:
+            *pops = 3;
+            *pushes = 1;
+            return 0;
+        case VT_OP_SWIPE:
+            *pops = 7;
+            return 0;
+        case VT_OP_BOX:
+            *pops = 5;
+            return 0;
+        case VT_OP_FINDCOLOR: case VT_OP_SWON:
+            *pushes = 1;
+            return 0;
+        case VT_OP_JMP: case VT_OP_CJMP: case VT_OP_UP:
+            return 0;
+        case VT_OP_CALL: case VT_OP_RET: case VT_OP_RETE: case VT_OP_TERM:
+            return 0;
+        default:
+            return -1;
+    }
+}
+
+static int vm_verify(vt_vm *vm) {
+    uint32_t i, k, s, n_insts = 0, wtop = 0, wcap;
+    uint8_t *bound = NULL;
+    int16_t *dep = NULL;
+    uint32_t *work = NULL;
+    int rc = -1;
+    size_t dcap = (vm->code_len ? vm->code_len : 1);
+
+    if (vm->code_len > 32768u) return ver_fail(vm, "代码超长");
+
+    bound = calloc((size_t)(vm->code_len + 7) / 8 + 1, 1);
+    dep = malloc(sizeof(int16_t) * dcap);
+    if (!bound || !dep) { ver_fail(vm, "内存"); goto out; }
+    memset(dep, 0xFF, sizeof(int16_t) * dcap);
+
+    /* 走查：解码 + 计数 + 边界集 */
+    for (i = 0; i < vm->code_len; ) {
+        uint32_t l = vm_op_len(vm->code[i]);
+        if (l == 0) { ver_fail(vm, "未知指令"); goto out; }
+        if (l > vm->code_len - i) { ver_fail(vm, "指令截断"); goto out; }
+        if (n_insts >= 8192u) { ver_fail(vm, "指令数超限"); goto out; }
+        n_insts++;
+        bound[i >> 3] |= (uint8_t)(1u << (i & 7));
+        i += l;
+    }
+
+    /* 函数入口：递增 + 落边界（entry == code_len 视为终止点，合法） */
+    for (k = 0; k < vm->n_fns; k++) {
+        uint32_t e = vm->fns[k].entry;
+        if (k > 0 && e < vm->fns[k - 1].entry) { ver_fail(vm, "函数入口乱序"); goto out; }
+        if (e < vm->code_len && !(bound[e >> 3] & (1u << (e & 7)))) {
+            ver_fail(vm, "函数入口非指令边界");
+            goto out;
+        }
+    }
+
+    wcap = 2u * n_insts + 8u;
+    work = malloc(sizeof(uint32_t) * wcap);
+    if (!work) { ver_fail(vm, "内存"); goto out; }
+
+    /* 种子：主程序 pc0 + 全部函数入口（深度 0；入口若已被主流程访问，深度须同为 0） */
+    if (vm->code_len > 0) {
+        dep[0] = 0;
+        work[wtop++] = 0;
+    }
+    for (k = 0; k < vm->n_fns; k++) {
+        uint32_t e = vm->fns[k].entry;
+        if (e >= vm->code_len) continue;
+        if (dep[e] < 0) {
+            dep[e] = 0;
+            work[wtop++] = e;
+        } else if (dep[e] != 0) {
+            ver_fail(vm, "栈深不一致");
+            goto out;
+        }
+    }
+
+    /* 数据流推进 */
+    while (wtop > 0) {
+        uint32_t pc = work[--wtop];
+        uint8_t op = vm->code[pc];
+        uint32_t l = vm_op_len(op);
+        int d = (int)dep[pc];
+        int pops = 0, pushes = 0, nd;
+        uint32_t off = pc + 1;
+
+        /* 操作数 / 引用界（仅可达指令） */
+        switch (op) {
+            case VT_OP_KN: {
+                uint32_t ci = rd32(vm->code + off);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 1) { ver_fail(vm, "常量引用非法"); goto out; }
+                break;
+            }
+            case VT_OP_KS: {
+                uint32_t ci = rd32(vm->code + off);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 2) { ver_fail(vm, "常量引用非法"); goto out; }
+                break;
+            }
+            case VT_OP_LV:
+            case VT_OP_SV: {
+                uint32_t a = rd32(vm->code + off);
+                if (a >= vm->slot_count && a - vm->slot_count >= ver_frame_locals(vm, pc)) {
+                    ver_fail(vm, "槽引用越界");
+                    goto out;
+                }
+                break;
+            }
+            case VT_OP_LT:
+            case VT_OP_ST: {
+                uint32_t ti = rd32(vm->code + off);
+                if (ti >= vm->n_tables) { ver_fail(vm, "表引用越界"); goto out; }
+                break;
+            }
+            case VT_OP_JMP:
+            case VT_OP_JF:
+            case VT_OP_JT:
+            case VT_OP_CJMP: {
+                uint32_t t = rd32(vm->code + off);
+                if (t > vm->code_len) { ver_fail(vm, "跳转越界"); goto out; }
+                break;
+            }
+            case VT_OP_CMP:
+                if (vm->code[off] > VT_C_GE) { ver_fail(vm, "比较子码非法"); goto out; }
+                break;
+            case VT_OP_TERM:
+                if (vm->code[off] > 1) { ver_fail(vm, "收工模式非法"); goto out; }
+                break;
+            case VT_OP_HL: {
+                uint32_t ci = rd32(vm->code + off);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 2) { ver_fail(vm, "区域常量非法"); goto out; }
+                break;
+            }
+            case VT_OP_FINDIMG: {
+                uint32_t ci = rd32(vm->code + off);
+                uint32_t ri = rd32(vm->code + off + 4);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 2) { ver_fail(vm, "模板常量非法"); goto out; }
+                if (ri != 0xFFFFFFFFu && (ri >= vm->nconsts || vm->cpool[ri].t != 2)) {
+                    ver_fail(vm, "区域常量非法");
+                    goto out;
+                }
+                break;
+            }
+            case VT_OP_FINDCOLOR: {
+                uint32_t ci = rd32(vm->code + off);
+                uint32_t ri = rd32(vm->code + off + 4);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 2) { ver_fail(vm, "点集常量非法"); goto out; }
+                if (ri != 0xFFFFFFFFu && (ri >= vm->nconsts || vm->cpool[ri].t != 2)) {
+                    ver_fail(vm, "区域常量非法");
+                    goto out;
+                }
+                break;
+            }
+            case VT_OP_FINDDOT: {
+                uint32_t ri = rd32(vm->code + off);
+                if (ri != 0xFFFFFFFFu && (ri >= vm->nconsts || vm->cpool[ri].t != 2)) {
+                    ver_fail(vm, "区域常量非法");
+                    goto out;
+                }
+                break;
+            }
+            case VT_OP_INREGION: {
+                uint32_t ri = rd32(vm->code + off);
+                if (ri >= vm->nconsts || vm->cpool[ri].t != 2) { ver_fail(vm, "区域常量非法"); goto out; }
+                break;
+            }
+            case VT_OP_SWON: {
+                uint32_t ci = rd32(vm->code + off);
+                if (ci >= vm->nconsts || vm->cpool[ci].t != 2) { ver_fail(vm, "开关名常量非法"); goto out; }
+                break;
+            }
+            case VT_OP_CALL: {
+                uint32_t fi = rd32(vm->code + off);
+                if (fi >= vm->n_fns) { ver_fail(vm, "函数引用越界"); goto out; }
+                if (vm->code[off + 4] != vm->fns[fi].nargs) { ver_fail(vm, "实参数不符"); goto out; }
+                break;
+            }
+            case VT_OP_RET:
+            case VT_OP_RETE:
+                if (!ver_in_fn(vm, pc)) { ver_fail(vm, "返回不在函数内"); goto out; }
+                break;
+            default:
+                break;
+        }
+
+        /* 栈效应 */
+        if (op == VT_OP_CALL) {
+            uint32_t fi = rd32(vm->code + off);
+            pops = (int)vm->fns[fi].nargs;
+            pushes = 1;
+        } else if (op == VT_OP_RET) {
+            pops = 1;
+        } else if (op == VT_OP_RETE || op == VT_OP_TERM) {
+            pops = 0;
+        } else if (vm_op_stack(op, &pops, &pushes) != 0) {
+            ver_fail(vm, "未知指令");
+            goto out;
+        }
+        if (d < pops) { ver_fail(vm, "栈下溢"); goto out; }
+        nd = d - pops + pushes;
+        if (nd > VT_VM_MAX_STACK) { ver_fail(vm, "栈深超限"); goto out; }
+
+        /* 终止 / 后继推进（跳转目标与落尾都须是边界；t == code_len = 终止合法） */
+        if (op == VT_OP_RET || op == VT_OP_RETE || op == VT_OP_TERM) continue;
+        {
+            uint32_t succ[2];
+            int nsucc = 0;
+            if (op == VT_OP_JMP || op == VT_OP_CJMP) {
+                succ[nsucc++] = rd32(vm->code + off);
+            } else if (op == VT_OP_JF || op == VT_OP_JT) {
+                succ[nsucc++] = rd32(vm->code + off);
+                succ[nsucc++] = pc + l;
+            } else {
+                succ[nsucc++] = pc + l;
+            }
+            for (s = 0; s < (uint32_t)nsucc; s++) {
+                uint32_t t = succ[s];
+                if (t == vm->code_len) continue;
+                if (t > vm->code_len) { ver_fail(vm, "跳转越界"); goto out; }
+                if (!(bound[t >> 3] & (1u << (t & 7)))) { ver_fail(vm, "跳转目标非指令边界"); goto out; }
+                if (dep[t] < 0) {
+                    if (wtop >= wcap) { ver_fail(vm, "验证溢出"); goto out; }
+                    dep[t] = (int16_t)nd;
+                    work[wtop++] = t;
+                } else if ((int)dep[t] != nd) {
+                    ver_fail(vm, "栈深不一致");
+                    goto out;
+                }
+            }
+        }
+    }
+    rc = 0;
+out:
+    free(bound);
+    free(dep);
+    free(work);
+    return rc;
+}
+
 /* ---------- 载入 ---------- */
 static int load_fail(vt_vm *vm, const char *m) {
     snprintf(vm->err, sizeof vm->err, "VTBC: %s", m);
@@ -123,13 +418,7 @@ int vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len) {
     if (vm->code_len > len - p) return load_fail(vm, "代码节越界");
     vm->code = bc + p; p += vm->code_len;
 
-    /* 指令流可解码走查（未知指令 / 截断在载入期拦下） */
-    for (i = 0; i < vm->code_len; ) {
-        uint32_t l = vm_op_len(vm->code[i]);
-        if (l == 0) return load_fail(vm, "指令非法");
-        if (l > vm->code_len - i) return load_fail(vm, "指令截断");
-        i += l;
-    }
+    /* （指令流/语义全量走查在尾部的 vt_vm_verify：解码、边界、栈深、引用界） */
 
     if (p + 4 > len) return load_fail(vm, "常量节越界");
     vm->nconsts = rd32(bc + p); p += 4;
@@ -205,6 +494,7 @@ int vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len) {
     }
 
     if (p != len) return load_fail(vm, "尾部多余字节");
+    if (vm_verify(vm) != 0) return -1;   /* err 已置（程序非法: <由>） */
     vt_vm_reset(vm);
     return 0;
 }

@@ -136,7 +136,8 @@ struct vt_vm {
     int32_t  act_ms, act_h1, act_h2;
 };
 
-/* 载入 + 结构校验（失败返回 -1，vm->err 说明原因）。成功即做好跑前准备。 */
+/* 载入 + 结构校验 + 验证器（T3.4：指令解码/跳转边界/栈深数据流/引用界/指令数/表界；
+ * 不过 → err `程序非法: <由>`）。成功即做好跑前准备。 */
 int  vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len);
 /* 复位运行态（全局清空 / 表清零 / 帧清空 / pc=0 / 时钟=0）。 */
 void vt_vm_reset(vt_vm *vm);
