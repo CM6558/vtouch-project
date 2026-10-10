@@ -1,6 +1,6 @@
 # OPS_IMPL_PLAN_V8 —— 操作语言化（真脚本+可视化）任务级实施计划
 
-> 状态：开工（2026-10-10）。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
+> 状态：T0..T4 完成（2026-10-10 晚；T4 记录 `docs/OPS_V8_T4_ACCEPTANCE.md`），**下一批 = T5 迁移器**。拍板已齐：V8 方案 12 项**全按推荐采纳**（用户「按推荐来／先实现」）。
 > 上位：`OPS_PLAN_V8.md`（方案）+ `VT_SCRIPT_V1_SPEC.md`（语言规范，语言唯一真相）。
 > 执行方式：**Native 逐任务**（单设备串行；子代理会互抢设备，不用子代理制）。
 > 纪律：每任务 = 实现 → 构建/离机验证 → 装机 → 测试台/真机验收 → 证据归档；每期结束跑既有 84+ 测试台与 zt 家族回归。
@@ -52,6 +52,13 @@
 | T4.2 | 面板：load/save 透传化（现 `vtouch_ui.cpp:936/:1047` 逐字段 → 不透明搬运） | 字节对拍 |
 | T4.3 | 热载 T8：观察 ops.conf + progs/ → 防抖重放 | 改脚本 ~2s 生效实测 |
 
+**T4 结论（2026-10-10 晚；记录 `docs/OPS_V8_T4_ACCEPTANCE.md`）**：
+- **T4.1 编辑器存储层 ✅**：`OpsV8.java`（v8 元数据模型/解析/序列化/FNV 校验/对账比较器/`backupV8`）+ `OpsV8Check` 离机核 **38 例全绿**（`~/vtchk-host` 三连：HostCheck + VtScriptCheck + OpsV8Check）；`Ops.java` v8 记录一等公民（progHash/extra/往返保真/域校验）、`Schemes.java` progs 镜像链（mirror/switchTo/saveAs）；设备测试台 **85/0/0**（+「ops v8 存储」7 核：scratch 往返/镜像对账/篡改可见/修复/`.bak-v8` 备份/缺产物 null/真实数据只读对账）；APK v34 `108bd0e6`（装机逐字节一致；`src.bak-v34`）。首轮真雷 = `backupV8` 的 `{ [ -f ] && …; }` 组断链（修复 = 条件段 `;` 独立语句）。
+- **T4.2 面板透传化 ✅**：`OPS_CONF_VER 8`（写端固定 v8、读端 v1..v5+v8）；`ops_load_prog` 不透明搬运 + FNV/大小校验（负样例按条跳过、不带走其余记录；gate `-` 归一空串真雷部署前修复）；`save_ops` 从核心原位写回 progs 字节 + 元数据行（`hr_files_note` 自写豁免）；`ui_glue` 补 `vtouch_prog_count/get/put`；scheme 层 progs 精确同步（sync_live/mirror/rollback/flush/switch 五路）+ 切换三 clear 不短路重放；T8 监视集扩 live 三文件 + 双侧 progs 目录签名 + current/ops.conf；`page_ops` 程序卡。**验收**：字节对拍过（往返后 progs `8349217d` 与 ops.conf `805e6503` 均不变）；负样例拒收词正确（`哈希不符`/`大小不符`）；镜像 live↔scheme 三对逐字节；v5 用户数据三次重启回归。部署核 `2cc6f9cb`（载荷对账 ✓；回滚备份 `ebf81f93`）。
+- **T4.3 T8 热载换轨 ✅**：改脚本（双侧）→ 重载确认 **2055ms**；新脚本行为生效（`完成 851ms` vs 原 551ms 档）；**核零重启**；恢复后 552ms 回归。注意：恢复 = 元数据 + 产物成对（只改一侧 = 哈希不符假阳性）。
+- **pilot 退役 ✅**：`ops-prog-*.vtbc` 扫描删除；**起跑旗标 `ops-prog.run` 保留**（真机起跑验证；供 T5 双跑）。收场：双侧还原 `666a45f9` + 试点文件清零 + 无 TRACE。
+- **T4 血泪**：① 面板 ALOGI → logcat（tag `VTouchUI`）、核心 fprintf → `vt_ui_core.log`——验收取证必须**两源合并**（`t4.sh` logmark2）；② toybox sh 条件组假分支断整链；③ 元数据 gate `-` 归一空串；④ 空 progs 目录 vs 缺失（哨兵 0xFFFF0001；空↔空不触发、缺失↔空触发一次幂等）；⑤ 启动期既有静默 save_regions→mirror（T4 起多一行 progs 同步日志，非异常）。
+
 ## T5 迁移器
 
 | 任务 | 内容 | 判据 |
@@ -90,3 +97,7 @@
 - [x] T3.3 控制/调用/返回/表/字符串/短路（语义在 T3.1 落地；逐指令对拍 = 宿主夹具直跑，g_* 含短路/递归/表/插值/归位）—— **完成（宿主级）**；设备级对拍并入 T3.5 双跑
 - [x] T3.4 验证器并入载入链（`vm_verify`：解码走查 + 指令数 ≤8192 + 代码 ≤32KB / 跳转与函数入口落指令边界 / 栈深数据流（种子 = main pc0 + 全部函数入口；合并点深度一致；下溢·超限拒）/ 引用界（常量种类·表·函数·实参数·槽按帧·视觉常量）/ CMP 子码·TERM 模式域 / RET·RETE 仅函数内；词 `程序非法: <由>`）—— **拒收矩阵 42 例全拒**（结构 9 + 夹具篡改 24 + 字节构造 9：含栈下溢/合并点不一致/指令数超限/代码超长/入口乱序）；宿主单测总 **85 断言 + 35 夹具全绿**
 - [x] T3.5 契约 v17 + 邮箱程序载荷 + 新旧引擎并存 —— **完成（含真机双跑验收）**：契约 `VT_SHM_VERSION 17`（邮箱载荷联合化 `payload.op`/`payload.prog`；新命令 `VT_EDIT_PUT_PROG=12`/`VT_EDIT_PROG_CLEAR=13`；区 A 增程序表 `struct vt_prog progs[16]`）；核心 `vt_prog_put`（上表前 `vt_vm_load` 全量验证、按条拒收）/`vt_prog_clear`/`del` 兼删两表/单命名空间互斥；`vt_ops_run` 双表派发 → `op_vm_start`（私有快照 `g_vm_prog` + `vt_vm_set_host(vt_ops_vm_host())` + 触发数据同步进 TDX..TMS 槽）；`vt_ops_tick` VM 让出式分支（WAIT→deadline / DONE→`op_finish`（`term_mode`→中止）/ ERR→`vt_ops_abort(vm->err)`）；abort/finish 补 VM 口径（`R.vm`/`R.vm_touch` 抬指防御）；面板试点通道 `pilot_prog_check`（load_ops 收尾检查 `ops-prog.vtbc`+`ops-prog.run`〔内容=起跑名，空=ztp1；可指步骤操作 → 双跑自动化〕）。**真机验收（`docs/OPS_V8_T35_ACCEPTANCE.md`，核 `2e54d501`）**：步骤版 zt1 `完成 551ms` = 脚本版 ztp1 `启动 脚本=166B / 完成 551ms`（逐毫秒一致、连跑两轮）；坏载荷 `op 被拒 ztp1: 程序非法: 未知指令`；双侧还原 md5 逐字节。（本批修复血泪：**`vt_vm.h` 字段名 `g` 被核心宏 `#define g` 替换 → 结构体跨 TU 漂移 16KB → vt_vm.c `memset` 越界清零 `g_vm_prog`、err 偏移错位 → 运行期载入全灭；修=改名 `glob`+血泪注释，诊断链=nm 符号尺寸→objdump memset 尺寸→offsetof 双 TU 对拍。**）
+- [x] T3.6 影子期双跑矩阵（见上 §T3 末条；核 `ebf81f93`；记录 `docs/OPS_V8_T36_ACCEPTANCE.md`）
+- [x] T4.1 编辑器存储层（`OpsV8`/`OpsV8Check` 38 例/`Ops` 保真/`Schemes` 镜像链；设备测试台 85/0/0；APK v34 `108bd0e6`）
+- [x] T4.2 面板 v8 链路（透传化 + 字节写回 + scheme 同步 + T8 监视集 + prog 接口；字节对拍/负样例/镜像对账全过；部署核 `2cc6f9cb`）
+- [x] T4.3 T8 热载换轨（改脚本 → 重载 2055ms；新行为 851ms 生效；零重启）—— **T4 完成**（记录 `docs/OPS_V8_T4_ACCEPTANCE.md`）
