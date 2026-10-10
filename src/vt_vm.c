@@ -502,7 +502,7 @@ int vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len) {
 /* ---------- 复位 ---------- */
 void vt_vm_reset(vt_vm *vm) {
     uint32_t i, off = 0;
-    memset(vm->g, 0, sizeof vm->g);
+    memset(vm->glob, 0, sizeof vm->glob);
     for (i = 0; i < vm->n_tables; i++) {
         uint32_t j, l = vm->table_len[i];
         vm->tables[i] = vm->tab_store + off;
@@ -540,7 +540,7 @@ static vt_val popv(vt_vm *vm) {
     return vm->stack[--vm->sp];
 }
 static vt_val *slot_ref(vt_vm *vm, uint32_t a) {
-    if (a < vm->slot_count) return &vm->g[a];
+    if (a < vm->slot_count) return &vm->glob[a];
     a -= vm->slot_count;
     if (a >= vm->cur_nlocals || vm->lbase + a >= VT_VM_MAX_LOCALS) return NULL;
     return &vm->locals[vm->lbase + a];
@@ -1193,12 +1193,12 @@ void vt_vm_set_host(vt_vm *vm, const struct vt_vm_host *host) {
 }
 
 void vt_vm_store_num(vt_vm *vm, uint32_t slot, double v) {
-    if (slot < vm->slot_count) vm->g[slot] = vnum(v);
+    if (slot < vm->slot_count) vm->glob[slot] = vnum(v);
 }
 
 int vt_vm_slot_num(const vt_vm *vm, uint32_t slot, double *out) {
-    if (slot >= vm->slot_count || vm->g[slot].t != 1) return 0;
-    if (out) *out = vm->g[slot].n;
+    if (slot >= vm->slot_count || vm->glob[slot].t != 1) return 0;
+    if (out) *out = vm->glob[slot].n;
     return 1;
 }
 
@@ -1212,7 +1212,7 @@ int vt_vm_global(const vt_vm *vm, const char *name, vt_val *out) {
         nc = rd32(e + 5);
         if (nc < vm->nconsts && vm->cpool[nc].t == 2 && vm->cpool[nc].sl == nlen &&
             memcmp(vm->cpool[nc].sp, name, nlen) == 0 && idx < vm->slot_count) {
-            *out = vm->g[idx];
+            *out = vm->glob[idx];
             return 1;
         }
     }

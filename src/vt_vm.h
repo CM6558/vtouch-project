@@ -111,7 +111,9 @@ struct vt_vm {
     const uint8_t *names;   uint32_t n_names;   /* 9 字节步长（kind,index,nameConst） */
 
     /* 运行态 */
-    vt_val  g[VT_VM_MAX_GLOBALS];
+    vt_val  glob[VT_VM_MAX_GLOBALS];  /* 全局槽。字段名避开单字符（核心 vt_internal.h 有 #define g 等宏 ——
+                                       * 若此字段叫 g，在「先包含 vt_internal.h」的 TU 里会被宏替换成 (*g_ptr)，
+                                       * 结构体漂移 16KB、两 TU 布局不一致（2026-10-10 血泪，设备侧载入全灭） */
     vt_val  stack[VT_VM_MAX_STACK];   int32_t sp;
     vt_val  locals[VT_VM_MAX_LOCALS];
     vt_val  tab_store[VT_VM_MAX_TABLE_CELLS];

@@ -1080,6 +1080,7 @@ static void pilot_prog_check(void)
     }
     fclose(f);
     if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", PILOT_PROG_NAME);
+    ALOGI("ops-prog 旗标起跑名=[%s]", run_name);       /* 诊断：旗标内容读出实况（T3.5 试点） */
     if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
     else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
 }

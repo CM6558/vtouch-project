@@ -2912,6 +2912,7 @@ static void op_vm_start(const struct vt_prog *p, const char *nm, const struct vt
     if (slot < 0) { op_drop("没空闲槽", nm); return; }
     memcpy(g_vm_prog, p->prog, (size_t)p->prog_len);     /* 私有快照（运行中改表/清表不影响本次，spec §7） */
     if (vt_vm_load(&g_vm, g_vm_prog, (uint32_t)p->prog_len) != 0) {   /* 载入会清宿主编排 + 复位运行态 */
+        fprintf(stderr, "vtouchd: op 程序载入失败 %s prog_len=%d 原因=%s\n", nm, p->prog_len, g_vm.err);
         op_drop("程序非法", nm);
         return;
     }
