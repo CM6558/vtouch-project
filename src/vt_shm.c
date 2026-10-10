@@ -216,7 +216,9 @@ void vt_shm_edit_apply(void)
     case VT_EDIT_ADD:    region_add(e.id, (int)e.type, (int)e.a1, (int)e.a2, (int)e.a3, (int)e.a4, (int)e.enabled); break;
     case VT_EDIT_DEL:    region_del(e.id); break;
     case VT_EDIT_RENAME: region_rename(e.id, e.new_id); break;
-    case VT_EDIT_OP_PUT:   vt_ops_put(&e.payload); break;    /* 操作载荷在 e.payload（PUT 专用） */
+    case VT_EDIT_OP_PUT:   vt_ops_put(&e.payload.op); break;    /* 操作载荷在 e.payload.op（PUT 专用） */
+    case VT_EDIT_PUT_PROG: vt_prog_put(&e.payload.prog); break;  /* 程序操作载荷（v17：上表前全量验证） */
+    case VT_EDIT_PROG_CLEAR: vt_prog_clear(); break;
     case VT_EDIT_OP_DEL:   vt_ops_del(e.id); break;
     case VT_EDIT_OP_CLEAR: vt_ops_clear(); break;
     case VT_EDIT_OP_RUN: {                   /* 起跑；名字按上限截断打印（邮箱载荷可能没终止符） */

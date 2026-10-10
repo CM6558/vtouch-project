@@ -386,7 +386,7 @@ static int glue_post_op(uint32_t op, const char *name, const struct vt_op *paylo
     memset(&e, 0, sizeof e);
     e.op = op;
     if (name) snprintf(e.id, sizeof e.id, "%s", name);
-    if (payload) e.payload = *payload;          /* 结构按值拷：区 B 一页装得下（见 vt_shm.h 的 _Static_assert） */
+    if (payload) e.payload.op = *payload;       /* 结构按值拷：区 B 一页装得下（见 vt_shm.h 的 _Static_assert；v17 联合成员 op） */
     e.seq = ++glue_seq;
     if (vt_shm_post_edit(&e) != 0) return -1;   /* 锁拿不到：不写、按失败上报（评审修复 2026-10-05） */
     glue_wake();
@@ -695,6 +695,43 @@ int vtouch_op_run(const char *name)
     if (!B || !name || !*name) return -1;
     /* 不回读运行状态（spec §2.6）：操作可能瞬间跑完、状态已归位 —— 只认「邮箱被吃掉」。 */
     return glue_post_op(VT_EDIT_OP_RUN, name, NULL);
+}
+
+/**
+ * @brief 投一条程序操作（契约 v17；T3.5 试点：面板读字节码文件 → 邮箱 → 核心验证上表）。 (vtouch-doc: 无)
+ * @param   name     操作名（核心再校验；须与步骤操作不重名）
+ * @param   gate     门控开关区域 id；NULL 或空串 = 无
+ * @param   autoff   跑完自动关门控（非 0 视为 1）
+ * @param   bytes    VTBC 字节码（1..VT_OP_PROG_MAX = 32KB）
+ * @param   len      字节数
+ * @return  0 核心已吃掉（邮件被消费；是否上表看核心日志）；-1 没接共享内存 / 参数非法 / 超时。
+ * @note    邮箱单槽：等 edit_applied 到位再返回（同 vtouch_op_put）；不做回读校验（同 run 口径）。
+ */
+int vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_t *bytes, int len)
+{
+    struct vt_shm_edit e;
+    struct vt_prog p;
+    int spins = 0;
+    if (!B || !name || !*name || !bytes || len < 1 || len > VT_OP_PROG_MAX) return -1;
+    memset(&p, 0, sizeof p);
+    snprintf(p.name, sizeof p.name, "%s", name);
+    snprintf(p.gate, sizeof p.gate, "%s", gate ? gate : "");
+    p.auto_off = autoff ? 1 : 0;
+    p.prog_len = len;
+    memcpy(p.prog, bytes, (size_t)len);
+    memset(&e, 0, sizeof e);
+    e.op = VT_EDIT_PUT_PROG;
+    snprintf(e.id, sizeof e.id, "%s", name);
+    e.payload.prog = p;
+    e.seq = ++glue_seq;
+    if (vt_shm_post_edit(&e) != 0) return -1;   /* 锁拿不到：不写、按失败上报 */
+    glue_wake();
+    while (B->edit_applied != e.seq && spins++ < 10000) usleep(100);   /* 上限 ~1s，防死等 */
+    if (B->edit_applied != e.seq) {
+        fprintf(stderr, "vtouch-ui: 程序操作投递 seq=%u 超时未生效\n", e.seq);
+        return -1;
+    }
+    return 0;
 }
 
 /**

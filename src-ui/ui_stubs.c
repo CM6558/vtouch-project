@@ -265,6 +265,12 @@ int vtouch_op_run(const char *name)
     return -1;
 }
 
+int vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_t *bytes, int len)
+{
+    (void)name; (void)gate; (void)autoff; (void)bytes; (void)len;
+    return -1;                               /* 桩：离屏测试台无共享内存（v17 试点通道不适用） */
+}
+
 void vtouch_op_stop(void)
 {
     ORUN = -1; ORSTEP = 0; ORSTATE = 0;

@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define VT_SHM_MAGIC    0x56544D31u   /* 'V' 'T' 'M' '1' */
-#define VT_SHM_VERSION 16u           /* 布局语义版本：不匹配就拒绝启动面板。
+#define VT_SHM_VERSION 17u           /* 布局语义版本：不匹配就拒绝启动面板。
                                        * 2 = struct region 增加 mark（脚本"开关样式"）。
                                        * 3 = 事件环契约改为**单调计数器**（尾/读都是计数、槽位=计数%槽数、
                                        *     只消费者推进读计数、环满丢新且 drops 可读）。
@@ -55,7 +55,11 @@
                                       *      （核心写面板读；区域名先写、release 存 seq）。注：v14 提示通道当时注释
                                       *      写了、define 漏 bump —— v15 一并生效。
                                       * 16 = 框矩形（docs/OPS_PLAN_V6F.md）：hl 通道泛化 —— 加 hl_kind
-                                      *      （0 区域名 / 1 矩形）+ hl_x1/hl_y1/hl_x2/hl_y2。 */
+                                      *      （0 区域名 / 1 矩形）+ hl_x1/hl_y1/hl_x2/hl_y2。
+                                      * 17 = 程序操作（docs/OPS_PLAN_V8.md §5，T3.5）：编辑邮箱载荷联合化
+                                      *      （payload.op = 步骤操作 / payload.prog = 程序操作）+ 新增
+                                      *      VT_EDIT_PUT_PROG / VT_EDIT_PROG_CLEAR；状态增程序表 g.progs[]
+                                      *      （影子期与旧步骤引擎并存，双跑对拍通过后才切主路径）。 */
 #define VT_SHM_FD       3             /* 传给面板子进程的固定 fd 号 */
 
 #define VT_EDIT_NONE   0
@@ -70,6 +74,8 @@
 #define VT_EDIT_OP_STOP   9           /* 中止运行中的操作 */
 #define VT_EDIT_BIND      10          /* id=区域, new_id=操作名（"-"=解除）, type=时机(0/1/2) */
 #define VT_EDIT_KIND      11          /* id=区域, type=kind(0/1) */
+#define VT_EDIT_PUT_PROG  12          /* 新增/覆盖一条程序操作（载荷 = payload.prog；重名=覆盖；v17） */
+#define VT_EDIT_PROG_CLEAR 13         /* 清空程序表（v17） */
 
 #define VT_RING_SLOTS  64             /* 事件环：与核心 outq 容量同量级 */
 #define VT_RING_LINE   96             /* 一条 region_ev 文本行长上限 */
@@ -99,7 +105,10 @@ struct vt_shm_edit {
     char     id[VT_NAME_BUF];
     char     new_id[VT_NAME_BUF];
     int32_t  type, enabled, a1, a2, a3, a4;
-    struct vt_op payload;             /* 操作载荷：VT_EDIT_OP_PUT 用；其余码不读它 */
+    /* v17：载荷联合（区 B 页预算内一次只装一种，按命令码取）：
+     *   VT_EDIT_OP_PUT   → payload.op（struct vt_op，步骤操作）
+     *   VT_EDIT_PUT_PROG → payload.prog（struct vt_prog，程序操作） */
+    union { struct vt_op op; struct vt_prog prog; } payload;
 };
 
 /* 区 B：面板矩形用 seq 奇偶校验（发布中=奇数），核心拿不准时保守「不吞」。 */

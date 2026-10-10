@@ -797,6 +797,14 @@ static int op_valid(const struct vt_op *op, char *why, size_t whycap)
     return 1;
 }
 
+/* V8 程序操作（契约 v17）：VM 实例 —— g_vm = 运行单例（一次只跑一条）；g_vmv = vt_prog_put
+ * 上表前的验证临时件（不动运行中的 g_vm）。g_vm_prog = 运行期字节码**私有快照**（vt_vm_load
+ * 不拷贝、直接引用入参缓冲：起跑时从表里拷一份，运行中清表/覆盖/删除都不影响本次，spec §7 口径）。
+ * 声明放文件前部：vt_prog_put（验证）与执行路径都要用。 */
+static vt_vm g_vm;
+static vt_vm g_vmv;
+static uint8_t g_vm_prog[VT_OP_PROG_MAX];
+
 /* 拒绝日志：名字可能为空或未终止（载荷直接来自邮箱字节），统一按上限截断打印，绝不越界读。 */
 static void op_reject_log(const char *name, const char *why)
 {
@@ -835,6 +843,12 @@ int vt_ops_put(const struct vt_op *op)
     if (!op_valid(op, why, sizeof why)) {
         op_reject_log(op->name, why);
         return -1;
+    }
+    for (i = 0; i < g.prog_count; i++) {                     /* v17 单命名空间：与程序操作互斥 */
+        if (strcmp(g.progs[i].name, op->name) == 0) {
+            op_reject_log(op->name, "与程序操作重名");
+            return -1;
+        }
     }
     for (i = 0; i < g.op_count; i++) {
         if (strcmp(g.ops[i].name, op->name) == 0) { dst = &g.ops[i]; break; }
@@ -883,8 +897,87 @@ int vt_ops_del(const char *name)
         fprintf(stderr, "vtouchd: op 编辑 del %s\n", name);
         return 0;
     }
+    for (i = 0; i < g.prog_count; i++) {                     /* v17：程序表同命名空间，同样删除 */
+        if (strcmp(g.progs[i].name, name) != 0) continue;
+        for (k = i; k + 1 < g.prog_count; k++) g.progs[k] = g.progs[k + 1];
+        g.prog_count--;
+        memset(&g.progs[g.prog_count], 0, sizeof g.progs[0]);
+        fprintf(stderr, "vtouchd: op 编辑 del %s（脚本）\n", name);
+        return 0;
+    }
     op_reject_log(name, "不存在");
     return -1;
+}
+
+/**
+ * @brief 新增或覆盖一条程序操作（契约 v17，OPS_PLAN_V8 §5；上表前全量验证）。 (vtouch-doc: 无)
+ * @param   p        程序载荷（名字/门控/自动关/prog_len/字节码）
+ * @return  0 成功；-1 参数为空、校验不过或表满（表满只发生在新增）。
+ * @note    校验：名字 vt_id_ok、prog_len 1..VT_OP_PROG_MAX、门控非空时过 vt_id_ok、与步骤操作
+ *          互斥（单命名空间）、**上表前 vt_vm_load 全量验证**（解码/边界/栈深/引用界；不过拒
+ *          `程序非法: <由>` —— 按条拒收，整条不动）。重名就地覆盖（表位稳定，同 vt_ops_put）。
+ */
+int vt_prog_put(const struct vt_prog *p)
+{
+    struct vt_prog *dst = NULL;
+    size_t n;
+    int i;
+
+    if (!p) return -1;
+    n = strnlen(p->name, VT_NAME_BUF);
+    if (n < 1 || !vt_id_ok(p->name, n)) {
+        op_reject_log(p->name, "名字非法");
+        return -1;
+    }
+    if (p->prog_len < 1 || p->prog_len > VT_OP_PROG_MAX) {
+        op_reject_log(p->name, "程序过大");
+        return -1;
+    }
+    if (p->gate[0]) {
+        n = strnlen(p->gate, VT_NAME_BUF);
+        if (n < 1 || !vt_id_ok(p->gate, n)) {
+            op_reject_log(p->name, "门控非法");
+            return -1;
+        }
+    }
+    for (i = 0; i < g.op_count; i++) {                       /* v17 单命名空间：与步骤操作互斥 */
+        if (strcmp(g.ops[i].name, p->name) == 0) {
+            op_reject_log(p->name, "与步骤操作重名");
+            return -1;
+        }
+    }
+    if (vt_vm_load(&g_vmv, p->prog, (uint32_t)p->prog_len) != 0) {   /* 上表前全量验证（程序非法 = 按条拒收） */
+        op_reject_log(p->name, g_vmv.err);
+        return -1;
+    }
+    for (i = 0; i < g.prog_count; i++) {
+        if (strcmp(g.progs[i].name, p->name) == 0) {
+            dst = &g.progs[i];
+            break;
+        }
+    }
+    if (!dst) {
+        if (g.prog_count >= MAX_OPS) {
+            op_reject_log(p->name, "表满");
+            return -1;
+        }
+        dst = &g.progs[g.prog_count++];
+    }
+    *dst = *p;                                   /* 整条按值覆盖：每个字段都来自载荷，没有残留 */
+    fprintf(stderr, "vtouchd: op 编辑 put %s 程序=%dB\n", dst->name, dst->prog_len);
+    return 0;
+}
+
+/**
+ * @brief 清空程序表（契约 v17）。 (vtouch-doc: 无)
+ * @note    整表归零（不只是 prog_count=0），不留"幽灵程序"；只动表 —— 运行中的程序跑的是起跑
+ *          时拷进 g_vm_prog 的**私有快照**，清表/覆盖/删除都不影响本次（spec §7 口径）。
+ */
+void vt_prog_clear(void)
+{
+    g.prog_count = 0;
+    memset(g.progs, 0, sizeof g.progs);
+    fprintf(stderr, "vtouchd: op 编辑 progclear\n");
 }
 
 /**
@@ -962,6 +1055,10 @@ static struct {
     double   fx, fy;                                         /* fx/fy：最近一次找图/找色命中坐标（视觉步写、字段引用读；
                                                               * 起跑清零，spec EDITOR_V2 §Task 7.5 —— 替代 v5 的结果槽 r1/r2） */
     unsigned res_mask;                                       /* fx/fy 已写位（位 0 = fx、位 1 = fy；起跑清零） */
+    /* V8 程序操作（契约 v17；影子期与步骤引擎并存）：R.vm=1 = VM 引擎在跑（收尾/中止清零）；
+     * R.vm_touch = VM 点按/滑动期间已按下（由宿主钩子维护，中止/收尾时补抬指用）。 */
+    int      vm;
+    int      vm_touch;
     char     vnames[OP_VAR_IDX_N][VT_NAME_BUF];              /* 自定义变量名快照（起跑从 op->vars 整表抄；空名 = 空槽） */
     double   vvals[OP_VAR_IDX_N];                            /* 自定义变量值（起跑清零；计算步写、字段引用读） */
     unsigned vmask;                                          /* 自定义变量已写位（位 0..15 = 索引；起跑清零） */
@@ -987,6 +1084,9 @@ static struct {
 /* 步内阶段：BEGIN=本步的起始动作还没发；TAP_UP=等 hold 到点抬指；SWIPE_MOVE=等下一个采样点；
  * SWIPE_UP=采样发完等终点抬指；WAIT=等到点直接进下一步。 */
 enum { PH_BEGIN = 0, PH_TAP_UP, PH_SWIPE_MOVE, PH_SWIPE_UP, PH_WAIT };
+
+/* V8 程序操作（契约 v17）的 g_vm / g_vmv / g_vm_prog 三件声明在文件前部（op_reject_log 之前）——
+ * vt_prog_put 上表验证与运行路径共用，声明必须先于两者。 */
 
 /* 单调毫秒（执行器的时间全走它：不累加拍数、不混墙钟，到点判据不漂）。 */
 static uint64_t op_now_ms(void) { return now_ns() / 1000000ull; }
@@ -1192,12 +1292,14 @@ static void op_finish(void)
 {
     uint64_t ms;
 
+    if (R.vm && R.vm_touch) { op_finger_raw("up", R.rx, R.ry); R.vm_touch = 0; }   /* v17 防御：脚本收尾仍按着 → 补抬指 */
     op_release_held();                                       /* 收尾兜底（spec §2.2）：结束仍按着 → 写 up + `op 收尾 松开` */
     ms = op_now_ms() - R.t_start;
     fprintf(stderr, "vtouchd: op 完成 %s 用时=%llums\n", R.name, (unsigned long long)ms);
-    op_ev_push("done", R.nsteps, R.nsteps);
+    op_ev_push("done", R.vm ? 1 : R.nsteps, R.vm ? 1 : R.nsteps);
     op_auto_off();                                           /* 仅正常完成翻回；中止不翻（中止≠跑完，spec §4.3） */
     R.active = 0;
+    R.vm = 0;                                                /* v17：引擎标记清零（绝不泄漏到下一次运行） */
     R.slot = -1;                                             /* 与 abort 归位一致：清槽防下一次起跑读到陈旧槽号 */
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
@@ -2719,6 +2821,22 @@ void vt_ops_tick(void)
     }
     op_consume_trigger();                                    /* 可能起跑一条操作（deadline = 现在） */
     if (!R.active) return;
+    if (R.vm) {                                              /* 程序操作（v17）：VM 让出式推进；到点才 tick */
+        now = op_now_ms();
+        if (now >= R.deadline) {
+            uint32_t w = 0;
+            vt_vm_status st = vt_vm_tick(&g_vm, &w);
+            if (st == VT_VM_WAIT) {
+                R.deadline = now + (uint64_t)w;              /* w=0：下一拍立即续（多拍动作的拍间让出） */
+            } else if (st == VT_VM_DONE) {
+                if (g_vm.term_mode) vt_ops_abort("终止");    /* 终止·中止模式（同步骤版口径） */
+                else op_finish();                            /* 正常完成（收尾释放 / 自动关照走） */
+            } else {
+                vt_ops_abort(g_vm.err);                      /* VM 中止词（变量无值 / 类型错 / 程序非法…） */
+            }
+        }
+        return;
+    }
     op_selfcheck();                                          /* 手指被外力动过：该记的记、该中止的中止 */
     if (!R.active) return;
     now = op_now_ms();
@@ -2748,6 +2866,92 @@ int vt_ops_next_deadline_ms(void)
     return (int)(R.deadline - now);
 }
 
+/* 门控检查（spec §4.3；批 3）：gate 非空 → 找区域；必须存在且 kind==toggle 且 toggle_on==1 才
+ * 放行，否则拒绝 + `op 丢弃 门控拦截`（解析失败同理 —— 安全侧）。判定要读区域表（区域线程会写
+ * toggle_on），照 T3.1 锁纪律：持 region_lock 判定、解锁后再记日志（锁内不 I/O）。
+ * 返回 1 = 放行；0 = 已拦截（日志已打）。步骤操作与程序操作共用（v17）。 */
+static int op_gate_check(const char *nm, const char *gate)
+{
+    int k, gate_on = 0;
+    const char *gate_why = "区域不存在";                 /* 拦截原因（stderr 明细用；放行时置 NULL） */
+    if (!gate[0]) return 1;
+    pthread_mutex_lock(&g.region_lock);
+    for (k = 0; k < g.region_count; k++) {
+        if (strcmp(g.regions[k].id, gate) != 0) continue;
+        if (g.regions[k].kind != 1) gate_why = "非开关型";
+        else if (g.regions[k].toggle_on != 1) gate_why = "未开";
+        else { gate_on = 1; gate_why = NULL; }
+        break;
+    }
+    pthread_mutex_unlock(&g.region_lock);
+    if (!gate_on) {
+        op_drop("门控拦截", nm);
+        if (gate_why) fprintf(stderr, "vtouchd: op 门控 %s 拦截原因=%s\n", nm, gate_why);
+        return 0;
+    }
+    return 1;
+}
+
+/* 挑第一个空闲虚拟槽（virt[] / staged[] / pending_up 全空）；-1 = 没空闲。 */
+static int op_pick_slot(void)
+{
+    int k;
+    for (k = 0; k < g.vslots; k++) {
+        if (g.virt[k].down || g.virt[k].pending_up ||
+            g.staged[k].down || g.staged[k].pending_up) continue;
+        return k;
+    }
+    return -1;
+}
+
+/* 起跑一条程序操作（v17）：载入（上表已验，防御再验）→ 宿主钩子 → 触发数据同步 → 单例状态。
+ * 触发数据按 mask 同步进预定义槽（tdx..tms）；未设位 = 空槽 → 读它 `变量无值`（与步骤版触发口径一致）。 */
+static void op_vm_start(const struct vt_prog *p, const char *nm, const struct vt_trig_data *td)
+{
+    int slot = op_pick_slot();
+    if (slot < 0) { op_drop("没空闲槽", nm); return; }
+    memcpy(g_vm_prog, p->prog, (size_t)p->prog_len);     /* 私有快照（运行中改表/清表不影响本次，spec §7） */
+    if (vt_vm_load(&g_vm, g_vm_prog, (uint32_t)p->prog_len) != 0) {   /* 载入会清宿主编排 + 复位运行态 */
+        op_drop("程序非法", nm);
+        return;
+    }
+    vt_vm_set_host(&g_vm, vt_ops_vm_host());
+    if (td) {
+        if (td->mask & OP_TRIGB_TDX) vt_vm_store_num(&g_vm, VT_VM_SLOT_TDX, td->dx);
+        if (td->mask & OP_TRIGB_TDY) vt_vm_store_num(&g_vm, VT_VM_SLOT_TDY, td->dy);
+        if (td->mask & OP_TRIGB_TUX) vt_vm_store_num(&g_vm, VT_VM_SLOT_TUX, td->ux);
+        if (td->mask & OP_TRIGB_TUY) vt_vm_store_num(&g_vm, VT_VM_SLOT_TUY, td->uy);
+        if (td->mask & OP_TRIGB_TMS) vt_vm_store_num(&g_vm, VT_VM_SLOT_TMS, td->ms);
+    }
+    R.active = 1;
+    R.vm = 1;
+    R.vm_touch = 0;
+    R.idx = -1;                                          /* 程序不在 ops[] 表内（进度面板看 g.op_run=-1） */
+    memcpy(R.name, p->name, sizeof R.name);
+    memcpy(R.gate, p->gate, sizeof R.gate);
+    R.auto_off = p->auto_off;
+    R.nsteps = 1;                                        /* 进度口径占位（脚本无步数；op_ev 用 1/1） */
+    R.step = 0;
+    R.trig = td ? *td : (struct vt_trig_data){0};
+    R.slot = slot;
+    R.conflict = 0;
+    R.jumps = 0;
+    R.frozen = 0;
+    R.stop_pending = 0;
+    R.held = 0;
+    R.blk_n = 0;
+    R.t_start = op_now_ms();
+    R.t0 = R.t_start;
+    R.deadline = R.t0;                                   /* 到点：本拍末尾就进入程序首指令 */
+    R.phase = PH_WAIT;                                   /* 步骤相位机不参与（防御值） */
+    g.op_run = -1;
+    g.op_run_step = 0;
+    g.op_run_state = 1;
+    fprintf(stderr, "vtouchd: op 启动 %s 脚本=%dB 槽=%d 门控=%s\n",
+            R.name, p->prog_len, R.slot, R.gate[0] ? R.gate : "无");
+    op_ev_push("run", 1, 1);
+}
+
 /**
  * (vtouch-doc: vt_ops_run)
  * @brief 起跑一条操作（忙时丢弃 + 日志）。
@@ -2770,7 +2974,7 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
 {
     char nm[VT_NAME_BUF];
     size_t n;
-    int i, k, slot = -1;
+    int i, slot = -1;
 
     if (R.active) { op_drop_busy(); return; }
     if (g.frame_open) { op_drop_frame(); return; }           /* 帧事务开着：直写 g.virt 会被 end_frame 的 staged 回填抹掉（悬空触点） */
@@ -2778,35 +2982,19 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;   /* 未终止按上限截断（原始名随后仍逐字节查表，找不到即不存在） */
     if (n < 1) { op_drop("操作不存在", NULL); return; }
     memcpy(nm, name, n); nm[n] = 0;
-    for (i = 0; i < g.op_count; i++) if (!strcmp(g.ops[i].name, nm)) break;
-    if (i >= g.op_count) { op_drop("操作不存在", nm); return; }
-    /* 门控检查（spec §4.3；批 3）：gate 非空 → 找区域；必须存在且 kind==toggle 且 toggle_on==1
-     * 才放行，否则拒绝 + `op 丢弃 门控拦截`（解析失败同理 —— 安全侧）。放在查表命中后、挑槽前：
-     * 先问「能不能跑」（门控），再问「有没有槽」（资源）。判定要读区域表（区域线程会写 toggle_on），
-     * 照 T3.1 锁纪律：持 region_lock 判定、解锁后再记日志（锁内不 I/O）。 */
-    if (g.ops[i].gate[0]) {
-        int gate_on = 0;
-        const char *gate_why = "区域不存在";                 /* 拦截原因（stderr 明细用；放行时置 NULL） */
-        pthread_mutex_lock(&g.region_lock);
-        for (k = 0; k < g.region_count; k++) {
-            if (strcmp(g.regions[k].id, g.ops[i].gate) != 0) continue;
-            if (g.regions[k].kind != 1) gate_why = "非开关型";
-            else if (g.regions[k].toggle_on != 1) gate_why = "未开";
-            else { gate_on = 1; gate_why = NULL; }
-            break;
-        }
-        pthread_mutex_unlock(&g.region_lock);
-        if (!gate_on) {
-            op_drop("门控拦截", nm);
-            if (gate_why) fprintf(stderr, "vtouchd: op 门控 %s 拦截原因=%s\n", nm, gate_why);
+    for (i = 0; i < g.prog_count; i++) {                     /* v17：先查程序表（单命名空间——PUT 两侧互斥保唯一） */
+        if (strcmp(g.progs[i].name, nm) == 0) {
+            if (!op_gate_check(nm, g.progs[i].gate)) return;
+            op_vm_start(&g.progs[i], nm, td);
             return;
         }
     }
-    for (k = 0; k < g.vslots; k++) {
-        if (g.virt[k].down || g.virt[k].pending_up ||
-            g.staged[k].down || g.staged[k].pending_up) continue;
-        slot = k; break;
-    }
+    for (i = 0; i < g.op_count; i++) if (!strcmp(g.ops[i].name, nm)) break;
+    if (i >= g.op_count) { op_drop("操作不存在", nm); return; }
+    /* 门控检查（spec §4.3；批 3）：gate 非空 → op_gate_check（锁纪律与日志见其注；v17 与程序操作共用）。
+     * 位置照旧：查表命中后、挑槽前 —— 先问「能不能跑」（门控），再问「有没有槽」（资源）。 */
+    if (!op_gate_check(nm, g.ops[i].gate)) return;
+    slot = op_pick_slot();
     if (slot < 0) { op_drop("没空闲槽", nm); return; }
 
     R.active = 1;
@@ -2824,6 +3012,8 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏进新一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏进新一次运行（R2a 封口） */
     R.held = 0;                                              /* 持有态清零：绝不泄漏进新一次运行（收尾兜底已释放；这里防御） */
+    R.vm = 0;                                                /* v17：引擎标记清零（步骤路径；绝不泄漏） */
+    R.vm_touch = 0;
     R.blk_n = 0;                                             /* 块栈清零（v12；绝不泄漏进新一次运行） */
     op_pair_build(R.steps, R.nsteps);                        /* 配对表起跑预计算（v12；OPS_PLAN_V6 §3.3） */
     memcpy(R.vnames, g.ops[i].vars, sizeof R.vnames);        /* 自定义变量名快照（v10）：整表从操作抄（名字表 = 单源） */
@@ -2888,11 +3078,20 @@ void vt_ops_abort(const char *why)
         return;                                              /* 不动 virt / 状态：帧窗内零 g.virt 写入 */
     }
     i = R.step < R.nsteps ? R.step + 1 : R.nsteps;
-    if (op_finger_down()) op_finger_raw("up", R.rx, R.ry);
+    if (R.vm) {                                              /* v17 程序操作：点按/滑动中补抬指（托钩子账） */
+        i = 1;
+        if (R.vm_touch) { op_finger_raw("up", R.rx, R.ry); R.vm_touch = 0; }
+    } else if (op_finger_down()) {
+        op_finger_raw("up", R.rx, R.ry);
+    }
     op_release_held();                                       /* 收尾兜底（spec §2.2）：中止时若还按着 → 同样释放 + `op 收尾 松开` */
-    fprintf(stderr, "vtouchd: op 中止 %s 步 %d/%d 原因=%s\n", R.name, i, R.nsteps, why ? why : "?");
-    op_ev_push("abort", i, R.nsteps);
+    if (R.vm)
+        fprintf(stderr, "vtouchd: op 中止 %s（脚本）原因=%s\n", R.name, why ? why : "?");
+    else
+        fprintf(stderr, "vtouchd: op 中止 %s 步 %d/%d 原因=%s\n", R.name, i, R.nsteps, why ? why : "?");
+    op_ev_push("abort", i, R.vm ? 1 : R.nsteps);
     R.active = 0;
+    R.vm = 0;                                                /* v17：引擎标记清零（绝不泄漏到下一次运行） */
     R.slot = -1;
     R.frozen = 0;                                            /* 冻结态清零：绝不泄漏到下一次运行（R1 封口） */
     R.stop_pending = 0;                                      /* 推迟账清零：绝不泄漏到下一次运行（R2a 封口） */
@@ -2952,6 +3151,7 @@ static int vmg_touch_down(void *c, int x, int y)
 {
     (void)c;
     if (op_finger_ll("down", x, y) != 0) { op_conflict_abort(); return -1; }
+    R.vm_touch = 1;                                      /* v17：脚本动作期间已按下（中止/收尾补抬指用） */
     return 0;
 }
 static int vmg_touch_move(void *c, int x, int y)
@@ -2963,6 +3163,7 @@ static int vmg_touch_move(void *c, int x, int y)
 static int vmg_touch_up(void *c)
 {
     (void)c;
+    R.vm_touch = 0;                                      /* v17：无论成败先销账（失败 = 槽已不在手里） */
     if (op_finger_raw("up", R.rx, R.ry) != 0) { op_conflict_abort(); return -1; }
     return 0;
 }

@@ -136,6 +136,7 @@ int  vtouch_op_put(const char *name, const char *gate, int autoff, const int *st
 int  vtouch_op_del(const char *name);
 int vtouch_op_clear(void);
 int  vtouch_op_run(const char *name);
+int  vtouch_prog_put(const char *name, const char *gate, int autoff, const uint8_t *bytes, int len);   /* v17：程序操作投递（T3.5 试点通道用） */
 void vtouch_op_stop(void);
 int  vtouch_op_status(int *run_i, int *run_step, int *run_state);
 int  vtouch_expr_check(const char *s, const char (*names)[VT_NAME_BUF], int nnames, char *why, int whycap);   /* v5：计算步表达式校验（转发核心 vt_expr_check；v10 起带自定义变量名表；0 = 合法、非 0 = why 填短中文原因） */
@@ -1044,6 +1045,45 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
     }
     return 0;
 }
+/* v17 试点通道（T3.5 影子期验收用；T4 由 ops.conf v8 的 progs/ 正式链路取代）：
+ * 每次 load_ops 收尾检查 ops-prog.vtbc（程序操作载荷，默认操作名 ztp1）+ ops-prog.run
+ * （存在 = 投一次起跑；文件内容非空 = 起跑那个名字（可指向步骤操作，用于并存双跑对拍），
+ * 空文件 = 起跑 ztp1）。文件不存在 = 零行为、零开销（一次 fopen 失败即返回）。 */
+#define PILOT_PROG_FILE     "/data/local/vtouch-runtime/ops-prog.vtbc"
+#define PILOT_PROG_RUN      "/data/local/vtouch-runtime/ops-prog.run"
+#define PILOT_PROG_NAME     "ztp1"
+#define PILOT_PROG_MAX      32768           /* = 核心 VT_OP_PROG_MAX（面板自带镜像常量，口径同 VT_NAME_BUF） */
+static void pilot_prog_check(void)
+{
+    static char buf[PILOT_PROG_MAX];
+    char run_name[VT_NAME_BUF];
+    FILE *f = fopen(PILOT_PROG_FILE, "rb");
+    long n;
+    if (!f) return;
+    n = (long)fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (n < 1) return;
+    if (vtouch_prog_put(PILOT_PROG_NAME, "", 0, (const uint8_t *)buf, (int)n) != 0) {
+        ALOGW("ops-prog.vtbc 投递失败（核心拒收或超时，见核心日志）");
+        return;
+    }
+    ALOGI("ops-prog 已投核心（%ld 字节）", n);
+    f = fopen(PILOT_PROG_RUN, "rb");
+    if (!f) return;
+    memset(run_name, 0, sizeof run_name);
+    if (fgets(run_name, sizeof run_name, f)) {       /* 内容非空 = 起跑指定名字；读不到 = 空 = ztp1 */
+        int k = 0;
+        while (run_name[k] == ' ' || run_name[k] == '\t') k++;
+        memmove(run_name, run_name + k, strlen(run_name + k) + 1);
+        k = (int)strlen(run_name);
+        while (k > 0 && (run_name[k-1] == '\n' || run_name[k-1] == '\r' || run_name[k-1] == ' ')) run_name[--k] = 0;
+    }
+    fclose(f);
+    if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", PILOT_PROG_NAME);
+    if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
+    else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
+}
+
 static void load_ops(void)
 {
     char line[192];
@@ -1145,6 +1185,7 @@ static void load_ops(void)
     if (nrec > 0 && (nskip || nbad))
         ALOGI("ops.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 %d、坏记录 %d）",
               nrec, nok, nskip + nbad, nskip, nbad);
+    pilot_prog_check();                   /* v17 试点通道（T3.5 影子期验收用；T4 由 progs/ 正式链路取代） */
 }
 
 /* ---- 方案文件层（v4 T1.1：schemes/<名>/ + current / 迁移 / 镜像）------------------------------------

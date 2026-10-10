@@ -78,6 +78,7 @@
 #define REGION_ID_MAX   VT_NAME_CHARS   /* 旧名保留（全库沿用）：语义 = 字符数上限，别再当字节数用 */
 #define MAX_OPS        16        /* 操作条数上限 */
 #define MAX_STEPS      512       /* 单条操作步骤数上限（v13 起 64→512；区 B 同步放宽二十页） */
+#define VT_OP_PROG_MAX 32768     /* 程序操作字节码上限（契约 v17；OPS_PLAN_V8 §5，≤32KB） */
 #define OP_NAME_MAX     VT_NAME_CHARS   /* 操作名字符数上限（同区域 id 规则） */
 #define OP_STEP_TAP    1         /* 步骤类型：点按 */
 #define OP_STEP_SWIPE  2         /* 步骤类型：滑动 */
@@ -252,6 +253,17 @@ struct vt_op {
 #endif
 };
 
+/* ---- 程序操作（契约 v17，OPS_PLAN_V8 §5）：VTBC 字节码容器（≤32KB）----
+ * 影子期与步骤操作并存：同一命名空间（PUT 两侧互斥保唯一），起跑按名查两表。
+ * 盘上载体（.vts/.vtbc/progs/）由 T4 接；本表是核心内存里的落点。 */
+struct vt_prog {
+    char    name[VT_NAME_BUF];
+    char    gate[VT_NAME_BUF];               /* 门控开关的区域 id；""=无 */
+    int     auto_off;                        /* 跑完自动关掉门控开关（同 vt_op） */
+    int     prog_len;                        /* 1..VT_OP_PROG_MAX */
+    uint8_t prog[VT_OP_PROG_MAX];            /* 编译产物（上表前经验证器全量校验） */
+};
+
 struct sha1 { uint32_t h[5]; uint64_t bits; unsigned char block[64]; size_t used; };
 
 /* ---- 共享状态（唯一定义在 vtouchd.c）---- */
@@ -303,6 +315,8 @@ struct vt_state {
     /* 操作模型：操作表 + 执行器状态 + 触发槽（面板只读直读；编辑走区 B 邮箱）。 */
     struct vt_op ops[MAX_OPS];                         /* 操作表 */
     int op_count;                                      /* 操作条数 */
+    struct vt_prog progs[MAX_OPS];                     /* 程序操作表（契约 v17；影子期与 ops 并存） */
+    int prog_count;                                    /* 程序操作条数 */
     volatile int op_run;                               /* 运行中的操作下标；-1 = 空闲 */
     volatile int op_run_step;                          /* 当前步（0 起） */
     volatile int op_run_state;                         /* 0=空闲 1=运行 */
@@ -444,6 +458,10 @@ struct vt_vm_host;
 const struct vt_vm_host *vt_ops_vm_host(void);
 /* 新增或覆盖一条操作（重名覆盖；核心单点校验，不过拒绝）。 (vtouch-doc: vt_ops_put) */
 int  vt_ops_put(const struct vt_op *op);
+/* 新增或覆盖一条程序操作（v17；上表前全量验证过 vt_vm_load，不过拒收）。 */
+int  vt_prog_put(const struct vt_prog *p);
+/* 清空程序表（v17）。 */
+void vt_prog_clear(void);
 /* 删除一条操作。 (vtouch-doc: vt_ops_del) */
 int  vt_ops_del(const char *name);
 /* 清空操作表。 (vtouch-doc: vt_ops_clear) */
