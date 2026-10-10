@@ -1045,44 +1045,87 @@ static int ops_load_put(const char *name, const char *gate, int autoff,
     }
     return 0;
 }
-/* v17 试点通道（T3.5 影子期验收用；T4 由 ops.conf v8 的 progs/ 正式链路取代）：
- * 每次 load_ops 收尾检查 ops-prog.vtbc（程序操作载荷，默认操作名 ztp1）+ ops-prog.run
- * （存在 = 投一次起跑；文件内容非空 = 起跑那个名字（可指向步骤操作，用于并存双跑对拍），
- * 空文件 = 起跑 ztp1）。文件不存在 = 零行为、零开销（一次 fopen 失败即返回）。 */
-#define PILOT_PROG_FILE     "/data/local/vtouch-runtime/ops-prog.vtbc"
-#define PILOT_PROG_RUN      "/data/local/vtouch-runtime/ops-prog.run"
+/* v17 试点通道（T3.5/T3.6 影子期验收用；T4 由 ops.conf v8 的 progs/ 正式链路取代）：
+ * 每次 load_ops 收尾：① 扫描 ops-prog*.vtbc 全量上表（`ops-prog.vtbc` → ztp1；
+ * `ops-prog-<名>.vtbc` → <名>，一族脚本一次注册）；② 读 ops-prog.run（存在 = 投一次起跑；
+ * 文件内容非空 = 起跑那个名字（可指向步骤操作，用于并存双跑对拍），空文件 = ztp1）。
+ * 文件不存在 = 零行为、零开销。 */
+#define PILOT_PROG_DIR      "/data/local/vtouch-runtime"
+#define PILOT_PROG_FILE     PILOT_PROG_DIR "/ops-prog.vtbc"
+#define PILOT_PROG_RUN      PILOT_PROG_DIR "/ops-prog.run"
 #define PILOT_PROG_NAME     "ztp1"
 #define PILOT_PROG_MAX      32768           /* = 核心 VT_OP_PROG_MAX（面板自带镜像常量，口径同 VT_NAME_BUF） */
-static void pilot_prog_check(void)
+static int pilot_put_file(const char *path, const char *opname)
 {
     static char buf[PILOT_PROG_MAX];
-    char run_name[VT_NAME_BUF];
-    FILE *f = fopen(PILOT_PROG_FILE, "rb");
+    FILE *f = fopen(path, "rb");
     long n;
-    if (!f) return;
+    if (!f) return 0;
     n = (long)fread(buf, 1, sizeof buf, f);
     fclose(f);
-    if (n < 1) return;
-    if (vtouch_prog_put(PILOT_PROG_NAME, "", 0, (const uint8_t *)buf, (int)n) != 0) {
-        ALOGW("ops-prog.vtbc 投递失败（核心拒收或超时，见核心日志）");
-        return;
+    if (n < 1) return 0;
+    if (vtouch_prog_put(opname, "", 0, (const uint8_t *)buf, (int)n) != 0) {
+        ALOGW("ops-prog 投递失败 %s（核心拒收或超时，见核心日志）", opname);
+        return -1;
     }
-    ALOGI("ops-prog 已投核心（%ld 字节）", n);
-    f = fopen(PILOT_PROG_RUN, "rb");
-    if (!f) return;
-    memset(run_name, 0, sizeof run_name);
-    if (fgets(run_name, sizeof run_name, f)) {       /* 内容非空 = 起跑指定名字；读不到 = 空 = ztp1 */
-        int k = 0;
-        while (run_name[k] == ' ' || run_name[k] == '\t') k++;
-        memmove(run_name, run_name + k, strlen(run_name + k) + 1);
-        k = (int)strlen(run_name);
-        while (k > 0 && (run_name[k-1] == '\n' || run_name[k-1] == '\r' || run_name[k-1] == ' ')) run_name[--k] = 0;
+    ALOGI("ops-prog 已投核心 %s（%ld 字节）", opname, n);
+    return 0;
+}
+static void pilot_prog_check(void)
+{
+    char run_name[VT_NAME_BUF];
+    char path[256];
+    DIR *d = opendir(PILOT_PROG_DIR);
+    struct dirent *it;
+    if (d) {                                             /* ① 扫描注册：ops-prog.vtbc + ops-prog-<名>.vtbc */
+        while ((it = readdir(d)) != NULL) {
+            const char *nm = it->d_name;
+            size_t ln = strlen(nm);
+            if (strncmp(nm, "ops-prog", 8) != 0 || ln < 13) continue;
+            if (strcmp(nm + ln - 5, ".vtbc") != 0) continue;
+            if (strcmp(nm, "ops-prog.vtbc") == 0) {      /* 裸名 → ztp1 */
+                snprintf(path, sizeof path, "%s/%s", PILOT_PROG_DIR, nm);
+                pilot_put_file(path, PILOT_PROG_NAME);
+                continue;
+            }
+            if (nm[8] == '-' && ln > 14) {               /* ops-prog-<名>.vtbc → <名>（≤15 字符名） */
+                char opname[VT_NAME_BUF];
+                size_t kl = ln - 5 - 9;
+                int k;
+                if (kl < 1 || kl > 15) continue;
+                memcpy(opname, nm + 9, kl);
+                opname[kl] = 0;
+                if (opname[0] == '.') continue;
+                for (k = 0; k < (int)kl; k++) {          /* 保守过滤：仅 [0-9A-Za-z_-]（核心再严格校验） */
+                    char c = opname[k];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                          (c >= 'A' && c <= 'Z') || c == '_' || c == '-')) { opname[0] = 0; break; }
+                }
+                if (opname[0] == 0) continue;
+                snprintf(path, sizeof path, "%s/%s", PILOT_PROG_DIR, nm);
+                pilot_put_file(path, opname);
+            }
+        }
+        closedir(d);
     }
-    fclose(f);
-    if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", PILOT_PROG_NAME);
-    ALOGI("ops-prog 旗标起跑名=[%s]", run_name);       /* 诊断：旗标内容读出实况（T3.5 试点） */
-    if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
-    else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
+    /* ② 起跑旗标：内容非空 = 起跑指定名；空 = ztp1；文件不存在 = 不跑 */
+    {
+        FILE *f = fopen(PILOT_PROG_RUN, "rb");
+        if (!f) return;
+        memset(run_name, 0, sizeof run_name);
+        if (fgets(run_name, sizeof run_name, f)) {
+            int k = 0;
+            while (run_name[k] == ' ' || run_name[k] == '\t') k++;
+            memmove(run_name, run_name + k, strlen(run_name + k) + 1);
+            k = (int)strlen(run_name);
+            while (k > 0 && (run_name[k-1] == '\n' || run_name[k-1] == '\r' || run_name[k-1] == ' ')) run_name[--k] = 0;
+        }
+        fclose(f);
+        if (run_name[0] == 0) snprintf(run_name, sizeof run_name, "%s", PILOT_PROG_NAME);
+        ALOGI("ops-prog 旗标起跑名=[%s]", run_name);
+        if (vtouch_op_run(run_name) == 0) ALOGI("ops-prog 已起跑 %s", run_name);
+        else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
+    }
 }
 
 static void load_ops(void)
