@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.vtouch.editor"
+    android:versionCode="1"
+    android:versionName="0.1">
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="29"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <application
+        android:icon="@0x7f010000"
+        android:label="vtouch"
+        android:debuggable="true"
+        android:allowBackup="false">
+        <activity
+            android:name="com.vtouch.editor.MainActivity"
+            android:label="vtouch"
+            android:exported="true"
+            android:launchMode="2"
+            android:windowSoftInputMode="16">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <service
+            android:name="com.vtouch.editor.RenderService"
+            android:exported="true"/>
+        <service
+            android:name="com.vtouch.editor.ChipService"
+            android:exported="true"/>
+        <service
+            android:name="com.vtouch.editor.CaptureChip"
+            android:exported="true"/>
+    </application>
+</manifest>

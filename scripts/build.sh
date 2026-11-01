@@ -57,7 +57,7 @@ if [ "${1:-}" = "ui" ]; then
   exit 0
 fi
 
-"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/*.c -o build/vtouchd   # 模块化后是多个 .c，一起链成一个可执行
+"$CC" -O2 -Wall -Wextra -Werror -D_GNU_SOURCE src/*.c -lm -o build/vtouchd   # VM 的数学内建也参与默认构建
 
 ls -l build/vtouchd
 md5sum build/vtouchd

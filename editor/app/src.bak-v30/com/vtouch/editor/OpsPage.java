@@ -1,0 +1,1310 @@
+package com.vtouch.editor;
+
+import android.content.Context;
+import android.view.Gravity;
+import android.view.View;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 操作页：ops.conf 编辑。
+ * 列表 ↔ 操作编辑（门控/自动关/步骤流） ↔ 步骤编辑（全屏表单）。
+ * 门控/开关判断口径（对齐核心）：引用的区域必须「存在 + 开关型」，否则核心按 门控拦截 / 非开关型 处理。
+ * v12.2：条件块分支插入——块头 [＋] 落「成立分支」末尾（否则之前）；「否则」分隔行 [＋] 落否则分支末尾。
+ * v26：① 切页/刷新保留编辑会话（busy() 供 Shell 判断）；② 移动全覆盖——块头=整块一起移（含子条件/块体/否则/块尾）、
+ * 子条件行=组内换序、落点结构预检（损坏回滚）；③ 添加/移动后自动滚动定位到目标行。
+ */
+public class OpsPage {
+    private final Context act;
+    private LinearLayout bar, container, bottomBar;
+    private ScrollView listSc;             // v26：列表滚动容器（添加/移动后定位用）
+    private int stepReturnY = -1;          // v27：进入步骤编辑前的滚动位置（返回时恢复原处，不回顶）
+    public int restoreYRequest = -1;       // v27：待恢复的滚动请求（post 与测试直驱共用）
+    private int restoreTries = 0;          // v27：未量测重投计数
+    private TextView statusLine;
+    private Ops.File file;
+    private List<String> regionIds = new ArrayList<String>();    // 全部区域（区域判断用）
+    private List<String> switchIds = new ArrayList<String>();    // 仅开关型（门控 / 开关判断用）
+    private List<String> tmplNames = new ArrayList<String>();    // 模板（.tmpl）名字（找图用）
+    private List<String> ptsNames = new ArrayList<String>();     // 点集（.pts）名字（找色多点用）
+    private List<Regions.Region> regionsAll = new ArrayList<Regions.Region>();   // 全量区域（区域限定换算用）
+    private boolean dirty = false;
+    private Ops.Op editing = null;         // 编辑中的副本
+    private int editIndex = -1;
+    private Ops.Step stepEditing = null;   // 步骤编辑中的副本（null = 不在步骤编辑）
+    private int stepIndex = -1;            // -1 = 新增步骤
+    private int insertBefore = -1;         // v12：块内插入的目标位置（-1 = 末尾）
+    private String insertCtx = "";         // v12.2：插入落点语境（成立分支 / 否则分支 / 循环体；进插入提示）
+    private int presetType = 0;            // v12.1：弹层选定的类型（用后清零 = 点按）
+    private boolean overview = false;      // 步骤流：总览模式（紧凑时间线）
+    private final java.util.Set<Ops.Step> foldedBlocks =     // v12.3：总览已收起的块（按步骤对象身份；编辑后不串位）
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Ops.Step, Boolean>());
+
+    /** v26：定位——idx → 行视图（卡片/总览共用；render() 重填），「添加/移动后滚动到目标行」用。 */
+    private final java.util.HashMap<Integer, View> focusRows = new java.util.HashMap<Integer, View>();
+    /** v26：待执行定位请求（-1 = 无；设置后于下一帧滚动执行；测试直驱可读）。 */
+    public int focusIdxRequest = -1;
+    /** v26：定位重试计数（post 回调可能早于本帧布局 → 未量好时重投，上限 10）。 */
+    private int focusTries = 0;
+
+    public OpsPage(Context a) { act = a; }
+
+    public View build() {
+        LinearLayout root = Ui.col(act);
+        bar = Ui.row(act);
+        bar.setPadding(Ui.dp(act, 16), Ui.dp(act, 10), Ui.dp(act, 8), Ui.dp(act, 6));
+        statusLine = Ui.mono(act, "", 12, Ui.DIM);
+        statusLine.setSingleLine(true);
+        statusLine.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        bar.addView(statusLine, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(bar);
+        listSc = new ScrollView(act);
+        container = Ui.col(act);
+        container.setPadding(Ui.dp(act, 8), Ui.dp(act, 4), Ui.dp(act, 8), Ui.dp(act, 16));
+        listSc.addView(container);
+        root.addView(listSc, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // 底部常驻操作条（编辑模式下显示「＋ 添加步骤」；不随列表滚动）
+        bottomBar = Ui.col(act);
+        bottomBar.setVisibility(View.GONE);
+        root.addView(bottomBar);
+        return root;
+    }
+
+    public void refresh() {
+        Ui.bg(new Runnable() {
+            public void run() {
+                final String text = Su.read(Ops.PATH);
+                final List<String> ids = new ArrayList<String>();
+                final List<String> sw = new ArrayList<String>();
+                final List<Regions.Region> rAll = new ArrayList<Regions.Region>();
+                String rt = Su.read(Regions.PATH);
+                if (rt != null) {
+                    try {
+                        Regions.File rf = Regions.File.parse(rt);
+                        for (Regions.Region r : rf.regions) {
+                            ids.add(r.id);
+                            if (r.kind == 1) sw.add(r.id);
+                            rAll.add(r);
+                        }
+                    } catch (Exception e) { /* 忽略 */ }
+                }
+                final List<String> tmpls = new ArrayList<String>();
+                final List<String> ptss = new ArrayList<String>();
+                Su.R tl = Su.run("ls " + Ops.TMPL_DIR + " 2>/dev/null");
+                if (tl.ok() && tl.out != null) {
+                    for (String ln : tl.out.split("\n")) {
+                        String fn = ln.trim();
+                        if (fn.endsWith(".tmpl")) tmpls.add(fn.substring(0, fn.length() - 5));
+                        else if (fn.endsWith(".pts")) ptss.add(fn.substring(0, fn.length() - 4));
+                    }
+                }
+                Ui.MAIN.post(new Runnable() {
+                    public void run() { applyLoad(text, ids, sw, tmpls, ptss, rAll); }
+                });
+            }
+        }, null);
+    }
+
+    /** 内容装载（refresh 异步回调）。v26：**不清空编辑会话**——切页/刷新不打断正在编辑的内容
+     *  （editing/stepEditing 保留，重渲染即可）；另以包内可见供 TestBench 直驱。 */
+    void applyLoad(String text, List<String> ids, List<String> sw,
+                           List<String> tmpls, List<String> ptss, List<Regions.Region> rAll) {
+        regionIds = ids;
+        switchIds = sw;
+        regionsAll = rAll != null ? rAll : new ArrayList<Regions.Region>();
+        tmplNames = tmpls != null ? tmpls : new ArrayList<String>();
+        ptsNames = ptss != null ? ptss : new ArrayList<String>();
+        if (text == null) {
+            statusLine.setText("读取失败：ops.conf 不存在或 root 不可用");
+            if (editing == null) container.removeAllViews(); else render();
+            return;
+        }
+        try {
+            file = Ops.File.parse(text);
+            dirty = false;
+            /* v26：原「editing = null; stepEditing = null」已删——编辑中刷新/切页保持现场 */
+            render();
+        } catch (Exception e) {
+            statusLine.setText("解析失败：" + e.getMessage());
+            container.removeAllViews();
+        }
+    }
+
+    /** v26：是否有进行中的编辑会话（Shell 切页/刷新据此保留现场，不重载）。 */
+    public boolean busy() { return editing != null; }
+
+    private void render() {
+        if (file == null) return;
+        focusRows.clear();                       // v26：行视图表随渲染重建
+        if (editing == null) renderList();
+        else if (stepEditing == null) renderEditor();
+        else renderStepEditor();
+    }
+
+    /** 门控 / 开关判断引用的区域必须存在且为开关型；返回错误文案或 null。 */
+    private String regionRefErr(Ops.Op o) {
+        if (!"-".equals(o.gate) && !switchIds.contains(o.gate)) {
+            return "操作「" + o.name + "」的门控「" + o.gate + "」不是开关型区域（核心会拦截此操作）";
+        }
+        for (int i = 0; i < o.steps.size(); i++) {
+            Ops.Step s = o.steps.get(i);
+            if (s.raw == null && s.type == Ops.T_COND_TOGGLE && !s.ref.isEmpty()
+                    && !switchIds.contains(s.ref)) {
+                return "操作「" + o.name + "」第 " + (i + 1) + " 步开关判断引用的「" + s.ref
+                        + "」不是开关型区域";
+            }
+        }
+        return null;
+    }
+
+    // ---------- 列表模式 ----------
+
+    private void renderList() {
+        bottomBar.setVisibility(View.GONE);
+        bar.removeAllViews();
+        bar.addView(statusLine, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView add = Ui.btnSmall(act, "＋ 新建操作");
+        add.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { newOpDialog(); }
+        });
+        bar.addView(add);
+
+        container.removeAllViews();
+        statusLine.setText("共 " + file.ops.size() + " 个操作（上限 16）");   /* v22：提交即落盘，无待保存态 */
+        if (file.ops.isEmpty()) {
+            container.addView(Ui.emptyState(act, "还没有操作",
+                    "操作由多个步骤组成：点击 / 滑动 / 等待 / 条件判断…",
+                    "＋ 新建操作", new View.OnClickListener() {
+                        public void onClick(View v) { newOpDialog(); }
+                    }));
+            return;
+        }
+        for (int i = 0; i < file.ops.size(); i++) {
+            final int idx = i;
+            final Ops.Op o = file.ops.get(i);
+            LinearLayout card = Ui.card(act);
+            card.setBackground(Ui.pressableStroked(act, Ui.CARD, Ui.CARD_LINE, 0xFF23272C, 8));
+            card.setClickable(true);
+            card.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { startEdit(idx); }
+            });
+            LinearLayout titleRow = Ui.row(act);
+            titleRow.addView(Ui.monoBold(act, o.name, 15, Ui.TEXT),
+                    new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            TextView edit = Ui.btnFlat(act, "✎ 编辑", Ui.ACCENT);
+            edit.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { startEdit(idx); }
+            });
+            TextView cp = Ui.btnFlat(act, "复制到…", Ui.DIM);
+            cp.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { CrossCopy.copyFlow(act, false, o.name, dirty); }
+            });
+            TextView del = Ui.btnFlat(act, "✕ 删除", Ui.WARN);
+            del.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { deleteOp(idx); }
+            });
+            titleRow.addView(edit);
+            titleRow.addView(cp);
+            titleRow.addView(del);
+            card.addView(titleRow);
+            LinearLayout metaRow = Ui.row(act);
+            metaRow.setPadding(0, Ui.dp(act, 2), 0, 0);
+            metaRow.addView(Ui.chip(act, o.steps.size() + " 步", Ui.DIM));
+            if (!"-".equals(o.gate)) {
+                metaRow.addView(Ui.chip(act, "门控 " + o.gate,
+                        switchIds.contains(o.gate) ? Ui.ACCENT : Ui.WARN));
+            }
+            if (o.autooff == 1) metaRow.addView(Ui.chip(act, "跑完自动关", Ui.OK));
+            card.addView(metaRow);
+            container.addView(card);
+        }
+    }
+
+    private void startEdit(int idx) {
+        editing = file.ops.get(idx).copy();
+        editIndex = idx;
+        foldedBlocks.clear();               // v12.3：收起状态随编辑会话重置
+        render();
+    }
+
+    private void newOpDialog() {
+        if (file.ops.size() >= 16) { Ui.toast("操作数已达上限 16"); return; }
+        final EditText nameE = Ui.textField(act, "操作名（1..15 字，可用中文）");
+        LinearLayout box = Ui.col(act);
+        box.addView(Ui.label(act, "操作名"));
+        box.addView(nameE);
+        final Ui.Dlg dlg = Ui.dialog(act, "新建操作");
+        dlg.body.addView(box);
+        TextView cancelB = Ui.btnFlat(act, "取消", Ui.DIM);
+        cancelB.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { dlg.dismiss(); }
+        });
+        TextView okB = Ui.btnSmallPrimary(act, "创建");
+        dlg.actions.addView(cancelB);
+        dlg.actions.addView(okB);
+        dlg.show();
+        okB.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String name = nameE.getText().toString().trim();
+                String err = startNewDraft(name);
+                if (err != null) { Ui.toast(err); return; }
+                dlg.dismiss();
+                Ui.toast("操作「" + name + "」：添加步骤后点「完成」创建");
+            }
+        });
+    }
+
+    /** 新建操作草稿：只校验名字（步数到 [完成] 再查——核心要求 1..512 步）→ 直接进编辑页。
+     *  草稿不在列表里：[完成] 才创建、[取消] 丢弃。返回错误文案或 null（供 TestBench 直驱）。 */
+    public String startNewDraft(String name) {
+        Ops.Op draft = new Ops.Op();
+        draft.name = name;
+        String err = Ops.validateName(draft, file, null);
+        if (err != null) return err;
+        editing = draft;
+        editIndex = -1;
+        overview = false;
+        foldedBlocks.clear();
+        render();
+        return null;
+    }
+
+    private void deleteOp(final int idx) {
+        final Ops.Op o = file.ops.get(idx);
+        final Ui.Dlg d = Ui.dialog(act, "删除操作 " + o.name + "？");
+        d.body.addView(Ui.dlgMessage(act, "引用它的区域绑定 / 门控会变为悬空（核心按未命中处理）。"));
+        TextView cancel = Ui.btnFlat(act, "取消", Ui.DIM);
+        cancel.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { d.dismiss(); }
+        });
+        TextView ok = Ui.btnSmallTonal(act, "删除", Ui.WARN);
+        ok.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                file.ops.remove(idx);
+                dirty = true;
+                render();
+                d.dismiss();
+                save("已删除操作「" + o.name + "」");   /* v22：删除即落盘 */
+            }
+        });
+        d.actions.addView(cancel);
+        d.actions.addView(ok);
+        d.show();
+    }
+
+    // ---------- 操作编辑模式 ----------
+
+    private void renderEditor() {
+        final Ops.Op eo = editing;
+        bar.removeAllViews();
+        bar.addView(statusLine, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        statusLine.setText("编辑中：操作 " + eo.name + "（" + eo.steps.size() + " 步）");
+        TextView cancel = Ui.btnSmall(act, "取消");
+        cancel.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                boolean draft = editIndex < 0;       // 草稿取消 = 丢弃新建（不在列表里）
+                editing = null;
+                render();
+                if (draft) Ui.toast("已取消：未创建操作");
+            }
+        });
+        TextView done = Ui.btnSmallPrimary(act, "完成");
+        done.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String err = commitEdit();
+                if (err != null) Ui.toast(err);
+            }
+        });
+        bar.addView(cancel);
+        bar.addView(done);
+
+        container.removeAllViews();
+
+        LinearLayout card = Ui.card(act);
+        card.addView(Ui.tv(act, "操作 " + eo.name, 16, Ui.TEXT, true));
+        card.addView(Ui.label(act, "门控区域（- = 无；仅开关型区域可选）"));
+        List<String> gateOpts = new ArrayList<String>();
+        gateOpts.add("-");
+        gateOpts.addAll(switchIds);
+        if (!"-".equals(eo.gate) && !switchIds.contains(eo.gate)) gateOpts.add(eo.gate);   // 旧值/已失效：保留展示，保存时校验
+        final Forms.Chips[] gateRef = new Forms.Chips[1];
+        gateRef[0] = new Forms.Chips(act, gateOpts, eo.gate, new Runnable() {
+            public void run() { eo.gate = gateRef[0].selected(); }
+        });
+        card.addView(gateRef[0].view);
+        if (switchIds.isEmpty()) {
+            TextView hint = Ui.tv(act, "（还没有开关型区域——在区域编辑里把「开关型」打开）", 11, Ui.WARN, false);
+            hint.setPadding(Ui.dp(act, 2), Ui.dp(act, 4), 0, 0);
+            card.addView(hint);
+        }
+        Forms.SwitchRow rAuto = Forms.switchRow(act, "执行后自动关闭开关型门控",
+                "开关型区域被本操作触发后自动复位", eo.autooff == 1, null);
+        rAuto.sw.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean v) {
+                eo.autooff = v ? 1 : 0;
+            }
+        });
+        card.addView(rAuto.row);
+        container.addView(card);
+
+        // 视图切换：卡片编辑 / 流程总览（紧凑时间线）
+        final Forms.Seg[] viewSeg = new Forms.Seg[1];
+        viewSeg[0] = new Forms.Seg(act, new String[]{"卡片", "流程总览"}, overview ? 1 : 0, new Runnable() {
+            public void run() {
+                overview = viewSeg[0].selected() == 1;
+                render();
+            }
+        });
+        LinearLayout segPad = Ui.col(act);
+        segPad.setPadding(0, Ui.dp(act, 4), 0, Ui.dp(act, 6));
+        segPad.addView(viewSeg[0].row);
+        container.addView(segPad);
+
+        if (eo.steps.isEmpty()) {                    // 空操作引导（新建草稿先落在这）——主操作在底栏，此处只指路
+            TextView emptyHint = Ui.tv(act, "还没有步骤——点下方「＋ 添加步骤」开始", 13, Ui.DIM, false);
+            emptyHint.setGravity(Gravity.CENTER);
+            emptyHint.setPadding(0, Ui.dp(act, 22), 0, Ui.dp(act, 10));
+            container.addView(emptyHint);
+        }
+
+        if (overview) {
+            container.addView(StepFlow.build(act, eo.steps, new StepFlow.Tap() {
+                public void onTap(int idx) { openStep(idx); }
+            }, foldedBlocks, new StepFlow.Toggle() {   // v12.3：块头 ▼/▸ 展开收起
+                public void onToggle(int headIdx) {
+                    if (headIdx < 0 || headIdx >= editing.steps.size()) return;
+                    Ops.Step hs = editing.steps.get(headIdx);
+                    if (!foldedBlocks.remove(hs)) foldedBlocks.add(hs);
+                    render();
+                }
+            }, focusRows));                             // v26：行视图表（定位用）
+        } else {
+        // v12：块感知渲染（形态 C 色带块风）——块体嵌色带壳；块内行平铺、块外行卡片
+        java.util.ArrayList<LinearLayout> bodyStack = new java.util.ArrayList<LinearLayout>();
+        java.util.ArrayList<LinearLayout> parentStack = new java.util.ArrayList<LinearLayout>();
+        LinearLayout listHost = container;
+        testShellMargins.clear();                                          // v6B：测试直驱断言用（色带步进剖面）
+        for (int i = 0; i < eo.steps.size(); i++) {
+            final int idx = i;
+            final Ops.Step s = eo.steps.get(i);
+            if (s.type == Ops.T_LOOP || s.type == Ops.T_IF) {
+                LinearLayout shell = Ui.col(act);
+                shell.setBackground(Ui.blockBg(act,
+                        s.type == Ops.T_LOOP ? Ui.ACCENT : Ui.COND_BAR,
+                        s.type == Ops.T_LOOP ? Ui.LOOP_TINT : Ui.COND_TINT));
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                // v6C 修（评审 F1）：margin 是相对父壳的，嵌套会累积 —— 每层只加 14dp（首层 0），
+                // 绝对偏移才逐级 =14·D；padFor 的补偿在全深度精确成立（此前 14*size 在 D≥2 双重计数漂移）。
+                slp.leftMargin = Ui.dp(act, bodyStack.size() == 0 ? 0 : 14);
+                listHost.addView(shell, slp);
+                testShellMargins.add(slp.leftMargin);
+                LinearLayout headV = blockHeadRow(idx, s, bodyStack.size());   // v12.3：代码式缩进
+                shell.addView(headV);
+                focusRows.put(Integer.valueOf(idx), headV);                    // v26：行锚（整块移动/定位）
+                bodyStack.add(shell);
+                parentStack.add(listHost);
+                listHost = shell;
+            } else if (s.type == Ops.T_ENDLOOP || s.type == Ops.T_ENDIF) {
+                LinearLayout tailV = blockTailRow(idx, s, Math.max(0, bodyStack.size() - 1));
+                listHost.addView(tailV);
+                focusRows.put(Integer.valueOf(idx), tailV);
+                if (!bodyStack.isEmpty()) bodyStack.remove(bodyStack.size() - 1);
+                if (!parentStack.isEmpty()) listHost = parentStack.remove(parentStack.size() - 1);
+            } else if (s.type == Ops.T_ELSE) {
+                LinearLayout elseV = elseRow(idx, s, Math.max(0, bodyStack.size() - 1));   // v12.2：分支分隔行（＋ = 否则分支末尾插入）
+                listHost.addView(elseV);
+                focusRows.put(Integer.valueOf(idx), elseV);
+            } else if (s.type == Ops.T_CLAUSE) {
+                LinearLayout clV = clauseRow(idx, s, Math.max(0, bodyStack.size() - 1)); // v6B：块头下编号子行（缩进=块头层）
+                listHost.addView(clV);
+                focusRows.put(Integer.valueOf(idx), clV);
+            } else {
+                LinearLayout stV = stepRow(idx, s, !bodyStack.isEmpty(), bodyStack.size());
+                listHost.addView(stV);
+                focusRows.put(Integer.valueOf(idx), stV);
+            }
+        }
+        }
+
+        // 底部常驻操作条：步数 + 添加（不随滚动，步数多时也随手可加）
+        bottomBar.removeAllViews();
+        bottomBar.setVisibility(View.VISIBLE);
+        bottomBar.addView(Ui.divider(act));
+        LinearLayout foot = Ui.row(act);
+        foot.setGravity(Gravity.CENTER_VERTICAL);
+        foot.setPadding(Ui.dp(act, 14), Ui.dp(act, 8), Ui.dp(act, 12), Ui.dp(act, 8));
+        foot.addView(Ui.mono(act, "共 " + eo.steps.size() + " 步（上限 " + Ops.MAX_STEPS + "）", 12, Ui.DIM),
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView addStep = Ui.btnSmallPrimary(act, "＋ 添加步骤");
+        addStep.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                if (editing.steps.size() >= Ops.MAX_STEPS) { Ui.toast("步骤数已达上限 " + Ops.MAX_STEPS); return; }
+                askTypeThenAdd(-1, "");
+            }
+        });
+        foot.addView(addStep);
+        bottomBar.addView(foot);
+    }
+
+    /** v12.3：代码式缩进（14dp/级）：块头 / 否则 / 块尾 = 本层；块内步骤 = 下一层（口径同流程总览）。 */
+    private int ind(int dep) { return Ui.dp(act, 12 + dep * 14); }
+
+    /** v6B：行内边距补偿（嵌套壳 marginLeft 14dp/级后，文本基线仍 = ind(dep)）。 */
+    private int padFor(int dep, int shellDepth) { return Ui.dp(act, 12 + (dep - shellDepth) * 14); }
+
+    /** v6B：块壳左缘步进剖面（测试直驱断言用；render() 重填）。 */
+    public final java.util.List<Integer> testShellMargins = new java.util.ArrayList<Integer>();
+
+    /** v6B：编辑块头时带上其子条件链副本（LOOP/IF 恒非空；其余 = null）。 */
+    private java.util.List<Ops.Step> clauseRowsFor(int idx, Ops.Step se) {
+        if (idx < 0 || !(se.type == Ops.T_LOOP || se.type == Ops.T_IF)) return null;
+        int tail = Ops.clauseTail(editing.steps, idx);
+        java.util.ArrayList<Ops.Step> l = new java.util.ArrayList<Ops.Step>();
+        for (int i = idx + 1; i <= tail; i++) l.add(editing.steps.get(i).copy());
+        return l;
+    }
+
+    /** 子条件行（v6B）：编号 + 连接词摘要（暗色、缩进=块头层）；点击进入该子条件编辑。 */
+    private LinearLayout clauseRow(final int idx, final Ops.Step s, final int dep) {
+        LinearLayout row = Ui.row(act);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(padFor(dep, dep), Ui.dp(act, 3), Ui.dp(act, 8), Ui.dp(act, 3));
+        row.setBackground(Ui.pressable(act, 0x00000000, 0x2EFFFFFF, 8));
+        row.setClickable(true);
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { openStep(idx); }
+        });
+        row.addView(Ui.tv(act, (idx + 1) + ". " + s.clauseSummary(editing.varSlots()), 12.5f, Ui.DIM, false),
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView mv = Ui.btnFlat(act, "↕ 移动", Ui.ACCENT);   // v26：子条件组内换序（求值序=短路序）
+        mv.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { moveStepDialog(idx); }
+        });
+        row.addView(mv);
+        return row;
+    }
+
+    /** 进入步骤编辑页（idx ≥ 0 编辑已有步骤；-1 新增）。 */
+    private void openStep(int idx) {
+        stepEditing = (idx >= 0) ? editing.steps.get(idx).copy() : newStep(presetType);
+        presetType = 0;   // 一次性（弹层选定后回默认）
+        stepIndex = idx;
+        stepReturnY = listSc.getScrollY();   // v27：记住进入前位置（返回时恢复，不回顶）
+        render();
+    }
+
+    private Ops.Step newStep(int type) {
+        Ops.Step s = new Ops.Step();
+        s.type = type;
+        if (type == Ops.T_TAP) s.ms = 50;
+        if (type == Ops.T_LOOP) { s.a1 = 0; s.a2 = 3; }   // 默认：循环 3 次
+        if (type == Ops.T_TOAST) s.ms = 2000;             // v6D：提示默认显示 2 秒
+        if (type == Ops.T_HL) s.ms = 3000;                // v6E：框区域默认显示 3 秒
+        if (type == Ops.T_BOX) s.ms = 3000;               // v6F：框矩形默认显示 3 秒
+        return s;
+    }
+
+    /** v12.1：先底部弹层选类型 → 再进步骤编辑页（插入位置 insertAt，-1 = 末尾；ctx = 落点语境，插入成功后提示）。 */
+    private void askTypeThenAdd(final int insertAt, final String ctx) {
+        Ui.Dlg d = Forms.typeSheet(act, new Forms.TypePick() {
+            public void onPick(int t) {
+                presetType = t;
+                insertBefore = insertAt;
+                insertCtx = ctx;
+                openStep(-1);
+            }
+        });
+        Ui.showSheet(d);
+    }
+
+    /** 步骤编辑页（全屏表单，替代原弹窗）。 */
+    private void renderStepEditor() {
+        bottomBar.setVisibility(View.GONE);
+        final Ops.Step se = stepEditing;
+        bar.removeAllViews();
+        bar.addView(statusLine, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        statusLine.setText(stepIndex < 0 ? "添加步骤" : "编辑步骤 " + (stepIndex + 1));
+        TextView cancelB = Ui.btnSmall(act, "取消");
+        TextView saveB = Ui.btnSmallPrimary(act, "保存");
+        bar.addView(cancelB);
+        bar.addView(saveB);
+
+        container.removeAllViews();
+        final StepEdit edit = StepEdit.build(act, se, regionIds, switchIds,
+                tmplNames, ptsNames, editing.varSlots(), visual, clauseRowsFor(stepIndex, se));
+        container.addView(edit.root);
+
+        if (stepIndex >= 0) {
+            TextView delB = Ui.btnSmallTonal(act, "删除此步", Ui.WARN);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            dlp.setMargins(Ui.dp(act, 12), Ui.dp(act, 6), Ui.dp(act, 12), Ui.dp(act, 4));
+            delB.setLayoutParams(dlp);
+            delB.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    editing.steps.remove(stepIndex);
+                    Ui.toast("已删除步骤 " + (stepIndex + 1));
+                    stepEditing = null;
+                    render();
+                    restoreScroll();   // v27：返回恢复原滚动位置
+                }
+            });
+            container.addView(delB);
+        }
+
+        cancelB.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { cancelStepEdit(); }
+        });
+        saveB.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String err = edit.collect();
+                if (err != null) { Ui.toast(err); return; }
+                if (stepIndex >= 0) {
+                    java.util.List<Ops.Step> cl = edit.collectedClauses();
+                    if (cl != null) {                  // v6B：块头（条件块 / 到条件循环）→ 头 + 子条件组替换
+                        if (!cl.isEmpty() && !Ops.canClause(se)) {
+                            Ui.toast("循环模式不是「到条件」：请先删除子条件（" + cl.size() + " 条）");
+                            return;
+                        }
+                        if (!Ops.setClauseGroup(editing.steps, stepIndex, se, cl)) {
+                            Ui.toast("无法保存子条件（超上限 " + Ops.CLAUSE_MAX + " 或步数超限）");
+                            return;
+                        }
+                        Ui.toast("步骤 " + (stepIndex + 1) + " 已更新"
+                                + (cl.isEmpty() ? "" : "（子条件 " + cl.size() + " 条）"));
+                    } else {
+                        editing.steps.set(stepIndex, se);
+                        Ui.toast("步骤 " + (stepIndex + 1) + " 已更新");
+                    }
+                } else {
+                    /* v12.2：结构头自动带出配套（12→+13；14→+15+16）——插入统一走 Ops.insertStep（位置由块导航先算好）
+                     * v26：插入收尾（重置现场 / 渲染 / 定位到新步骤）全部在 insertNewStep 内完成 */
+                    String ierr = insertNewStep(insertBefore, se, insertCtx);
+                    if (ierr != null) { Ui.toast(ierr); return; }
+                    return;
+                }
+                insertBefore = -1;
+                insertCtx = "";
+                stepEditing = null;
+                render();
+                restoreScroll();   // v27：返回恢复原滚动位置
+            }
+        });
+    }
+
+    /** 取消步骤编辑（[取消] 按钮 / 测试直驱共用；v27：返回恢复滚动位置）。 */
+    public void cancelStepEdit() {
+        stepEditing = null;
+        insertBefore = -1;
+        insertCtx = "";
+        render();
+        restoreScroll();
+    }
+
+    /** v26：插入新步骤（含结构配套），收尾并定位到落点。at = 插入下标（<0 或越界 = 末尾）；
+     *  ctx = 落点语境（成立分支/否则分支/循环体，可空）。返回错误文案或 null（供 TestBench 直驱）。 */
+    public String insertNewStep(int at, Ops.Step se, String ctx) {
+        if (editing == null) return "不在操作编辑中";
+        int atc = (at >= 0 && at <= editing.steps.size()) ? at : editing.steps.size();
+        if (!Ops.insertStep(editing.steps, atc, se)) {
+            return "步骤数将超过上限 " + Ops.MAX_STEPS + "（结构行按配套计）";
+        }
+        String suf = (ctx == null || ctx.isEmpty()) ? "" : " · " + ctx;
+        if (se.type == Ops.T_LOOP) Ui.toast("已插入循环（含循环结束）" + suf);
+        else if (se.type == Ops.T_IF) Ui.toast("已插入条件块（含否则 / 结束）" + suf);
+        else Ui.toast("已插入步骤 " + (atc + 1) + suf);
+        insertBefore = -1;
+        insertCtx = "";
+        stepEditing = null;
+        render();
+        focusStep(atc);
+        return null;
+    }
+
+    // ---------------- v26：操作后定位（添加/移动 → 滚动到目标行） ----------------
+
+    /** 请求定位到 idx 行：确保目标可见（块内已收起的先展开），下一帧执行最小滚动。 */
+    private void focusStep(int idx) {
+        if (idx < 0 || editing == null || idx >= editing.steps.size()) return;
+        if (overview) unfoldAncestorsOf(idx);        // 目标若在收起的块里：先展开（内部会重渲染）
+        focusIdxRequest = idx;
+        try {
+            container.post(new Runnable() {
+                public void run() { applyFocusNow(); }
+            });
+        } catch (Throwable t) { /* 离屏环境无消息队列时静默 */ }
+    }
+
+    /** 展开覆盖 idx 的全部已收起块（总览模式下收起块不渲染行，定位会落空）。 */
+    private void unfoldAncestorsOf(int idx) {
+        if (foldedBlocks.isEmpty() || editing == null) return;
+        boolean changed = false;
+        for (int i = 0; i < editing.steps.size(); i++) {
+            Ops.Step hs = editing.steps.get(i);
+            if (!foldedBlocks.contains(hs)) continue;
+            int tt = Ops.pairTail(editing.steps, i);
+            if (i < idx && tt > idx) { foldedBlocks.remove(hs); changed = true; }
+        }
+        if (changed) render();
+    }
+
+    /** 立即执行定位（post 回调与测试直驱共用）：最小滚动使目标行连同边距进入视野；返回目标 Y（-1 = 无行/未布局）。
+     *  ⚠ 时序：post 回调可能早于本帧布局（View.post 立即入队、布局等 vsync）——行在但未量好时**保留请求并重投**
+     *  （≤10 次），量好即滚；行已不在（收起/删除）则放弃。 */
+    public int applyFocusNow() {
+        int idx = focusIdxRequest;
+        if (idx < 0) return -1;
+        View rv = focusRows.get(Integer.valueOf(idx));
+        if (rv == null) { focusIdxRequest = -1; return -1; }        // 行不在 → 放弃
+        int y = computeFocusScrollY(idx);
+        if (y < 0 && focusTries < 10) {                             // 未量好 → 下一轮再试
+            focusTries++;
+            try {
+                container.post(new Runnable() {
+                    public void run() { applyFocusNow(); }
+                });
+            } catch (Throwable t) { focusIdxRequest = -1; }
+            return -1;
+        }
+        focusTries = 0;
+        focusIdxRequest = -1;
+        if (y >= 0 && listSc != null) {
+            try { listSc.smoothScrollTo(0, y); } catch (Throwable t) { /* 离屏静默 */ }
+        }
+        return y;
+    }
+
+    // ---------------- v27：步骤编辑返回 → 恢复进入前滚动位置 ----------------
+
+    /** 请求恢复滚动位置（步骤编辑返回时用）；未量好由 applyRestoreNow 重投（≤10 次）。 */
+    private void restoreScroll() {
+        if (stepReturnY > 0) {
+            restoreYRequest = stepReturnY;
+            try {
+                container.post(new Runnable() {
+                    public void run() { applyRestoreNow(); }
+                });
+            } catch (Throwable t) { /* 离屏无消息队列：静默（由测试直驱） */ }
+        }
+        stepReturnY = -1;
+    }
+
+    /** 立即恢复滚动（post 与测试直驱共用）；返回实际 Y（-1 = 未量好已重投 / 无请求）。 */
+    public int applyRestoreNow() {
+        int y = restoreYRequest;
+        if (y < 0) return -1;
+        int viewportH = listSc.getHeight() - listSc.getPaddingTop() - listSc.getPaddingBottom();
+        if (viewportH <= 0 || container.getHeight() <= 0) {          // 未布局 → 下一轮再试
+            if (restoreTries++ < 10) {
+                try {
+                    container.post(new Runnable() {
+                        public void run() { applyRestoreNow(); }
+                    });
+                } catch (Throwable t) { restoreTries = 0; }
+            } else restoreTries = 0;
+            return -1;
+        }
+        restoreTries = 0;
+        int maxScroll = Math.max(0, container.getHeight() - viewportH);
+        int target = Math.min(y, maxScroll);
+        try { listSc.scrollTo(0, target); } catch (Throwable t) { /* 离屏静默 */ }
+        restoreYRequest = -1;
+        return target;
+    }
+
+    /** v27：测试直驱——进入步骤编辑前的捕获位置。 */
+    public int stepReturnYForTest() { return stepReturnY; }
+
+    /** v27：测试直驱——待恢复请求。 */
+    public int restoreYRequestForTest() { return restoreYRequest; }
+
+    /** v27：测试直驱——直接滚动列表。 */
+    public void listScrollToForTest(int y) { listSc.scrollTo(0, y); }
+
+    /** v27：测试直驱——当前滚动位置。 */
+    public int listScrollYForTest() { return listSc.getScrollY(); }
+
+    /** v27：测试直驱——等价点步骤行（进入步骤编辑）。 */
+    public void openStepForTest(int idx) { openStep(idx); }
+
+    /** 行顶/行底（相对 content）/ 视口高 / 目标 Y 观测（测试直驱）；无行时各 -1。 */
+    public int[] focusMetricsForTest(int idx) {
+        int[] r = new int[]{-1, -1, -1, -1};
+        View rv = focusRows.get(Integer.valueOf(idx));
+        if (rv == null || listSc == null) return r;
+        int top = 0;
+        View v = rv;
+        while (v != null && v != container) { top += v.getTop(); v = (View) v.getParent(); }
+        if (v == null) return r;
+        r[0] = top;
+        r[1] = top + rv.getHeight();
+        r[2] = listSc.getHeight() - listSc.getPaddingTop() - listSc.getPaddingBottom();
+        r[3] = computeFocusScrollY(idx);
+        return r;
+    }
+
+    private int computeFocusScrollY(int idx) {
+        View rv = focusRows.get(Integer.valueOf(idx));
+        if (rv == null || listSc == null || container == null) return -1;
+        int top = 0;
+        View v = rv;
+        while (v != null && v != container) { top += v.getTop(); v = (View) v.getParent(); }
+        if (v == null) return -1;
+        int rowH = rv.getHeight();
+        int viewportH = listSc.getHeight() - listSc.getPaddingTop() - listSc.getPaddingBottom();
+        if (rowH <= 0 || viewportH <= 0) return -1;         // 未布局（离屏需先 measure/layout）
+        int margin = Ui.dp(act, 12);
+        int cur = listSc.getScrollY();
+        int target = cur;
+        if (top - margin < cur) target = top - margin;                              // 目标在上方
+        else if (top + rowH + margin > cur + viewportH)                             // 目标在下方
+            target = top + rowH + margin - viewportH;
+        int maxScroll = Math.max(0, container.getHeight() - viewportH);
+        if (target < 0) target = 0;
+        if (target > maxScroll) target = maxScroll;
+        return target;
+    }
+
+    /** 一行步骤（v12）：块外 = 卡片；块内 = 平铺行（色带壳内）。dep = 代码式缩进层级（v12.3）。 */
+    private LinearLayout stepRow(final int idx, final Ops.Step s, final boolean inBlock, final int dep) {
+        LinearLayout sc = inBlock ? Ui.col(act) : Ui.card(act);
+        if (!inBlock && s.known()) {
+            sc.setBackground(Ui.pressableStroked(act, Ui.CARD, Ui.CARD_LINE, 0xFF23272C, 8));
+        }
+        if (inBlock) {
+            sc.setPadding(padFor(dep, dep - 1), Ui.dp(act, 6), Ui.dp(act, 10), Ui.dp(act, 6));
+            sc.setBackground(Ui.pressable(act, 0x00000000, 0x2EFFFFFF, 8));
+        }
+        if (s.known()) {
+            sc.setClickable(true);
+            sc.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { openStep(idx); }
+            });
+        }
+        LinearLayout stRow = Ui.row(act);
+        stRow.addView(Ui.tv(act, (idx + 1) + ". " + Ops.typeName(s.type), inBlock ? 13.5f : 14, Ui.TEXT, true));
+        if (!s.known()) stRow.addView(Ui.chip(act, "未解锁", Ui.WARN));
+        sc.addView(stRow);
+        TextView sum = Ui.tv(act, s.summary(editing.varSlots()), inBlock ? 12.5f : 13, Ui.DIM, false);
+        sum.setPadding(0, Ui.dp(act, 3), 0, 0);
+        sc.addView(sum);
+        LinearLayout btns = Ui.row(act);
+        btns.setGravity(Gravity.END);
+        if (s.known()) {
+            TextView edit = Ui.btnFlat(act, "✎ 编辑", Ui.ACCENT);
+            edit.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { openStep(idx); }
+            });
+            btns.addView(edit);
+        } else {
+            btns.addView(Ui.tv(act, "类型未解锁（可移动/删除）", 11, Ui.WARN, false));
+        }
+        TextView mv = Ui.btnFlat(act, "↕ 移动", Ui.ACCENT);
+        mv.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { moveStepDialog(idx); }
+        });
+        TextView del = Ui.btnFlat(act, "✕ 删除", Ui.WARN);
+        del.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                editing.steps.remove(idx);
+                render();
+                Ui.toast("已删除步骤 " + (idx + 1));
+            }
+        });
+        btns.addView(mv);
+        btns.addView(del);
+        sc.addView(btns);
+        return sc;
+    }
+
+    /** 块头行（v12/v12.2）：类型 + 参数摘要（琥珀粗体）；点行=编辑块属性。dep = 代码式缩进层级（v12.3）。
+     *  右侧 [＋] = 在本块体内末尾插入：条件块 → 成立分支末尾（否则之前）；循环 → 循环体末尾（循环结束之前）。 */
+    private LinearLayout blockHeadRow(final int idx, final Ops.Step s, final int dep) {
+        LinearLayout row = Ui.row(act);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(padFor(dep, dep), Ui.dp(act, 7), Ui.dp(act, 8), Ui.dp(act, 7));
+        row.setBackground(Ui.pressable(act, 0x00000000, 0x2EFFFFFF, 8));
+        row.setClickable(true);
+        row.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { openStep(idx); }
+        });
+        LinearLayout col = Ui.col(act);
+        col.addView(Ui.tv(act, (idx + 1) + ". " + Ops.typeName(s.type), 14, Ui.ACCENT, true));
+        TextView sum = Ui.tv(act, s.summary(editing.varSlots()), 12.5f, Ui.DIM, false);
+        sum.setPadding(0, Ui.dp(act, 2), 0, 0);
+        col.addView(sum);
+        row.addView(col, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView mv = Ui.btnFlat(act, "↕ 移动", Ui.ACCENT);   // v26：整块移动（子条件/块体/否则/块尾一起走）
+        mv.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { moveStepDialog(idx); }
+        });
+        row.addView(mv);
+        TextView add = Ui.btnFlat(act, "＋", Ui.ACCENT);
+        add.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                int at = (s.type == Ops.T_IF)
+                        ? Ops.ifTrueTail(editing.steps, idx) : Ops.pairTail(editing.steps, idx);
+                if (at < 0) { Ui.toast("结构未配对（先修复再插入）"); return; }
+                if (editing.steps.size() >= Ops.MAX_STEPS) { Ui.toast("步骤数已达上限 " + Ops.MAX_STEPS); return; }
+                askTypeThenAdd(at, s.type == Ops.T_IF ? "成立分支" : "循环体");
+            }
+        });
+        row.addView(add);
+        return row;
+    }
+
+    /** 块尾行（v12）：灰小字（循环结束 / 条件块结束）+ [＋ 否则]（条件块无否则时）+ [✕ 整块]（两步确认）。 */
+    private LinearLayout blockTailRow(final int idx, final Ops.Step s, final int dep) {
+        LinearLayout row = Ui.row(act);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(padFor(dep, dep), Ui.dp(act, 3), Ui.dp(act, 8), Ui.dp(act, 5));
+        row.addView(Ui.tv(act, Ops.typeName(s.type), 11.5f, Ui.FAINT, false),
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        if (s.type == Ops.T_ENDIF && !hasElse(idx)) {
+            TextView addElse = Ui.btnFlat(act, "＋ 否则", Ui.DIM);
+            addElse.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    Ops.Step nl = new Ops.Step();
+                    nl.type = Ops.T_ELSE;
+                    editing.steps.add(idx, nl);          // 插到条件块结束之前
+                    render();
+                    Ui.toast("已加「否则」");
+                }
+            });
+            row.addView(addElse);
+        }
+        final TextView del = Ui.btnFlat(act, "✕ 整块", Ui.FAINT);
+        del.setOnClickListener(new View.OnClickListener() {
+            private boolean armed = false;
+            public void onClick(View v) {
+                if (!armed) { armed = true; del.setText("确认删块"); del.setTextColor(Ui.WARN); return; }
+                removeBlock(idx);
+            }
+        });
+        row.addView(del);
+        return row;
+    }
+
+    /** 「否则」分隔行（v12.2）：结构行（不入步骤编辑）+ [＋]（否则分支末尾插入）+ [✕ 否则]（两步确认，删标记本身）。
+     *  删除只移除结构行「否则」；其下步骤随之归入成立分支一侧（沿原有单行删除语义，未改）。 */
+    private LinearLayout elseRow(final int idx, final Ops.Step s, final int dep) {
+        LinearLayout row = Ui.row(act);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(padFor(dep, dep), Ui.dp(act, 5), Ui.dp(act, 8), Ui.dp(act, 5));
+        row.addView(Ui.tv(act, (idx + 1) + ". 否则", 12.5f, Ui.DIM, true));   // 带步号：与流程总览一致，防「跳号」误读
+        View line = new View(act);
+        line.setBackgroundColor((Ui.COND_BAR & 0x00FFFFFF) | 0x59000000);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, Ui.dp(act, 1), 1f);
+        llp.leftMargin = Ui.dp(act, 10);
+        llp.rightMargin = Ui.dp(act, 6);
+        line.setLayoutParams(llp);
+        row.addView(line);
+        TextView add = Ui.btnFlat(act, "＋", Ui.ACCENT);
+        add.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                int head = Ops.blockHeadOf(editing.steps, idx);
+                int at = head >= 0 ? Ops.pairTail(editing.steps, head) : -1;
+                if (at < 0) { Ui.toast("结构未配对（先修复再插入）"); return; }
+                if (editing.steps.size() >= Ops.MAX_STEPS) { Ui.toast("步骤数已达上限 " + Ops.MAX_STEPS); return; }
+                askTypeThenAdd(at, "否则分支");
+            }
+        });
+        row.addView(add);
+        final TextView del = Ui.btnFlat(act, "✕ 否则", Ui.FAINT);
+        del.setOnClickListener(new View.OnClickListener() {
+            private boolean armed = false;
+            public void onClick(View v) {
+                if (!armed) { armed = true; del.setText("确认删除"); del.setTextColor(Ui.WARN); return; }
+                editing.steps.remove(idx);
+                render();
+                Ui.toast("已删除「否则」（其下步骤并入成立分支）");
+            }
+        });
+        row.addView(del);
+        return row;
+    }
+
+    /** 条件块（endif 下标）本层是否已有「否则」。 */
+    private boolean hasElse(int endifIdx) {
+        int d = 0;
+        for (int i = endifIdx - 1; i >= 0; i--) {
+            int t = editing.steps.get(i).type;
+            if (t == Ops.T_ENDIF || t == Ops.T_ENDLOOP) d++;
+            else if (t == Ops.T_LOOP || t == Ops.T_IF) {
+                if (d == 0) return false;                // 到本层头了，没见 15
+                d--;
+            } else if (t == Ops.T_ELSE && d == 0) {
+                return true;                             // 本层 15
+            }
+        }
+        return false;
+    }
+
+    /** 删整块：从头（配对头）删到配对尾（栈法，含内嵌步）。 */
+    private void removeBlock(int tailIdx) {
+        int d = 0, head = -1;
+        for (int i = tailIdx; i >= 0; i--) {
+            int t = editing.steps.get(i).type;
+            if (t == Ops.T_ENDIF || t == Ops.T_ENDLOOP) d++;
+            else if (t == Ops.T_LOOP || t == Ops.T_IF) {
+                d--;
+                if (d == 0) { head = i; break; }
+            }
+        }
+        if (head < 0) { Ui.toast("结构未配对（先修复）"); return; }
+        int depth = 0, end = head;
+        for (int i = head; i < editing.steps.size(); i++) {
+            int t = editing.steps.get(i).type;
+            if (t == Ops.T_LOOP || t == Ops.T_IF) depth++;
+            else if (t == Ops.T_ENDLOOP || t == Ops.T_ENDIF) {
+                depth--;
+                if (depth == 0) { end = i + 1; break; }
+            }
+        }
+        int n = end - head;
+        for (int k = 0; k < n; k++) editing.steps.remove(head);
+        render();
+        Ui.toast("已删除整块（" + n + " 步）");
+    }
+
+    /** v26：「移动」对话框——普通步=自身、块头=整块（含子条件/块体/否则/块尾）一起移动，一步到位。
+     *  子条件行走组内换序对话框。k = 单元首行最终落位（1 基）；只列合法落点（越界/原位不列）。 */
+    private void moveStepDialog(final int idx) {
+        if (editing == null || idx < 0 || idx >= editing.steps.size()) return;
+        final Ops.Step s = editing.steps.get(idx);
+        if (s.type == Ops.T_CLAUSE) { clauseMoveDialog(idx); return; }   // v26：19 行只组内换序
+        final int n = editing.steps.size();
+        if (n <= 1) { Ui.toast("只有一步，无需移动"); return; }
+        final int tail = Ops.unitTail(editing.steps, idx);
+        if (tail < 0) { Ui.toast("结构未配对（先修复再移动）"); return; }
+        final int m = tail - idx + 1;
+        final int maxK = n - m + 1;               // 单元首行的最大合法落位
+        final List<String> items = new ArrayList<String>();
+        final List<Integer> ks = new ArrayList<Integer>();
+        for (int k = 1; k <= maxK; k++) {
+            if (k == idx + 1) continue;           // 跳过原位
+            String label;
+            if (k == 1) label = "移到第 1 位（开头）";
+            else if (k == maxK) label = (m > 1) ? ("移到末尾（第 " + maxK + " 位）")
+                                                : ("移到第 " + maxK + " 位（末尾）");
+            else label = "移到第 " + k + " 位";
+            items.add(label);
+            ks.add(Integer.valueOf(k));
+        }
+        if (items.isEmpty()) { Ui.toast("没有可移动的位置"); return; }
+        String title = "移动「" + (idx + 1) + ". " + Ops.typeName(s.type) + "」"
+                + (m > 1 ? "整块（" + m + " 步）" : "") + "到…";
+        Forms.pickDialog(act, title, items, -1, new Forms.Pick() {
+            public void onPick(int index) {
+                int k = ks.get(index).intValue();
+                String err = moveUnitTo(idx, k);
+                if (err != null) { Ui.toast(err); return; }
+                Ui.toast(m > 1 ? ("已移到第 " + k + " 位（整块 " + m + " 步）")
+                               : ("已移到第 " + k + " 位"));
+            }
+        });
+    }
+
+    /** v26：子条件行移动——只在所属块头的子条件组内换序（求值序 = 短路序）。 */
+    private void clauseMoveDialog(final int idx) {
+        if (editing == null || idx < 0 || idx >= editing.steps.size()) return;
+        final int head = Ops.blockHeadOf(editing.steps, idx);
+        if (head < 0) { Ui.toast("结构未配对（先修复再移动）"); return; }
+        final int rows = Ops.clauseCount(editing.steps, head) - 1;   // 19 行条数（不含头子句）
+        final int cur = idx - head;                                  // 当前条位（1 基）
+        if (rows <= 1) { Ui.toast("组内只有 1 条子条件，无需移动"); return; }
+        final List<String> items = new ArrayList<String>();
+        final List<Integer> js = new ArrayList<Integer>();
+        for (int j = 1; j <= rows; j++) {
+            if (j == cur) continue;
+            items.add("移到第 " + j + " 条（共 " + rows + " 条）");
+            js.add(Integer.valueOf(j));
+        }
+        Forms.pickDialog(act, "移动「" + (idx + 1) + ". " + editing.steps.get(idx).clauseSummary(editing.varSlots())
+                + "」到…（组内）", items, -1, new Forms.Pick() {
+            public void onPick(int index) {
+                int j = js.get(index).intValue();
+                String err = moveClauseTo(idx, j);
+                if (err != null) { Ui.toast(err); return; }
+                Ui.toast("已移到组内第 " + j + " 条");
+            }
+        });
+    }
+
+    /** v26：移动单元（普通步=自身；块头=整块）到第 k 位（k = 单元首行最终落位，1 基）。
+     *  落点全程结构预检（结构扫描 + 跨块跳）：会把原本完好结构弄坏 → 回滚并返回原因；原本就破损的数据不拦。
+     *  成功 = 渲染 + 定位到新位置。返回错误文案或 null（供 TestBench 直驱）。 */
+    public String moveUnitTo(int idx, int k) {
+        if (editing == null || idx < 0 || idx >= editing.steps.size()) return "不在操作编辑中";
+        int tail = Ops.unitTail(editing.steps, idx);
+        if (tail < 0) return "结构未配对（先修复再移动）";
+        int m = tail - idx + 1;
+        int n = editing.steps.size();
+        if (k < 1 || k > n - m + 1) return "目标位非法";
+        if (k == idx + 1) return "目标与原位相同";
+        List<Ops.Step> pre = new ArrayList<Ops.Step>(editing.steps);
+        String preErr = Ops.structureErr(pre);
+        java.util.List<Ops.Step> mv = new ArrayList<Ops.Step>();
+        for (int i = idx; i <= tail; i++) mv.add(editing.steps.get(i));
+        editing.steps.subList(idx, tail + 1).clear();
+        editing.steps.addAll(k - 1, mv);
+        String postErr = Ops.structureErr(editing.steps);
+        if (postErr != null && preErr == null) {
+            editing.steps.clear();
+            editing.steps.addAll(pre);
+            return "落点不合法：" + postErr;
+        }
+        render();
+        focusStep(k - 1);
+        return null;
+    }
+
+    /** v26：子条件行组内移动（j = 目标条位，1 基，仅计 19 行）。返回错误文案或 null（供 TestBench 直驱）。 */
+    public String moveClauseTo(int idx, int j) {
+        if (editing == null || idx < 0 || idx >= editing.steps.size()) return "不在操作编辑中";
+        if (editing.steps.get(idx).type != Ops.T_CLAUSE) return "该步骤不是子条件行";
+        int head = Ops.blockHeadOf(editing.steps, idx);
+        if (head < 0) return "结构未配对（先修复再移动）";
+        int rows = Ops.clauseCount(editing.steps, head) - 1;
+        int cur = idx - head;
+        if (j < 1 || j > rows) return "目标条位非法";
+        if (j == cur) return "目标与原位相同";
+        Ops.Step mv = editing.steps.remove(idx);
+        editing.steps.add(head + j, mv);
+        String err = Ops.structureErr(editing.steps);   // 防御：组内换序不应破结构
+        if (err != null) {
+            editing.steps.remove(head + j);
+            editing.steps.add(idx, mv);
+            return "落点不合法：" + err;
+        }
+        render();
+        focusStep(head + j);
+        return null;
+    }
+
+    /** [完成]：校验并提交（草稿 editIndex<0 = 创建、落回列表；已有的 = 更新）。返回错误文案或 null（供 TestBench 直驱）。 */
+    public String commitEdit() {
+        final boolean isNew = editIndex < 0;
+        String err = Ops.validate(editing, file, isNew ? null : file.ops.get(editIndex));
+        if (err != null) return err;
+        String ge = regionRefErr(editing);
+        if (ge != null) return ge;
+        final String nm = editing.name;
+        if (isNew) file.ops.add(editing);
+        else file.ops.set(editIndex, editing);
+        dirty = true;
+        editing = null;
+        editIndex = -1;
+        render();
+        save(isNew ? "操作「" + nm + "」已创建" : "操作「" + nm + "」已更新");   /* v22：提交即落盘 */
+        return null;
+    }
+
+    // （旧版「步骤弹窗 + StepForm」已重构为全屏步骤编辑页：见 renderStepEditor / StepEdit.java；
+    //   旧版 ↑/↓ 逐步交换已重构为「↕ 移动」到第 N 位对话框：见 moveStepDialog）
+
+    /** 测试台直驱（离屏渲染）：把编辑态直接置为该操作并渲染（不读盘、不起异步；供 TestBench 用）。
+     *  注意：render() 有 file == null 守卫，直驱路径必须先补一个空 Ops.File。 */
+    public void openEditorForTest(Ops.Op op) {
+        if (file == null) file = new Ops.File();
+        editing = op;
+        editIndex = -1;
+        dirty = false;
+        overview = false;
+        stepEditing = null;
+        render();
+    }
+
+    /** 退出编辑/步骤编辑页；返回是否处理了（供返回键）。 */
+    public boolean closeEditor() {
+        if (stepEditing != null) {
+            stepEditing = null;
+            render();
+            restoreScroll();   // v27：返回键退出步骤编辑也恢复原滚动位置
+            return true;
+        }
+        if (editing != null) {
+            boolean draft = editIndex < 0;       // 草稿（新建中）：返回键 = 丢弃新建
+            editing = null;
+            render();
+            if (draft) Ui.toast("已取消：未创建操作");
+            return true;
+        }
+        return false;
+    }
+
+    // ---------- 写盘 ----------
+
+    /** 测试台直驱用：写盘重定向到别处（正常恒 null = 写 Ops.PATH 并镜像方案）。 */
+    public String pathOverride = null;
+
+    /** v22：提交即落盘——校验 → 整文件原子写（+ 镜像方案）→ 「已保存」生效口径反馈。what = 反馈文案。 */
+    private void save(final String what) {
+        if (file == null) { Ui.toast("尚未加载"); return; }
+        if (editing != null) { Ui.toast("请先完成或取消当前编辑"); return; }
+        for (Ops.Op o : file.ops) {
+            String err = Ops.validate(o, file, o);
+            if (err != null) { Ui.toast(err); return; }
+            String ge = regionRefErr(o);
+            if (ge != null) { Ui.toast(ge); return; }
+        }
+        final String text = file.serialize();
+        final String ov = pathOverride;
+        final String path = ov != null ? ov : Ops.PATH;
+        Ui.bg(new Runnable() {
+            public void run() {
+                if (ov == null) Su.backup(Ops.PATH);
+                final Su.R res = Su.writeAtomic(path, text.getBytes());
+                if (res.ok() && ov == null) Schemes.mirror();
+                Ui.MAIN.post(new Runnable() {
+                    public void run() {
+                        if (!res.ok()) { Ui.toast("保存失败：" + res.trimmed()); return; }
+                        dirty = false;
+                        render();
+                        Ui.saved(what);
+                    }
+                });
+            }
+        }, null);
+    }
+
+    // ---------- 视觉素材集成（v7 T8） ----------
+
+    private final StepEdit.Visual visual = new StepEdit.Visual() {
+        public void newTmpl(Forms.Chips field) { openTmpl(false, null); }
+        public void editTmpl(String name) {
+            if (name == null || name.isEmpty()) { Ui.toast("先选一个模板"); return; }
+            openTmpl(true, name);
+        }
+        public void testTmpl(String name, int thresh, boolean cc, String region) {
+            if (name == null || name.isEmpty()) { Ui.toast("先选一个模板"); return; }
+            openTmplTest(name, thresh, cc, region);
+        }
+        public void newPts(Forms.Chips field) { openPts(false, null); }
+        public void editPts(String name) {
+            if (name == null || name.isEmpty()) { Ui.toast("先选一个点集"); return; }
+            openPts(true, name);
+        }
+        public void testPts(String name, String region) {
+            if (name == null || name.isEmpty()) { Ui.toast("先选一个点集"); return; }
+            openPtsTest(name, region);
+        }
+        public void pickPointXY(final Forms.Num fx, final Forms.Num fy) {
+            VisualPage.Session s = new VisualPage.Session();
+            s.mode = VisualPage.MODE_PICK_POINT;
+            VisualPage.open(s, new VisualPage.Done() {
+                public void onTmplSaved(String name) { }
+                public void onPointPicked(int lx, int ly) {
+                    if (fx != null) { fx.setValue(lx); fx.clearError(); }
+                    if (fy != null) { fy.setValue(ly); fy.clearError(); }
+                }
+                public void onColorPicked(int rgb) { }
+                public void onCanceled() { }
+            });
+        }
+        public void pickColor(final StepEdit.ColorSink sink) {
+            VisualPage.Session s = new VisualPage.Session();
+            s.mode = VisualPage.MODE_PICK_COLOR;
+            VisualPage.open(s, new VisualPage.Done() {
+                public void onTmplSaved(String name) { }
+                public void onPointPicked(int lx, int ly) { }
+                public void onColorPicked(int rgb) { if (sink != null) sink.onColor(rgb); }
+                public void onCanceled() { }
+            });
+        }
+    };
+
+    private void openTmpl(boolean edit, String name) {
+        VisualPage.Session s = new VisualPage.Session();
+        s.mode = edit ? VisualPage.MODE_TMPL_EDIT : VisualPage.MODE_TMPL_NEW;
+        s.name = name;
+        VisualPage.open(s, new VisualPage.Done() {
+            public void onTmplSaved(String n) {
+                if (stepEditing != null) stepEditing.ref = n;
+                reloadNamesAndRerender();
+            }
+            public void onPointPicked(int lx, int ly) { }
+            public void onColorPicked(int rgb) { }
+            public void onCanceled() { }
+        });
+    }
+
+    private void openTmplTest(String name, int thresh, boolean cc, String region) {
+        VisualPage.Session s = new VisualPage.Session();
+        s.mode = VisualPage.MODE_TMPL_TEST;
+        s.name = name;
+        s.thresh = thresh;
+        s.colorCheck = cc;
+        s.region = region;
+        s.regionRect = regionRect(region);
+        VisualPage.open(s, null);
+    }
+
+    private void openPts(boolean edit, String name) {
+        VisualPage.Session s = new VisualPage.Session();
+        s.mode = edit ? VisualPage.MODE_PTS_EDIT : VisualPage.MODE_PTS_NEW;
+        s.name = name;
+        VisualPage.open(s, new VisualPage.Done() {
+            public void onTmplSaved(String n) {
+                if (stepEditing != null) stepEditing.ref = n;
+                reloadNamesAndRerender();
+            }
+            public void onPointPicked(int lx, int ly) { }
+            public void onColorPicked(int rgb) { }
+            public void onCanceled() { }
+        });
+    }
+
+    private void openPtsTest(String name, String region) {
+        VisualPage.Session s = new VisualPage.Session();
+        s.mode = VisualPage.MODE_PTS_TEST;
+        s.name = name;
+        s.region = region;
+        s.regionRect = regionRect(region);
+        VisualPage.open(s, null);
+    }
+
+    /** 区域几何（rect= x,y,w,h；circle= 外接矩形）→ 逻辑矩形（区域限定试验用）。 */
+    private int[] regionRect(String regionId) {
+        if (regionId == null || regionId.isEmpty()) return null;
+        for (Regions.Region r : regionsAll) {
+            if (r.id.equals(regionId)) {
+                if (r.type == 0) return new int[]{r.a1, r.a2, r.a3, r.a4};
+                return new int[]{r.a1 - r.a3, r.a2 - r.a3, r.a3 * 2, r.a3 * 2};
+            }
+        }
+        return null;
+    }
+
+    /** 素材保存后：只重载名单并重建当前步编辑（不打断操作编辑状态）。 */
+    private void reloadNamesAndRerender() {
+        Ui.bg(new Runnable() {
+            public void run() {
+                final List<String> tmpls = new ArrayList<String>();
+                final List<String> ptss = new ArrayList<String>();
+                Su.R tl = Su.run("ls " + Ops.TMPL_DIR + " 2>/dev/null");
+                if (tl.ok() && tl.out != null) {
+                    for (String ln : tl.out.split("\n")) {
+                        String fn = ln.trim();
+                        if (fn.endsWith(".tmpl")) tmpls.add(fn.substring(0, fn.length() - 5));
+                        else if (fn.endsWith(".pts")) ptss.add(fn.substring(0, fn.length() - 4));
+                    }
+                }
+                Ui.MAIN.post(new Runnable() {
+                    public void run() {
+                        tmplNames = tmpls;
+                        ptsNames = ptss;
+                        if (stepEditing != null) renderStepEditor();
+                    }
+                });
+            }
+        }, null);
+    }
+}

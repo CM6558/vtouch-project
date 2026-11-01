@@ -194,8 +194,7 @@ struct vt_ev {
 
 struct vtq {
     struct vt_ev buf[VTQ_CAP];
-    unsigned head, tail;     /* 消费者只写 head，生产者只写 tail（生产者**绝不**推进 head ——
-                              * 满态只做「合并 / 丢新」，见 vtq_push：那是给 C13 竞态打的补丁） */
+    unsigned head, tail;     /* 消费者只写 head，生产者只写 tail；短锁保护复制与满态原地合并 */
     unsigned long drops;     /* 溢出丢弃计数（仅诊断；只有生产者写） */
 };
 
@@ -519,7 +518,7 @@ int header_value(const char *req, const char *name, char *out, size_t cap);
 int has_token(const char *s, const char *token);
 /* 把 len 字节写满（EINTR、短写自动续写）。 (vtouch-doc: write_full) */
 int write_full(int fd, const void *buf, size_t len);
-/* 读 HTTP 请求、校验 Upgrade 与 Sec-WebSocket-Key，回 101。 (vtouch-doc: websocket_handshake) */
+/* 非阻塞增量读取 HTTP 握手，校验后回 101。 (vtouch-doc: websocket_handshake) */
 int websocket_handshake(int fd);
 /* 直接发一个 WS 帧（控制帧：close / pong 用）。 (vtouch-doc: ws_send) */
 int ws_send(int fd, unsigned opcode, const unsigned char *p, size_t n);

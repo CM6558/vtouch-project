@@ -23,9 +23,8 @@ DOCS = {
     note="诊断不占热路径（代价只是一次取模比较）。"),
 "vtq_push": dict(brief="事件入队（单生产者 = 主线程，消费者 = 区域线程）。",
     params=[("q", "队列"), ("ev", "事件（按值拷入）")],
-    note="永不阻塞、永不失败：队满先合并（队尾同槽 move，再退 8 格找同槽旧 move 原地覆盖），"
-         "都不行就丢**这一条新的**。生产者**绝不推进 head**（那是消费者一个人的）—— "
-         "老实现满态 CAS 推 head「丢最旧」会与消费者抢 head（评审 C13）。丢的只影响事件条数，注入路径不受影响。"),
+    note="短互斥只保护内存复制与满队列合并，日志在锁外；防止覆盖消费者正在读取的已发布槽。"
+         "队满先合并同槽 move，再退 8 格找旧 move，都不行则丢新。head 仍只由消费者推进。"),
 "vtq_pop": dict(brief="事件出队（单消费者 = 区域线程）。", params=[("q", "队列"), ("ev", "输出事件")], ret="1 取到；0 队空。"),
 "outq_reset": dict(brief="清空出站队列（新客户端接入 / 断连时）。", note="残包不许串给下一个客户端（§4.6）。"),
 "outq_pending": dict(brief="出站队列是否非空（主循环据此决定要不要挂 POLLOUT）。", ret="1 有；0 无。"),
@@ -150,8 +149,9 @@ DOCS = {
 "write_full": dict(brief="把 len 字节写满（EINTR、短写自动续写）。",
     params=[("fd", "目标 fd"), ("buf", "数据"), ("len", "长度")], ret="0 成功；-1 出错。",
     note="握手与上行同步写用它；下行的响应/事件走出站队列，不走这里。"),
-"websocket_handshake": dict(brief="读 HTTP 请求、校验 Upgrade 与 Sec-WebSocket-Key，回 101。",
-    params=[("fd", "已 accept 的连接")], ret="0 成功；-1 不是合法 WS 请求。", note="握手期用带超时的阻塞读（最多被拖 300ms）。"),
+"websocket_handshake": dict(brief="非阻塞增量读取 HTTP 握手，校验后回 101。",
+    params=[("fd", "连接；-1 清空在途状态")], ret="0 成功；1 数据未就绪；-1 失败。",
+    note="主循环单请求在途，总期限 1000ms；MSG_DONTWAIT 不阻塞输入。VTOUCH_WS_TOKEN 非空时要求 Bearer 认证。"),
 "ws_send": dict(brief="直接发一个 WS 帧（控制帧：close / pong 用）。",
     params=[("fd", "连接"), ("opcode", "操作码"), ("p", "正文"), ("n", "正文长度")], ret="0 成功；-1 失败。",
     note="只给控制帧用；文本帧请走 outq_push_text。"),
@@ -760,3 +760,23 @@ DOCS = {
          "（在途序号比对）自行丢弃陈旧结果。读侧以 acquire 读 res_seq（配核心侧 release 写：读到新 res_seq"
          "必能读到配对 x/y/err）。"),
 }
+
+# 运行可靠性批：函数文档与实际跨拍接口同源更新。
+DOCS["op_vis_capture"].update(
+    brief="取帧：复用缓存或推进异步请求，未就绪即返回。",
+    params=[("fr", "输出稳定帧视图"), ("force", "非零强制新帧"),
+            ("err", "输出失败原因"), ("job", "跨拍保留的请求与开始时刻")],
+    ret="0 成功；1 尚未就绪；-1 失败。",
+    note="单请求在途，按 req_seq 和帧头 seqlock 读稳定视图；轮询不等待，超时按单调钟。")
+DOCS["vis_exec_find"].update(
+    brief="视觉查找：VM/试查跨拍推进；旧步骤路径保留同步兼容。",
+    params=DOCS["vis_exec_find"]["params"] + [("async_job", "跨拍任务；NULL 为旧步骤同步路径")],
+    ret="0 命中；1 异步待续；-1 未命中；-2 硬失败。",
+    note="VM/试查请求帧后立即让出，每次续跑只做一次匹配，持续查找未命中则下一拍请求新帧。"
+         "找色只绑定 RGBA，找图才生成灰度金字塔。旧步骤兼容路径不改变四档语义。")
+DOCS["op_vis_cancel"] = dict(brief="清理结束脚本的异步视觉任务和帧复用标记。", note="仅主线程调用。")
+DOCS["vt_vis_frame_prepare_color"] = dict(
+    brief="准备仅找色的轻量 RGBA 视图，不扫描像素。",
+    params=[("rgba", "RGBA 缓冲"), ("w,h", "帧尺寸"), ("stride", "行跨距")],
+    ret="VT_VIS_OK 成功；VT_VIS_BAD 参数非法。",
+    note="失败使旧视图失效；该视图不能直接用于找图，调用方保证 RGBA 生命周期。")

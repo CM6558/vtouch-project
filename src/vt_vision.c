@@ -63,6 +63,7 @@ static uint8_t s_t4   [VT_VIS_MAX_W / 4 * VT_VIS_MAX_H / 4];  /* 模板 1/4 */
 static const uint8_t *s_rgba;   /* 帧 RGBA 指针（prepare..release 间由调用方保持有效；引擎只读） */
 static int s_w, s_h, s_stride;  /* 帧尺寸与行跨距（字节） */
 static int s_ok;                /* 1 = 帧视图已准备 */
+static int s_gray_ok;           /* 找色帧不需要扫描整帧生成灰度 */
 
 /* 金字塔精修的 1/4 胞行缓存（单线程静态；避免整帧 flag 大数组）。 */
 static uint8_t s_flagrow[VT_VIS_MAX_W / 4 + 2];  /* 当前胞行的粗筛结果（按 X） */
@@ -507,6 +508,30 @@ static int vis_image_pyramid(int x0, int x1, int y0, int y1, const uint8_t *tmpl
 /* ---- 对外接口 ---- */
 
 /**
+ * (vtouch-doc: vt_vis_frame_prepare_color)
+ * @brief 准备仅找色的轻量 RGBA 视图，不扫描像素。
+ * @param   rgba     RGBA 缓冲
+ * @param   w,h      帧尺寸
+ * @param   stride   行跨距
+ * @return  VT_VIS_OK 成功；VT_VIS_BAD 参数非法。
+ * @note    失败使旧视图失效；该视图不能直接用于找图，调用方保证 RGBA 生命周期。
+ */
+int vt_vis_frame_prepare_color(const uint8_t *rgba, int w, int h, int stride)
+{
+    s_ok = 0;                                        /* 失败即失效：不静默沿用上一帧 */
+    s_gray_ok = 0;
+    if (!rgba || w <= 0 || h <= 0 || w > VT_VIS_MAX_W || h > VT_VIS_MAX_H) return VT_VIS_BAD;
+    if (stride < w * 4) return VT_VIS_BAD;
+
+    s_rgba = rgba;
+    s_w = w;
+    s_h = h;
+    s_stride = stride;
+    s_ok = 1;
+    return VT_VIS_OK;
+}
+
+/**
  * (vtouch-doc: vt_vis_frame_prepare)
  * @brief 准备帧视图（静态单例）：RGBA→灰度 + 1/2、1/4 金字塔。
  * @param   rgba     帧 RGBA8888（stride 字节/行；调用方保证在 release 前有效）
@@ -518,18 +543,11 @@ static int vis_image_pyramid(int x0, int x1, int y0, int y1, const uint8_t *tmpl
  */
 int vt_vis_frame_prepare(const uint8_t *rgba, int w, int h, int stride)
 {
-    s_ok = 0;                                        /* 失败即失效：不静默沿用上一帧 */
-    if (!rgba || w <= 0 || h <= 0 || w > VT_VIS_MAX_W || h > VT_VIS_MAX_H) return VT_VIS_BAD;
-    if (stride < w * 4) return VT_VIS_BAD;
-
-    s_rgba = rgba;
-    s_w = w;
-    s_h = h;
-    s_stride = stride;
+    if (vt_vis_frame_prepare_color(rgba, w, h, stride) != VT_VIS_OK) return VT_VIS_BAD;
     VIS_GRAY(s_gray, rgba, w, h, stride);
     vis_down2(s_gray2, w / 2, h / 2, s_gray, w);
     vis_down2(s_gray4, w / 4, h / 4, s_gray2, w / 2);
-    s_ok = 1;
+    s_gray_ok = 1;
     return VT_VIS_OK;
 }
 
@@ -541,6 +559,7 @@ int vt_vis_frame_prepare(const uint8_t *rgba, int w, int h, int stride)
 void vt_vis_frame_release(void)
 {
     s_ok = 0;
+    s_gray_ok = 0;
     s_rgba = NULL;
 }
 
@@ -637,7 +656,7 @@ int vt_vis_find_image(int rx, int ry, int rw, int rh, const uint8_t *tmpl, int t
     int x0, x1, y0, y1;
     uint64_t limit;
 
-    if (!s_ok || !tmpl || !ox || !oy) return VT_VIS_BAD;
+    if (!s_ok || !s_gray_ok || !tmpl || !ox || !oy) return VT_VIS_BAD;
     if (tw <= 0 || th <= 0 || tw > s_w || th > s_h || tw > VT_VIS_MAX_W || th > VT_VIS_MAX_H)
         return VT_VIS_BAD;
     if (thresh < 0 || thresh > 255 || rw <= 0 || rh <= 0) return VT_VIS_BAD;

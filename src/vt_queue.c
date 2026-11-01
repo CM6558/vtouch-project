@@ -7,6 +7,8 @@ static struct out_msg outq[OUTQ_CAP];
 static int outq_head, outq_tail;
 static unsigned long outq_dropped;
 static pthread_mutex_t outq_lock = PTHREAD_MUTEX_INITIALIZER;
+/* 溢出时会原地合并已发布槽：必须与消费者的整格复制互斥。只保护内存，不持锁写日志。 */
+static pthread_mutex_t eventq_lock = PTHREAD_MUTEX_INITIALIZER;
 /**
  * (vtouch-doc: queue_drop_log)
  * @brief 队列丢弃的诊断日志：前 3 次每次都打，之后每 100 次打一行。
@@ -28,7 +30,7 @@ void queue_drop_log(const char *what, unsigned long n)
  * @brief 事件入队（单生产者 = 主线程，消费者 = 区域线程）。
  * @param   q        队列
  * @param   ev       事件（按值拷入）
- * @note    永不阻塞、永不失败：队满先合并（队尾同槽 move，再退 8 格找同槽旧 move 原地覆盖），都不行就丢**这一条新的**。生产者**绝不推进 head**（那是消费者一个人的）—— 老实现满态 CAS 推 head「丢最旧」会与消费者抢 head（评审 C13）。丢的只影响事件条数，注入路径不受影响。
+ * @note    短互斥只保护内存复制与满队列合并，日志在锁外；防止覆盖消费者正在读取的已发布槽。队满先合并同槽 move，再退 8 格找旧 move，都不行则丢新。head 仍只由消费者推进。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   溢出策略（§4.3）：① 队尾同槽同类的 move 原地合并（丢旧位置不影响增量语义）；
@@ -42,13 +44,18 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
     /* 生产者**只写 tail 与数据格**，head 永远是消费者一个人的（评审 C13：老实现在满态用 CAS 推进
      * head「丢最旧」，与消费者「读了 head、正在拷数据」竞态 —— 拷一半的事件被覆盖、或 head 被写回去，
      * 结果就是丢事件）。满态的新策略：先合并，合并不了就丢**这一条新的**。 */
-    unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_RELAXED);
-    unsigned head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    unsigned tail, head;
+    unsigned long dropped = 0;
+    const char *label = NULL;
     unsigned i;
+    pthread_mutex_lock(&eventq_lock);
+    tail = q->tail;
+    head = q->head;
     if (tail - head >= VTQ_CAP) {
         unsigned last = (tail - 1u) % VTQ_CAP;
         if (ev->action == VT_MOVE && q->buf[last].action == VT_MOVE && q->buf[last].slot == ev->slot) {
             q->buf[last].x = ev->x; q->buf[last].y = ev->y; q->buf[last].ts = ev->ts;
+            pthread_mutex_unlock(&eventq_lock);
             return;                    /* 最常见的一路：同一根手指连续 move ⇒ 原地合并，一条都不丢 */
         }
         /* 再往后最多看 8 格：找**同槽的旧 move** 原地覆盖（另一根手指的事件与之交错时的常见情形）。
@@ -57,15 +64,20 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
             unsigned idx = (tail - 1u - i) % VTQ_CAP;
             if (q->buf[idx].action == VT_MOVE && q->buf[idx].slot == ev->slot) {
                 q->buf[idx] = *ev;
-                queue_drop_log(ev->action == VT_MOVE ? "事件(合并旧move)" : "事件(覆盖旧move)", ++q->drops);
-                return;
+                label = ev->action == VT_MOVE ? "事件(合并旧move)" : "事件(覆盖旧move)";
+                dropped = ++q->drops;
+                goto done;
             }
         }
-        queue_drop_log("事件(丢新)", ++q->drops);
-        return;
+        label = "事件(丢新)";
+        dropped = ++q->drops;
+        goto done;
     }
     q->buf[tail % VTQ_CAP] = *ev;
-    __atomic_store_n(&q->tail, tail + 1u, __ATOMIC_RELEASE);
+    q->tail = tail + 1u;
+done:
+    pthread_mutex_unlock(&eventq_lock);
+    if (label) queue_drop_log(label, dropped);
 }
 /**
  * (vtouch-doc: vtq_pop)
@@ -76,11 +88,13 @@ void vtq_push(struct vtq *q, const struct vt_ev *ev)
  */
 int vtq_pop(struct vtq *q, struct vt_ev *ev)
 {
-    unsigned head = __atomic_load_n(&q->head, __ATOMIC_RELAXED);
-    unsigned tail = __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE);
-    if (head == tail) return 0;
+    unsigned head, tail;
+    pthread_mutex_lock(&eventq_lock);
+    head = q->head; tail = q->tail;
+    if (head == tail) { pthread_mutex_unlock(&eventq_lock); return 0; }
     *ev = q->buf[head % VTQ_CAP];
-    __atomic_store_n(&q->head, head + 1u, __ATOMIC_RELEASE);
+    q->head = head + 1u;
+    pthread_mutex_unlock(&eventq_lock);
     return 1;
 }
 /**

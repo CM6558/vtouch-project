@@ -20,6 +20,12 @@
 #define VT_VM_MAX_FNS         128
 #define VT_VM_SHEAP_CAP       65536  /* 运行时字符串堆（拼接/转串） */
 #define VT_VM_ERR_CAP         160
+#ifndef VT_VM_TICK_BUDGET
+#define VT_VM_TICK_BUDGET     2000u  /* 每拍最多执行的字节码数；让主循环处理输入与停止 */
+#endif
+#ifndef VT_VM_COMPUTE_LIMIT
+#define VT_VM_COMPUTE_LIMIT   2000000u /* 连续无等待计算上限；WAIT/动作/异步视觉会重置 */
+#endif
 
 /* 操作码（= docs/VTBC_V1.md §3.1；与编辑器 VtOp.java 一致） */
 enum {
@@ -48,7 +54,8 @@ enum { VT_C_EQ = 0, VT_C_NE = 1, VT_C_LT = 2, VT_C_GT = 3, VT_C_LE = 4, VT_C_GE 
 typedef enum {
     VT_VM_DONE = 0,   /* 程序结束（term_mode：0 完成 / 1 中止） */
     VT_VM_WAIT = 1,   /* 需等待（出参 ms）后继续 tick */
-    VT_VM_ERR  = 2    /* 中止：err / err_line */
+    VT_VM_ERR  = 2,   /* 中止：err / err_line */
+    VT_VM_YIELD = 3   /* 时间片耗尽或宿主异步待续；不是脚本中的等待 */
 } vt_vm_status;
 
 /* 值：t 0 空 / 1 数 / 2 串（sp 指向 blob 常量或字符串堆） */
@@ -74,6 +81,7 @@ enum {
  *   点按：touch_down → [等 ms，ms=0 也隔一拍] → touch_up
  *   滑动：touch_down → [等 停1] → N=max(2,ms/10) 次（等 k·ms/N−(k−1)·ms/N → touch_move(lerp)）
  *         → [等 停2] → touch_up
+ * 视觉钩子可返回 1 = 尚未完成；VM 恢复操作数并在下一拍重试，不重复推进 pc。
  * 未挂宿主（NULL）= 纯逻辑模式：动作/视觉占位（消费操作数，视觉推 0）。
  * 注意：vt_vm_load 会清空宿主编排——载入后须重新 vt_vm_set_host。 */
 struct vt_vm_host {
@@ -123,8 +131,10 @@ struct vt_vm {
     uint32_t pc;
     uint32_t lbase, cur_nlocals;      /* 当前帧局部窗（绝对槽号 = slot_count + 帧内相对号） */
     uint32_t cjmp_count;
+    uint32_t compute_count;            /* 自上次真正等待以来的指令数 */
     double   now_ms;                  /* NOW 源；批模式每调一次 +now_incr（测试假时钟） */
     double   now_incr;
+    uint64_t (*clock_ms)(void);        /* NULL = 单测假时钟；宿主绑定单调钟 */
     char     sheap[VT_VM_SHEAP_CAP];  uint32_t sheap_used;
     char     err[VT_VM_ERR_CAP];
     uint32_t err_pc, err_line;
@@ -145,7 +155,7 @@ int  vt_vm_load(vt_vm *vm, const uint8_t *bc, uint32_t len);
 void vt_vm_reset(vt_vm *vm);
 /* 执行一段，直到 等待/结束/错误。WAIT 时 *wait_ms 为需等毫秒。 */
 vt_vm_status vt_vm_tick(vt_vm *vm, uint32_t *wait_ms);
-/* 批模式：WAIT 不等直接续跑（测试/编译期望值用）。 */
+/* 批模式：WAIT/YIELD 不等直接续跑（测试/编译期望值用，仍受计算上限约束）。 */
 vt_vm_status vt_vm_run(vt_vm *vm);
 /* 挂载/卸载宿主钩子（NULL = 纯逻辑模式）。 */
 void vt_vm_set_host(vt_vm *vm, const struct vt_vm_host *host);

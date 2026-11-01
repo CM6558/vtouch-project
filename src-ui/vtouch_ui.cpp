@@ -692,6 +692,14 @@ static void hide_toggle(const char *id)
 #define REGION_CONF_DIR "/data/local/vtouch-runtime"
 #define REGION_CONF_NEW REGION_CONF_DIR "/regions.conf"
 #define REGION_CONF_OLD "/data/local/tmp/vtouch-runtime/regions.conf"   /* 升级前的老位置（只读一次做迁移） */
+static long S_publish_grace;
+
+/* 与 App 的 mkdir 锁使用同一原子获取操作，避免「先检查、后写入」窗口。只由串行文件层持有。 */
+struct RuntimeWriteGuard {
+    bool held;
+    RuntimeWriteGuard() : held(mkdir(REGION_CONF_DIR "/.publish-lock", 0775) == 0) {}
+    ~RuntimeWriteGuard() { if (held) rmdir(REGION_CONF_DIR "/.publish-lock"); }
+};
 static void region_conf_dir(void)
 {
     if (mkdir(REGION_CONF_DIR, 0775) < 0 && errno != EEXIST)
@@ -710,6 +718,10 @@ static int save_failed(void)
 static void scheme_mirror(void);
 static int save_regions(void)
 {
+    if (access(REGION_CONF_DIR "/.publish-lock", F_OK) == 0 ||
+        access(REGION_CONF_DIR "/.publish-pending", F_OK) == 0 || now_ms() < S_publish_grace) return save_failed();
+    RuntimeWriteGuard write_guard;
+    if (!write_guard.held) return save_failed();
     char tmppath[128];
     int i, n;
     /* 转屏批次进行中：表是混合态（部分区域已换算、部分没有）→ 推迟到收尾后再写。
@@ -950,6 +962,10 @@ static unsigned int fnv1a32(const unsigned char *b, size_t n);   /* 定义见「
 static int ops_write_prog_file(const char *name, const unsigned char *buf, int n);   /* 同上 */
 static int save_ops(void)
 {
+    if (access(REGION_CONF_DIR "/.publish-lock", F_OK) == 0 ||
+        access(REGION_CONF_DIR "/.publish-pending", F_OK) == 0 || now_ms() < S_publish_grace) return ops_save_failed();
+    RuntimeWriteGuard write_guard;
+    if (!write_guard.held) return ops_save_failed();
     char tmppath[128];
     static unsigned char pbuf[OPS_PROG_MAX];      /* 程序产物读回缓冲（32KB，勿上栈） */
     int i, n, np, nprog = 0;
@@ -1128,6 +1144,7 @@ static int ops_load_prog(const char *name, const char *gate, int autoff, const c
     long sz = 0, n;
     unsigned int want = 0, have;
     int i, k, plen = 0;
+    static unsigned char installed[OPS_PROG_MAX];
     if (sscanf(tail, "%15s %ld", hh, &sz) != 2 || strlen(hh) != 8 || sz < 1 || sz > OPS_PROG_MAX) {
         ALOGW("ops.conf 跳过一条坏记录（%s：prog 元数据非法）", name[0] ? name : "无名记录");
         return -1;
@@ -1141,6 +1158,15 @@ static int ops_load_prog(const char *name, const char *gate, int autoff, const c
         want = (want << 4) | d;
     }
     if (op_exists(name) || prog_find(name) >= 0) {
+        char have_gate[VT_NAME_BUF];
+        int existing = prog_find(name), have_autoff = 0, have_len = 0;
+        if (existing < 0 || vtouch_get_prog(existing, NULL, 0, have_gate, sizeof have_gate,
+                &have_autoff, installed, sizeof installed, &have_len) != 0 ||
+            have_len != sz || fnv1a32(installed, (size_t)have_len) != want ||
+            strcmp(have_gate, g) != 0 || have_autoff != autoff) {
+            ALOGW("ops.conf 程序 %s 与核心现役定义不同，需要强制重载", name);
+            return -1;
+        }
         ALOGI("ops.conf 程序 %s 核心表里已有 → 跳过（不覆盖现役定义）", name);
         return 1;
     }
@@ -1165,7 +1191,8 @@ static int ops_load_prog(const char *name, const char *gate, int autoff, const c
         return -1;
     }
     i = prog_find(name);                             /* 回读校验：找到同名且长度一致才算真上表 */
-    if (i < 0 || vtouch_get_prog(i, NULL, 0, NULL, 0, NULL, NULL, 0, &plen) != 0 || plen != (int)n) {
+    if (i < 0 || vtouch_get_prog(i, NULL, 0, NULL, 0, NULL, installed, sizeof installed, &plen) != 0 ||
+        plen != (int)n || fnv1a32(installed, (size_t)plen) != want) {
         ALOGW("ops.conf 程序 %s 核心拒收（见核心日志）", name);
         return -1;
     }
@@ -1197,8 +1224,27 @@ static void op_run_flag_check(void)
     else ALOGW("ops-prog 起跑请求未送达（%s）", run_name);
 }
 
+static int S_load_bad;
+static unsigned S_loaded_hash;
+
+/* 面板确认：当前 core pid + 实际读入的 ops.conf 哈希，供 App 区分已保存与已加载。 */
+static void publish_load_status(const char *state, int bad)
+{
+    const char *path = REGION_CONF_DIR "/reload-status.txt";
+    const char *tmp = REGION_CONF_DIR "/reload-status.txt.tmp";
+    char cur[VT_NAME_BUF] = {0};
+    FILE *f = fopen(REGION_CONF_DIR "/current", "r");
+    if (f) { (void)fgets(cur, sizeof cur, f); fclose(f); cur[strcspn(cur, "\r\n")] = 0; }
+    f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "version=1\ncore_pid=%ld\npanel_pid=%ld\nops_hash=%08x\nscheme=%s\nstate=%s\nbad=%d\n",
+            (long)getppid(), (long)getpid(), S_loaded_hash, cur, state, bad);
+    if (fclose(f) != 0 || rename(tmp, path) != 0) remove(tmp);
+}
+
 static void load_ops(void)
 {
+    S_load_bad = 0;
     char line[192];
     int ver = 0, nrec = 0, nok = 0, nskip = 0, nbad = 0, orphan = 0, rc = 0;
     /* 待结算的一条（op 行 + 其后 step 行）：下一条 op 行/EOF 才结算 —— 半截记录不落表 */
@@ -1209,7 +1255,11 @@ static void load_ops(void)
     char refs[OPS_MAX_STEPS][VT_NAME_BUF];   /* v3 每步 ref（旧版行读入时缺省空） */
     char exprs[OPS_MAX_STEPS][OPS_EXPR_MAX + 1];   /* v4 每步表达式（v1/v2/v3 行缺省空；`-` = 空） */
     FILE *f = fopen(OPS_CONF_FILE, "r");
-    if (!f) return;          /* 没有文件 = 没有历史操作（首次运行），什么都不做、也不写盘 */
+    if (!f) { S_load_bad = 1; return; }
+    S_loaded_hash = 0x811C9DC5u;
+    int hash_ch;
+    while ((hash_ch = fgetc(f)) != EOF) { S_loaded_hash ^= (unsigned char)hash_ch; S_loaded_hash *= 0x01000193u; }
+    if (ferror(f) || fseek(f, 0, SEEK_SET) != 0) { fclose(f); S_load_bad = 1; return; }
     /* 版本门：v1 / v2 / v3 / v4（兼容读入 + v5 翻译，spec §7 / EDITOR_V2 §Task 7.5）、v5（步骤本格式）
      * 与 v8（v8 T4.2：元数据行 [+ 过渡期步骤行]）都认；
      * 无版本行 / 其他版本 = 旧版本残留 → 整份丢弃；照 regions.conf 口径改写当前表 */
@@ -1217,6 +1267,7 @@ static void load_ops(void)
         (ver < 1 || (ver > OPS_CONF_VER_STEP && ver != OPS_CONF_VER))) {
         fclose(f);
         ALOGI("ops.conf 旧格式/版本不符 → 丢弃清空");
+        S_load_bad = 1;
         save_ops();
         return;
     }
@@ -1307,6 +1358,8 @@ static void load_ops(void)
         if (rc == 0) nok++; else if (rc == 1) nskip++; else nbad++;
     }
     fclose(f);
+    S_load_bad = nbad;
+    publish_load_status(nbad ? "partial" : "loaded", nbad);
     if (nrec > 0 && (nskip || nbad))
         ALOGI("ops.conf 共 %d 条：补入 %d 条、跳过 %d 条（核心表里已有 %d、坏记录 %d）",
               nrec, nok, nskip + nbad, nskip, nbad);
@@ -1780,11 +1833,15 @@ static void scheme_rollback_to(const char *cur)
 static int S_scm_force = 0;   /* T8 热生效：强制重放标志（仅 scheme_reload 置位；绕过同名 no-op） */
 int scheme_switch(const char *name)
 {
-    char cur[VT_NAME_BUF], sp[160], dp[160];
+    char cur[VT_NAME_BUF] = {0}, sp[160], dp[160];
     int rc, rst = 0;
+    if (access(REGION_CONF_DIR "/.publish-lock", F_OK) == 0) return 11;
+    RuntimeWriteGuard write_guard;
+    if (!write_guard.held) return 11;
 
     if (!name || !scheme_name_known(name)) return 1;
-    if (!S_scm_force && scheme_cur_get(cur) == 0 && strcmp(cur, name) == 0) return 0;    /* 已是当前 → no-op（S_scm_force=1 时强制重放，T8） */
+    (void)scheme_cur_get(cur);
+    if (!S_scm_force && strcmp(cur, name) == 0) return 0;
     rc = scheme_precheck(name);                                          /* ① 预检：坏 → 拒切、原状 */
     if (rc != 0) return rc;
 
@@ -1793,7 +1850,7 @@ int scheme_switch(const char *name)
     if (vtouch_op_status(NULL, NULL, &rst) == 0 && rst) vtouch_op_stop();
 
     /* ③ flush 旧（兜底镜像，spec §4-3；失败仅告警、不中断） */
-    if (cur[0]) {
+    if (cur[0] && !S_scm_force) {                /* 热重载不能把 live 旧版本反写覆盖外部发布的新方案 */
         snprintf(dp, sizeof dp, "%s/%s/regions.conf", SCHEME_DIR, cur);
         if (scheme_copy_file(REGION_CONF_NEW, dp, 0) != 0)
             ALOGW("方案 切换：flush %s/regions.conf 失败: %s", cur, strerror(errno));
@@ -1877,6 +1934,12 @@ int scheme_switch(const char *name)
         ALOGI("方案 切换 %s → %s（区域 %d / 操作 %d）", cur[0] ? cur : "-", name, nr, no);
     }
     ui_region_changed();
+    if (!S_load_bad && access(REGION_CONF_DIR "/.publish-pending", F_OK) == 0) {
+        remove(REGION_CONF_DIR "/.publish-pending");
+        S_publish_grace = now_ms() + 1500;
+        g_save_pending = 0; g_ops_save_pending = 0;
+    }
+    publish_load_status(S_load_bad ? "partial" : "loaded", S_load_bad);
     g_need = 1; g_force_frames = 3;
     return 0;
 }
@@ -1890,6 +1953,7 @@ static int scheme_reload(void)
     int rc = scheme_switch(cur);
     S_scm_force = 0;
     if (rc == 0) ALOGI("方案 重载 %s（热生效）", cur);
+    else if (access(REGION_CONF_DIR "/.publish-lock", F_OK) != 0) publish_load_status("failed", rc);
     return rc;
 }
 
@@ -1905,6 +1969,8 @@ static long hr_mtime[3] = {-2, -2, -2};   /* 基线：regions/ops/current 的 mt
 static long hr_size[3] = {-1, -1, -1};    /* 基线：size */
 static unsigned hr_psig[2] = {0, 0};      /* 基线：[0] = live progs / [1] = schemes/<current>/progs 目录签名 */
 static long hr_sops_mt = -2, hr_sops_sz = -1;   /* 基线：schemes/<current>/ops.conf 的 mtime/size */
+static long hr_retry_at;
+static unsigned hr_failures;
 
 static void hr_stat3(long *mt, long *sz)
 {
@@ -1980,6 +2046,7 @@ static void hr_poll(void)
     unsigned psig[2];
     if (now < hr_next_t) return;
     hr_next_t = now + HR_POLL_MS;
+    if (access(REGION_CONF_DIR "/.publish-lock", F_OK) == 0) return;
     hr_sample(mt, sz, psig, &smt, &ssz);
     if (hr_mtime[0] == -2) {                       /* 首巡：只记基线 */
         for (int i = 0; i < 3; i++) { hr_mtime[i] = mt[i]; hr_size[i] = sz[i]; }
@@ -1988,15 +2055,23 @@ static void hr_poll(void)
         return;
     }
     int diff = 0;
+    if (hr_failures || access(REGION_CONF_DIR "/.publish-pending", F_OK) == 0) diff = 1;
     for (int i = 0; i < 3; i++) if (mt[i] != hr_mtime[i] || sz[i] != hr_size[i]) diff = 1;
     if (psig[0] != hr_psig[0] || psig[1] != hr_psig[1] || smt != hr_sops_mt || ssz != hr_sops_sz) diff = 1;
     if (!diff) { hr_chg_t = 0; return; }
     if (hr_chg_t == 0) { hr_chg_t = now; return; } /* 首次发现：进防抖窗 */
-    if (now - hr_chg_t < HR_DEBOUNCE_MS) return;   /* 未稳 */
+    if (now - hr_chg_t < HR_DEBOUNCE_MS || now < hr_retry_at) return;
     {
         int rc = scheme_reload();
-        if (rc != 0) ALOGW("热生效：重载失败 rc=%d（保持现状，等下次变化）", rc);
-        hr_files_note();                           /* 成功/失败都刷基线（同一次变化不重试） */
+        if (rc != 0 || S_load_bad) {
+            if (hr_failures < 5) hr_failures++;
+            hr_retry_at = now + (1000L << hr_failures);
+            publish_load_status("failed", rc ? rc : S_load_bad);
+            ALOGW("热生效：重载失败 rc=%d bad=%d（限频重试）", rc, S_load_bad);
+        } else {
+            hr_failures = 0; hr_retry_at = 0;
+            hr_files_note();
+        }
     }
 }
 
@@ -4203,15 +4278,20 @@ JNIEXPORT jint JNICALL Java_VTouchUI_nativeInit(JNIEnv *env, jclass, jint w, jin
     { pthread_t th; if (pthread_create(&th, NULL, test_ev_thread, NULL) == 0) pthread_detach(th); }
 #endif
     if (vtouch_init(7, argv) != 0) return -2;
-    {   /* v4 方案接管（spec §2）：兜底迁移 → 强制同步（保证 live == schemes/<current>）→ 照旧加载。
-         * 同步失败只告警：按现有 live 文件继续（不阻塞启动、不影响注入），下次启动兜底再试。 */
-        char scm[VT_NAME_BUF];
-        scheme_migrate(scm);
-        if (scm[0] && scheme_sync_live(scm) != 0)
-            ALOGW("方案 同步失败 %s: %s", scm, strerror(errno));
+    {
+        region_conf_dir();
+        RuntimeWriteGuard startup_guard;
+        if (!startup_guard.held) { ALOGW("发布/恢复尚未完成，面板暂不载入配置"); return -3; }
+        {   /* v4 方案接管（spec §2）：兜底迁移 → 强制同步 → 照旧加载。 */
+            char scm[VT_NAME_BUF];
+            scheme_migrate(scm);
+            if (scm[0] && scheme_sync_live(scm) != 0)
+                ALOGW("方案 同步失败 %s: %s", scm, strerror(errno));
+        }
+        load_regions();
+        load_ops();
+        if (!S_load_bad) remove(REGION_CONF_DIR "/.publish-pending");
     }
-    load_regions();   /* 上次落盘的表（regions.conf），没有则空表 */
-    load_ops();       /* 上次落盘的操作表（ops.conf）：只补缺（核心已有同名不动）；坏记录单条跳过 */
     /* T4.2 验收钩（env 门控，默认零行为）：启动导入完成后做一次 save 往返 —— 供「同一操作 vtbc
      * md5 经面板往返不变」字节对拍（VTOUCH_UI_OPS_SAVE_TEST=1 时开；T5 验收后评估退役）。 */
     if (getenv("VTOUCH_UI_OPS_SAVE_TEST")) {

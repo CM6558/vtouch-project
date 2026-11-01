@@ -197,7 +197,9 @@ int vtouch_init(int argc, char **argv)
  */
 int vtouch_poll_step(void)
 {
-    struct pollfd p[6];
+    static int handshake_fd = -1;
+    static uint64_t handshake_started;
+    struct pollfd p[7];
     nfds_t np;
     int want_out, r;
     int to;
@@ -228,6 +230,7 @@ int vtouch_poll_step(void)
         if (od >= 0 && od < to) to = od;
     }
 #endif
+    if (handshake_fd >= 0 && to > 10) to = 10;       /* 握手增量推进，不阻塞触摸或脚本 */
     want_out = (g.client_fd >= 0 && outq_pending());
     p[0] = (struct pollfd){ g.input_fd, POLLIN | POLLHUP | POLLERR, 0 };
     p[1] = (struct pollfd){ g.listen_fd, POLLIN, 0 };
@@ -248,6 +251,11 @@ int vtouch_poll_step(void)
         np = 6;
     }
 #endif
+    if (handshake_fd >= 0) {
+        while (np < 6) p[np++] = (struct pollfd){-1, 0, 0};
+        p[6] = (struct pollfd){handshake_fd, POLLIN | POLLHUP | POLLERR, 0};
+        np = 7;
+    }
     r = poll(p, np, to);
     if (r < 0) {
         if (errno == EINTR) return 0;
@@ -278,28 +286,32 @@ int vtouch_poll_step(void)
         return -1;
     }
     if (p[1].revents & POLLIN) {
-        int ncf = accept4(g.listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        int ncf = accept4(g.listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
         if (ncf >= 0) {
-            struct timeval rtv = { .tv_sec = 0, .tv_usec = 300000 };   /* 单次 recv 超时 300ms（整段握手总预算 1000ms，见 vt_ws.c VT_HS_TOTAL_MS） */
-            struct timeval stv = { .tv_sec = 0, .tv_usec = 20000 };    /* 写超时（第二道保险） */
             int one = 1;
-            if (g.client_fd >= 0) { fprintf(stderr, "vtouchd: 新连接，踢掉旧客户端\n"); drop_client(); }
-            setsockopt(ncf, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof rtv);
-            setsockopt(ncf, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof stv);
             setsockopt(ncf, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-            if (websocket_handshake(ncf) != 0) {
-                fprintf(stderr, "vtouchd: ws 握手失败\n");
-                close(ncf);
-            } else {
-                int fl = fcntl(ncf, F_GETFL, 0);
-                if (fl >= 0) fcntl(ncf, F_SETFL, fl | O_NONBLOCK);   /* §4.5：出站写永不阻塞主线程 */
-                g.client_fd = ncf;
+            if (handshake_fd >= 0) close(ncf);           /* 慢握手不挤走已有客户端/在途握手 */
+            else {
+                (void)websocket_handshake(-1);
+                handshake_fd = ncf;
+                handshake_started = now_ns();
+            }
+        }
+    }
+    if (handshake_fd >= 0) {
+        int hs = websocket_handshake(handshake_fd);
+        if (hs != 1 || now_ns() - handshake_started >= 1000000000ull) {
+            if (hs == 0) {
+                if (g.client_fd >= 0) drop_client();
+                g.client_fd = handshake_fd;
                 ws_input_reset();
                 outq_reset();
                 p[2].revents = 0;            /* 评审修复 2026-10-05：p[2]/p[3] 装的是**旧 fd** 的 poll 结果， */
                 p[3].revents = 0;            /* 不清零会把旧连接的 HUP/ERR 算到新连接头上（新连接同轮被踢） */
                 fprintf(stderr, "vtouchd: ws client connected\n");
-            }
+            } else { close(handshake_fd); fprintf(stderr, "vtouchd: ws 握手失败\n"); }
+            handshake_fd = -1;
+            (void)websocket_handshake(-1);
         }
     }
     if (g.client_fd >= 0 && (p[2].revents & (POLLHUP | POLLERR))) drop_client();
@@ -320,7 +332,7 @@ int vtouch_poll_step(void)
         if (p[4].revents & (POLLHUP | POLLERR)) vt_panel_wake_drop();
     }
     /* p[5] 操作触发唤醒 fd：只把可读状态关掉（触发本身在**下一轮开头**的 vt_ops_tick 里消费） */
-    if (np == 6 && (p[5].revents & POLLIN)) {
+    if (np >= 6 && p[5].fd >= 0 && (p[5].revents & POLLIN)) {
         uint64_t b;
         while (read(g.ops_wake_fd, &b, sizeof b) > 0) ;
     }

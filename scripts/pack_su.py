@@ -5,7 +5,7 @@
     python scripts/pack_su.py                        # build/vtouchd_ui → build/vtouch.sh
     python scripts/pack_su.py <核心二进制> <输出路径>
 """
-import base64, hashlib, pathlib, re, sys, textwrap
+import base64, hashlib, pathlib, re, sys
 
 root = pathlib.Path(__file__).resolve().parent.parent
 src = root / "scripts" / "vtouch.sh.in"
@@ -19,7 +19,9 @@ if not bin_path.is_file():
 
 data = bin_path.read_bytes()
 md5 = hashlib.md5(data).hexdigest()
-b64 = "\n".join(textwrap.wrap(base64.b64encode(data).decode("ascii"), 76))
+# Base64 is one enormous word: textwrap repeatedly slices its remaining tail (quadratic).
+# encodebytes already produces the same 76-column layout in linear time.
+b64 = base64.encodebytes(data).decode("ascii").rstrip("\n")
 
 
 def sub1(pattern, replacement, text, what):

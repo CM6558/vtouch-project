@@ -179,6 +179,9 @@ def stale_block_edits(lines):
         for k, x in enumerate(lines):
             if (MARK % name) not in x or keep_start <= k < i:
                 continue
+            # 只处理当前定义上方的旧孤儿块；不能误删后一个函数的正常文档。
+            if k >= i:
+                continue
             a = next((x for x in range(k, -1, -1) if lines[x].strip() == "/**"), None)
             b = next((x for x in range(k, len(lines)) if lines[x].strip() == "*/"), None)
             if a is None or b is None:

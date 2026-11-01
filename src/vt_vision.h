@@ -61,6 +61,8 @@ struct vt_vis_pt { int dx, dy; uint32_t rgb; int tol; };
 
 /* 帧视图（一次性准备：灰度 + 1/2、1/4 金字塔）。静态单例（主循环单线程）。 (vtouch-doc: vt_vis_frame_prepare) */
 int  vt_vis_frame_prepare(const uint8_t *rgba, int w, int h, int stride);
+/* 仅准备找色 RGBA 视图，不生成灰度或金字塔。 */
+int  vt_vis_frame_prepare_color(const uint8_t *rgba, int w, int h, int stride);
 /* 释放帧视图（标记失效；静态缓冲不释放）。 (vtouch-doc: vt_vis_frame_release) */
 void vt_vis_frame_release(void);
 

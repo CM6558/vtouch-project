@@ -232,10 +232,10 @@ int write_full(int fd, const void *buf, size_t len)
 #define VT_HS_TOTAL_MS 1000
 /**
  * (vtouch-doc: websocket_handshake)
- * @brief 读 HTTP 请求、校验 Upgrade 与 Sec-WebSocket-Key，回 101。
- * @param   fd       已 accept 的连接
- * @return  0 成功；-1 不是合法 WS 请求。
- * @note    握手期用带超时的阻塞读（最多被拖 300ms）。
+ * @brief 非阻塞增量读取 HTTP 握手，校验后回 101。
+ * @param   fd       连接；-1 清空在途状态
+ * @return  0 成功；1 数据未就绪；-1 失败。
+ * @note    主循环单请求在途，总期限 1000ms；MSG_DONTWAIT 不阻塞输入。VTOUCH_WS_TOKEN 非空时要求 Bearer 认证。
  *
  * 为什么这么写（原有注释，逐字保留）：
  *   握手：socket 上已设 SO_RCVTIMEO（300ms），所以慢客户端最多拖这么久；
@@ -243,22 +243,22 @@ int write_full(int fd, const void *buf, size_t len)
  */
 int websocket_handshake(int fd)
 {
-    char req[HTTP_MAX], key[128], upgrade[64], connection[128], version[32], accept[64];
+    static char req[HTTP_MAX];
+    static size_t used;
+    static uint64_t hs_deadline;
+    char key[128], upgrade[64], connection[128], version[32], accept[64];
     unsigned char digest[20];
     struct sha1 s;
-    size_t used = 0;
     ssize_t n;
-    const uint64_t hs_deadline = now_ns() + VT_HS_TOTAL_MS * 1000000ull;   /* 整段握手的总预算 */
+    if (fd < 0) { used = 0; hs_deadline = 0; return 0; }
+    if (!hs_deadline) { used = 0; hs_deadline = now_ns() + VT_HS_TOTAL_MS * 1000000ull; }
     const char *guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    if (now_ns() >= hs_deadline) return -1;
     while (used + 1 < sizeof req) {
-        struct pollfd pr = { fd, POLLIN, 0 };
-        int left_ms;
-        uint64_t now = now_ns();
-        if (now >= hs_deadline) return -1;           /* 总期限到：慢客户端不再拖住主循环 */
-        left_ms = (int)((hs_deadline - now) / 1000000ull);
-        if (poll(&pr, 1, left_ms) <= 0) return -1;   /* 只等剩余额度：总耗时 ≤ VT_HS_TOTAL_MS */
-        n = recv(fd, req + used, 1, 0);
-        if (n <= 0) return -1;                       /* 超时/断开都算失败 */
+        n = recv(fd, req + used, 1, MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 1;
+        if (n <= 0) return -1;
         used += (size_t)n; req[used] = 0;
         if (used >= 4 && req[used - 4] == 13 && req[used - 3] == 10 &&
             req[used - 2] == 13 && req[used - 1] == 10) break;   /* CRLFCRLF（用数值避开转义） */
@@ -270,6 +270,15 @@ int websocket_handshake(int fd)
         header_value(req, "Sec-WebSocket-Version", version, sizeof version) < 0 ||
         strcasecmp(upgrade, "websocket") != 0 || !has_token(connection, "Upgrade") ||
         strcmp(version, "13") != 0 || strlen(key) != 24) return -1;
+    {
+        const char *token = getenv("VTOUCH_WS_TOKEN");
+        if (token && token[0]) {
+            char auth[256];
+            if (strlen(token) > sizeof auth - 8 ||
+                header_value(req, "Authorization", auth, sizeof auth) < 0 ||
+                strncmp(auth, "Bearer ", 7) != 0 || strcmp(auth + 7, token) != 0) return -1;
+        }
+    }
     sha1_init(&s);
     sha1_update(&s, (const unsigned char *)key, strlen(key));
     sha1_update(&s, (const unsigned char *)guid, strlen(guid));
@@ -897,4 +906,3 @@ int handle_line(char *line, char *resp, size_t cap)
     if ((r = cmd_sub(t, &st, resp, cap)) != 1) return r;
     snprintf(resp, cap, "err unknown"); return -1;
 }
-

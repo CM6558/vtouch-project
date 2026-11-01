@@ -1090,6 +1090,9 @@ enum { PH_BEGIN = 0, PH_TAP_UP, PH_SWIPE_MOVE, PH_SWIPE_UP, PH_WAIT };
 
 /* 单调毫秒（执行器的时间全走它：不累加拍数、不混墙钟，到点判据不漂）。 */
 static uint64_t op_now_ms(void) { return now_ns() / 1000000ull; }
+static void op_vis_cancel(void);
+static uint64_t S_run_id;
+static pthread_mutex_t S_trigger_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* 高频明细开关（L9 / spec §8 第 10 条）：滑动每采样点一行默认**不**打，env `VTOUCH_OPS_TRACE=1`
  * 才开。env 读一次存静态 —— 之后只是一次分支判断，不碰环境、不影响时序；默认零输出。
@@ -1296,7 +1299,10 @@ static void op_finish(void)
     op_release_held();                                       /* 收尾兜底（spec §2.2）：结束仍按着 → 写 up + `op 收尾 松开` */
     ms = op_now_ms() - R.t_start;
     fprintf(stderr, "vtouchd: op 完成 %s 用时=%llums\n", R.name, (unsigned long long)ms);
+    if (R.vm) fprintf(stderr, "vtouchd: script_done id=%llu name=%s line=%u elapsed_ms=%llu\n",
+            (unsigned long long)S_run_id, R.name, vt_vm_line(&g_vm, g_vm.pc), (unsigned long long)ms);
     op_ev_push("done", R.vm ? 1 : R.nsteps, R.vm ? 1 : R.nsteps);
+    op_vis_cancel();
     op_auto_off();                                           /* 仅正常完成翻回；中止不翻（中止≠跑完，spec §4.3） */
     R.active = 0;
     R.vm = 0;                                                /* v17：引擎标记清零（绝不泄漏到下一次运行） */
@@ -1469,6 +1475,25 @@ static int      S_vis_have;          /* 有缓存帧（复用候选） */
 static int      S_vis_buf;           /* 缓存帧所在缓冲（0/1） */
 static struct op_vis_frame S_vis_f;  /* 缓存帧 */
 
+/* 一个异步任务独占抓帧请求；在等待帧期间 VM/试查让回主循环。 */
+struct op_vis_job {
+    int active, tries;
+    uint32_t req;
+    uint64_t start_ms, capture_ns;
+};
+static struct op_vis_job S_vm_vis, S_test_vis;
+
+/**
+ * (vtouch-doc: op_vis_cancel)
+ * @brief 清理结束脚本的异步视觉任务和帧复用标记。
+ * @note    仅主线程调用。
+ */
+static void op_vis_cancel(void)
+{
+    memset(&S_vm_vis, 0, sizeof S_vm_vis);
+    S_vis_have = 0;
+}
+
 /**
  * (vtouch-doc: op_vis_panel_dead)
  * @brief 「面板不在」判据：ui_hb 冻结 ≥3s（或从未有过心跳）= 面板不在。
@@ -1489,14 +1514,16 @@ static int op_vis_panel_dead(void)
 
 /**
  * (vtouch-doc: op_vis_capture)
- * @brief 取帧：复用缓存（≤50ms / 帧未变 / 方向一致）或发抓帧请求并轮询等待完成。
- * @param   fr       输出：帧句柄（rgba 直指 shm 缓冲；调用方在使用期间保证不再发新请求）
- * @param   force    1 = 强制抓新帧（持续查找用：复用缓存会原地空转同一画面）；0 = 允许复用（单次路径照旧）
- * @param   err      输出：失败原因词（`无画面` / `视觉错`）
- * @return  0 成功；-1 失败（err 已置原因词 —— 调用方中止或按码报错；本函数不再直接中止）。
- * @note    **静态**，只在执行器内用。协议（spec §2.2/§3.1）：写 req_pending = ++请求序号 → 轮询等 req_seq == 该序号（usleep(1000)，总超时 VT_VIS_CAPTURE_TIMEOUT_MS）→ 校验 flags 无错 + 尺寸合法 → 按 seqlock 读一次稳定帧（读 seq → 读字段 → 再读 seq；奇/变 → 重试至超时）。面板不在（ui_hb 冻结 ≥3s）→ 立即 `无画面`；超时 / flags 报错 → `无画面`；头损坏 / 尺寸非法 → `视觉错`。TRACE（VTOUCH_OPS_TRACE=1）：`vis 抓帧 请求 → 完成 <ms>`。
+ * @brief 取帧：复用缓存或推进异步请求，未就绪即返回。
+ * @param   fr       输出稳定帧视图
+ * @param   force    非零强制新帧
+ * @param   err      输出失败原因
+ * @param   job      跨拍保留的请求与开始时刻
+ * @return  0 成功；1 尚未就绪；-1 失败。
+ * @note    单请求在途，按 req_seq 和帧头 seqlock 读稳定视图；轮询不等待，超时按单调钟。
  */
-static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
+static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err,
+                          struct op_vis_job *job)
 {
     struct vt_shm_frame_hdr *h = vt_shm_frame();
     uint64_t t0, t1, fbuf = (uint64_t)g.logical_width * (uint64_t)g.logical_height * 4u;
@@ -1507,7 +1534,7 @@ static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
 
     /* 一帧多步复用（spec §9）：≤50ms、帧仍有效、缓冲没被换过、方向一致（与面板上报的当前方向相同）。
      * 持续查找（T7.4）force=1：每拍都要新帧 —— 复用同一帧会原地空转（匹配同一画面到 50ms 窗口过期）。 */
-    if (!force && S_vis_have &&
+    if (!job->req && !force && S_vis_have &&
         now_ns() - S_vis_f.ts_ns < (uint64_t)VT_VIS_REUSE_MS * 1000000ull &&
         (h->flags & VT_FRAME_F_VALID) && !(h->flags & VT_FRAME_F_ERR) &&
         h->buf_idx == (uint32_t)S_vis_buf && h->rotation == (uint32_t)S_vis_f.rot &&
@@ -1517,9 +1544,14 @@ static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
     }
 
     if (op_vis_panel_dead()) { *err = "无画面"; return -1; }
-    req = ++S_vis_req;                                       /* 单调请求序号（0 留给「无请求」初值） */
-    __atomic_store_n(&h->req_pending, req, __ATOMIC_RELEASE);
-    t0 = now_ns();
+    if (!job->req) {
+        if (++S_vis_req == 0) ++S_vis_req;
+        job->req = S_vis_req;
+        job->capture_ns = now_ns();
+        __atomic_store_n(&h->req_pending, job->req, __ATOMIC_RELEASE);
+    }
+    req = job->req;
+    t0 = job->capture_ns;
     for (;;) {                                               /* 完成判定 = req_seq == 请求序号（最后写） */
         if (__atomic_load_n(&h->req_seq, __ATOMIC_ACQUIRE) == req) break;
         if (op_vis_panel_dead()) { *err = "无画面"; return -1; }
@@ -1527,7 +1559,7 @@ static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
             *err = "无画面";
             return -1;
         }
-        usleep(1000);
+        return 1;                                           /* 抓帧未就绪：主循环稍后再试，不阻塞输入 */
     }
     t1 = now_ns();
     /* 抓帧失败（flags bit1）/ 没有有效帧（bit0 未置）→ `无画面`（spec §6.2：抓帧失败/超时/面板不在）。
@@ -1556,7 +1588,7 @@ static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
             *err = "无画面";
             return -1;
         }
-        usleep(1000);
+        return 1;                                           /* 帧头正在更新：下一拍重新读取 */
     }
     /* 尺寸合法（spec §6.1「校验」；越界按「缓冲损坏 / 尺寸超限」中止 `视觉错`）。
      * 帧按 1:1 口径（spec §3.3：物理 vs 逻辑通常 1:1）；帧字节跨度必须装进缓冲（两方向同字节数）。 */
@@ -1571,6 +1603,7 @@ static int op_vis_capture(struct op_vis_frame *fr, int force, const char **err)
     fr->w = (int)w; fr->h = (int)hh; fr->stride = (int)stride;
     fr->rot = (int)rot; fr->ts_ns = ts;
     S_vis_f = *fr; S_vis_buf = (int)buf; S_vis_have = 1;
+    job->req = 0;
     if (op_trace_on())                                       /* TRACE：抓帧全链耗时（L9 默认零输出） */
         fprintf(stderr, "vtouchd: vis 抓帧 请求 → 完成 %llums\n",
                 (unsigned long long)((t1 - t0) / 1000000ull));
@@ -1753,7 +1786,7 @@ static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, i
 
 /**
  * (vtouch-doc: vis_exec_find)
- * @brief 查找执行（找图 / 找色；op 视觉步与面板试查共用）：抓帧（或复用）→ 帧视图 → 区域换算 → 匹配；持续模式循环到命中或超时。
+ * @brief 视觉查找：VM/试查跨拍推进；旧步骤路径保留同步兼容。
  * @param   kind     0 = 找图 / 1 = 找色单点 / 2 = 找色多点
  * @param   ref      模板名（kind 0）/ 点集名（kind 2）；kind 1 忽略
  * @param   region   区域名（空 = 全屏）
@@ -1764,12 +1797,16 @@ static uint8_t *op_vis_rot_gray(const uint8_t *src, int sw, int sh, int steps, i
  * @param   ms       输出：单次 = 匹配耗时毫秒（只计匹配调用，不含抓帧等待 —— 保 op 路径 `耗时` 语义逐字不变）；持续 = 全程耗时（含抓帧等待；可 NULL）
  * @param   attempts 输出：尝试次数（抓帧 + 匹配的轮数；单次 = 1；可 NULL）
  * @param   err      输出：失败原因词（`无画面` / `视觉错` / `区域不存在` / `模板不存在`；命中 / 未命中置 NULL）
- * @return  0 = 命中 / -1 = 未命中 / -2 = 失败（err 已置原因词，调用方中止或按码报错）。
- * @note    **静态**，op 执行器与面板「试一下」共用（op 路径单次行为逐字不变：中止词 / 日志 / 命中坐标口径照旧；v10 起把命中点写进 fx/fy 的是调用方 op_vis_run）。持续模式（T7.4）：循环 { 抓新帧（force=1，不复用缓存）→ 匹配 → 命中 break } 到 deadline；硬失败（无画面 / 视觉错 / 区域不存在 / 模板不存在）立即按 -2 收场，不等超时；超时按未命中（-1）返回。持续循环占着主循环：每轮手动 vt_shm_tick 喂核心心跳（面板心跳停滞 ≥3s 会自杀退出；单次 ≤1s 不越线）。链路（spec VISION §6.1）：抓帧失败 → `无画面`；内部错 → `视觉错`；区域名不存在 → `区域不存在`；模板 / 点集读不到 → `模板不存在`。命中点从帧坐标换算成竖屏逻辑坐标（vt_vis_frame_to_logic）；找图先读 .tmpl、方向不同先旋转模板；找色多点先读 .pts（单点 a2 = (颜色<<8)|容差）。
+ * @param   async_job 跨拍任务；NULL 为旧步骤同步路径
+ * @return  0 命中；1 异步待续；-1 未命中；-2 硬失败。
+ * @note    VM/试查请求帧后立即让出，每次续跑只做一次匹配，持续查找未命中则下一拍请求新帧。找色只绑定 RGBA，找图才生成灰度金字塔。旧步骤兼容路径不改变四档语义。
  */
 static int vis_exec_find(int kind, const char *ref, const char *region, int a1, int a2, int timeout_ms,
-                         int *x, int *y, uint64_t *ms, int *attempts, const char **err)
+                         int *x, int *y, uint64_t *ms, int *attempts, const char **err,
+                         struct op_vis_job *async_job)
 {
+    struct op_vis_job local_job = {0};
+    struct op_vis_job *job = async_job ? async_job : &local_job;
     struct op_vis_frame fr;
     int rx, ry, rw, rh, ox = 0, oy = 0, rc, tries = 0;
     uint32_t avg_rgb = 0;
@@ -1780,12 +1817,15 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
     if (ms) *ms = 0;
     if (attempts) *attempts = 0;
     if (timeout_ms < 0) timeout_ms = 0;                      /* 防御：域外值按单次（op_valid 已挡；试查恒传 0） */
-    t_start = op_now_ms();
+    if (!job->active) { job->active = 1; job->start_ms = op_now_ms(); }
+    t_start = job->start_ms;
+    tries = job->tries;
     for (;;) {                                               /* 持续（T7.4）：循环抓新帧查到命中或超时；单次跑一轮 */
-        tries++;
+        if (!job->req) tries++;
+        job->tries = tries;
         /* 持续循环占着主循环：手动喂核心心跳 —— 否则面板 vt_shm_ui_tick 见心跳停滞 ≥3s 判「核心死了」自杀退出
          *（单次路径 ≤1s（抓帧超时）不越线，不动）。每轮一喂：轮间隔 ≤ 抓帧超时 1000ms + 匹配，恒 < 3s。 */
-        if (timeout_ms > 0) {
+        if (timeout_ms > 0 && !async_job) {
             vt_shm_tick();       /* 喂心跳（见上） */
             physical_events();   /* drain 触摸 fd + 转发：搜索期间手指照常响应（评审 I-1 修复；单次路径不动） */
             vt_shm_edit_apply(); /* 评审修复 2026-10-05：控制通道不再被持续查找挡住 —— 停止按钮 / 面板编辑 /
@@ -1797,9 +1837,18 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
             }
         }
         /* 持续 force=1：每轮都要新帧（复用缓存会原地空转同一画面）；单次照旧允许复用（行为逐字不变）。 */
-        if (op_vis_capture(&fr, timeout_ms > 0, err) != 0) break;   /* 原因词已置（`无画面` / `视觉错`） */
+        rc = op_vis_capture(&fr, timeout_ms > 0, err, job);
+        if (rc > 0) {
+            if (async_job) return 1;
+            physical_events();
+            if (g.stop_flag || vt_shm_stop_req()) { *err = "已停止"; break; }
+            usleep(1000);                                    /* 仅旧步骤路径兼容；VM/试查不在此等待 */
+            continue;
+        }
+        if (rc < 0) break;
         if (timeout_ms > 0) vt_shm_tick();   /* 轮内第二喂（评审 M-2）：抓帧段最坏 ~1s，缩心跳间隔 */
-        if (vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride) != VT_VIS_OK) {
+        if ((kind == 0 ? vt_vis_frame_prepare(fr.rgba, fr.w, fr.h, fr.stride)
+                       : vt_vis_frame_prepare_color(fr.rgba, fr.w, fr.h, fr.stride)) != VT_VIS_OK) {
             *err = "视觉错";
             break;
         }
@@ -1877,20 +1926,25 @@ static int vis_exec_find(int kind, const char *ref, const char *region, int a1, 
             vt_vis_frame_to_logic(fr.rot, fr.w, fr.h, ox, oy, x, y); /* 命中点 → 竖屏逻辑坐标 */
             if (ms) *ms = (timeout_ms > 0) ? op_now_ms() - t_start : dt;   /* 持续：耗时 = 全程（含抓帧等待） */
             if (attempts) *attempts = tries;
+            memset(job, 0, sizeof *job);
             return 0;
         }
         if (timeout_ms <= 0) {                               /* 单次：未命中（不写坐标） */
             if (ms) *ms = dt;
             if (attempts) *attempts = tries;
+            memset(job, 0, sizeof *job);
             return -1;
         }
         if (op_now_ms() - t_start >= (uint64_t)timeout_ms) { /* 持续：到 deadline 仍未见命中 → 未命中（超时） */
             if (ms) *ms = op_now_ms() - t_start;
             if (attempts) *attempts = tries;
+            memset(job, 0, sizeof *job);
             return -1;
         }
+        if (async_job) return 1;                             /* 未命中：下一拍再请求新帧 */
     }
     if (attempts) *attempts = tries;                         /* 失败：-2（err 已置原因词） */
+    memset(job, 0, sizeof *job);
     return -2;
 }
 
@@ -1921,7 +1975,9 @@ static int op_vis_eval(int is_image, const char *ref, const char *region, int a1
     /* kind：找图 = 0；找色按模式（a1 == 1 = 多点）。字段映射照 spec §6.1（a1 = 阈值 / 模式；a2 = 单点打包色容差）。
      * ms（T7.4）：0 = 单次（现状）；>0 = 持续查找超时 —— vis_exec_find 循环抓帧查到命中或超时。 */
     kind = is_image ? 0 : (a1 == 1 ? 2 : 1);
-    rc = vis_exec_find(kind, ref, region, a1, a2, timeout_ms, &ox, &oy, &dt, &n, &err);
+    rc = vis_exec_find(kind, ref, region, a1, a2, timeout_ms, &ox, &oy, &dt, &n, &err,
+                       R.vm ? &S_vm_vis : NULL);
+    if (rc == 1) return 1;
     if (!R.active) return -1;                                /* 运行已被停止（停止按钮在搜索循环内经编辑邮箱生效）：
                                                               * 不再补中止 / 补日志 / 走四档（评审修复 2026-10-05） */
     if (rc == -2) { vt_ops_abort(err); return -1; }          /* `无画面` / `视觉错` / `区域不存在` / `模板不存在` */
@@ -2159,6 +2215,9 @@ static int vis_test_err_code(const char *why)
  */
 void vt_ops_test_poll(void)
 {
+    static int pending, saved_kind, saved_a1, saved_a2;
+    static uint32_t saved_req;
+    static char saved_ref[VT_NAME_BUF + 1], saved_region[VT_NAME_BUF + 1];
     struct vt_shm_frame_hdr *h = vt_shm_frame();
     char ref[sizeof h->test_ref + 1];
     char region[sizeof h->test_region + 1];
@@ -2176,6 +2235,15 @@ void vt_ops_test_poll(void)
         S_test_seen = req;
         return;
     }
+    if (S_vm_vis.active) return;                            /* VM 独占当前在途抓帧 */
+    if (R.active && !pending) return;                       /* 试查排队，不暂停正在执行的点按/滑动 */
+    if (pending) {
+        req = saved_req;
+        kind = saved_kind; a1 = saved_a1; a2 = saved_a2;
+        memcpy(ref, saved_ref, sizeof ref);
+        memcpy(region, saved_region, sizeof region);
+        goto run_test;
+    }
     if (req == S_test_seen) return;                          /* 没有新请求：热路径零成本 */
     S_test_seen = req;
     /* acquire 之后读参数（面板写序：参数先写、seq 最后 release）—— 拷进本地，防执行期间被下一发改写。 */
@@ -2188,7 +2256,12 @@ void vt_ops_test_poll(void)
     n = strnlen(h->test_region, sizeof h->test_region);
     if (n > sizeof h->test_region) n = sizeof h->test_region;
     memcpy(region, h->test_region, n); region[n] = 0;
+    saved_req = req; saved_kind = kind; saved_a1 = a1; saved_a2 = a2;
+    memcpy(saved_ref, ref, sizeof saved_ref);
+    memcpy(saved_region, region, sizeof saved_region);
+    pending = 1;
 
+run_test:
     if (kind == 0) snprintf(what, sizeof what, "找图 %s", ref);
     else if (kind == 2) snprintf(what, sizeof what, "找色 多点 %s", ref);
     else snprintf(what, sizeof what, "找色 单点");
@@ -2196,7 +2269,10 @@ void vt_ops_test_poll(void)
     /* 防御（面板已预检，真漏进来按词表收场，不硬撑）：kind 必须 0/1/2；找图 / 找色多点的 ref 过 vt_id_ok 尺子。 */
     if (kind != 0 && kind != 1 && kind != 2) { err = "视觉错"; rc = -2; }
     else if (kind != 1 && !vt_id_ok(ref, strnlen(ref, sizeof ref))) { err = "模板不存在"; rc = -2; }
-    else rc = vis_exec_find(kind, ref, region, a1, a2, 0, &x, &y, &ms, NULL, &err);   /* 试查恒单次（契约 v9 无 ms 字段） */
+    else rc = vis_exec_find(kind, ref, region, a1, a2, 0, &x, &y, &ms, NULL, &err, &S_test_vis);
+    if (rc == 1) return;
+    pending = 0;
+    memset(&S_test_vis, 0, sizeof S_test_vis);
 
     if (rc == 0) {
         h->test_x = x; h->test_y = y; h->test_err = VT_TEST_HIT;
@@ -2720,9 +2796,7 @@ static void op_selfcheck(void)
     }
 }
 
-/* 触发槽消费：单槽覆盖、只保留最新（spec §3.4）；主线程按 seq 的差值分辨「被盖掉的」那几发。
- * 名字/触发数据读取与生产者写入之间有个纳秒级窗口：混读最多让这一发起跑查无此名（丢弃 + 日志），
- * 不会跑去动别的状态 —— 触发是物理手指级别的低频事件，值不当 seqlock。 */
+/* 触发槽消费：单槽保留最新；seq 提供无新事件的快速判断，短锁保护完整的名字/数据快照。 */
 static void op_consume_trigger(void)
 {
     uint32_t seq = __atomic_load_n(&g.op_trig_seq, __ATOMIC_ACQUIRE);
@@ -2731,6 +2805,8 @@ static void op_consume_trigger(void)
     size_t n;
     struct vt_trig_data td;
     if (seq == R.trig_seen) return;                          /* 没有新触发：热路径零成本 */
+    pthread_mutex_lock(&S_trigger_lock);
+    seq = __atomic_load_n(&g.op_trig_seq, __ATOMIC_ACQUIRE);
     delta = seq - R.trig_seen;
     R.trig_seen = seq;
     /* 生产者先写 name/slot/触发数据、release 才自增 seq ⇒ acquire 看到新 seq 就一定能看到它们 */
@@ -2744,9 +2820,11 @@ static void op_consume_trigger(void)
     td.ux = g.op_trig_ux;
     td.uy = g.op_trig_uy;
     td.ms = g.op_trig_ms;
-    for (k = 1; k < delta; k++) fprintf(stderr, "vtouchd: op 丢弃 覆盖\n");
+    k = (uint32_t)g.op_trig_slot;
+    pthread_mutex_unlock(&S_trigger_lock);
+    if (delta > 1) fprintf(stderr, "vtouchd: op 丢弃 覆盖 count=%u\n", delta - 1);
     if (op_trace_on())                                       /* L9：默认零输出（判定只一次分支） */
-        fprintf(stderr, "vtouchd: op 触发 %s 槽=%d\n", name, g.op_trig_slot);
+        fprintf(stderr, "vtouchd: op 触发 %s 槽=%d\n", name, (int)k);
     vt_ops_run(name, &td);                                   /* 忙 / 不存在 / 没空闲槽由它丢弃 + 日志 */
 }
 
@@ -2784,6 +2862,7 @@ void vt_ops_tick(void)
 {
     uint64_t now;
     if (g.g_reemit) return;                                  /* 上一帧没写出去：不推进（不丢帧、不跳步） */
+    if (S_test_vis.active) return;                           /* 不抢走试查在途的抓帧缓冲 */
 
     /* 帧冻结（R1 封口）：客户端帧事务（begin_frame..end_frame）开着时，本次 tick 直接返回 ——
      * 不推进 / 不自检 / 不消费触发。机制与起跑门（op_drop_frame）同源：帧窗内执行器写 g.virt 的
@@ -2828,10 +2907,13 @@ void vt_ops_tick(void)
     if (R.vm) {                                              /* 程序操作（v17）：VM 让出式推进；到点才 tick */
         now = op_now_ms();
         if (now >= R.deadline) {
-            uint32_t w = 0;
+        uint32_t w = 0;
             vt_vm_status st = vt_vm_tick(&g_vm, &w);
-            if (st == VT_VM_WAIT) {
-                R.deadline = now + (uint64_t)w;              /* w=0：下一拍立即续（多拍动作的拍间让出） */
+            if (!R.active) return;                          /* 宿主失败已收尾，不再重复结束 */
+            if (st == VT_VM_YIELD) {
+                R.deadline = op_now_ms() + 1u;
+            } else if (st == VT_VM_WAIT) {
+                R.deadline = op_now_ms() + (uint64_t)w;      /* 宿主耗时不吞掉其后的等待 */
             } else if (st == VT_VM_DONE) {
                 if (g_vm.term_mode) vt_ops_abort("终止");    /* 终止·中止模式（同步骤版口径） */
                 else op_finish();                            /* 正常完成（收尾释放 / 自动关照走） */
@@ -2860,6 +2942,7 @@ void vt_ops_tick(void)
 int vt_ops_next_deadline_ms(void)
 {
     uint64_t now;
+    if (S_test_vis.active) return 1;
     if (!R.active) return -1;
     /* 帧冻结（R1 封口）：帧窗内不做 deadline 唤醒 —— 剩余毫秒已被暂停冻住（甚至为负），再返回 0
      * 会把主循环压成 0ms 超时自旋；返回 -1 让主循环维持别的档位，帧关由 WS fd 活动唤醒后自会重算。 */
@@ -2921,6 +3004,9 @@ static void op_vm_start(const struct vt_prog *p, const char *nm, const struct vt
         return;
     }
     vt_vm_set_host(&g_vm, vt_ops_vm_host());
+    g_vm.clock_ms = op_now_ms;
+    op_vis_cancel();
+    ++S_run_id;
     if (td) {
         if (td->mask & OP_TRIGB_TDX) vt_vm_store_num(&g_vm, VT_VM_SLOT_TDX, td->dx);
         if (td->mask & OP_TRIGB_TDY) vt_vm_store_num(&g_vm, VT_VM_SLOT_TDY, td->dy);
@@ -2955,6 +3041,10 @@ static void op_vm_start(const struct vt_prog *p, const char *nm, const struct vt
     fprintf(stderr, "vtouchd: op 启动 %s 脚本=%dB 槽=%d 门控=%s\n",
             R.name, p->prog_len, R.slot, R.gate[0] ? R.gate : "无");
     op_ev_push("run", 1, 1);
+    fprintf(stderr, "vtouchd: script_run id=%llu name=%s source=%08x\n",
+            (unsigned long long)S_run_id, R.name,
+            (unsigned)((uint32_t)g_vm_prog[8] | (uint32_t)g_vm_prog[9] << 8 |
+                       (uint32_t)g_vm_prog[10] << 16 | (uint32_t)g_vm_prog[11] << 24));
 }
 
 /**
@@ -2981,7 +3071,7 @@ void vt_ops_run(const char *name, const struct vt_trig_data *td)
     size_t n;
     int i, slot = -1;
 
-    if (R.active) { op_drop_busy(); return; }
+    if (R.active || S_test_vis.active) { op_drop_busy(); return; }
     if (g.frame_open) { op_drop_frame(); return; }           /* 帧事务开着：直写 g.virt 会被 end_frame 的 staged 回填抹掉（悬空触点） */
     n = name ? strnlen(name, VT_NAME_BUF) : 0;
     if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;   /* 未终止按上限截断（原始名随后仍逐字节查表，找不到即不存在） */
@@ -3090,11 +3180,16 @@ void vt_ops_abort(const char *why)
         op_finger_raw("up", R.rx, R.ry);
     }
     op_release_held();                                       /* 收尾兜底（spec §2.2）：中止时若还按着 → 同样释放 + `op 收尾 松开` */
-    if (R.vm)
+    if (R.vm) {
         fprintf(stderr, "vtouchd: op 中止 %s（脚本）原因=%s\n", R.name, why ? why : "?");
-    else
+        fprintf(stderr, "vtouchd: script_error id=%llu name=%s line=%u pc=%u reason=%s\n",
+                (unsigned long long)S_run_id, R.name,
+                g_vm.err_line ? g_vm.err_line : vt_vm_line(&g_vm, g_vm.pc),
+                g_vm.err_line ? g_vm.err_pc : g_vm.pc, why ? why : "?");
+    } else
         fprintf(stderr, "vtouchd: op 中止 %s 步 %d/%d 原因=%s\n", R.name, i, R.nsteps, why ? why : "?");
     op_ev_push("abort", i, R.vm ? 1 : R.nsteps);
+    op_vis_cancel();
     R.active = 0;
     R.vm = 0;                                                /* v17：引擎标记清零（绝不泄漏到下一次运行） */
     R.slot = -1;
@@ -3125,6 +3220,7 @@ void vt_ops_abort(const char *why)
 void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *td)
 {
     size_t n = name ? strnlen(name, VT_NAME_BUF) : 0;
+    pthread_mutex_lock(&S_trigger_lock);
     if (n > VT_NAME_BUF - 1) n = VT_NAME_BUF - 1;
     if (n) memcpy(g.op_trig_name, name, n);
     g.op_trig_name[n] = 0;
@@ -3137,6 +3233,7 @@ void vt_ops_trigger_post(const char *name, int slot, const struct vt_trig_data *
     g.op_trig_uy = td->uy;
     g.op_trig_ms = td->ms;
     __atomic_add_fetch(&g.op_trig_seq, 1u, __ATOMIC_RELEASE);   /* 最后 release：上面各字段先可见 */
+    pthread_mutex_unlock(&S_trigger_lock);
     if (g.ops_wake_fd >= 0) {
         uint64_t one = 1;
         ssize_t r;
@@ -3207,23 +3304,31 @@ static int vmg_hl_rect(void *c, int x1, int y1, int x2, int y2, int ms)
 static int vmg_find_img(void *c, vt_vm *vm, const char *tpl, const char *region,
                         int thresh, int colorchk, int persist, int *hit)
 {
+    int rc;
     (void)c;
-    if (op_vis_eval(1, tpl, region, thresh, colorchk, persist, hit) != 0) return -1;
+    if (S_test_vis.active) return 1;
+    rc = op_vis_eval(1, tpl, region, thresh, colorchk, persist, hit);
+    if (rc != 0) return rc;
     if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
     return 0;
 }
 static int vmg_find_color(void *c, vt_vm *vm, const char *set, const char *region, int *hit)
 {
+    int rc;
     (void)c;
-    if (op_vis_eval(0, set, region, 1, 0, 0, hit) != 0) return -1;   /* a1=1：多点（.pts 点集） */
+    if (S_test_vis.active) return 1;
+    rc = op_vis_eval(0, set, region, 1, 0, 0, hit);
+    if (rc != 0) return rc;
     if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
     return 0;
 }
 static int vmg_find_dot(void *c, vt_vm *vm, int color, int tol, const char *region, int *hit)
 {
+    int rc;
     (void)c;
-    if (op_vis_eval(0, NULL, region, 0, (int)(((uint32_t)color << 8) | ((uint32_t)tol & 0xFFu)), 0, hit) != 0)
-        return -1;                                       /* a1=0 单点；a2 = (颜色<<8)|容差（spec §6.1） */
+    if (S_test_vis.active) return 1;
+    rc = op_vis_eval(0, NULL, region, 0, (int)(((uint32_t)color << 8) | ((uint32_t)tol & 0xFFu)), 0, hit);
+    if (rc != 0) return rc;
     if (*hit) { vt_vm_store_num(vm, VT_VM_SLOT_FX, R.fx); vt_vm_store_num(vm, VT_VM_SLOT_FY, R.fy); }
     return 0;
 }
